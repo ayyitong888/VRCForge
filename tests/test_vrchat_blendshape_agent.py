@@ -7,6 +7,7 @@ from vrchat_blendshape_agent import (
     BlendshapeAdjustment,
     BlendshapePlan,
     build_planning_payload,
+    load_settings,
     load_export_payload,
     mock_execute_csharp,
     read_plan_json,
@@ -196,6 +197,22 @@ class PlanningValidationTests(unittest.TestCase):
 
 
 class MvpFlowTests(unittest.TestCase):
+    def test_load_settings_allows_model_override(self) -> None:
+        settings_payload = {
+            "gemini": {
+                "api_key_env": "TEST_GEMINI_API_KEY",
+                "model": "gemini-3.1-pro-preview",
+                "thinking_level": "low",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(settings_payload, ensure_ascii=False), encoding="utf-8")
+
+            settings = load_settings(settings_path, gemini_model_override="gemini-2.5-flash")
+            self.assertEqual(settings.gemini_model, "gemini-2.5-flash")
+
     def test_reads_export_json_from_local_file(self) -> None:
         payload = make_export_payload()
 

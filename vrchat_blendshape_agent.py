@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
 DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
 class BlendshapeAdjustment(BaseModel):
@@ -80,6 +82,10 @@ def main() -> int:
         help='Natural language expression tweak, e.g. "Open the eyes wider and raise the mouth corners".',
     )
     parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS_PATH, help="Path to settings.json")
+    parser.add_argument(
+        "--model",
+        help="Optional Gemini model override, e.g. gemini-2.5-flash or gemini-3.1-pro-preview.",
+    )
     parser.add_argument(
         "--mvp",
         action="store_true",
@@ -147,59 +153,63 @@ def main() -> int:
     if not args.instruction and not args.list_avatars and not args.plan_json:
         parser.error("instruction is required unless --list-avatars or --plan-json is used")
 
-    settings = load_settings(args.settings)
-    export_payload, export_source, using_mock_execute = load_export_payload(
-        settings=settings,
-        export_json_path=args.export_json,
-        skip_export=args.skip_export,
-        mvp_mode=args.mvp,
-        mock_execute=args.mock_execute,
-    )
+    try:
+        settings = load_settings(args.settings, gemini_model_override=args.model)
+        export_payload, export_source, using_mock_execute = load_export_payload(
+            settings=settings,
+            export_json_path=args.export_json,
+            skip_export=args.skip_export,
+            mvp_mode=args.mvp,
+            mock_execute=args.mock_execute,
+        )
 
-    if args.list_avatars:
-        print(render_avatar_list(export_payload))
+        if args.list_avatars:
+            print(render_avatar_list(export_payload))
+            return 0
+
+        selected_avatar = resolve_avatar_selection(export_payload, args.avatar)
+        planning_payload = build_planning_payload(export_payload, selected_avatar)
+        plan = read_plan_json(args.plan_json) if args.plan_json else create_blendshape_plan(settings, planning_payload, args.instruction)
+        plan = validate_plan(
+            plan=plan,
+            export_payload=planning_payload,
+            selected_avatar=selected_avatar,
+            min_confidence=args.min_confidence if args.min_confidence is not None else settings.min_confidence,
+            allow_low_confidence=args.allow_low_confidence,
+        )
+
+        if args.save_plan:
+            save_plan(args.save_plan, plan)
+
+        if args.print_plan:
+            print(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
+
+        print(render_preview(selected_avatar, plan, export_source, using_mock_execute))
+
+        code = render_csharp(plan)
+        if args.save_csharp:
+            save_text(args.save_csharp, code)
+
+        if args.dry_run:
+            print(code)
+            return 0
+
+        if using_mock_execute:
+            result = mock_execute_csharp(code, selected_avatar, export_source)
+        else:
+            result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+
+        if args.save_result:
+            save_result(args.save_result, result)
+
+        print(render_summary(selected_avatar, plan, result, using_mock_execute))
         return 0
-
-    selected_avatar = resolve_avatar_selection(export_payload, args.avatar)
-    planning_payload = build_planning_payload(export_payload, selected_avatar)
-    plan = read_plan_json(args.plan_json) if args.plan_json else create_blendshape_plan(settings, planning_payload, args.instruction)
-    plan = validate_plan(
-        plan=plan,
-        export_payload=planning_payload,
-        selected_avatar=selected_avatar,
-        min_confidence=args.min_confidence if args.min_confidence is not None else settings.min_confidence,
-        allow_low_confidence=args.allow_low_confidence,
-    )
-
-    if args.save_plan:
-        save_plan(args.save_plan, plan)
-
-    if args.print_plan:
-        print(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
-
-    print(render_preview(selected_avatar, plan, export_source, using_mock_execute))
-
-    code = render_csharp(plan)
-    if args.save_csharp:
-        save_text(args.save_csharp, code)
-
-    if args.dry_run:
-        print(code)
-        return 0
-
-    if using_mock_execute:
-        result = mock_execute_csharp(code, selected_avatar, export_source)
-    else:
-        result = execute_csharp(settings, code, [selected_avatar.avatar_path])
-
-    if args.save_result:
-        save_result(args.save_result, result)
-
-    print(render_summary(selected_avatar, plan, result, using_mock_execute))
-    return 0
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        return 1
 
 
-def load_settings(settings_path: Path) -> Settings:
+def load_settings(settings_path: Path, gemini_model_override: str | None = None) -> Settings:
     if not settings_path.exists():
         raise SystemExit(
             f"Missing settings file: {settings_path}\n"
@@ -222,7 +232,7 @@ def load_settings(settings_path: Path) -> Settings:
 
     return Settings(
         gemini_api_key=gemini_api_key,
-        gemini_model=gemini_settings.get("model", "gemini-3.1-pro-preview"),
+        gemini_model=(gemini_model_override or gemini_settings.get("model", DEFAULT_GEMINI_MODEL)).strip(),
         gemini_thinking_level=gemini_settings.get("thinking_level", "low"),
         unity_mcp_command=command,
         unity_mcp_retries=int(mcp_settings.get("retries", 3)),
@@ -382,23 +392,8 @@ def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], i
     prompt = build_planner_prompt(export_payload, instruction)
 
     # Keep the LLM adapter isolated so swapping Gemini for DeepSeek later only changes this block.
-    config = types.GenerateContentConfig(response_mime_type="application/json")
-
-    if settings.gemini_thinking_level:
-        try:
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
-            )
-        except TypeError:
-            # Older SDK versions may not expose thinking config yet.
-            pass
-
-    response = client.models.generate_content(
-        model=settings.gemini_model,
-        contents=prompt,
-        config=config,
-    )
+    config = build_generate_content_config(settings.gemini_thinking_level)
+    response = request_gemini_plan(client, settings.gemini_model, prompt, config)
 
     raw_json = extract_json_block(response.text or "")
     if not raw_json:
@@ -408,6 +403,77 @@ def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], i
         return BlendshapePlan.model_validate(json.loads(raw_json))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise RuntimeError(f"Gemini returned invalid blendshape JSON:\n{response.text}") from exc
+
+
+def format_gemini_client_error(exc: genai_errors.ClientError, model: str) -> str:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None) or "unknown"
+    message = str(exc).strip()
+
+    if status_code == 429:
+        return (
+            f"Gemini quota was exhausted for model '{model}'.\n"
+            "Try a lighter model with --model, enable billing for this project, or retry after the quota window resets.\n"
+            f"Original error: {message}"
+        )
+
+    if status_code == 400 and "API_KEY_INVALID" in message:
+        return (
+            f"Gemini rejected the API key while calling model '{model}'.\n"
+            "Make sure GEMINI_API_KEY comes from Google AI Studio / Gemini Developer API and has no extra whitespace.\n"
+            f"Original error: {message}"
+        )
+
+    return f"Gemini request failed for model '{model}' with HTTP {status_code}.\nOriginal error: {message}"
+
+
+def build_generate_content_config(thinking_level: str) -> types.GenerateContentConfig:
+    if thinking_level:
+        try:
+            return types.GenerateContentConfig(
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+            )
+        except TypeError:
+            # Older SDK versions may not expose thinking config yet.
+            pass
+
+    return types.GenerateContentConfig(response_mime_type="application/json")
+
+
+def request_gemini_plan(
+    client: genai.Client,
+    model: str,
+    prompt: str,
+    config: types.GenerateContentConfig,
+) -> Any:
+    try:
+        return client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=config,
+        )
+    except genai_errors.ClientError as exc:
+        if uses_thinking_config(config) and is_unsupported_thinking_error(exc):
+            fallback_config = types.GenerateContentConfig(response_mime_type="application/json")
+            return client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=fallback_config,
+            )
+        raise RuntimeError(format_gemini_client_error(exc, model)) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Gemini request failed for model '{model}'.\n"
+            f"Original error: {exc}"
+        ) from exc
+
+
+def uses_thinking_config(config: types.GenerateContentConfig) -> bool:
+    return getattr(config, "thinking_config", None) is not None
+
+
+def is_unsupported_thinking_error(exc: genai_errors.ClientError) -> bool:
+    return "thinking level is not supported for this model" in str(exc).lower()
 
 
 def read_plan_json(path: Path) -> BlendshapePlan:

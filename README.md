@@ -138,6 +138,7 @@ python vrchat_blendshape_agent.py --list-avatars
 
 - 默认：调用 Gemini
 - `--plan-json path`：跳过 Gemini，直接读取本地计划 JSON
+- `--model name`：临时覆盖 Gemini 模型，例如 `gemini-2.5-flash`
 
 ### 执行方式
 
@@ -165,8 +166,8 @@ python vrchat_blendshape_agent.py --list-avatars
 {
   "gemini": {
     "api_key_env": "GEMINI_API_KEY",
-    "model": "gemini-3.1-pro-preview",
-    "thinking_level": "low"
+    "model": "gemini-2.5-flash",
+    "thinking_level": ""
   },
   "unity_mcp": {
     "command": ["unity-mcp"]
@@ -179,6 +180,12 @@ python vrchat_blendshape_agent.py --list-avatars
   }
 }
 ```
+
+说明：
+
+- 当前模板默认模型改成了 `gemini-2.5-flash`，优先保证本地 MVP 更容易跑通
+- 当前模板默认关闭了 `thinking_level`，因为部分 `flash` 模型不支持这个参数
+- 如果你后续有 `gemini-3.1-pro-preview` 配额，可以直接在配置文件里改回去，或运行时加 `--model gemini-3.1-pro-preview`
 
 ## 已实现的关键保护
 
