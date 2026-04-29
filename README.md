@@ -17,8 +17,49 @@
 - `PROJECT_STATUS.md`
 - `tools/unity-mcp-cli.ps1`
 - `tools/install-unity-project.ps1`
+- `tools/start-dashboard.ps1`
+- `start_dashboard.cmd`
+- `dashboard_server.py`
+- `dashboard/index.html`
+- `dashboard/styles.css`
+- `dashboard/app.js`
 
 ## 现在能做什么
+
+### Dashboard 路线
+
+仓库现在还带了一套本地 dashboard：
+
+- FastAPI 后端
+- WebSocket 实时状态推送
+- vanilla CSS 前端，不需要 React / Vite / 编译链
+- Unity MCP 连接状态实时显示
+- Blendshape 操作日志滚动
+- Unity 工程选择下拉，多工程切换
+
+启动命令：
+
+```bash
+python dashboard_server.py --host 127.0.0.1 --port 8757
+```
+
+一键启动：
+
+```text
+start_dashboard.cmd
+```
+
+或者：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start-dashboard.ps1
+```
+
+打开：
+
+```text
+http://127.0.0.1:8757
+```
 
 ### MVP 路线
 
@@ -88,6 +129,18 @@ python vrchat_blendshape_agent.py --mvp "把眼睛睁大，嘴角上扬" --print
 - 返回 mock 执行结果
 
 ## 完整 Unity 路线
+
+### Dashboard 控制方式
+
+如果你更想通过页面操作，而不是命令行，可以直接走 dashboard：
+
+1. 在顶部工程下拉里选目标 Unity 工程
+2. 点击“安装插件”把 `Assets/VRCAutoRig` 和 `unity-mcp` 包依赖接进去
+3. 点击“打开工程”启动 Unity
+4. 在 Unity 里启动 MCP Server
+5. 回到 dashboard，看 WebSocket 推送的 Unity 状态变成 Connected
+6. 刷新 Avatar，选择目标 Avatar
+7. 输入自然语言，先生成计划，再运行全链路
 
 ### 接现有 Unity 工程
 
@@ -185,6 +238,14 @@ python vrchat_blendshape_agent.py --list-avatars
 - `--unity-status`：输出当前 `unity-mcp` 连接状态
 - `--list-unity-instances`：列出当前可见的 Unity 实例
 
+dashboard 里对应这些能力：
+
+- 顶部状态卡：WebSocket / Unity MCP / Active Project / Execution Mode
+- 工程卡：多工程下拉、打开工程、安装插件
+- Unity 卡：状态、实例、工具列表
+- Pipeline 卡：来源切换、Avatar 选择、Gemini / 本地计划、mock / live 执行
+- Live Feed：滚动 Blendshape 操作日志
+
 ### 安全相关
 
 - `--avatar`：多 Avatar 场景显式指定目标
@@ -226,6 +287,13 @@ python vrchat_blendshape_agent.py --list-avatars
   },
   "planning": {
     "min_confidence": 0.65
+  },
+  "dashboard": {
+    "project_roots": [
+      "E:/unity/Projects"
+    ],
+    "unity_editor_path": "E:/unity/Unity 2022.3.22f1/Editor/Unity.exe",
+    "status_push_interval_seconds": 2.5
   }
 }
 ```
@@ -235,6 +303,8 @@ python vrchat_blendshape_agent.py --list-avatars
 - 当前模板默认模型改成了 `gemini-2.5-flash`，优先保证本地 MVP 更容易跑通
 - 当前模板默认关闭了 `thinking_level`，因为部分 `flash` 模型不支持这个参数
 - 当前模板默认通过 `tools/unity-mcp-cli.ps1` 调用官方 `unity-mcp` CLI
+- 当前模板默认把 dashboard 的工程根目录指向 `E:/unity/Projects`
+- dashboard 使用 WebSocket 推送 Unity 状态和操作日志，前端不做轮询
 - 如果后续要锁定某个 Unity 实例，可以把 `unity_mcp.instance` 填成 `unity-mcp instances` 返回的 `Name@hash`
 - 如果你后续有 `gemini-3.1-pro-preview` 配额，可以直接在配置文件里改回去，或运行时加 `--model gemini-3.1-pro-preview`
 
@@ -264,6 +334,7 @@ python -m unittest discover -s tests -v
 - 本地导出 JSON 读取
 - 本地计划 JSON 读取
 - mock 执行结果
+- dashboard HTTP / WebSocket 基础能力
 - unity-mcp 命令拼装
 
 ## 已知限制
@@ -271,6 +342,7 @@ python -m unittest discover -s tests -v
 - 2 秒超时仍是软保护，不是强制沙箱
 - 如果多个 Avatar 共享同一个 `AnimatorController`，`Write Defaults` 仍可能一起生效
 - 当前机器上已经确认 `unity-mcp` CLI 可通过 wrapper 启动，但 Unity MCP 服务器尚未从 Unity Editor 侧真正启动
+- dashboard 前后端已经可启动，WebSocket `hello` 推送和工程扫描测试已验证通过
 - 当前 MVP 的纯本地路线是“样例导出 + 样例计划 + mock 执行”，目的是先演示主流程，不是替代真实 Unity 验收
 
 ## 下一步建议

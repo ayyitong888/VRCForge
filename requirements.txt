@@ -1,3 +1,5 @@
+fastapi>=0.115.0
 google-genai>=1.16.1
 mcpforunityserver>=9.6.8
 pydantic>=2.7.0,<3.0.0
+uvicorn>=0.30.0

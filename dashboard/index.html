@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Avatar Control Deck</title>
+    <link rel="stylesheet" href="/dashboard/styles.css">
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+    <div class="ambient ambient-c"></div>
+
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">VRChat Blendshape Automation</p>
+          <h1>Avatar Control Deck</h1>
+          <p class="hero-text">
+            用一个零编译 dashboard 把 Unity MCP、工程切换、Blendshape 规划、C# 生成和执行日志收进同一条链路里。
+          </p>
+        </div>
+        <div class="hero-metrics">
+          <article class="metric-card">
+            <span class="metric-label">Socket</span>
+            <strong id="socket-status" class="metric-value metric-warn">Connecting</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Unity MCP</span>
+            <strong id="unity-status-pill" class="metric-value metric-warn">Unknown</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Active Project</span>
+            <strong id="active-project-name" class="metric-value">None</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Execution Mode</span>
+            <strong id="active-execution-mode" class="metric-value">Mock</strong>
+          </article>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="panel panel-controls">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Projects</p>
+              <h2>工程与连接</h2>
+            </div>
+            <span id="project-count" class="chip">0 projects</span>
+          </div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>工程选择</span>
+              <select id="project-select"></select>
+            </label>
+            <div class="button-row">
+              <button id="refresh-projects-btn" class="button button-ghost">刷新工程</button>
+              <button id="open-project-btn" class="button">打开工程</button>
+              <button id="install-project-btn" class="button button-accent">安装插件</button>
+            </div>
+          </div>
+
+          <div class="field-grid three-cols">
+            <label class="field">
+              <span>Unity Host</span>
+              <input id="unity-host" type="text" value="127.0.0.1">
+            </label>
+            <label class="field">
+              <span>Unity Port</span>
+              <input id="unity-port" type="number" value="8080">
+            </label>
+            <label class="field">
+              <span>Unity Instance</span>
+              <input id="unity-instance" type="text" placeholder="Project name or Name@hash">
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="sync-state-btn" class="button">同步状态</button>
+            <button id="unity-status-btn" class="button">检查连接</button>
+            <button id="unity-instances-btn" class="button">列出实例</button>
+            <button id="unity-tools-btn" class="button button-ghost">工具列表</button>
+          </div>
+
+          <div class="stack">
+            <div class="subpanel">
+              <div class="subpanel-head">
+                <h3>Unity 状态</h3>
+                <span id="unity-status-text" class="subtle">Waiting for WebSocket push</span>
+              </div>
+              <pre id="unity-status-output" class="code-block compact"></pre>
+            </div>
+            <div class="subpanel dual">
+              <div>
+                <div class="subpanel-head"><h3>实例</h3></div>
+                <pre id="unity-instances-output" class="code-block compact"></pre>
+              </div>
+              <div>
+                <div class="subpanel-head"><h3>工具</h3></div>
+                <pre id="unity-tools-output" class="code-block compact"></pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-controls">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Pipeline</p>
+              <h2>规划与执行</h2>
+            </div>
+            <span id="source-mode-badge" class="chip">mvp_sample</span>
+          </div>
+
+          <div class="field-grid two-cols">
+            <label class="field">
+              <span>数据来源</span>
+              <select id="source-mode">
+                <option value="mvp_sample">MVP Sample</option>
+                <option value="unity_live_export">Unity Live Export</option>
+                <option value="configured_export">Configured Export</option>
+                <option value="custom_export">Custom Export JSON</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Gemini Model</span>
+              <input id="model-input" type="text" placeholder="gemini-2.5-flash">
+            </label>
+          </div>
+
+          <div class="field-grid two-cols">
+            <label class="field hidden" id="export-json-field">
+              <span>Export JSON</span>
+              <input id="export-json" type="text" placeholder="examples/mvp_blendshapes_export.json">
+            </label>
+            <label class="field" id="plan-json-field">
+              <span>Local Plan JSON</span>
+              <input id="plan-json" type="text" placeholder="可留空，走 Gemini">
+            </label>
+          </div>
+
+          <div class="field-grid two-cols">
+            <label class="field">
+              <span>Avatar</span>
+              <select id="avatar-select"></select>
+            </label>
+            <label class="field">
+              <span>Min Confidence</span>
+              <input id="min-confidence" type="number" min="0" max="1" step="0.01" value="0.65">
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle">
+              <input id="mock-execute" type="checkbox" checked>
+              <span>Mock Execute</span>
+            </label>
+            <label class="toggle">
+              <input id="allow-low-confidence" type="checkbox">
+              <span>Allow Low Confidence</span>
+            </label>
+            <label class="toggle">
+              <input id="save-artifacts" type="checkbox" checked>
+              <span>Save Artifacts</span>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>自然语言指令</span>
+            <textarea id="instruction-input" rows="4" placeholder="把眼睛睁大，嘴角上扬"></textarea>
+          </label>
+
+          <div class="button-row">
+            <button id="refresh-avatars-btn" class="button button-ghost">刷新 Avatar</button>
+            <button id="generate-plan-btn" class="button">生成计划</button>
+            <button id="run-pipeline-btn" class="button button-accent">运行全链路</button>
+          </div>
+
+          <div class="subpanel">
+            <div class="subpanel-head">
+              <h3>执行摘要</h3>
+              <span id="summary-tag" class="subtle">Idle</span>
+            </div>
+            <pre id="summary-output" class="code-block"></pre>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Avatars</p>
+              <h2>Avatar 视图</h2>
+            </div>
+            <span id="avatar-source-tag" class="chip">No export yet</span>
+          </div>
+          <div id="avatars-list" class="avatar-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Preview</p>
+              <h2>计划预览</h2>
+            </div>
+            <span id="plan-count-tag" class="chip">0 adjustments</span>
+          </div>
+          <div class="stack">
+            <pre id="preview-output" class="code-block"></pre>
+            <pre id="plan-output" class="code-block"></pre>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Roslyn</p>
+              <h2>C# 代码</h2>
+            </div>
+            <span class="chip">Generated</span>
+          </div>
+          <pre id="csharp-output" class="code-block tall"></pre>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Result</p>
+              <h2>执行结果</h2>
+            </div>
+            <span id="artifact-tag" class="chip">Artifacts idle</span>
+          </div>
+          <div class="stack">
+            <pre id="result-output" class="code-block"></pre>
+            <div id="artifact-paths" class="artifact-list"></div>
+          </div>
+        </section>
+
+        <section class="panel panel-full">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Live Feed</p>
+              <h2>Blendshape 操作日志</h2>
+            </div>
+            <button id="clear-logs-btn" class="button button-ghost">清空前端日志</button>
+          </div>
+          <div id="log-stream" class="log-stream"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/dashboard/app.js"></script>
+  </body>
+</html>
