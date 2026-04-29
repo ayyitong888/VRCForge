@@ -34,7 +34,9 @@ function Ensure-DashboardDependencies {
         [string]$PythonExe
     )
 
-    & $PythonExe -c "import fastapi, uvicorn, google.genai, pydantic" 2>$null
+    $importCheck = 'import anthropic, fastapi, google.genai, openai, pydantic, uvicorn'
+    $quotedPython = '"' + $PythonExe + '"'
+    cmd.exe /c "$quotedPython -c ""$importCheck"" >nul 2>nul"
     if ($LASTEXITCODE -eq 0) {
         return
     }

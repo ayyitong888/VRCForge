@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from vrchat_blendshape_agent import (
+    DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
     DEFAULT_SETTINGS_PATH,
     McpResult,
@@ -26,9 +27,13 @@ from vrchat_blendshape_agent import (
     build_planning_payload,
     create_blendshape_plan,
     execute_csharp,
+    get_provider_defaults,
     load_export_payload,
     load_settings,
     mock_execute_csharp,
+    normalize_base_url,
+    normalize_provider_name,
+    provider_display_name,
     read_plan_json,
     render_csharp,
     render_preview,
@@ -48,12 +53,13 @@ DASHBOARD_DIR = ROOT_DIR / "dashboard"
 DASHBOARD_ARTIFACTS_DIR = ROOT_DIR / "artifacts" / "dashboard"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
+CONFIG_PATH = ROOT_DIR / "config.json"
 
 
 class DashboardRequest(BaseModel):
-    instruction: str | None = Field(default=None, description="Natural language instruction for Gemini planning.")
+    instruction: str | None = Field(default=None, description="Natural language instruction for LLM planning.")
     avatar: str | None = Field(default=None, description="Exact or partial avatar path/name.")
-    model: str | None = Field(default=None, description="Optional Gemini model override.")
+    model: str | None = Field(default=None, description="Optional model override.")
     source_mode: Literal["unity_live_export", "configured_export", "custom_export", "mvp_sample"] = "mvp_sample"
     export_json: str | None = Field(default=None, description="Optional local export JSON path.")
     plan_json: str | None = Field(default=None, description="Optional local plan JSON path.")
@@ -89,6 +95,21 @@ class ProjectActionRequest(BaseModel):
 class ProjectInstallRequest(BaseModel):
     project_path: str | None = None
     launch_unity: bool = False
+
+
+class ApiConfigRequest(BaseModel):
+    provider: str = DEFAULT_LLM_PROVIDER
+    api_key: str = ""
+    base_url: str | None = None
+    model: str | None = None
+
+
+@dataclass
+class DashboardApiConfig:
+    provider: str
+    api_key: str
+    base_url: str
+    model: str
 
 
 @dataclass
@@ -153,6 +174,7 @@ LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
 STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
+DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
 
 
 @app.on_event("startup")
@@ -160,6 +182,8 @@ async def on_startup() -> None:
     global STATUS_MONITOR_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    if not CONFIG_PATH.exists():
+        save_dashboard_api_config(DASHBOARD_API_CONFIG)
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
         STATUS_MONITOR_TASK = asyncio.create_task(status_monitor_loop())
 
@@ -170,6 +194,8 @@ async def on_startup() -> None:
         {
             "projectRoots": [str(path) for path in DASHBOARD_STATE.project_roots],
             "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
+            "provider": DASHBOARD_API_CONFIG.provider,
+            "model": DASHBOARD_API_CONFIG.model,
         },
     )
 
@@ -194,13 +220,19 @@ def read_dashboard() -> FileResponse:
 
 @app.get("/api/health")
 def read_health() -> dict[str, Any]:
-    settings = load_settings(resolve_local_path(DEFAULT_SETTINGS_PATH))
+    settings = load_settings(
+        resolve_local_path(DEFAULT_SETTINGS_PATH),
+        llm_override=serialize_api_config(include_secret=True),
+    )
     return {
         "ok": True,
         "projectRoot": str(ROOT_DIR),
         "settingsPath": str(resolve_local_path(DEFAULT_SETTINGS_PATH)),
+        "configPath": str(CONFIG_PATH),
         "defaults": {
-            "model": settings.gemini_model,
+            "provider": settings.llm_provider,
+            "model": settings.llm_model,
+            "baseUrl": settings.llm_base_url,
             "sourceMode": "mvp_sample",
             "exportJson": str(DEFAULT_MVP_EXPORT_PATH),
             "planJson": "",
@@ -211,6 +243,7 @@ def read_health() -> dict[str, Any]:
             "unityInstance": DASHBOARD_STATE.unity_instance,
         },
         "state": serialize_dashboard_state(),
+        "apiConfig": serialize_api_config(include_secret=True),
         "projects": project_snapshot_payload(),
         "recentLogs": list(RECENT_LOGS),
         "unityStatus": CURRENT_UNITY_STATUS,
@@ -266,6 +299,40 @@ async def update_state(request: DashboardStateRequest) -> dict[str, Any]:
         {
             "projectPath": DASHBOARD_STATE.selected_project_path,
             "unityInstance": DASHBOARD_STATE.unity_instance,
+        },
+    )
+    return payload
+
+
+@app.get("/api/config")
+def read_api_config() -> dict[str, Any]:
+    return {
+        "configPath": str(CONFIG_PATH),
+        "apiConfig": serialize_api_config(include_secret=True),
+        "effective": build_effective_model_summary(),
+    }
+
+
+@app.post("/api/config")
+async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
+    global DASHBOARD_API_CONFIG
+
+    DASHBOARD_API_CONFIG = normalize_api_config_request(request)
+    save_dashboard_api_config(DASHBOARD_API_CONFIG)
+    payload = {
+        "configPath": str(CONFIG_PATH),
+        "apiConfig": serialize_api_config(include_secret=True),
+        "effective": build_effective_model_summary(),
+    }
+    await EVENT_BUS.broadcast("config", payload)
+    await emit_log_async(
+        "success",
+        "config",
+        "Dashboard API config saved and applied.",
+        {
+            "provider": DASHBOARD_API_CONFIG.provider,
+            "model": DASHBOARD_API_CONFIG.model,
+            "baseUrl": DASHBOARD_API_CONFIG.base_url or "(official endpoint)",
         },
     )
     return payload
@@ -408,7 +475,16 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             if not request.instruction:
                 raise RuntimeError("instruction is required unless a local plan_json path is provided.")
             plan = create_blendshape_plan(settings, planning_payload, request.instruction)
-            emit_log("info", "pipeline", "Gemini plan generated.", {"instruction": request.instruction})
+            emit_log(
+                "info",
+                "pipeline",
+                "LLM plan generated.",
+                {
+                    "instruction": request.instruction,
+                    "provider": settings.llm_provider,
+                    "model": settings.llm_model,
+                },
+            )
 
         min_confidence = request.min_confidence if request.min_confidence is not None else settings.min_confidence
         plan = validate_plan(
@@ -480,7 +556,11 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
 
 def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Settings:
     settings_path = resolve_local_path(request.settings_path)
-    settings = load_settings(settings_path, getattr(request, "model", None))
+    settings = load_settings(
+        settings_path,
+        getattr(request, "model", None),
+        llm_override=serialize_api_config(include_secret=True),
+    )
 
     settings.unity_mcp_host = request.unity_host or DASHBOARD_STATE.unity_host or settings.unity_mcp_host
     settings.unity_mcp_port = int(request.unity_port if request.unity_port is not None else DASHBOARD_STATE.unity_port or settings.unity_mcp_port)
@@ -737,6 +817,11 @@ def build_bootstrap_payload() -> dict[str, Any]:
     return {
         "health": read_health(),
         "state": serialize_dashboard_state(),
+        "config": {
+            "configPath": str(CONFIG_PATH),
+            "apiConfig": serialize_api_config(include_secret=True),
+            "effective": build_effective_model_summary(),
+        },
         "projects": project_snapshot_payload(),
         "unityStatus": status,
         "recentLogs": list(RECENT_LOGS),
@@ -746,6 +831,7 @@ def build_bootstrap_payload() -> dict[str, Any]:
 def serialize_dashboard_state() -> dict[str, Any]:
     return {
         "settingsPath": str(DASHBOARD_STATE.settings_path),
+        "configPath": str(CONFIG_PATH),
         "selectedProjectPath": DASHBOARD_STATE.selected_project_path,
         "unityHost": DASHBOARD_STATE.unity_host,
         "unityPort": DASHBOARD_STATE.unity_port,
@@ -848,9 +934,103 @@ def normalize_path_string(value: str) -> str:
     return str(Path(value)).replace("\\", "/")
 
 
-def load_initial_dashboard_state() -> DashboardState:
+def load_initial_dashboard_api_config() -> DashboardApiConfig:
     settings_path = resolve_local_path(DEFAULT_SETTINGS_PATH)
     settings = load_settings(settings_path)
+    config_document = load_config_document()
+    api_section = config_document.get("api") or {}
+
+    provider = normalize_provider_name(api_section.get("provider") or settings.llm_provider or DEFAULT_LLM_PROVIDER)
+    defaults = get_provider_defaults(provider)
+    api_key = str(api_section.get("api_key") or settings.llm_api_key).strip()
+    base_url = normalize_base_url(api_section.get("base_url"), provider, defaults["base_url"])
+    model = str(api_section.get("model") or settings.llm_model or defaults["model"]).strip() or defaults["model"]
+
+    return DashboardApiConfig(
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+
+
+def load_config_document() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfig:
+    provider = normalize_provider_name(request.provider)
+    defaults = get_provider_defaults(provider)
+    model = str(request.model or defaults["model"]).strip() or defaults["model"]
+    base_url = normalize_base_url(request.base_url, provider, defaults["base_url"])
+
+    return DashboardApiConfig(
+        provider=provider,
+        api_key=request.api_key.strip(),
+        base_url=base_url,
+        model=model,
+    )
+
+
+def save_dashboard_api_config(config: DashboardApiConfig) -> None:
+    payload = {
+        "api": {
+            "provider": config.provider,
+            "api_key": config.api_key,
+            "base_url": config.base_url,
+            "model": config.model,
+        }
+    }
+    CONFIG_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def serialize_api_config(include_secret: bool) -> dict[str, Any]:
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    return {
+        "provider": config.provider,
+        "providerLabel": provider_display_name(config.provider),
+        "api_key": config.api_key if include_secret else mask_secret(config.api_key),
+        "apiKeyPresent": bool(config.api_key),
+        "base_url": config.base_url,
+        "model": config.model,
+        "usesBaseUrl": config.provider != "anthropic",
+        "authHeader": "x-api-key" if config.provider == "anthropic" else "Authorization: Bearer",
+    }
+
+
+def build_effective_model_summary() -> dict[str, Any]:
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    return {
+        "provider": config.provider,
+        "providerLabel": provider_display_name(config.provider),
+        "model": config.model,
+        "baseUrl": config.base_url,
+        "authHeader": "x-api-key" if config.provider == "anthropic" else "Authorization: Bearer",
+    }
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * max(len(value) - 8, 4)}{value[-4:]}"
+
+
+def load_initial_dashboard_state() -> DashboardState:
+    settings_path = resolve_local_path(DEFAULT_SETTINGS_PATH)
+    settings = load_settings(
+        settings_path,
+        llm_override=serialize_api_config(include_secret=True) if DASHBOARD_API_CONFIG is not None else None,
+    )
     raw = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
     dashboard_settings = raw.get("dashboard") or {}
 
@@ -868,6 +1048,10 @@ def load_initial_dashboard_state() -> DashboardState:
         unity_port=settings.unity_mcp_port,
         unity_instance=settings.unity_mcp_instance,
     )
+
+
+if DASHBOARD_API_CONFIG is None:
+    DASHBOARD_API_CONFIG = load_initial_dashboard_api_config()
 
 
 if DASHBOARD_STATE is None:

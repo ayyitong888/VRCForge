@@ -9,9 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
 
@@ -19,6 +16,17 @@ DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
 DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_CUSTOM_BASE_URL = ""
+DEFAULT_LLM_PROVIDER = "gemini"
+SUPPORTED_LLM_PROVIDERS = ("gemini", "deepseek", "openai", "openrouter", "anthropic", "custom")
 
 
 class BlendshapeAdjustment(BaseModel):
@@ -47,8 +55,11 @@ class SelectedAvatar:
 
 @dataclass
 class Settings:
-    gemini_api_key: str
-    gemini_model: str
+    llm_provider: str
+    llm_api_key: str
+    llm_base_url: str
+    llm_model: str
+    llm_api_key_env: str
     gemini_thinking_level: str
     unity_mcp_command: list[str]
     unity_mcp_host: str
@@ -77,7 +88,7 @@ class UnityMcpError(RuntimeError):
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Use Gemini and Unity MCP to tune VRChat avatar blendshapes from natural language."
+        description="Use an LLM provider and Unity MCP to tune VRChat avatar blendshapes from natural language."
     )
     parser.add_argument(
         "instruction",
@@ -87,7 +98,7 @@ def main() -> int:
     parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS_PATH, help="Path to settings.json")
     parser.add_argument(
         "--model",
-        help="Optional Gemini model override, e.g. gemini-2.5-flash or gemini-3.1-pro-preview.",
+        help="Optional provider model override, e.g. gemini-2.5-flash, deepseek-chat, or claude-opus-4-6.",
     )
     parser.add_argument(
         "--mvp",
@@ -112,7 +123,7 @@ def main() -> int:
     parser.add_argument(
         "--plan-json",
         type=Path,
-        help="Optional local plan JSON file. If provided, Gemini generation is skipped and the plan is validated locally.",
+        help="Optional local plan JSON file. If provided, live LLM generation is skipped and the plan is validated locally.",
     )
     parser.add_argument(
         "--avatar",
@@ -121,7 +132,7 @@ def main() -> int:
     parser.add_argument(
         "--list-avatars",
         action="store_true",
-        help="Export the current scene and print the available avatar paths without running Gemini.",
+        help="Export the current scene and print the available avatar paths without running the LLM planner.",
     )
     parser.add_argument(
         "--unity-status",
@@ -137,7 +148,7 @@ def main() -> int:
         "--min-confidence",
         type=float,
         default=None,
-        help="Reject Gemini adjustments below this confidence unless --allow-low-confidence is used.",
+        help="Reject low-confidence planner adjustments unless --allow-low-confidence is used.",
     )
     parser.add_argument(
         "--allow-low-confidence",
@@ -230,31 +241,35 @@ def main() -> int:
         return 1
 
 
-def load_settings(settings_path: Path, gemini_model_override: str | None = None) -> Settings:
+def load_settings(
+    settings_path: Path,
+    gemini_model_override: str | None = None,
+    llm_override: dict[str, Any] | None = None,
+) -> Settings:
     if not settings_path.exists():
         raise SystemExit(
             f"Missing settings file: {settings_path}\n"
-            "Create it from the provided template, set GEMINI_API_KEY in your environment, and try again."
+            "Create it from the provided template, configure your provider API key, and try again."
         )
 
     raw_settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    gemini_settings = raw_settings.get("gemini", {})
     mcp_settings = raw_settings.get("unity_mcp", {})
     path_settings = raw_settings.get("paths", {})
     planning_settings = raw_settings.get("planning", {})
-
-    api_key_env = gemini_settings.get("api_key_env", "GEMINI_API_KEY")
-    gemini_api_key = os.environ.get(api_key_env, "").strip()
     command = mcp_settings.get("command", ["unity-mcp"])
     if isinstance(command, str):
         command = [command]
 
     export_path = Path(path_settings.get("blendshape_export", "Assets/VRCAutoRig/blendshapes_export.json"))
+    llm_settings = build_llm_settings(raw_settings, gemini_model_override, llm_override)
 
     return Settings(
-        gemini_api_key=gemini_api_key,
-        gemini_model=(gemini_model_override or gemini_settings.get("model", DEFAULT_GEMINI_MODEL)).strip(),
-        gemini_thinking_level=gemini_settings.get("thinking_level", "low"),
+        llm_provider=llm_settings["provider"],
+        llm_api_key=llm_settings["api_key"],
+        llm_base_url=llm_settings["base_url"],
+        llm_model=llm_settings["model"],
+        llm_api_key_env=llm_settings["api_key_env"],
+        gemini_thinking_level=llm_settings["thinking_level"],
         unity_mcp_command=command,
         unity_mcp_host=str(mcp_settings.get("host", "127.0.0.1")).strip() or "127.0.0.1",
         unity_mcp_port=int(mcp_settings.get("port", 8080)),
@@ -267,6 +282,102 @@ def load_settings(settings_path: Path, gemini_model_override: str | None = None)
         export_path=export_path,
         min_confidence=float(planning_settings.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
     )
+
+
+def build_llm_settings(
+    raw_settings: dict[str, Any],
+    model_override: str | None,
+    llm_override: dict[str, Any] | None,
+) -> dict[str, str]:
+    llm_settings = dict(raw_settings.get("llm") or {})
+    legacy_gemini_settings = dict(raw_settings.get("gemini") or {})
+    override = llm_override or {}
+
+    provider = normalize_provider_name(
+        override.get("provider")
+        or llm_settings.get("provider")
+        or legacy_gemini_settings.get("provider")
+        or DEFAULT_LLM_PROVIDER
+    )
+    defaults = get_provider_defaults(provider)
+    api_key_env = str(
+        override.get("api_key_env")
+        or llm_settings.get("api_key_env")
+        or legacy_gemini_settings.get("api_key_env")
+        or default_api_key_env_for_provider(provider)
+    ).strip()
+    api_key = str(
+        override.get("api_key")
+        or llm_settings.get("api_key")
+        or os.environ.get(api_key_env, "")
+    ).strip()
+    base_url_value = (
+        override.get("base_url")
+        if "base_url" in override
+        else llm_settings.get("base_url", legacy_gemini_settings.get("base_url"))
+    )
+    model_value = (
+        model_override
+        or override.get("model")
+        or llm_settings.get("model")
+        or legacy_gemini_settings.get("model")
+        or defaults["model"]
+    )
+    thinking_level_value = (
+        override.get("thinking_level")
+        if "thinking_level" in override
+        else llm_settings.get("thinking_level", legacy_gemini_settings.get("thinking_level", ""))
+    )
+
+    return {
+        "provider": provider,
+        "api_key_env": api_key_env,
+        "api_key": api_key,
+        "base_url": normalize_base_url(base_url_value, provider, defaults["base_url"]),
+        "model": str(model_value).strip() or defaults["model"],
+        "thinking_level": str(thinking_level_value or "").strip(),
+    }
+
+
+def get_provider_defaults(provider: str) -> dict[str, str]:
+    normalized = normalize_provider_name(provider)
+    defaults = {
+        "gemini": {"model": DEFAULT_GEMINI_MODEL, "base_url": DEFAULT_GEMINI_BASE_URL},
+        "deepseek": {"model": DEFAULT_DEEPSEEK_MODEL, "base_url": DEFAULT_DEEPSEEK_BASE_URL},
+        "openai": {"model": DEFAULT_OPENAI_MODEL, "base_url": DEFAULT_OPENAI_BASE_URL},
+        "openrouter": {"model": DEFAULT_OPENROUTER_MODEL, "base_url": DEFAULT_OPENROUTER_BASE_URL},
+        "anthropic": {"model": DEFAULT_ANTHROPIC_MODEL, "base_url": ""},
+        "custom": {"model": "", "base_url": DEFAULT_CUSTOM_BASE_URL},
+    }
+    return defaults[normalized]
+
+
+def default_api_key_env_for_provider(provider: str) -> str:
+    return {
+        "gemini": "GEMINI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "custom": "LLM_API_KEY",
+    }[normalize_provider_name(provider)]
+
+
+def normalize_provider_name(provider: str | None) -> str:
+    normalized = str(provider or DEFAULT_LLM_PROVIDER).strip().lower()
+    if normalized not in SUPPORTED_LLM_PROVIDERS:
+        raise RuntimeError(
+            f"Unsupported LLM provider '{provider}'. Supported values: {', '.join(SUPPORTED_LLM_PROVIDERS)}."
+        )
+    return normalized
+
+
+def normalize_base_url(base_url: Any, provider: str, default_base_url: str) -> str:
+    if normalize_provider_name(provider) == "anthropic":
+        return ""
+
+    resolved = str(base_url if base_url is not None else default_base_url).strip()
+    return resolved.rstrip("/")
 
 
 def export_blendshapes(settings: Settings) -> dict[str, Any]:
@@ -409,95 +520,181 @@ def build_planning_payload(export_payload: dict[str, Any], selected_avatar: Sele
 
 
 def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], instruction: str) -> BlendshapePlan:
-    if not settings.gemini_api_key:
-        raise RuntimeError("Gemini API key is empty. Set GEMINI_API_KEY or use --plan-json for a local MVP run.")
+    if not settings.llm_api_key:
+        provider_name = provider_display_name(settings.llm_provider)
+        raise RuntimeError(
+            f"{provider_name} API key is empty. Set {settings.llm_api_key_env} or use --plan-json for a local MVP run."
+        )
 
-    client = genai.Client(api_key=settings.gemini_api_key)
     prompt = build_planner_prompt(export_payload, instruction)
 
-    # Keep the LLM adapter isolated so swapping Gemini for DeepSeek later only changes this block.
-    config = build_generate_content_config(settings.gemini_thinking_level)
-    response = request_gemini_plan(client, settings.gemini_model, prompt, config)
-
-    raw_json = extract_json_block(response.text or "")
+    raw_response_text = request_llm_plan(settings, prompt)
+    raw_json = extract_json_block(raw_response_text)
     if not raw_json:
-        raise RuntimeError("Gemini returned an empty response while generating the blendshape plan.")
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned an empty response while generating the blendshape plan."
+        )
 
     try:
         return BlendshapePlan.model_validate(json.loads(raw_json))
     except (json.JSONDecodeError, ValidationError) as exc:
-        raise RuntimeError(f"Gemini returned invalid blendshape JSON:\n{response.text}") from exc
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned invalid blendshape JSON:\n{raw_response_text}"
+        ) from exc
 
 
-def format_gemini_client_error(exc: genai_errors.ClientError, model: str) -> str:
-    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None) or "unknown"
+def request_llm_plan(settings: Settings, prompt: str) -> str:
+    provider = normalize_provider_name(settings.llm_provider)
+    if provider == "anthropic":
+        return request_anthropic_plan(settings, prompt)
+
+    return request_openai_compatible_plan(settings, prompt)
+
+
+def request_openai_compatible_plan(settings: Settings, prompt: str) -> str:
+    if not settings.llm_base_url:
+        provider_name = provider_display_name(settings.llm_provider)
+        raise RuntimeError(f"{provider_name} requires a Base URL for OpenAI-compatible requests.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'openai' package is not installed. Run pip install -r requirements.txt and try again."
+        ) from exc
+
+    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    try:
+        response = client.chat.completions.create(
+            model=settings.llm_model,
+            temperature=0.1,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return extract_openai_message_text(response)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(format_openai_compatible_error(exc, settings)) from exc
+
+
+def request_anthropic_plan(settings: Settings, prompt: str) -> str:
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'anthropic' package is not installed. Run pip install -r requirements.txt and try again."
+        ) from exc
+
+    client = anthropic.Anthropic(api_key=settings.llm_api_key)
+    try:
+        response = client.messages.create(
+            model=settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
+            max_tokens=1400,
+            system="You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return extract_anthropic_message_text(response)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
+
+
+def extract_openai_message_text(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ""
+
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", "") if message is not None else ""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+            elif isinstance(block, dict) and block.get("text"):
+                parts.append(str(block["text"]))
+        return "\n".join(parts)
+
+    return str(content or "")
+
+
+def extract_anthropic_message_text(response: Any) -> str:
+    content = getattr(response, "content", None) or []
+    if not content:
+        return ""
+
+    parts: list[str] = []
+    for block in content:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(text)
+        elif isinstance(block, dict) and block.get("text"):
+            parts.append(str(block["text"]))
+    return "\n".join(parts)
+
+
+def format_openai_compatible_error(exc: Exception, settings: Settings) -> str:
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None) or "unknown"
+    message = str(exc).strip()
+    provider_name = provider_display_name(settings.llm_provider)
+
+    if status_code == 429:
+        return (
+            f"{provider_name} quota was exhausted for model '{settings.llm_model}'.\n"
+            "Try a lighter model, check provider billing/quota, or retry after the quota window resets.\n"
+            f"Original error: {message}"
+        )
+
+    if status_code in {401, 403}:
+        return (
+            f"{provider_name} rejected the API key while calling model '{settings.llm_model}'.\n"
+            f"Check {settings.llm_api_key_env} or the saved dashboard API config.\n"
+            f"Original error: {message}"
+        )
+
+    return (
+        f"{provider_name} request failed for model '{settings.llm_model}' via OpenAI-compatible endpoint "
+        f"'{settings.llm_base_url}' with HTTP {status_code}.\nOriginal error: {message}"
+    )
+
+
+def format_anthropic_error(exc: Exception, model: str) -> str:
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None) or "unknown"
     message = str(exc).strip()
 
     if status_code == 429:
         return (
-            f"Gemini quota was exhausted for model '{model}'.\n"
-            "Try a lighter model with --model, enable billing for this project, or retry after the quota window resets.\n"
+            f"Anthropic quota was exhausted for model '{model}'.\n"
+            "Check Anthropic billing/quota or retry after the quota window resets.\n"
             f"Original error: {message}"
         )
 
-    if status_code == 400 and "API_KEY_INVALID" in message:
+    if status_code in {401, 403}:
         return (
-            f"Gemini rejected the API key while calling model '{model}'.\n"
-            "Make sure GEMINI_API_KEY comes from Google AI Studio / Gemini Developer API and has no extra whitespace.\n"
+            f"Anthropic rejected the x-api-key while calling model '{model}'.\n"
+            "Check ANTHROPIC_API_KEY or the saved dashboard API config.\n"
             f"Original error: {message}"
         )
 
-    return f"Gemini request failed for model '{model}' with HTTP {status_code}.\nOriginal error: {message}"
+    return f"Anthropic request failed for model '{model}' with HTTP {status_code}.\nOriginal error: {message}"
 
 
-def build_generate_content_config(thinking_level: str) -> types.GenerateContentConfig:
-    if thinking_level:
-        try:
-            return types.GenerateContentConfig(
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
-            )
-        except TypeError:
-            # Older SDK versions may not expose thinking config yet.
-            pass
-
-    return types.GenerateContentConfig(response_mime_type="application/json")
-
-
-def request_gemini_plan(
-    client: genai.Client,
-    model: str,
-    prompt: str,
-    config: types.GenerateContentConfig,
-) -> Any:
-    try:
-        return client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config,
-        )
-    except genai_errors.ClientError as exc:
-        if uses_thinking_config(config) and is_unsupported_thinking_error(exc):
-            fallback_config = types.GenerateContentConfig(response_mime_type="application/json")
-            return client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=fallback_config,
-            )
-        raise RuntimeError(format_gemini_client_error(exc, model)) from exc
-    except Exception as exc:
-        raise RuntimeError(
-            f"Gemini request failed for model '{model}'.\n"
-            f"Original error: {exc}"
-        ) from exc
-
-
-def uses_thinking_config(config: types.GenerateContentConfig) -> bool:
-    return getattr(config, "thinking_config", None) is not None
-
-
-def is_unsupported_thinking_error(exc: genai_errors.ClientError) -> bool:
-    return "thinking level is not supported for this model" in str(exc).lower()
+def provider_display_name(provider: str) -> str:
+    return {
+        "gemini": "Gemini",
+        "deepseek": "DeepSeek",
+        "openai": "OpenAI",
+        "openrouter": "OpenRouter",
+        "anthropic": "Anthropic",
+        "custom": "Custom",
+    }[normalize_provider_name(provider)]
 
 
 def read_plan_json(path: Path) -> BlendshapePlan:
@@ -579,7 +776,7 @@ def validate_plan(
 
         if key in dedupe_index:
             warnings.append(
-                f"Gemini returned duplicate edits for {adjustment.blendshape_name} on {adjustment.renderer_path}; "
+                f"The planner returned duplicate edits for {adjustment.blendshape_name} on {adjustment.renderer_path}; "
                 "the later target weight was kept."
             )
             deduped_adjustments[dedupe_index[key]] = adjustment
@@ -591,18 +788,18 @@ def validate_plan(
     if invalid_targets:
         detail = "\n".join(invalid_targets)
         raise RuntimeError(
-            "Gemini returned blendshape targets that do not exist in the selected avatar export.\n"
+            "The planner returned blendshape targets that do not exist in the selected avatar export.\n"
             f"Selected avatar: {selected_avatar.avatar_path}\n{detail}"
         )
 
     if not deduped_adjustments:
-        warning_text = "; ".join(warnings) if warnings else "Gemini did not find a safe match."
+        warning_text = "; ".join(warnings) if warnings else "The planner did not find a safe match."
         raise RuntimeError(f"No blendshape adjustments were generated. {warning_text}")
 
     if low_confidence_adjustments and not allow_low_confidence:
         detail = "\n".join(low_confidence_adjustments)
         raise RuntimeError(
-            "Gemini returned low-confidence adjustments. Re-run with a more specific prompt, lower "
+            "The planner returned low-confidence adjustments. Re-run with a more specific prompt, lower "
             "--min-confidence, or use --allow-low-confidence if you want to accept the risk.\n"
             f"{detail}"
         )

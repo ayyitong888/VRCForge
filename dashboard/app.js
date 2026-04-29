@@ -1,9 +1,57 @@
+const PROVIDER_PRESETS = {
+  gemini: {
+    providerLabel: "Gemini",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    model: "gemini-2.5-flash",
+    authHeader: "Authorization: Bearer",
+    usesBaseUrl: true,
+  },
+  deepseek: {
+    providerLabel: "DeepSeek",
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-chat",
+    authHeader: "Authorization: Bearer",
+    usesBaseUrl: true,
+  },
+  openai: {
+    providerLabel: "OpenAI",
+    base_url: "https://api.openai.com/v1",
+    model: "gpt-4.1-mini",
+    authHeader: "Authorization: Bearer",
+    usesBaseUrl: true,
+  },
+  openrouter: {
+    providerLabel: "OpenRouter",
+    base_url: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4.1-mini",
+    authHeader: "Authorization: Bearer",
+    usesBaseUrl: true,
+  },
+  anthropic: {
+    providerLabel: "Anthropic",
+    base_url: "",
+    model: "claude-opus-4-6",
+    authHeader: "x-api-key",
+    usesBaseUrl: false,
+  },
+  custom: {
+    providerLabel: "自定义",
+    base_url: "",
+    model: "",
+    authHeader: "Authorization: Bearer",
+    usesBaseUrl: true,
+  },
+};
+
 const state = {
   socket: null,
   projects: [],
   selectedProjectPath: "",
   unityStatus: null,
   recentLogs: [],
+  apiConfig: null,
+  providerDrafts: {},
+  apiConfigDirty: false,
 };
 
 const refs = {};
@@ -13,6 +61,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   connectSocket();
   updateModeVisibility();
+  syncMetricMode();
 });
 
 function cacheRefs() {
@@ -20,6 +69,8 @@ function cacheRefs() {
     "socket-status",
     "unity-status-pill",
     "active-project-name",
+    "active-provider-name",
+    "active-model-name",
     "active-execution-mode",
     "project-count",
     "project-select",
@@ -37,12 +88,26 @@ function cacheRefs() {
     "unity-status-output",
     "unity-instances-output",
     "unity-tools-output",
+    "config-path-tag",
+    "provider-select",
+    "api-model-input",
+    "api-key-input",
+    "api-key-label",
+    "api-key-note",
+    "api-base-url-field",
+    "api-base-url",
+    "api-base-url-note",
+    "effective-provider-name",
+    "effective-model-name",
+    "effective-auth-header",
+    "config-save-status",
+    "config-output",
+    "save-config-btn",
+    "reset-provider-btn",
     "source-mode",
     "source-mode-badge",
-    "model-input",
     "export-json-field",
     "export-json",
-    "plan-json-field",
     "plan-json",
     "avatar-select",
     "min-confidence",
@@ -88,6 +153,13 @@ function bindEvents() {
   refs["open-project-btn"].addEventListener("click", openProject);
   refs["install-project-btn"].addEventListener("click", installProject);
   refs["clear-logs-btn"].addEventListener("click", clearLogView);
+  refs["provider-select"].addEventListener("change", onProviderChanged);
+  refs["save-config-btn"].addEventListener("click", () => saveApiConfig(false));
+  refs["reset-provider-btn"].addEventListener("click", resetProviderDefaults);
+
+  for (const id of ["api-model-input", "api-key-input", "api-base-url"]) {
+    refs[id].addEventListener("input", markApiConfigDirty);
+  }
 }
 
 function connectSocket() {
@@ -130,6 +202,9 @@ function handleSocketEvent(type, payload) {
     case "state":
       applyDashboardState(payload, false);
       break;
+    case "config":
+      applyApiConfigPayload(payload, { fromSocket: true });
+      break;
     case "log":
       appendLog(payload, true);
       break;
@@ -140,7 +215,6 @@ function handleSocketEvent(type, payload) {
 
 function applyBootstrap(payload) {
   if (payload.health?.defaults) {
-    refs["model-input"].value = payload.health.defaults.model || "";
     refs["source-mode"].value = payload.health.defaults.sourceMode || "mvp_sample";
     refs["export-json"].value = payload.health.defaults.exportJson || "";
     refs["plan-json"].value = payload.health.defaults.planJson || "";
@@ -150,6 +224,12 @@ function applyBootstrap(payload) {
 
   if (payload.state) {
     applyDashboardState(payload.state, true);
+  }
+
+  if (payload.config) {
+    applyApiConfigPayload(payload.config, { fromSocket: false });
+  } else if (payload.health?.apiConfig) {
+    applyApiConfigPayload({ apiConfig: payload.health.apiConfig, effective: payload.health.apiConfig }, { fromSocket: false });
   }
 
   if (payload.projects) {
@@ -182,6 +262,166 @@ function applyDashboardState(payload, preferCurrentProject) {
   refs["active-project-name"].textContent = state.selectedProjectPath ? projectNameFromPath(state.selectedProjectPath) : "None";
 }
 
+function applyApiConfigPayload(payload, options = {}) {
+  const apiConfig = payload.apiConfig || payload;
+  const effective = payload.effective || apiConfig;
+  const provider = apiConfig.provider || "gemini";
+  const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
+
+  state.apiConfig = {
+    provider,
+    api_key: apiConfig.api_key || "",
+    base_url: apiConfig.base_url ?? preset.base_url,
+    model: apiConfig.model || preset.model,
+    authHeader: apiConfig.authHeader || preset.authHeader,
+    usesBaseUrl: apiConfig.usesBaseUrl ?? preset.usesBaseUrl,
+  };
+  state.providerDrafts[provider] = { ...state.apiConfig };
+
+  refs["config-path-tag"].textContent = payload.configPath || "config.json";
+  refs["provider-select"].value = provider;
+  refs["api-key-input"].value = state.apiConfig.api_key;
+  refs["api-base-url"].value = state.apiConfig.base_url || "";
+  refs["api-model-input"].value = state.apiConfig.model || "";
+  applyProviderFieldVisibility(provider);
+  updateEffectiveSummary(effective);
+
+  refs["config-output"].textContent = prettyJson({
+    configPath: payload.configPath || "config.json",
+    apiConfig: state.apiConfig,
+    effective,
+  });
+  setApiConfigDirty(false);
+  refs["config-save-status"].textContent = options.fromSocket ? "Live update received" : "Saved and active";
+}
+
+function updateEffectiveSummary(effective) {
+  const provider = effective.provider || state.apiConfig?.provider || "gemini";
+  const providerLabel = effective.providerLabel || PROVIDER_PRESETS[provider]?.providerLabel || provider;
+  const model = effective.model || state.apiConfig?.model || "";
+  const authHeader = effective.authHeader || PROVIDER_PRESETS[provider]?.authHeader || "Authorization: Bearer";
+
+  refs["effective-provider-name"].textContent = providerLabel;
+  refs["effective-model-name"].textContent = model || "Not set";
+  refs["effective-auth-header"].textContent = authHeader;
+  refs["active-provider-name"].textContent = providerLabel;
+  refs["active-model-name"].textContent = model || "Not set";
+}
+
+function applyProviderFieldVisibility(provider) {
+  const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
+  const isAnthropic = provider === "anthropic";
+
+  refs["api-key-label"].textContent = isAnthropic ? "API Key（x-api-key header）" : "API Key（Bearer token）";
+  refs["api-key-note"].textContent = isAnthropic
+    ? "Anthropic 走官方端点，只保存 API Key 与 Model。"
+    : "保存到本地 config.json，保存后立即生效，不需要重启 dashboard。";
+  refs["api-base-url-field"].classList.toggle("hidden", isAnthropic);
+  refs["api-base-url-note"].textContent = isAnthropic
+    ? "Anthropic 使用官方端点。"
+    : "非 Anthropic provider 统一走 OpenAI 兼容接口。";
+  refs["api-model-input"].placeholder = preset.model || "model-name";
+
+  if (isAnthropic) {
+    refs["api-base-url"].value = "";
+  } else if (!refs["api-base-url"].value.trim()) {
+    refs["api-base-url"].value = preset.base_url;
+  }
+}
+
+function onProviderChanged() {
+  rememberCurrentProviderDraft();
+  const provider = refs["provider-select"].value;
+  const draft = state.providerDrafts[provider] || buildDefaultProviderDraft(provider);
+
+  refs["api-key-input"].value = draft.api_key || "";
+  refs["api-base-url"].value = draft.base_url || "";
+  refs["api-model-input"].value = draft.model || "";
+  applyProviderFieldVisibility(provider);
+  updateEffectiveSummary({
+    provider,
+    providerLabel: PROVIDER_PRESETS[provider]?.providerLabel || provider,
+    model: refs["api-model-input"].value.trim() || PROVIDER_PRESETS[provider]?.model || "",
+    authHeader: PROVIDER_PRESETS[provider]?.authHeader || "Authorization: Bearer",
+  });
+  markApiConfigDirty();
+}
+
+function resetProviderDefaults() {
+  const provider = refs["provider-select"].value;
+  const draft = buildDefaultProviderDraft(provider);
+  state.providerDrafts[provider] = { ...draft };
+  refs["api-key-input"].value = "";
+  refs["api-base-url"].value = draft.base_url || "";
+  refs["api-model-input"].value = draft.model || "";
+  applyProviderFieldVisibility(provider);
+  markApiConfigDirty();
+}
+
+function buildDefaultProviderDraft(provider) {
+  const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
+  return {
+    provider,
+    api_key: "",
+    base_url: preset.base_url,
+    model: preset.model,
+    authHeader: preset.authHeader,
+    usesBaseUrl: preset.usesBaseUrl,
+  };
+}
+
+function rememberCurrentProviderDraft() {
+  const provider = refs["provider-select"].value;
+  if (!provider) {
+    return;
+  }
+
+  state.providerDrafts[provider] = readApiForm();
+}
+
+function readApiForm() {
+  const provider = refs["provider-select"].value;
+  const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
+  return {
+    provider,
+    api_key: refs["api-key-input"].value.trim(),
+    base_url: provider === "anthropic" ? "" : (refs["api-base-url"].value.trim() || preset.base_url),
+    model: refs["api-model-input"].value.trim() || preset.model,
+    authHeader: preset.authHeader,
+    usesBaseUrl: preset.usesBaseUrl,
+  };
+}
+
+function markApiConfigDirty() {
+  rememberCurrentProviderDraft();
+  setApiConfigDirty(true);
+}
+
+function setApiConfigDirty(isDirty) {
+  state.apiConfigDirty = Boolean(isDirty);
+  if (state.apiConfigDirty) {
+    refs["config-save-status"].textContent = "Unsaved changes";
+  }
+}
+
+async function saveApiConfig(silent) {
+  const payload = readApiForm();
+  const response = await postJson("/api/config", payload);
+  applyApiConfigPayload(response, { fromSocket: false });
+  if (!silent) {
+    refs["summary-tag"].textContent = "Config saved";
+    refs["summary-output"].textContent = prettyJson(response);
+  }
+  return response;
+}
+
+async function ensureApiConfigSaved() {
+  if (!state.apiConfigDirty) {
+    return;
+  }
+  await saveApiConfig(true);
+}
+
 function renderProjects(payload) {
   state.projects = payload.projects || [];
   state.selectedProjectPath = payload.selectedProjectPath || state.selectedProjectPath || "";
@@ -191,7 +431,7 @@ function renderProjects(payload) {
     const status = [];
     if (project.hasVrcAutoRig) status.push("VRCAutoRig");
     if (project.hasUnityMcpPackage) status.push("Unity MCP");
-    const suffix = status.length ? ` · ${status.join(" / ")}` : "";
+    const suffix = status.length ? ` / ${status.join(" / ")}` : "";
     return `<option value="${escapeHtml(project.path)}">${escapeHtml(project.name)} (${escapeHtml(project.editorVersion)})${escapeHtml(suffix)}</option>`;
   });
 
@@ -244,7 +484,7 @@ function buildPipelinePayload() {
     ...buildConnectionPayload(),
     instruction: refs["instruction-input"].value.trim(),
     avatar: refs["avatar-select"].value || null,
-    model: refs["model-input"].value.trim() || null,
+    model: refs["api-model-input"].value.trim() || null,
     source_mode: refs["source-mode"].value,
     export_json: refs["export-json"].value.trim() || null,
     plan_json: refs["plan-json"].value.trim() || null,
@@ -309,6 +549,7 @@ async function loadUnityTools() {
 }
 
 async function loadAvatars() {
+  await ensureApiConfigSaved();
   const payload = await postJson("/api/avatars", buildPipelinePayload());
   renderAvatarPayload(payload);
   refs["summary-tag"].textContent = "Avatars loaded";
@@ -316,6 +557,7 @@ async function loadAvatars() {
 }
 
 async function generatePlan() {
+  await ensureApiConfigSaved();
   const payload = await postJson("/api/pipeline/plan", buildPipelinePayload());
   renderPipelinePayload(payload);
   refs["summary-tag"].textContent = "Plan ready";
@@ -323,6 +565,7 @@ async function generatePlan() {
 }
 
 async function runPipeline() {
+  await ensureApiConfigSaved();
   const payload = await postJson("/api/pipeline/run", buildPipelinePayload());
   renderPipelinePayload(payload);
   refs["summary-tag"].textContent = payload.executionMode === "mock" ? "Mock executed" : "Live executed";
@@ -349,10 +592,16 @@ function renderPipelinePayload(payload) {
 }
 
 function renderAvatarSelect(avatars, selectedAvatarPath = null) {
+  if (!avatars.length) {
+    refs["avatar-select"].innerHTML = `<option value="">No avatars loaded</option>`;
+    return;
+  }
+
+  const currentValue = selectedAvatarPath || refs["avatar-select"].value;
   const options = avatars.map((avatar) => {
     const value = avatar.avatarPath;
-    const selected = (selectedAvatarPath || refs["avatar-select"].value) === value ? "selected" : "";
-    return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(avatar.avatarName)} · ${escapeHtml(avatar.sceneName)}</option>`;
+    const selected = currentValue === value ? "selected" : "";
+    return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(avatar.avatarName)} / ${escapeHtml(avatar.sceneName)}</option>`;
   });
   refs["avatar-select"].innerHTML = options.join("");
   if (selectedAvatarPath) {
@@ -411,7 +660,7 @@ function appendLog(entry, autoScroll) {
   node.className = `log-entry log-${entry.level || "info"}`;
   node.innerHTML = `
     <div class="log-entry-head">
-      <span class="log-entry-level">${escapeHtml(entry.scope || "system")} · ${escapeHtml(entry.level || "info")}</span>
+      <span class="log-entry-level">${escapeHtml(entry.scope || "system")} / ${escapeHtml(entry.level || "info")}</span>
       <span>${escapeHtml(formatTimestamp(entry.timestamp))}</span>
     </div>
     <p class="log-entry-body">${escapeHtml(entry.message || "")}</p>

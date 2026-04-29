@@ -17,7 +17,8 @@
           <p class="eyebrow">VRChat Blendshape Automation</p>
           <h1>Avatar Control Deck</h1>
           <p class="hero-text">
-            用一个零编译 dashboard 把 Unity MCP、工程切换、Blendshape 规划、C# 生成和执行日志收进同一条链路里。
+            用一套零编译 dashboard 把 Unity MCP、工程切换、LLM 规划、Roslyn C# 生成和执行日志收进同一条链路里。
+            WebSocket 负责实时推送状态，前端不做轮询。
           </p>
         </div>
         <div class="hero-metrics">
@@ -32,6 +33,14 @@
           <article class="metric-card">
             <span class="metric-label">Active Project</span>
             <strong id="active-project-name" class="metric-value">None</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Provider</span>
+            <strong id="active-provider-name" class="metric-value">Gemini</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Model</span>
+            <strong id="active-model-name" class="metric-value">gemini-2.5-flash</strong>
           </article>
           <article class="metric-card">
             <span class="metric-label">Execution Mode</span>
@@ -108,6 +117,75 @@
         <section class="panel panel-controls">
           <div class="panel-head">
             <div>
+              <p class="panel-kicker">API Config</p>
+              <h2>Provider 与模型</h2>
+            </div>
+            <span id="config-path-tag" class="chip">config.json</span>
+          </div>
+
+          <div class="status-strip">
+            <div class="status-pill">
+              <span>当前生效 Provider</span>
+              <strong id="effective-provider-name">Gemini</strong>
+            </div>
+            <div class="status-pill">
+              <span>当前生效 Model</span>
+              <strong id="effective-model-name">gemini-2.5-flash</strong>
+            </div>
+            <div class="status-pill">
+              <span>鉴权方式</span>
+              <strong id="effective-auth-header">Authorization: Bearer</strong>
+            </div>
+          </div>
+
+          <div class="field-grid two-cols">
+            <label class="field">
+              <span>Provider</span>
+              <select id="provider-select">
+                <option value="gemini">Gemini</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label class="field">
+              <span id="api-model-label">Model 名称</span>
+              <input id="api-model-input" type="text" placeholder="gemini-2.5-flash">
+            </label>
+          </div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span id="api-key-label">API Key（Bearer token）</span>
+              <input id="api-key-input" type="password" placeholder="Paste provider API key">
+              <small class="field-note" id="api-key-note">保存到本地 config.json，保存后立即生效，不需要重启 dashboard。</small>
+            </label>
+            <label class="field" id="api-base-url-field">
+              <span>Base URL</span>
+              <input id="api-base-url" type="text" placeholder="https://api.example.com/v1">
+              <small class="field-note" id="api-base-url-note">非 Anthropic provider 统一走 OpenAI 兼容接口。</small>
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="reset-provider-btn" class="button button-ghost">恢复该 Provider 默认值</button>
+            <button id="save-config-btn" class="button button-accent">保存并立即生效</button>
+          </div>
+
+          <div class="subpanel">
+            <div class="subpanel-head">
+              <h3>配置状态</h3>
+              <span id="config-save-status" class="subtle">Not saved yet</span>
+            </div>
+            <pre id="config-output" class="code-block compact"></pre>
+          </div>
+        </section>
+
+        <section class="panel panel-controls">
+          <div class="panel-head">
+            <div>
               <p class="panel-kicker">Pipeline</p>
               <h2>规划与执行</h2>
             </div>
@@ -125,8 +203,8 @@
               </select>
             </label>
             <label class="field">
-              <span>Gemini Model</span>
-              <input id="model-input" type="text" placeholder="gemini-2.5-flash">
+              <span>Local Plan JSON</span>
+              <input id="plan-json" type="text" placeholder="可留空，走实时 LLM 规划">
             </label>
           </div>
 
@@ -135,36 +213,31 @@
               <span>Export JSON</span>
               <input id="export-json" type="text" placeholder="examples/mvp_blendshapes_export.json">
             </label>
-            <label class="field" id="plan-json-field">
-              <span>Local Plan JSON</span>
-              <input id="plan-json" type="text" placeholder="可留空，走 Gemini">
+            <label class="field">
+              <span>Avatar</span>
+              <select id="avatar-select"></select>
             </label>
           </div>
 
           <div class="field-grid two-cols">
             <label class="field">
-              <span>Avatar</span>
-              <select id="avatar-select"></select>
-            </label>
-            <label class="field">
               <span>Min Confidence</span>
               <input id="min-confidence" type="number" min="0" max="1" step="0.01" value="0.65">
             </label>
-          </div>
-
-          <div class="toggle-row">
-            <label class="toggle">
-              <input id="mock-execute" type="checkbox" checked>
-              <span>Mock Execute</span>
-            </label>
-            <label class="toggle">
-              <input id="allow-low-confidence" type="checkbox">
-              <span>Allow Low Confidence</span>
-            </label>
-            <label class="toggle">
-              <input id="save-artifacts" type="checkbox" checked>
-              <span>Save Artifacts</span>
-            </label>
+            <div class="toggle-row">
+              <label class="toggle">
+                <input id="mock-execute" type="checkbox" checked>
+                <span>Mock Execute</span>
+              </label>
+              <label class="toggle">
+                <input id="allow-low-confidence" type="checkbox">
+                <span>Allow Low Confidence</span>
+              </label>
+              <label class="toggle">
+                <input id="save-artifacts" type="checkbox" checked>
+                <span>Save Artifacts</span>
+              </label>
+            </div>
           </div>
 
           <label class="field">

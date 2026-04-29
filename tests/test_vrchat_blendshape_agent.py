@@ -208,8 +208,11 @@ class MvpFlowTests(unittest.TestCase):
 
     def test_build_unity_mcp_command_includes_host_port_and_instance(self) -> None:
         settings = Settings(
-            gemini_api_key="",
-            gemini_model="gemini-2.5-flash",
+            llm_provider="gemini",
+            llm_api_key="",
+            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            llm_model="gemini-2.5-flash",
+            llm_api_key_env="GEMINI_API_KEY",
             gemini_thinking_level="",
             unity_mcp_command=["powershell", "-File", "tools/unity-mcp-cli.ps1"],
             unity_mcp_host="127.0.0.1",
@@ -260,10 +263,41 @@ class MvpFlowTests(unittest.TestCase):
             settings_path.write_text(json.dumps(settings_payload, ensure_ascii=False), encoding="utf-8")
 
             settings = load_settings(settings_path, gemini_model_override="gemini-2.5-flash")
-            self.assertEqual(settings.gemini_model, "gemini-2.5-flash")
+            self.assertEqual(settings.llm_provider, "gemini")
+            self.assertEqual(settings.llm_model, "gemini-2.5-flash")
+            self.assertEqual(settings.llm_base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+            self.assertEqual(settings.llm_api_key_env, "TEST_GEMINI_API_KEY")
             self.assertEqual(settings.unity_mcp_host, "127.0.0.1")
             self.assertEqual(settings.unity_mcp_port, 8080)
             self.assertEqual(settings.unity_mcp_instance, "Karin FT Rework@abc123")
+
+    def test_load_settings_accepts_llm_override(self) -> None:
+        settings_payload = {
+            "llm": {
+                "provider": "openai",
+                "api_key_env": "OPENAI_API_KEY",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4.1-mini",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(settings_payload, ensure_ascii=False), encoding="utf-8")
+
+            settings = load_settings(
+                settings_path,
+                llm_override={
+                    "provider": "anthropic",
+                    "api_key": "test-key",
+                    "model": "claude-opus-4-6",
+                    "base_url": "https://ignored.example.com",
+                },
+            )
+            self.assertEqual(settings.llm_provider, "anthropic")
+            self.assertEqual(settings.llm_model, "claude-opus-4-6")
+            self.assertEqual(settings.llm_base_url, "")
+            self.assertEqual(settings.llm_api_key, "test-key")
 
     def test_reads_export_json_from_local_file(self) -> None:
         payload = make_export_payload()

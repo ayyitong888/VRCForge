@@ -23,6 +23,7 @@ class DashboardServerTests(unittest.TestCase):
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
             self.assertIn("Avatar Control Deck", response.text)
+            self.assertIn("Provider 与模型", response.text)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -34,6 +35,45 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("defaults", payload)
             self.assertIn("state", payload)
             self.assertIn("projects", payload)
+            self.assertIn("apiConfig", payload)
+            self.assertIn("configPath", payload)
+
+    def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_config_path = dashboard_server.CONFIG_PATH
+            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
+            dashboard_server.CONFIG_PATH = Path(temp_dir) / "config.json"
+            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
+                provider="gemini",
+                api_key="",
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                model="gemini-2.5-flash",
+            )
+
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/config",
+                        json={
+                            "provider": "anthropic",
+                            "api_key": "anthropic-secret",
+                            "base_url": "https://ignored.example.com",
+                            "model": "claude-opus-4-6",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.json()
+                    self.assertEqual(payload["apiConfig"]["provider"], "anthropic")
+                    self.assertEqual(payload["apiConfig"]["base_url"], "")
+                    self.assertEqual(payload["effective"]["model"], "claude-opus-4-6")
+                    self.assertTrue(dashboard_server.CONFIG_PATH.exists())
+
+                    saved_payload = json.loads(dashboard_server.CONFIG_PATH.read_text(encoding="utf-8"))
+                    self.assertEqual(saved_payload["api"]["provider"], "anthropic")
+                    self.assertEqual(saved_payload["api"]["base_url"], "")
+            finally:
+                dashboard_server.CONFIG_PATH = original_config_path
+                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
 
     def test_discover_projects_reads_unity_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
