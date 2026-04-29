@@ -1,0 +1,40 @@
+{
+  "summary": "Open the eyes a bit wider and lift the mouth corners for a friendly smile.",
+  "warnings": [
+    "This is a canned MVP plan for local validation and mock execution."
+  ],
+  "adjustments": [
+    {
+      "avatar_path": "Scene/MvpAvatar",
+      "renderer_path": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Face",
+      "blendshape_name": "eyeWideLeft",
+      "target_weight": 35.0,
+      "reason": "Open the left eye slightly wider.",
+      "confidence": 0.98
+    },
+    {
+      "avatar_path": "Scene/MvpAvatar",
+      "renderer_path": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Face",
+      "blendshape_name": "eyeWideRight",
+      "target_weight": 35.0,
+      "reason": "Open the right eye slightly wider.",
+      "confidence": 0.98
+    },
+    {
+      "avatar_path": "Scene/MvpAvatar",
+      "renderer_path": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Face",
+      "blendshape_name": "mouthSmileLeft",
+      "target_weight": 48.0,
+      "reason": "Raise the left mouth corner.",
+      "confidence": 0.99
+    },
+    {
+      "avatar_path": "Scene/MvpAvatar",
+      "renderer_path": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Face",
+      "blendshape_name": "mouthSmileRight",
+      "target_weight": 48.0,
+      "reason": "Raise the right mouth corner.",
+      "confidence": 0.99
+    }
+  ]
+}

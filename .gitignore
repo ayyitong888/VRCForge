@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .mypy_cache/
+artifacts/
 
 Assets/VRCAutoRig/blendshapes_export.json
 Assets/VRCAutoRig/*.log

@@ -1,0 +1,101 @@
+{
+  "generatedAtUtc": "2026-04-30T12:00:00Z",
+  "unityProject": "VRCAutoRigMvpSample",
+  "scenes": [
+    "MvpScene"
+  ],
+  "summary": {
+    "avatarCount": 1,
+    "rendererCount": 2,
+    "blendshapeCount": 10
+  },
+  "avatars": [
+    {
+      "avatarName": "MvpAvatar",
+      "avatarPath": "Scene/MvpAvatar",
+      "sceneName": "MvpScene",
+      "scenePath": "Assets/Scenes/MvpScene.unity",
+      "isVrChatAvatar": true,
+      "renderers": [
+        {
+          "rendererName": "Face",
+          "rendererPath": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Face",
+          "relativeRendererPath": "Armature/Hips/Spine/Chest/Neck/Head/Face",
+          "meshName": "MvpFace",
+          "blendshapeCount": 8,
+          "blendshapes": [
+            {
+              "index": 0,
+              "name": "eyeWideLeft",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 1,
+              "name": "eyeWideRight",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 2,
+              "name": "mouthSmileLeft",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 3,
+              "name": "mouthSmileRight",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 4,
+              "name": "jawOpen",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 5,
+              "name": "browInnerUp",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 6,
+              "name": "cheekSquintLeft",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 7,
+              "name": "cheekSquintRight",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            }
+          ]
+        },
+        {
+          "rendererName": "Brows",
+          "rendererPath": "Scene/MvpAvatar/Armature/Hips/Spine/Chest/Neck/Head/Brows",
+          "relativeRendererPath": "Armature/Hips/Spine/Chest/Neck/Head/Brows",
+          "meshName": "MvpBrows",
+          "blendshapeCount": 2,
+          "blendshapes": [
+            {
+              "index": 0,
+              "name": "browOuterUpLeft",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            },
+            {
+              "index": 1,
+              "name": "browOuterUpRight",
+              "currentWeight": 0.0,
+              "normalizedWeight": 0.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,9 @@
 # VRChat Avatar Blendshape Gemini Automation
 
-这套框架把 Unity 自定义工具、Gemini 语义匹配和 Roslyn 动态执行串成一条链路，用自然语言直接调整 VRChat SDK3 Avatar 的 blendshape 权重。
+这套项目的目标是：把 Unity 自定义工具、Gemini 语义匹配和 Roslyn 动态执行串成一条链路，用自然语言调整 VRChat SDK3 Avatar 的 blendshape。
+
+当前仓库已经优先整理出一条可先演示、可先验收的 MVP 路线。
+项目现状、差距和后续建议见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
 
 ## 目录结构
 
@@ -8,101 +11,168 @@
 - `Assets/VRCAutoRig/Editor/RoslynExecutor.cs`
 - `vrchat_blendshape_agent.py`
 - `.gemini/settings.json`
-- `requirements.txt`
-- `PROJECT_STATUS.md`
+- `examples/mvp_blendshapes_export.json`
+- `examples/mvp_plan_smile.json`
 - `tests/test_vrchat_blendshape_agent.py`
+- `PROJECT_STATUS.md`
 
-## 功能概览
+## 现在能做什么
 
-- Unity 自定义工具 `vrc_export_blendshapes`
-- 扫描当前打开场景中的 `SkinnedMeshRenderer`
-- 识别 VRChat Avatar 根节点
-- 导出真实 blendshape 名字、路径、当前权重到 JSON
-- Unity 自定义工具 `vrc_execute_roslyn`
-- 在 Unity 主线程执行 Roslyn C# 代码
-- 自动收集 Unity / VRChat 已加载程序集引用
-- Roslyn 编译失败时返回清晰诊断
-- 2 秒安全超时保护
-- Python 代理先导出 blendshape，再调用 Gemini 生成计划
-- 多 Avatar 场景支持 `--list-avatars` 和 `--avatar`
-- 只把目标 Avatar 的导出数据发给 Gemini，减少误选
-- 本地二次校验 avatar / renderer / blendshape 是否真实存在
-- 支持 confidence 阈值拦截低置信度调整
-- 通过 `unity-mcp` 把生成的 C# 发回 Unity 执行
+### MVP 路线
 
-## 前置条件
+MVP 已经支持两种跑法：
 
-### 1. Unity 工程
+1. 纯本地样例 MVP
+2. Gemini 规划 + 本地 mock 执行 MVP
 
-- Unity 2021.3 LTS 或更高
-- 已导入 VRChat SDK3 Avatar
-- 已安装 [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp)
+这两条都不依赖真实 Unity 在线执行，因此适合先演示主流程。
 
-推荐从 Package Manager 用 Git URL 安装：
+### 完整路线
 
-```text
-https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main
-```
+完整路线仍然保留：
 
-### 2. 启用 unity-mcp 服务
+- Unity 导出真实 blendshape
+- Gemini 生成计划
+- Roslyn 生成并执行 C# 代码
+- 通过 `unity-mcp` 把执行结果送回 Unity
 
-在 Unity 中：
+只是当前机器还没有把 `unity-mcp` CLI 接到本地 PATH，所以完整在线执行还需要后续接环境。
 
-1. 打开 `Window > MCP for Unity`
-2. 点击 `Start Server`
-3. 确认本地服务已连通
-4. 等待 Unity 编译完 `Assets/VRCAutoRig/Editor/` 下的自定义工具
+## MVP 路线
 
-`unity-mcp` 官方文档说明：
+### 路线 A：纯本地样例 MVP
 
-- 自定义工具必须放在 `Editor/` 目录下才会被发现
-- 可以通过 `unity-mcp editor custom-tool "<tool_name>" --params '{...}'` 调用工具
+这条路线不需要 Gemini Key，也不需要 Unity。
 
-参考：
+它会：
 
-- [CoplayDev/unity-mcp README](https://github.com/CoplayDev/unity-mcp)
-- [Custom Tools 文档](https://github.com/CoplayDev/unity-mcp/blob/beta/docs/reference/CUSTOM_TOOLS.md)
+- 读取 `examples/mvp_blendshapes_export.json`
+- 读取 `examples/mvp_plan_smile.json`
+- 校验计划是否合法
+- 生成 Roslyn C# 代码
+- 返回 mock 执行结果
 
-### 3. 安装 Roslyn
-
-在 Unity 中：
-
-1. 打开 `Window > MCP For Unity`
-2. 找到 Runtime Code Execution / Roslyn 区域
-3. 点击安装 Roslyn DLL
-4. 在 `Player Settings > Scripting Define Symbols` 中加入 `USE_ROSLYN`
-5. 重启 Unity
-
-如果没有这一步，`vrc_execute_roslyn` 会直接返回清晰错误，不会静默失败。
-
-### 4. Python 环境
+运行命令：
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+python vrchat_blendshape_agent.py --mvp --plan-json examples/mvp_plan_smile.json --save-plan artifacts/mvp/plan.json --save-csharp artifacts/mvp/apply.cs --save-result artifacts/mvp/result.json
 ```
 
-本地单元测试可用：
+这是当前仓库最小、最稳、最容易先演示的一条链路。
 
-```bash
-python -m unittest discover -s tests -v
-```
+### 路线 B：Gemini 规划 + 本地 mock 执行 MVP
 
-### 5. Gemini API Key
+这条路线需要 Gemini API Key，但仍然不依赖真实 Unity 执行。
 
-把 API Key 放到环境变量里：
+先设置 Key：
 
 ```powershell
 $env:GEMINI_API_KEY="你的 Key"
 ```
 
-`.gemini/settings.json` 默认读取这个环境变量，并默认使用：
+再运行：
+
+```bash
+python vrchat_blendshape_agent.py --mvp "把眼睛睁大，嘴角上扬" --print-plan --save-plan artifacts/mvp/plan.json --save-csharp artifacts/mvp/apply.cs --save-result artifacts/mvp/result.json
+```
+
+这条路线会：
+
+- 读取 `examples/mvp_blendshapes_export.json`
+- 调用 Gemini 生成计划
+- 做本地严格校验
+- 生成 C# 代码
+- 返回 mock 执行结果
+
+## 完整 Unity 路线
+
+### 前置条件
+
+- Unity 2021.3 LTS 或更高
+- 已导入 VRChat SDK3 Avatar
+- 已安装 [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp)
+- 已安装 Roslyn DLL，并启用 `USE_ROSLYN`
+
+推荐 Unity Package Manager Git URL：
+
+```text
+https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main
+```
+
+### Unity 侧工具
+
+当前仓库已经有两个自定义工具：
+
+- `vrc_export_blendshapes`
+- `vrc_execute_roslyn`
+
+它们分别对应：
+
+- 导出当前场景 Avatar 的 blendshape 数据
+- 在 Unity 主线程执行 Roslyn C# 代码
+
+### 完整命令
+
+如果 `unity-mcp` 已经能在命令行里用，完整路线命令是：
+
+```bash
+python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "把眼睛睁大，嘴角上扬"
+```
+
+多 Avatar 场景里建议先列出：
+
+```bash
+python vrchat_blendshape_agent.py --list-avatars
+```
+
+## CLI 说明
+
+### 输入来源
+
+- 默认：调用 Unity 导出
+- `--export-json path`：直接读取本地导出 JSON
+- `--skip-export`：跳过导出，读取 `.gemini/settings.json` 里配置的导出路径
+- `--mvp`：如果没传 `--export-json`，默认读取 `examples/mvp_blendshapes_export.json`
+
+### 计划来源
+
+- 默认：调用 Gemini
+- `--plan-json path`：跳过 Gemini，直接读取本地计划 JSON
+
+### 执行方式
+
+- 默认：真实调用 Unity MCP 执行
+- `--mock-execute`：只返回 mock 成功结果，不连接 Unity
+- `--mvp`：自动启用 mock 执行
+
+### 安全相关
+
+- `--avatar`：多 Avatar 场景显式指定目标
+- `--min-confidence`：本地置信度阈值
+- `--allow-low-confidence`：允许低于阈值的计划继续执行
+
+### 结果落盘
+
+- `--save-plan`
+- `--save-csharp`
+- `--save-result`
+
+## 配置文件
+
+`.gemini/settings.json` 当前包含：
 
 ```json
 {
   "gemini": {
-    "model": "gemini-3.1-pro-preview"
+    "api_key_env": "GEMINI_API_KEY",
+    "model": "gemini-3.1-pro-preview",
+    "thinking_level": "low"
+  },
+  "unity_mcp": {
+    "command": ["unity-mcp"]
+  },
+  "paths": {
+    "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
   },
   "planning": {
     "min_confidence": 0.65
@@ -110,128 +180,44 @@ $env:GEMINI_API_KEY="你的 Key"
 }
 ```
 
-如果 Google 后续调整模型 ID，只需要改配置文件，不用改业务代码。
+## 已实现的关键保护
 
-## 运行步骤
+- 多 Avatar 场景下不指定 `--avatar` 会拒绝执行
+- 只把目标 Avatar 的导出数据发给 Gemini
+- 本地再次校验 avatar / renderer / blendshape 是否真实存在
+- 本地拦截低置信度调整
+- 重复 adjustment 会自动去重
+- `Write Defaults` 已经收敛到目标 Avatar 路径范围
 
-确认 Unity 已打开目标 Avatar 场景，并且 `MCP for Unity` 服务已经启动后，执行：
+## 本地测试
 
-```bash
-python vrchat_blendshape_agent.py "把眼睛睁大，嘴角上扬"
-```
-
-如果场景里有多个 Avatar，先列出可选目标：
-
-```bash
-python vrchat_blendshape_agent.py --list-avatars
-```
-
-然后显式指定目标 Avatar：
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "把眼睛睁大，嘴角上扬"
-```
-
-脚本执行流程：
-
-1. 调用 `vrc_export_blendshapes`
-2. 读取 `Assets/VRCAutoRig/blendshapes_export.json`
-3. 在多 Avatar 场景中要求显式选择目标 Avatar
-4. 只把目标 Avatar 的导出数据发给 Gemini
-5. 本地校验返回的 avatar / renderer / blendshape 是否真实存在
-6. 检查 confidence 是否低于阈值
-7. 生成 `RoslynExecutor.SetBlendshapeWeight(...)` 代码
-8. 调用 `vrc_execute_roslyn`
-9. Unity 主线程实际修改 blendshape 权重并保存
-
-## 常用命令
-
-### 列出当前场景里的 Avatar
-
-```bash
-python vrchat_blendshape_agent.py --list-avatars
-```
-
-### 指定目标 Avatar 再执行
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "眉毛抬高一点"
-```
-
-### 只看验证后的 Gemini 计划
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "做一个轻微微笑" --print-plan --dry-run
-```
-
-### 只看生成的 C# 代码
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "眉毛抬高一点" --dry-run
-```
-
-### 保存计划 JSON
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" --save-plan plan.json "把嘴角上扬一点"
-```
-
-### 放宽置信度阈值
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" --min-confidence 0.5 "做一个轻微坏笑"
-```
-
-### 接受低置信度结果
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" --allow-low-confidence "做一个非常夸张的表情"
-```
-
-### 运行本地单元测试
+运行：
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## 输出 JSON 说明
+当前测试覆盖：
 
-导出的 `blendshapes_export.json` 里，核心字段包括：
-
-- `avatars[].avatarPath`
-- `avatars[].renderers[].rendererPath`
-- `avatars[].renderers[].blendshapes[].name`
-
-Python 侧只允许 Gemini 选择这些真实存在的值，避免模型凭空编造 blendshape 名称。
-
-## 后续替换成 DeepSeek 的位置
-
-后续如果要换模型，主要改这里：
-
-- `vrchat_blendshape_agent.py` 里的 `create_blendshape_plan`
-
-现在 Gemini 调用已经被单独封装，替换成 DeepSeek 时只要保持输入输出 JSON 结构一致即可。
+- Avatar 选择
+- 目标 Avatar 过滤
+- 低置信度拦截
+- 重复 adjustment 去重
+- 本地导出 JSON 读取
+- 本地计划 JSON 读取
+- mock 执行结果
 
 ## 已知限制
 
-- 2 秒超时是安全护栏，不是强制中断不安全代码的沙箱
-- `Write Defaults` 现在会优先收敛到本次目标 Avatar，但如果多个 Avatar 共享同一个 `AnimatorController` 资源，改动仍可能一起生效
-- 如果场景里有多个名字非常接近的 blendshape，建议先用 `--print-plan` 检查 Gemini 的匹配结果
-- 这套脚本默认修改当前场景对象的 blendshape 当前权重，不会自动创建动画文件
-- 多 Avatar 场景下如果不传 `--avatar`，脚本会直接拒绝执行，避免误改
+- 2 秒超时仍是软保护，不是强制沙箱
+- 如果多个 Avatar 共享同一个 `AnimatorController`，`Write Defaults` 仍可能一起生效
+- 当前机器上 `unity-mcp` 命令还不在 PATH 里，所以完整在线执行尚未在本机验通
+- 当前 MVP 的纯本地路线是“样例导出 + 样例计划 + mock 执行”，目的是先演示主流程，不是替代真实 Unity 验收
 
-## 验证建议
+## 下一步建议
 
-最小验证链路：
+建议先这样推进：
 
-1. 打开 Unity 和目标 Avatar 场景
-2. 启动 MCP for Unity
-3. 手动从 Unity 菜单执行 `VRCAutoRig/Export Blendshapes`
-4. 确认 `Assets/VRCAutoRig/blendshapes_export.json` 生成
-5. 运行：
-
-```bash
-python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "把眼睛睁大，嘴角上扬"
-```
-
-6. 回到 Unity 检查对应 `SkinnedMeshRenderer` 的 blendshape 权重是否变化
+1. 先跑路线 A，确认本地 MVP 产物都能落出来。
+2. 再跑路线 B，确认 Gemini 生成结果能通过本地校验。
+3. 最后把 `unity-mcp` CLI 接上，再跑真实 Unity 执行链路。

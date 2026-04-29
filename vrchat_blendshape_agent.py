@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
 DEFAULT_MIN_CONFIDENCE = 0.65
+DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 
 
 class BlendshapeAdjustment(BaseModel):
@@ -80,6 +81,31 @@ def main() -> int:
     )
     parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS_PATH, help="Path to settings.json")
     parser.add_argument(
+        "--mvp",
+        action="store_true",
+        help="Run the MVP flow using a local export JSON and mock Unity execution.",
+    )
+    parser.add_argument(
+        "--export-json",
+        type=Path,
+        help="Read blendshape export data from a local JSON file instead of calling Unity export.",
+    )
+    parser.add_argument(
+        "--skip-export",
+        action="store_true",
+        help="Skip Unity export and read the configured export JSON path from disk.",
+    )
+    parser.add_argument(
+        "--mock-execute",
+        action="store_true",
+        help="Skip Unity execution and return a mock success result after generating C#.",
+    )
+    parser.add_argument(
+        "--plan-json",
+        type=Path,
+        help="Optional local plan JSON file. If provided, Gemini generation is skipped and the plan is validated locally.",
+    )
+    parser.add_argument(
         "--avatar",
         help="Exact or partial avatar path/name from the export. Required when multiple avatars are present.",
     )
@@ -104,15 +130,31 @@ def main() -> int:
         type=Path,
         help="Optional path to save the validated adjustment plan JSON after local checks pass.",
     )
+    parser.add_argument(
+        "--save-csharp",
+        type=Path,
+        help="Optional path to save the generated Roslyn C# snippet.",
+    )
+    parser.add_argument(
+        "--save-result",
+        type=Path,
+        help="Optional path to save the execution result JSON, including mock execution output in MVP mode.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Generate the plan and C# snippet without sending it to Unity.")
     parser.add_argument("--print-plan", action="store_true", help="Print the full validated JSON plan.")
     args = parser.parse_args()
 
-    if not args.instruction and not args.list_avatars:
-        parser.error("instruction is required unless --list-avatars is used")
+    if not args.instruction and not args.list_avatars and not args.plan_json:
+        parser.error("instruction is required unless --list-avatars or --plan-json is used")
 
     settings = load_settings(args.settings)
-    export_payload = export_blendshapes(settings)
+    export_payload, export_source, using_mock_execute = load_export_payload(
+        settings=settings,
+        export_json_path=args.export_json,
+        skip_export=args.skip_export,
+        mvp_mode=args.mvp,
+        mock_execute=args.mock_execute,
+    )
 
     if args.list_avatars:
         print(render_avatar_list(export_payload))
@@ -120,7 +162,7 @@ def main() -> int:
 
     selected_avatar = resolve_avatar_selection(export_payload, args.avatar)
     planning_payload = build_planning_payload(export_payload, selected_avatar)
-    plan = create_blendshape_plan(settings, planning_payload, args.instruction)
+    plan = read_plan_json(args.plan_json) if args.plan_json else create_blendshape_plan(settings, planning_payload, args.instruction)
     plan = validate_plan(
         plan=plan,
         export_payload=planning_payload,
@@ -135,15 +177,25 @@ def main() -> int:
     if args.print_plan:
         print(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
 
-    print(render_preview(selected_avatar, plan))
+    print(render_preview(selected_avatar, plan, export_source, using_mock_execute))
 
     code = render_csharp(plan)
+    if args.save_csharp:
+        save_text(args.save_csharp, code)
+
     if args.dry_run:
         print(code)
         return 0
 
-    result = execute_csharp(settings, code, [selected_avatar.avatar_path])
-    print(render_summary(selected_avatar, plan, result))
+    if using_mock_execute:
+        result = mock_execute_csharp(code, selected_avatar, export_source)
+    else:
+        result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+
+    if args.save_result:
+        save_result(args.save_result, result)
+
+    print(render_summary(selected_avatar, plan, result, using_mock_execute))
     return 0
 
 
@@ -162,9 +214,6 @@ def load_settings(settings_path: Path) -> Settings:
 
     api_key_env = gemini_settings.get("api_key_env", "GEMINI_API_KEY")
     gemini_api_key = os.environ.get(api_key_env, "").strip()
-    if not gemini_api_key:
-        raise SystemExit(f"Environment variable {api_key_env} is empty. Set your Gemini API key before running.")
-
     command = mcp_settings.get("command", ["unity-mcp"])
     if isinstance(command, str):
         command = [command]
@@ -196,6 +245,35 @@ def export_blendshapes(settings: Settings) -> dict[str, Any]:
         )
 
     return json.loads(settings.export_path.read_text(encoding="utf-8"))
+
+
+def load_export_payload(
+    settings: Settings,
+    export_json_path: Path | None,
+    skip_export: bool,
+    mvp_mode: bool,
+    mock_execute: bool,
+) -> tuple[dict[str, Any], str, bool]:
+    resolved_export_json_path = export_json_path
+    using_mock_execute = mock_execute or mvp_mode
+
+    if mvp_mode and resolved_export_json_path is None:
+        resolved_export_json_path = DEFAULT_MVP_EXPORT_PATH
+
+    if resolved_export_json_path is not None:
+        return read_export_json(resolved_export_json_path), str(resolved_export_json_path), using_mock_execute
+
+    if skip_export:
+        return read_export_json(settings.export_path), str(settings.export_path), using_mock_execute
+
+    return export_blendshapes(settings), "unity-mcp export", using_mock_execute
+
+
+def read_export_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise RuntimeError(f"Export JSON file does not exist: {path}")
+
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def render_avatar_list(export_payload: dict[str, Any]) -> str:
@@ -297,6 +375,9 @@ def build_planning_payload(export_payload: dict[str, Any], selected_avatar: Sele
 
 
 def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], instruction: str) -> BlendshapePlan:
+    if not settings.gemini_api_key:
+        raise RuntimeError("Gemini API key is empty. Set GEMINI_API_KEY or use --plan-json for a local MVP run.")
+
     client = genai.Client(api_key=settings.gemini_api_key)
     prompt = build_planner_prompt(export_payload, instruction)
 
@@ -327,6 +408,21 @@ def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], i
         return BlendshapePlan.model_validate(json.loads(raw_json))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise RuntimeError(f"Gemini returned invalid blendshape JSON:\n{response.text}") from exc
+
+
+def read_plan_json(path: Path) -> BlendshapePlan:
+    if not path.exists():
+        raise RuntimeError(f"Plan JSON file does not exist: {path}")
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Plan JSON is not valid JSON: {path}") from exc
+
+    try:
+        return BlendshapePlan.model_validate(payload)
+    except ValidationError as exc:
+        raise RuntimeError(f"Plan JSON does not match the expected schema: {path}") from exc
 
 
 def build_planner_prompt(export_payload: dict[str, Any], instruction: str) -> str:
@@ -439,12 +535,40 @@ def build_allowed_target_set(export_payload: dict[str, Any]) -> set[tuple[str, s
 
 
 def save_plan(output_path: Path, plan: BlendshapePlan) -> None:
+    save_json(output_path, plan.model_dump())
+
+
+def save_result(output_path: Path, result: McpResult) -> None:
+    save_json(
+        output_path,
+        {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "payload": result.payload,
+        },
+    )
+
+
+def save_json(output_path: Path, payload: Any) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False), encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def render_preview(selected_avatar: SelectedAvatar, plan: BlendshapePlan) -> str:
+def save_text(output_path: Path, text: str) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+
+
+def render_preview(
+    selected_avatar: SelectedAvatar,
+    plan: BlendshapePlan,
+    export_source: str,
+    using_mock_execute: bool,
+) -> str:
     lines = [
+        f"Export source: {export_source}",
+        f"Execution mode: {'mock' if using_mock_execute else 'live-unity'}",
         f"Target avatar: {selected_avatar.avatar_path}",
         f"Scene: {selected_avatar.scene_name}",
         f"Available renderers: {selected_avatar.renderer_count}",
@@ -495,6 +619,23 @@ def execute_csharp(settings: Settings, code: str, target_avatar_paths: list[str]
             "enforceWriteDefaultsOn": True,
             "targetAvatarPaths": target_avatar_paths,
         },
+    )
+
+
+def mock_execute_csharp(code: str, selected_avatar: SelectedAvatar, export_source: str) -> McpResult:
+    payload = {
+        "mode": "mock",
+        "message": "Skipped Unity execution and returned a mock success result.",
+        "avatarPath": selected_avatar.avatar_path,
+        "exportSource": export_source,
+        "generatedCodeLineCount": len(code.splitlines()),
+        "generatedCodePreview": code.splitlines()[:8],
+    }
+    return McpResult(
+        exit_code=0,
+        stdout=json.dumps(payload, ensure_ascii=False, indent=2),
+        stderr="",
+        payload=payload,
     )
 
 
@@ -583,9 +724,15 @@ def extract_json_block(text: str) -> str:
     return ""
 
 
-def render_summary(selected_avatar: SelectedAvatar, plan: BlendshapePlan, result: McpResult) -> str:
+def render_summary(
+    selected_avatar: SelectedAvatar,
+    plan: BlendshapePlan,
+    result: McpResult,
+    using_mock_execute: bool,
+) -> str:
     lines = [
         f"Applied plan to avatar: {selected_avatar.avatar_path}",
+        f"Execution mode: {'mock' if using_mock_execute else 'live-unity'}",
         f"Plan summary: {plan.summary}",
         f"Adjusted blendshapes: {len(plan.adjustments)}",
     ]

@@ -1,11 +1,18 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from vrchat_blendshape_agent import (
     BlendshapeAdjustment,
     BlendshapePlan,
-    SelectedAvatar,
     build_planning_payload,
+    load_export_payload,
+    mock_execute_csharp,
+    read_plan_json,
+    read_export_json,
     resolve_avatar_selection,
+    render_preview,
     validate_plan,
 )
 
@@ -186,6 +193,103 @@ class PlanningValidationTests(unittest.TestCase):
         self.assertEqual(len(validated.adjustments), 1)
         self.assertEqual(validated.adjustments[0].target_weight, 60)
         self.assertTrue(any("duplicate edits" in warning for warning in validated.warnings))
+
+
+class MvpFlowTests(unittest.TestCase):
+    def test_reads_export_json_from_local_file(self) -> None:
+        payload = make_export_payload()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "export.json"
+            export_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            loaded = read_export_json(export_path)
+            self.assertEqual(loaded["unityProject"], "SampleProject")
+            self.assertEqual(len(loaded["avatars"]), 2)
+
+    def test_load_export_payload_uses_local_json_in_mvp_mode(self) -> None:
+        payload = make_export_payload()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "export.json"
+            export_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            class DummySettings:
+                export_path = Path("unused.json")
+
+            loaded_payload, export_source, using_mock_execute = load_export_payload(
+                settings=DummySettings(),
+                export_json_path=export_path,
+                skip_export=False,
+                mvp_mode=True,
+                mock_execute=False,
+            )
+
+            self.assertEqual(export_source, str(export_path))
+            self.assertTrue(using_mock_execute)
+            self.assertEqual(loaded_payload["unityProject"], "SampleProject")
+
+    def test_mock_execute_returns_success_payload(self) -> None:
+        selected_avatar = resolve_avatar_selection(make_export_payload(), "Scene/HeroAvatar")
+        result = mock_execute_csharp(
+            code='RoslynExecutor.Log("Hello");',
+            selected_avatar=selected_avatar,
+            export_source="examples/mvp_blendshapes_export.json",
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.payload["mode"], "mock")
+        self.assertEqual(result.payload["avatarPath"], "Scene/HeroAvatar")
+
+    def test_reads_plan_json_from_local_file(self) -> None:
+        plan = {
+            "summary": "Test",
+            "warnings": [],
+            "adjustments": [
+                {
+                    "avatar_path": "Scene/HeroAvatar",
+                    "renderer_path": "Scene/HeroAvatar/Body/Face",
+                    "blendshape_name": "Smile",
+                    "target_weight": 50,
+                    "reason": "Test reason",
+                    "confidence": 0.95,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            loaded = read_plan_json(plan_path)
+            self.assertEqual(loaded.summary, "Test")
+            self.assertEqual(len(loaded.adjustments), 1)
+
+    def test_render_preview_includes_execution_mode_and_source(self) -> None:
+        selected_avatar = resolve_avatar_selection(make_export_payload(), "Scene/HeroAvatar")
+        plan = BlendshapePlan(
+            summary="Preview test",
+            adjustments=[
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Body/Face",
+                    blendshape_name="Smile",
+                    target_weight=50,
+                    reason="Preview",
+                    confidence=0.9,
+                )
+            ],
+        )
+
+        preview = render_preview(
+            selected_avatar=selected_avatar,
+            plan=plan,
+            export_source="examples/mvp_blendshapes_export.json",
+            using_mock_execute=True,
+        )
+
+        self.assertIn("Execution mode: mock", preview)
+        self.assertIn("Export source: examples/mvp_blendshapes_export.json", preview)
 
 
 if __name__ == "__main__":
