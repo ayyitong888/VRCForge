@@ -51,6 +51,9 @@ class Settings:
     gemini_model: str
     gemini_thinking_level: str
     unity_mcp_command: list[str]
+    unity_mcp_host: str
+    unity_mcp_port: int
+    unity_mcp_instance: str
     unity_mcp_retries: int
     unity_mcp_retry_backoff_seconds: float
     unity_mcp_timeout_seconds: int
@@ -121,6 +124,16 @@ def main() -> int:
         help="Export the current scene and print the available avatar paths without running Gemini.",
     )
     parser.add_argument(
+        "--unity-status",
+        action="store_true",
+        help="Print the current unity-mcp connection status and exit.",
+    )
+    parser.add_argument(
+        "--list-unity-instances",
+        action="store_true",
+        help="List Unity instances visible to unity-mcp and exit.",
+    )
+    parser.add_argument(
         "--min-confidence",
         type=float,
         default=None,
@@ -150,11 +163,19 @@ def main() -> int:
     parser.add_argument("--print-plan", action="store_true", help="Print the full validated JSON plan.")
     args = parser.parse_args()
 
-    if not args.instruction and not args.list_avatars and not args.plan_json:
+    if not args.instruction and not args.list_avatars and not args.plan_json and not args.unity_status and not args.list_unity_instances:
         parser.error("instruction is required unless --list-avatars or --plan-json is used")
 
     try:
         settings = load_settings(args.settings, gemini_model_override=args.model)
+        if args.unity_status:
+            print(run_unity_mcp_passthrough(settings, ["status"]))
+            return 0
+
+        if args.list_unity_instances:
+            print(run_unity_mcp_passthrough(settings, ["instances"]))
+            return 0
+
         export_payload, export_source, using_mock_execute = load_export_payload(
             settings=settings,
             export_json_path=args.export_json,
@@ -235,6 +256,9 @@ def load_settings(settings_path: Path, gemini_model_override: str | None = None)
         gemini_model=(gemini_model_override or gemini_settings.get("model", DEFAULT_GEMINI_MODEL)).strip(),
         gemini_thinking_level=gemini_settings.get("thinking_level", "low"),
         unity_mcp_command=command,
+        unity_mcp_host=str(mcp_settings.get("host", "127.0.0.1")).strip() or "127.0.0.1",
+        unity_mcp_port=int(mcp_settings.get("port", 8080)),
+        unity_mcp_instance=str(mcp_settings.get("instance", "")).strip(),
         unity_mcp_retries=int(mcp_settings.get("retries", 3)),
         unity_mcp_retry_backoff_seconds=float(mcp_settings.get("retry_backoff_seconds", 2.0)),
         unity_mcp_timeout_seconds=int(mcp_settings.get("timeout_seconds", 30)),
@@ -710,21 +734,15 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
 
     for attempt in range(1, settings.unity_mcp_retries + 1):
         try:
-            command = [
-                *settings.unity_mcp_command,
-                "editor",
-                "custom-tool",
-                tool_name,
-                "--params",
-                json.dumps(params, ensure_ascii=False),
-            ]
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=settings.unity_mcp_timeout_seconds,
+            completed = run_unity_mcp_process(
+                settings,
+                [
+                    "editor",
+                    "custom-tool",
+                    tool_name,
+                    "--params",
+                    json.dumps(params, ensure_ascii=False),
+                ],
             )
             payload = try_parse_json(completed.stdout)
             result = McpResult(
@@ -739,7 +757,7 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
                 return result
 
             error_text = payload_error or result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
-            raise UnityMcpError(error_text)
+            raise UnityMcpError(humanize_unity_mcp_error(error_text))
         except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
             last_error = exc
             if attempt >= settings.unity_mcp_retries:
@@ -747,6 +765,60 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
             time.sleep(settings.unity_mcp_retry_backoff_seconds * attempt)
 
     raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries.") from last_error
+
+
+def run_unity_mcp_passthrough(settings: Settings, cli_args: list[str]) -> str:
+    completed = run_unity_mcp_process(settings, cli_args)
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        detail = stderr or stdout or f"unity-mcp exited with code {completed.returncode}"
+        raise UnityMcpError(humanize_unity_mcp_error(detail))
+
+    return completed.stdout.strip() or completed.stderr.strip() or "unity-mcp returned no output."
+
+
+def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess.CompletedProcess[str]:
+    command = build_unity_mcp_command(settings, cli_args)
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=settings.unity_mcp_timeout_seconds,
+        )
+    except FileNotFoundError as exc:
+        joined_command = " ".join(command)
+        raise UnityMcpError(
+            "Could not find the unity-mcp CLI command.\n"
+            f"Tried command: {joined_command}\n"
+            "Install mcpforunityserver, or use the provided tools/unity-mcp-cli.ps1 wrapper in settings."
+        ) from exc
+
+
+def build_unity_mcp_command(settings: Settings, cli_args: list[str]) -> list[str]:
+    command = list(settings.unity_mcp_command)
+    command.extend(["--host", settings.unity_mcp_host, "--port", str(settings.unity_mcp_port)])
+    if settings.unity_mcp_instance:
+        command.extend(["--instance", settings.unity_mcp_instance])
+    command.extend(cli_args)
+    return command
+
+
+def humanize_unity_mcp_error(detail: str) -> str:
+    normalized = detail.strip()
+    lowered = normalized.lower()
+
+    if "http error from server: 503" in lowered or "cannot connect to unity mcp server" in lowered:
+        return (
+            f"{normalized}\n"
+            "Unity MCP server is not ready yet. Open the target Unity project, wait for package import, "
+            "then start MCP for Unity inside the editor before retrying."
+        )
+
+    return normalized
 
 
 def extract_mcp_error(payload: Any | None) -> str | None:

@@ -15,6 +15,8 @@
 - `examples/mvp_plan_smile.json`
 - `tests/test_vrchat_blendshape_agent.py`
 - `PROJECT_STATUS.md`
+- `tools/unity-mcp-cli.ps1`
+- `tools/install-unity-project.ps1`
 
 ## 现在能做什么
 
@@ -36,7 +38,8 @@ MVP 已经支持两种跑法：
 - Roslyn 生成并执行 C# 代码
 - 通过 `unity-mcp` 把执行结果送回 Unity
 
-只是当前机器还没有把 `unity-mcp` CLI 接到本地 PATH，所以完整在线执行还需要后续接环境。
+当前仓库已经改成优先通过仓库内 wrapper 调用 `unity-mcp` CLI，不再强依赖全局 PATH。
+如果本机已经装了 `mcpforunityserver` 或 `uv`，脚本会优先复用它们。
 
 ## MVP 路线
 
@@ -86,11 +89,35 @@ python vrchat_blendshape_agent.py --mvp "把眼睛睁大，嘴角上扬" --print
 
 ## 完整 Unity 路线
 
+### 接现有 Unity 工程
+
+如果你已经有现成 Unity 工程，先把本仓库的插件和 `unity-mcp` 包依赖接进去：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 `
+  -ProjectPath "E:\unity\Projects\Karin FT Rework" `
+  -UnityEditorPath "E:\unity\Unity 2022.3.22f1\Editor\Unity.exe" `
+  -LaunchUnity
+```
+
+这个脚本会：
+
+- 把 `Assets/VRCAutoRig` 复制到目标 Unity 工程
+- 确保 `Packages/manifest.json` 里有 `com.coplaydev.unity-mcp`
+- 可选直接启动对应 Unity Editor
+
+然后在 Unity 里继续完成：
+
+- 等待 Package Manager 拉取 `MCP for Unity`
+- 安装 Roslyn 运行时支持
+- 确认启用 `USE_ROSLYN`
+- 启动 Unity MCP Server
+
 ### 前置条件
 
 - Unity 2021.3 LTS 或更高
 - 已导入 VRChat SDK3 Avatar
-- 已安装 [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp)
+- 已安装或可通过 wrapper 自动找到 [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp) CLI
 - 已安装 Roslyn DLL，并启用 `USE_ROSLYN`
 
 推荐 Unity Package Manager Git URL：
@@ -113,7 +140,14 @@ https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main
 
 ### 完整命令
 
-如果 `unity-mcp` 已经能在命令行里用，完整路线命令是：
+Unity 启动并连上 MCP 后，建议先做连接诊断：
+
+```bash
+python vrchat_blendshape_agent.py --unity-status
+python vrchat_blendshape_agent.py --list-unity-instances
+```
+
+如果 `--unity-status` 正常，再运行完整路线命令：
 
 ```bash
 python vrchat_blendshape_agent.py --avatar "YourAvatarRootPath" "把眼睛睁大，嘴角上扬"
@@ -146,6 +180,11 @@ python vrchat_blendshape_agent.py --list-avatars
 - `--mock-execute`：只返回 mock 成功结果，不连接 Unity
 - `--mvp`：自动启用 mock 执行
 
+### Unity 诊断
+
+- `--unity-status`：输出当前 `unity-mcp` 连接状态
+- `--list-unity-instances`：列出当前可见的 Unity 实例
+
 ### 安全相关
 
 - `--avatar`：多 Avatar 场景显式指定目标
@@ -170,7 +209,17 @@ python vrchat_blendshape_agent.py --list-avatars
     "thinking_level": ""
   },
   "unity_mcp": {
-    "command": ["unity-mcp"]
+    "command": [
+      "powershell",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "tools/unity-mcp-cli.ps1"
+    ],
+    "host": "127.0.0.1",
+    "port": 8080,
+    "instance": "",
+    "retries": 3
   },
   "paths": {
     "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
@@ -185,6 +234,8 @@ python vrchat_blendshape_agent.py --list-avatars
 
 - 当前模板默认模型改成了 `gemini-2.5-flash`，优先保证本地 MVP 更容易跑通
 - 当前模板默认关闭了 `thinking_level`，因为部分 `flash` 模型不支持这个参数
+- 当前模板默认通过 `tools/unity-mcp-cli.ps1` 调用官方 `unity-mcp` CLI
+- 如果后续要锁定某个 Unity 实例，可以把 `unity_mcp.instance` 填成 `unity-mcp instances` 返回的 `Name@hash`
 - 如果你后续有 `gemini-3.1-pro-preview` 配额，可以直接在配置文件里改回去，或运行时加 `--model gemini-3.1-pro-preview`
 
 ## 已实现的关键保护
@@ -213,12 +264,13 @@ python -m unittest discover -s tests -v
 - 本地导出 JSON 读取
 - 本地计划 JSON 读取
 - mock 执行结果
+- unity-mcp 命令拼装
 
 ## 已知限制
 
 - 2 秒超时仍是软保护，不是强制沙箱
 - 如果多个 Avatar 共享同一个 `AnimatorController`，`Write Defaults` 仍可能一起生效
-- 当前机器上 `unity-mcp` 命令还不在 PATH 里，所以完整在线执行尚未在本机验通
+- 当前机器上已经确认 `unity-mcp` CLI 可通过 wrapper 启动，但 Unity MCP 服务器尚未从 Unity Editor 侧真正启动
 - 当前 MVP 的纯本地路线是“样例导出 + 样例计划 + mock 执行”，目的是先演示主流程，不是替代真实 Unity 验收
 
 ## 下一步建议
@@ -227,4 +279,5 @@ python -m unittest discover -s tests -v
 
 1. 先跑路线 A，确认本地 MVP 产物都能落出来。
 2. 再跑路线 B，确认 Gemini 生成结果能通过本地校验。
-3. 最后把 `unity-mcp` CLI 接上，再跑真实 Unity 执行链路。
+3. 在 Unity 里启动 MCP Server 后，先跑 `--unity-status` 和 `--list-avatars`。
+4. 最后再跑真实 Unity 执行链路。

@@ -6,7 +6,10 @@ from pathlib import Path
 from vrchat_blendshape_agent import (
     BlendshapeAdjustment,
     BlendshapePlan,
+    Settings,
+    build_unity_mcp_command,
     build_planning_payload,
+    humanize_unity_mcp_error,
     load_settings,
     load_export_payload,
     mock_execute_csharp,
@@ -197,13 +200,59 @@ class PlanningValidationTests(unittest.TestCase):
 
 
 class MvpFlowTests(unittest.TestCase):
+    def test_humanize_unity_mcp_error_adds_startup_hint(self) -> None:
+        detail = "Cannot connect to Unity MCP server at 127.0.0.1:8080"
+        message = humanize_unity_mcp_error(detail)
+        self.assertIn("Unity MCP server is not ready yet.", message)
+        self.assertIn(detail, message)
+
+    def test_build_unity_mcp_command_includes_host_port_and_instance(self) -> None:
+        settings = Settings(
+            gemini_api_key="",
+            gemini_model="gemini-2.5-flash",
+            gemini_thinking_level="",
+            unity_mcp_command=["powershell", "-File", "tools/unity-mcp-cli.ps1"],
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_instance="Karin FT Rework@abc123",
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2.0,
+            unity_mcp_timeout_seconds=30,
+            export_tool_name="vrc_export_blendshapes",
+            execute_tool_name="vrc_execute_roslyn",
+            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            min_confidence=0.65,
+        )
+
+        command = build_unity_mcp_command(settings, ["status"])
+        self.assertEqual(
+            command,
+            [
+                "powershell",
+                "-File",
+                "tools/unity-mcp-cli.ps1",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8080",
+                "--instance",
+                "Karin FT Rework@abc123",
+                "status",
+            ],
+        )
+
     def test_load_settings_allows_model_override(self) -> None:
         settings_payload = {
             "gemini": {
                 "api_key_env": "TEST_GEMINI_API_KEY",
                 "model": "gemini-3.1-pro-preview",
                 "thinking_level": "low",
-            }
+            },
+            "unity_mcp": {
+                "host": "127.0.0.1",
+                "port": 8080,
+                "instance": "Karin FT Rework@abc123",
+            },
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,6 +261,9 @@ class MvpFlowTests(unittest.TestCase):
 
             settings = load_settings(settings_path, gemini_model_override="gemini-2.5-flash")
             self.assertEqual(settings.gemini_model, "gemini-2.5-flash")
+            self.assertEqual(settings.unity_mcp_host, "127.0.0.1")
+            self.assertEqual(settings.unity_mcp_port, 8080)
+            self.assertEqual(settings.unity_mcp_instance, "Karin FT Rework@abc123")
 
     def test_reads_export_json_from_local_file(self) -> None:
         payload = make_export_payload()
