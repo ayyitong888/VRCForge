@@ -101,6 +101,9 @@ namespace VRCAutoRig.Editor
 
             [ToolParameter("If true, animator states found on the avatar graph will have Write Defaults forced ON.", Required = false)]
             public bool? enforceWriteDefaultsOn { get; set; } = true;
+
+            [ToolParameter("Optional avatar root paths whose AnimatorControllers should have Write Defaults forced ON.", Required = false)]
+            public string[] targetAvatarPaths { get; set; }
         }
 
         public sealed class ScriptGlobals
@@ -124,7 +127,10 @@ namespace VRCAutoRig.Editor
             {
                 var startedAt = Stopwatch.StartNew();
                 var executionResult = RoslynMainThreadDispatcher.Run(
-                    () => ExecuteSnippet(parameters.code, parameters.enforceWriteDefaultsOn ?? true),
+                    () => ExecuteSnippet(
+                        parameters.code,
+                        parameters.enforceWriteDefaultsOn ?? true,
+                        parameters.targetAvatarPaths),
                     ExecutionTimeout);
 
                 startedAt.Stop();
@@ -162,7 +168,10 @@ namespace VRCAutoRig.Editor
         }
 
 #if USE_ROSLYN
-        private static (object result, int writeDefaultsUpdated) ExecuteSnippet(string code, bool enforceWriteDefaultsOn)
+        private static (object result, int writeDefaultsUpdated) ExecuteSnippet(
+            string code,
+            bool enforceWriteDefaultsOn,
+            IEnumerable<string> targetAvatarPaths)
         {
             var options = BuildScriptOptions();
             var globals = new ScriptGlobals();
@@ -175,7 +184,7 @@ namespace VRCAutoRig.Editor
             }
 
             var result = evaluation.GetAwaiter().GetResult();
-            var writeDefaultsUpdated = enforceWriteDefaultsOn ? EnsureWriteDefaultsOn() : 0;
+            var writeDefaultsUpdated = enforceWriteDefaultsOn ? EnsureWriteDefaultsOn(targetAvatarPaths) : 0;
 
             AssetDatabase.SaveAssets();
             EditorSceneManager.SaveOpenScenes();
@@ -272,15 +281,25 @@ namespace VRCAutoRig.Editor
             EditorSceneManager.SaveOpenScenes();
         }
 
-        public static int EnsureWriteDefaultsOn()
+        public static int EnsureWriteDefaultsOn(IEnumerable<string> targetAvatarPaths = null)
         {
             var updatedStates = 0;
+            var scopedAvatarPaths = BuildNormalizedPathSet(targetAvatarPaths);
 
             foreach (var animator in Resources.FindObjectsOfTypeAll<Animator>().Where(IsSceneObject))
             {
                 if (animator == null || animator.runtimeAnimatorController == null)
                 {
                     continue;
+                }
+
+                if (scopedAvatarPaths.Count > 0)
+                {
+                    var animatorAvatarPath = NormalizePath(GetTransformPath(FindAvatarRoot(animator.transform)));
+                    if (!scopedAvatarPaths.Contains(animatorAvatarPath))
+                    {
+                        continue;
+                    }
                 }
 
                 var controller = animator.runtimeAnimatorController as AnimatorController;
@@ -407,6 +426,20 @@ namespace VRCAutoRig.Editor
         private static string NormalizePath(string value)
         {
             return (value ?? string.Empty).Trim().Replace("\\", "/");
+        }
+
+        private static HashSet<string> BuildNormalizedPathSet(IEnumerable<string> paths)
+        {
+            if (paths == null)
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            return new HashSet<string>(
+                paths
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Select(NormalizePath),
+                StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool IsSceneObject(Component component)

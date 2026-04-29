@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
+DEFAULT_MIN_CONFIDENCE = 0.65
 
 
 class BlendshapeAdjustment(BaseModel):
@@ -32,6 +33,15 @@ class BlendshapePlan(BaseModel):
     adjustments: list[BlendshapeAdjustment] = Field(default_factory=list, description="Blendshape edits to apply.")
 
 
+@dataclass(frozen=True)
+class SelectedAvatar:
+    avatar_name: str
+    avatar_path: str
+    scene_name: str
+    renderer_count: int
+    blendshape_count: int
+
+
 @dataclass
 class Settings:
     gemini_api_key: str
@@ -44,6 +54,7 @@ class Settings:
     export_tool_name: str
     execute_tool_name: str
     export_path: Path
+    min_confidence: float
 
 
 @dataclass
@@ -60,30 +71,79 @@ class UnityMcpError(RuntimeError):
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Use Gemini and Unity MCP to tune VRChat avatar blendshapes from natural language.")
+        description="Use Gemini and Unity MCP to tune VRChat avatar blendshapes from natural language."
+    )
     parser.add_argument(
         "instruction",
+        nargs="?",
         help='Natural language expression tweak, e.g. "Open the eyes wider and raise the mouth corners".',
     )
     parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS_PATH, help="Path to settings.json")
+    parser.add_argument(
+        "--avatar",
+        help="Exact or partial avatar path/name from the export. Required when multiple avatars are present.",
+    )
+    parser.add_argument(
+        "--list-avatars",
+        action="store_true",
+        help="Export the current scene and print the available avatar paths without running Gemini.",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=None,
+        help="Reject Gemini adjustments below this confidence unless --allow-low-confidence is used.",
+    )
+    parser.add_argument(
+        "--allow-low-confidence",
+        action="store_true",
+        help="Allow execution even when some adjustments fall below the confidence threshold.",
+    )
+    parser.add_argument(
+        "--save-plan",
+        type=Path,
+        help="Optional path to save the validated adjustment plan JSON after local checks pass.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Generate the plan and C# snippet without sending it to Unity.")
-    parser.add_argument("--print-plan", action="store_true", help="Print the full JSON plan produced by Gemini.")
+    parser.add_argument("--print-plan", action="store_true", help="Print the full validated JSON plan.")
     args = parser.parse_args()
+
+    if not args.instruction and not args.list_avatars:
+        parser.error("instruction is required unless --list-avatars is used")
 
     settings = load_settings(args.settings)
     export_payload = export_blendshapes(settings)
-    plan = create_blendshape_plan(settings, export_payload, args.instruction)
+
+    if args.list_avatars:
+        print(render_avatar_list(export_payload))
+        return 0
+
+    selected_avatar = resolve_avatar_selection(export_payload, args.avatar)
+    planning_payload = build_planning_payload(export_payload, selected_avatar)
+    plan = create_blendshape_plan(settings, planning_payload, args.instruction)
+    plan = validate_plan(
+        plan=plan,
+        export_payload=planning_payload,
+        selected_avatar=selected_avatar,
+        min_confidence=args.min_confidence if args.min_confidence is not None else settings.min_confidence,
+        allow_low_confidence=args.allow_low_confidence,
+    )
+
+    if args.save_plan:
+        save_plan(args.save_plan, plan)
 
     if args.print_plan:
         print(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
+
+    print(render_preview(selected_avatar, plan))
 
     code = render_csharp(plan)
     if args.dry_run:
         print(code)
         return 0
 
-    result = execute_csharp(settings, code)
-    print(render_summary(plan, result))
+    result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+    print(render_summary(selected_avatar, plan, result))
     return 0
 
 
@@ -98,6 +158,7 @@ def load_settings(settings_path: Path) -> Settings:
     gemini_settings = raw_settings.get("gemini", {})
     mcp_settings = raw_settings.get("unity_mcp", {})
     path_settings = raw_settings.get("paths", {})
+    planning_settings = raw_settings.get("planning", {})
 
     api_key_env = gemini_settings.get("api_key_env", "GEMINI_API_KEY")
     gemini_api_key = os.environ.get(api_key_env, "").strip()
@@ -121,6 +182,7 @@ def load_settings(settings_path: Path) -> Settings:
         export_tool_name=mcp_settings.get("export_tool_name", "vrc_export_blendshapes"),
         execute_tool_name=mcp_settings.get("execute_tool_name", "vrc_execute_roslyn"),
         export_path=export_path,
+        min_confidence=float(planning_settings.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
     )
 
 
@@ -134,6 +196,104 @@ def export_blendshapes(settings: Settings) -> dict[str, Any]:
         )
 
     return json.loads(settings.export_path.read_text(encoding="utf-8"))
+
+
+def render_avatar_list(export_payload: dict[str, Any]) -> str:
+    avatars = export_payload.get("avatars") or []
+    if not avatars:
+        return "No avatars were found in the exported scene."
+
+    lines = ["Available avatars:"]
+    for avatar in avatars:
+        renderer_count = len(avatar.get("renderers") or [])
+        blendshape_count = sum(len(renderer.get("blendshapes") or []) for renderer in avatar.get("renderers") or [])
+        lines.append(
+            f"- {avatar.get('avatarPath', '<unknown path>')} "
+            f"(name={avatar.get('avatarName', '<unknown>')}, scene={avatar.get('sceneName', '<unknown>')}, "
+            f"renderers={renderer_count}, blendshapes={blendshape_count})"
+        )
+    return "\n".join(lines)
+
+
+def resolve_avatar_selection(export_payload: dict[str, Any], requested_avatar: str | None) -> SelectedAvatar:
+    avatars = export_payload.get("avatars") or []
+    if not avatars:
+        raise RuntimeError("The export JSON did not contain any avatars with blendshapes.")
+
+    if requested_avatar:
+        matches = find_avatar_matches(avatars, requested_avatar)
+        if len(matches) == 1:
+            return to_selected_avatar(matches[0])
+        if len(matches) > 1:
+            options = "\n".join(f"- {avatar.get('avatarPath', '<unknown path>')}" for avatar in matches)
+            raise RuntimeError(
+                f"Avatar selector '{requested_avatar}' matched multiple avatars. Be more specific:\n{options}"
+            )
+
+        available = "\n".join(f"- {avatar.get('avatarPath', '<unknown path>')}" for avatar in avatars)
+        raise RuntimeError(
+            f"Avatar selector '{requested_avatar}' did not match any exported avatars.\nAvailable avatars:\n{available}"
+        )
+
+    if len(avatars) == 1:
+        return to_selected_avatar(avatars[0])
+
+    raise RuntimeError(
+        "Multiple avatars were exported from the scene. Re-run with --avatar or --list-avatars to choose one safely."
+    )
+
+
+def find_avatar_matches(avatars: list[dict[str, Any]], requested_avatar: str) -> list[dict[str, Any]]:
+    requested = normalize_token(requested_avatar)
+    exact_matches = [
+        avatar
+        for avatar in avatars
+        if normalize_token(avatar.get("avatarPath", "")) == requested
+        or normalize_token(avatar.get("avatarName", "")) == requested
+    ]
+    if exact_matches:
+        return exact_matches
+
+    return [
+        avatar
+        for avatar in avatars
+        if requested in normalize_token(avatar.get("avatarPath", ""))
+        or requested in normalize_token(avatar.get("avatarName", ""))
+    ]
+
+
+def to_selected_avatar(avatar: dict[str, Any]) -> SelectedAvatar:
+    renderers = avatar.get("renderers") or []
+    blendshape_count = sum(len(renderer.get("blendshapes") or []) for renderer in renderers)
+    return SelectedAvatar(
+        avatar_name=avatar.get("avatarName", "<unknown>"),
+        avatar_path=avatar.get("avatarPath", "<unknown path>"),
+        scene_name=avatar.get("sceneName", "<unknown scene>"),
+        renderer_count=len(renderers),
+        blendshape_count=blendshape_count,
+    )
+
+
+def build_planning_payload(export_payload: dict[str, Any], selected_avatar: SelectedAvatar) -> dict[str, Any]:
+    selected_avatar_payload = next(
+        avatar
+        for avatar in export_payload.get("avatars") or []
+        if avatar.get("avatarPath") == selected_avatar.avatar_path
+    )
+    renderers = selected_avatar_payload.get("renderers") or []
+    blendshape_count = sum(len(renderer.get("blendshapes") or []) for renderer in renderers)
+
+    return {
+        "generatedAtUtc": export_payload.get("generatedAtUtc"),
+        "unityProject": export_payload.get("unityProject"),
+        "scenes": [selected_avatar.scene_name],
+        "summary": {
+            "avatarCount": 1,
+            "rendererCount": len(renderers),
+            "blendshapeCount": blendshape_count,
+        },
+        "avatars": [selected_avatar_payload],
+    }
 
 
 def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], instruction: str) -> BlendshapePlan:
@@ -201,11 +361,112 @@ def build_planner_prompt(export_payload: dict[str, Any], instruction: str) -> st
     )
 
 
-def render_csharp(plan: BlendshapePlan) -> str:
-    if not plan.adjustments:
-        warning_text = "; ".join(plan.warnings) if plan.warnings else "Gemini did not find a safe match."
+def validate_plan(
+    plan: BlendshapePlan,
+    export_payload: dict[str, Any],
+    selected_avatar: SelectedAvatar,
+    min_confidence: float,
+    allow_low_confidence: bool,
+) -> BlendshapePlan:
+    allowed_targets = build_allowed_target_set(export_payload)
+    warnings = list(plan.warnings)
+    invalid_targets: list[str] = []
+    low_confidence_adjustments: list[str] = []
+    dedupe_index: dict[tuple[str, str, str], int] = {}
+    deduped_adjustments: list[BlendshapeAdjustment] = []
+
+    for adjustment in plan.adjustments:
+        key = (adjustment.avatar_path, adjustment.renderer_path, adjustment.blendshape_name)
+
+        if key not in allowed_targets:
+            invalid_targets.append(
+                f"- avatar={adjustment.avatar_path}, renderer={adjustment.renderer_path}, "
+                f"blendshape={adjustment.blendshape_name}"
+            )
+            continue
+
+        if adjustment.confidence < min_confidence:
+            low_confidence_adjustments.append(
+                f"- {adjustment.blendshape_name} on {adjustment.renderer_path}: "
+                f"{adjustment.confidence:.2f} < {min_confidence:.2f}"
+            )
+
+        if key in dedupe_index:
+            warnings.append(
+                f"Gemini returned duplicate edits for {adjustment.blendshape_name} on {adjustment.renderer_path}; "
+                "the later target weight was kept."
+            )
+            deduped_adjustments[dedupe_index[key]] = adjustment
+            continue
+
+        dedupe_index[key] = len(deduped_adjustments)
+        deduped_adjustments.append(adjustment)
+
+    if invalid_targets:
+        detail = "\n".join(invalid_targets)
+        raise RuntimeError(
+            "Gemini returned blendshape targets that do not exist in the selected avatar export.\n"
+            f"Selected avatar: {selected_avatar.avatar_path}\n{detail}"
+        )
+
+    if not deduped_adjustments:
+        warning_text = "; ".join(warnings) if warnings else "Gemini did not find a safe match."
         raise RuntimeError(f"No blendshape adjustments were generated. {warning_text}")
 
+    if low_confidence_adjustments and not allow_low_confidence:
+        detail = "\n".join(low_confidence_adjustments)
+        raise RuntimeError(
+            "Gemini returned low-confidence adjustments. Re-run with a more specific prompt, lower "
+            "--min-confidence, or use --allow-low-confidence if you want to accept the risk.\n"
+            f"{detail}"
+        )
+
+    if low_confidence_adjustments:
+        warnings.append("Low-confidence adjustments were allowed by CLI override.")
+
+    return BlendshapePlan(summary=plan.summary, warnings=warnings, adjustments=deduped_adjustments)
+
+
+def build_allowed_target_set(export_payload: dict[str, Any]) -> set[tuple[str, str, str]]:
+    allowed: set[tuple[str, str, str]] = set()
+    for avatar in export_payload.get("avatars") or []:
+        avatar_path = avatar.get("avatarPath", "")
+        for renderer in avatar.get("renderers") or []:
+            renderer_path = renderer.get("rendererPath", "")
+            for blendshape in renderer.get("blendshapes") or []:
+                allowed.add((avatar_path, renderer_path, blendshape.get("name", "")))
+    return allowed
+
+
+def save_plan(output_path: Path, plan: BlendshapePlan) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def render_preview(selected_avatar: SelectedAvatar, plan: BlendshapePlan) -> str:
+    lines = [
+        f"Target avatar: {selected_avatar.avatar_path}",
+        f"Scene: {selected_avatar.scene_name}",
+        f"Available renderers: {selected_avatar.renderer_count}",
+        f"Available blendshapes: {selected_avatar.blendshape_count}",
+        f"Plan summary: {plan.summary}",
+        f"Planned adjustments: {len(plan.adjustments)}",
+    ]
+
+    for adjustment in plan.adjustments:
+        lines.append(
+            f"- {adjustment.renderer_path} :: {adjustment.blendshape_name} -> {adjustment.target_weight:.2f} "
+            f"(confidence={adjustment.confidence:.2f})"
+        )
+
+    if plan.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in plan.warnings)
+
+    return "\n".join(lines)
+
+
+def render_csharp(plan: BlendshapePlan) -> str:
     lines = [
         "// Generated by vrchat_blendshape_agent.py",
         f"RoslynExecutor.Log({to_csharp_string(plan.summary)});",
@@ -225,11 +486,15 @@ def render_csharp(plan: BlendshapePlan) -> str:
     return "\n".join(lines)
 
 
-def execute_csharp(settings: Settings, code: str) -> McpResult:
+def execute_csharp(settings: Settings, code: str, target_avatar_paths: list[str]) -> McpResult:
     return invoke_unity_mcp(
         settings,
         settings.execute_tool_name,
-        {"code": code, "enforceWriteDefaultsOn": True},
+        {
+            "code": code,
+            "enforceWriteDefaultsOn": True,
+            "targetAvatarPaths": target_avatar_paths,
+        },
     )
 
 
@@ -262,10 +527,11 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
                 payload=payload,
             )
 
-            if completed.returncode == 0:
+            payload_error = extract_mcp_error(result.payload)
+            if completed.returncode == 0 and not payload_error:
                 return result
 
-            error_text = result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
+            error_text = payload_error or result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
             raise UnityMcpError(error_text)
         except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
             last_error = exc
@@ -274,6 +540,19 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
             time.sleep(settings.unity_mcp_retry_backoff_seconds * attempt)
 
     raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries.") from last_error
+
+
+def extract_mcp_error(payload: Any | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    if payload.get("_mcp_status") == "error":
+        return str(payload.get("error") or payload.get("message") or json.dumps(payload, ensure_ascii=False))
+
+    if payload.get("isError") is True or payload.get("success") is False or payload.get("ok") is False:
+        return str(payload.get("error") or payload.get("message") or json.dumps(payload, ensure_ascii=False))
+
+    return None
 
 
 def try_parse_json(text: str) -> Any | None:
@@ -304,19 +583,25 @@ def extract_json_block(text: str) -> str:
     return ""
 
 
-def render_summary(plan: BlendshapePlan, result: McpResult) -> str:
-    lines = [f"Applied plan: {plan.summary}"]
+def render_summary(selected_avatar: SelectedAvatar, plan: BlendshapePlan, result: McpResult) -> str:
+    lines = [
+        f"Applied plan to avatar: {selected_avatar.avatar_path}",
+        f"Plan summary: {plan.summary}",
+        f"Adjusted blendshapes: {len(plan.adjustments)}",
+    ]
 
     if plan.warnings:
         lines.append("Warnings: " + " | ".join(plan.warnings))
-
-    lines.append(f"Adjusted blendshapes: {len(plan.adjustments)}")
 
     if result.stdout:
         lines.append("Unity MCP output:")
         lines.append(result.stdout)
 
     return "\n".join(lines)
+
+
+def normalize_token(value: str) -> str:
+    return value.strip().casefold()
 
 
 def to_csharp_string(value: str) -> str:
