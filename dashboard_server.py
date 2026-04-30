@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import mimetypes
 import subprocess
 from collections import deque
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from vrchat_blendshape_agent import (
     create_blendshape_plan,
     execute_csharp,
     get_provider_defaults,
+    invoke_unity_mcp,
     load_export_payload,
     load_settings,
     mock_execute_csharp,
@@ -51,9 +53,12 @@ from vrchat_blendshape_agent import (
 ROOT_DIR = Path(__file__).resolve().parent
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
 DASHBOARD_ARTIFACTS_DIR = ROOT_DIR / "artifacts" / "dashboard"
+ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
 CONFIG_PATH = ROOT_DIR / "config.json"
+
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class DashboardRequest(BaseModel):
@@ -104,6 +109,48 @@ class ApiConfigRequest(BaseModel):
     model: str | None = None
 
 
+class AvatarSceneScanRequest(ConnectionRequest):
+    pass
+
+
+class AvatarBlendshapeListRequest(DashboardRequest):
+    pass
+
+
+class ManualBlendshapeItem(BaseModel):
+    renderer_path: str
+    blendshape_name: str
+    target_weight: float = Field(ge=0.0, le=100.0)
+    previous_weight: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class ManualBlendshapeApplyRequest(DashboardRequest):
+    adjustments: list[ManualBlendshapeItem] = Field(default_factory=list)
+
+
+class UndoBlendshapeRequest(ConnectionRequest):
+    avatar_path: str
+
+
+class AvatarScopedConnectionRequest(ConnectionRequest):
+    avatar_path: str | None = None
+
+
+class ClothingToggleRequest(ConnectionRequest):
+    object_path: str
+    active: bool
+
+
+class VisionCaptureRequest(ConnectionRequest):
+    avatar_path: str | None = None
+    width: int = 960
+    height: int = 960
+
+
+class VisionAuditRequest(ConnectionRequest):
+    image_path: str | None = None
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -122,6 +169,16 @@ class DashboardState:
     unity_host: str = "127.0.0.1"
     unity_port: int = 8080
     unity_instance: str = ""
+
+
+@dataclass
+class DashboardRuntimeState:
+    current_avatar_name: str = ""
+    current_avatar_path: str = ""
+    scene_avatars: list[dict[str, Any]] = field(default_factory=list)
+    manual_undo_stack: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
+    latest_screenshot_path: str = ""
+    latest_screenshot_url: str = ""
 
 
 class DashboardEventBus:
@@ -166,6 +223,7 @@ class DashboardEventBus:
 
 app = FastAPI(title="VRCAutoRig Dashboard", version="0.2.0")
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard")
+app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
 EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
@@ -175,6 +233,7 @@ LAST_STATUS_CONNECTED: bool | None = None
 STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
+DASHBOARD_RUNTIME = DashboardRuntimeState()
 
 
 @app.on_event("startup")
@@ -233,10 +292,10 @@ def read_health() -> dict[str, Any]:
             "provider": settings.llm_provider,
             "model": settings.llm_model,
             "baseUrl": settings.llm_base_url,
-            "sourceMode": "mvp_sample",
+            "sourceMode": "unity_live_export",
             "exportJson": str(DEFAULT_MVP_EXPORT_PATH),
             "planJson": "",
-            "mockExecute": True,
+            "mockExecute": False,
             "minConfidence": settings.min_confidence,
             "unityHost": DASHBOARD_STATE.unity_host,
             "unityPort": DASHBOARD_STATE.unity_port,
@@ -416,9 +475,19 @@ async def read_unity_tools(request: ConnectionRequest) -> dict[str, Any]:
     return await asyncio.to_thread(run_unity_cli_json, load_dashboard_settings(request), ["-f", "json", "tool", "list"])
 
 
+@app.post("/api/scene/avatars")
+async def read_scene_avatars(request: AvatarSceneScanRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(scan_scene_avatars_sync, request)
+
+
 @app.post("/api/avatars")
 async def read_avatars(request: DashboardRequest) -> dict[str, Any]:
     return await asyncio.to_thread(read_avatars_sync, request)
+
+
+@app.post("/api/avatar/blendshapes")
+async def read_avatar_blendshapes(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(read_avatar_blendshapes_sync, request)
 
 
 @app.post("/api/pipeline/plan")
@@ -429,6 +498,51 @@ async def build_pipeline_plan(request: DashboardRequest) -> dict[str, Any]:
 @app.post("/api/pipeline/run")
 async def run_pipeline(request: DashboardRequest) -> dict[str, Any]:
     return await asyncio.to_thread(run_dashboard_pipeline_sync, request, True)
+
+
+@app.post("/api/blendshapes/apply")
+async def apply_manual_blendshapes(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_manual_blendshapes_sync, request)
+
+
+@app.post("/api/blendshapes/undo")
+async def undo_manual_blendshapes(request: UndoBlendshapeRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(undo_manual_blendshapes_sync, request)
+
+
+@app.post("/api/clothes/scan")
+async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(scan_clothes_sync, request)
+
+
+@app.post("/api/clothes/toggle")
+async def toggle_clothing(request: ClothingToggleRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(toggle_clothing_sync, request)
+
+
+@app.post("/api/clothes/generate-fx")
+async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(generate_clothing_fx_sync, request)
+
+
+@app.post("/api/parameters/scan")
+async def scan_avatar_parameters(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(scan_avatar_parameters_sync, request)
+
+
+@app.post("/api/parameters/optimize")
+async def optimize_avatar_parameters(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(optimize_avatar_parameters_sync, request)
+
+
+@app.post("/api/vision/capture")
+async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
+
+
+@app.post("/api/vision/audit")
+async def audit_avatar_screenshot(request: VisionAuditRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(audit_avatar_screenshot_sync, request)
 
 
 def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
@@ -449,11 +563,266 @@ def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
         raise to_http_exception(exc) from exc
 
 
+def scan_scene_avatars_sync(request: AvatarSceneScanRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        result = execute_dashboard_code(settings, build_avatar_descriptor_scan_code())
+        avatars = ensure_list_payload(result, "scene avatar scan")
+        DASHBOARD_RUNTIME.scene_avatars = avatars
+        emit_log("info", "avatar", "Scene avatar scan completed.", {"count": len(avatars)})
+        return {
+            "ok": True,
+            "avatars": avatars,
+            "avatarCount": len(avatars),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "avatar", "Failed to scan scene avatars.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def read_avatar_blendshapes_sync(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
+        selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
+        remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
+        blendshapes = serialize_blendshape_details(export_payload, selected_avatar)
+        emit_log(
+            "info",
+            "blendshape",
+            "Avatar blendshape list loaded.",
+            {"avatarPath": selected_avatar.avatar_path, "count": len(blendshapes)},
+        )
+        return {
+            "ok": True,
+            "exportSource": export_source,
+            "executionMode": "mock" if using_mock_execute else "live-unity",
+            "selectedAvatar": serialize_selected_avatar(selected_avatar),
+            "blendshapes": blendshapes,
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "blendshape", "Failed to load blendshape list.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
+    try:
+        if not request.adjustments:
+            raise RuntimeError("No blendshape adjustments were provided.")
+
+        settings = load_dashboard_settings(request)
+        export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
+        selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
+        remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
+
+        validated_adjustments = []
+        undo_items: list[dict[str, Any]] = []
+        allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+        for item in request.adjustments:
+            key = (item.renderer_path, item.blendshape_name)
+            if key not in allowed_targets:
+                raise RuntimeError(
+                    f"Blendshape target does not exist on selected avatar: {item.renderer_path} :: {item.blendshape_name}"
+                )
+
+            current_weight = allowed_targets[key]["currentWeight"]
+            previous_weight = current_weight if item.previous_weight is None else item.previous_weight
+            validated_adjustments.append(
+                {
+                    "rendererPath": item.renderer_path,
+                    "blendshapeName": item.blendshape_name,
+                    "targetWeight": item.target_weight,
+                }
+            )
+            undo_items.append(
+                {
+                    "rendererPath": item.renderer_path,
+                    "blendshapeName": item.blendshape_name,
+                    "targetWeight": previous_weight,
+                }
+            )
+
+        code = render_manual_blendshape_csharp(selected_avatar.avatar_path, validated_adjustments)
+        if using_mock_execute:
+            result = mock_execute_csharp(code, selected_avatar, export_source)
+        else:
+            result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+
+        push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+        emit_log(
+            "success",
+            "blendshape",
+            "Manual blendshape adjustments applied.",
+            {"avatarPath": selected_avatar.avatar_path, "count": len(validated_adjustments)},
+        )
+        return {
+            "ok": True,
+            "selectedAvatar": serialize_selected_avatar(selected_avatar),
+            "executionMode": "mock" if using_mock_execute else "live-unity",
+            "result": serialize_result(result),
+            "appliedAdjustments": validated_adjustments,
+            "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "blendshape", "Failed to apply manual blendshape adjustments.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def undo_manual_blendshapes_sync(request: UndoBlendshapeRequest) -> dict[str, Any]:
+    try:
+        avatar_path = request.avatar_path.strip()
+        if not avatar_path:
+            raise RuntimeError("avatar_path is required for undo.")
+
+        stack = DASHBOARD_RUNTIME.manual_undo_stack.get(avatar_path) or []
+        if not stack:
+            raise RuntimeError("There is no manual blendshape action to undo for the selected avatar.")
+
+        settings = load_dashboard_settings(request)
+        undo_items = stack.pop()
+        code = render_manual_blendshape_csharp(avatar_path, undo_items)
+        result = execute_csharp(settings, code, [avatar_path])
+        emit_log("success", "blendshape", "Manual blendshape undo applied.", {"avatarPath": avatar_path, "count": len(undo_items)})
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "result": serialize_result(result),
+            "undoDepth": len(stack),
+            "restoredAdjustments": undo_items,
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "blendshape", "Failed to undo manual blendshape adjustments.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        result = execute_dashboard_code(settings, build_clothes_scan_code(avatar_path), [avatar_path] if avatar_path else None)
+        clothes = ensure_list_payload(result, "clothes scan")
+        emit_log("info", "fx", "Clothing scan completed.", {"avatarPath": avatar_path, "count": len(clothes)})
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "clothes": clothes,
+            "count": len(clothes),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "fx", "Failed to scan clothing objects.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def toggle_clothing_sync(request: ClothingToggleRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        result = execute_dashboard_code(settings, build_clothing_toggle_code(request.object_path, request.active))
+        payload = ensure_dict_payload(result, "clothing toggle")
+        emit_log(
+            "success",
+            "fx",
+            "Clothing object toggled.",
+            {"objectPath": request.object_path, "active": request.active},
+        )
+        return {"ok": True, "result": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "fx", "Failed to toggle clothing object.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def generate_clothing_fx_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        result = execute_dashboard_code(settings, build_clothes_fx_blueprint_code(avatar_path), [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "clothing fx blueprint")
+        emit_log("success", "fx", "Clothing FX blueprint generated.", {"avatarPath": avatar_path, "itemCount": len(payload.get("items") or [])})
+        return {"ok": True, "avatarPath": avatar_path, "fxBlueprint": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "fx", "Failed to generate clothing FX blueprint.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def scan_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        result = execute_dashboard_code(settings, build_parameter_scan_code(avatar_path), [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "parameter scan")
+        emit_log("info", "parameter", "Avatar parameter scan completed.", {"avatarPath": avatar_path})
+        return {"ok": True, "avatarPath": avatar_path, "stats": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "parameter", "Failed to scan avatar parameters.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def optimize_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        result = execute_dashboard_code(settings, build_parameter_optimization_code(avatar_path), [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "parameter optimization")
+        emit_log("success", "parameter", "Avatar parameter optimization suggestions generated.", {"avatarPath": avatar_path})
+        return {"ok": True, "avatarPath": avatar_path, "optimization": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "parameter", "Failed to build parameter optimization suggestions.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        output_path = (DASHBOARD_ARTIFACTS_DIR / "latest" / "vision_capture.png").resolve()
+        result = execute_dashboard_code(
+            settings,
+            build_screenshot_capture_code(output_path, request.width, request.height),
+            [request.avatar_path] if request.avatar_path else None,
+        )
+        payload = ensure_dict_payload(result, "vision capture")
+        image_path = payload.get("imagePath") or str(output_path)
+        image_url = to_artifact_url(image_path)
+        DASHBOARD_RUNTIME.latest_screenshot_path = image_path
+        DASHBOARD_RUNTIME.latest_screenshot_url = image_url
+        emit_log("success", "vision", "Screenshot captured for visual audit.", {"imagePath": image_path})
+        return {"ok": True, "imagePath": image_path, "imageUrl": image_url, "capture": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "vision", "Failed to capture screenshot.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
+    try:
+        image_path = request.image_path or DASHBOARD_RUNTIME.latest_screenshot_path
+        if not image_path:
+            raise RuntimeError("No screenshot is available yet. Capture a screenshot before running Gemini Vision audit.")
+
+        image_file = resolve_local_path(image_path)
+        if not image_file.exists():
+            raise RuntimeError(f"Screenshot file does not exist: {image_file}")
+
+        api_config = serialize_api_config(include_secret=True)
+        if api_config.get("provider") != "gemini":
+            raise RuntimeError("Gemini Vision audit currently requires the dashboard provider to be set to Gemini.")
+
+        result = run_gemini_vision_audit(api_config, image_file)
+        emit_log("success", "vision", "Gemini Vision audit completed.", {"status": result.get("status")})
+        return {
+            "ok": True,
+            "imagePath": str(image_file),
+            "imageUrl": to_artifact_url(str(image_file)),
+            "audit": result,
+        }
+    except RuntimeError as exc:
+        emit_log("error", "vision", "Failed to run Gemini Vision audit.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
 def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
         selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
+        remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
         planning_payload = build_planning_payload(export_payload, selected_avatar)
 
         emit_log(
@@ -602,6 +971,68 @@ def load_dashboard_export_payload(
     )
 
 
+def execute_dashboard_code(
+    settings: Settings,
+    code: str,
+    target_avatar_paths: list[str] | None = None,
+) -> Any:
+    result = invoke_unity_mcp(
+        settings,
+        settings.execute_tool_name,
+        {
+            "code": code,
+            "enforceWriteDefaultsOn": False,
+            "targetAvatarPaths": target_avatar_paths or [],
+        },
+    )
+    payload = extract_tool_result_payload(result)
+    if payload is None:
+        raise RuntimeError("Unity MCP returned no structured result payload for the requested operation.")
+    return payload
+
+
+def extract_tool_result_payload(result: McpResult) -> Any:
+    candidate: Any = result.payload
+    visited = set()
+    while isinstance(candidate, dict):
+        marker = id(candidate)
+        if marker in visited:
+            break
+        visited.add(marker)
+
+        if "data" in candidate and isinstance(candidate["data"], dict):
+            candidate = candidate["data"]
+            continue
+        if "result" in candidate:
+            candidate = candidate["result"]
+            continue
+        if "payload" in candidate:
+            candidate = candidate["payload"]
+            continue
+        if "value" in candidate:
+            candidate = candidate["value"]
+            continue
+        break
+
+    if isinstance(candidate, str):
+        parsed = try_parse_json(candidate)
+        return parsed if parsed is not None else candidate
+
+    return candidate
+
+
+def ensure_list_payload(payload: Any, scope: str) -> list[Any]:
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Expected {scope} to return a JSON array, got: {type(payload).__name__}")
+    return payload
+
+
+def ensure_dict_payload(payload: Any, scope: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected {scope} to return a JSON object, got: {type(payload).__name__}")
+    return payload
+
+
 def run_unity_cli_json(settings: Settings, cli_args: list[str]) -> dict[str, Any]:
     try:
         output = run_unity_mcp_passthrough(settings, cli_args)
@@ -636,6 +1067,49 @@ def serialize_avatar_list(export_payload: dict[str, Any]) -> list[dict[str, Any]
     return avatars
 
 
+def serialize_blendshape_details(export_payload: dict[str, Any], selected_avatar: SelectedAvatar) -> list[dict[str, Any]]:
+    avatar_payload = next(
+        avatar for avatar in export_payload.get("avatars") or [] if avatar.get("avatarPath") == selected_avatar.avatar_path
+    )
+    details: list[dict[str, Any]] = []
+    for renderer in avatar_payload.get("renderers") or []:
+        renderer_path = renderer.get("rendererPath", "")
+        renderer_name = renderer.get("rendererName", "")
+        mesh_name = renderer.get("meshName", "")
+        for blendshape in renderer.get("blendshapes") or []:
+            details.append(
+                {
+                    "avatarPath": selected_avatar.avatar_path,
+                    "avatarName": selected_avatar.avatar_name,
+                    "rendererName": renderer_name,
+                    "rendererPath": renderer_path,
+                    "meshName": mesh_name,
+                    "blendshapeName": blendshape.get("name", ""),
+                    "currentWeight": float(blendshape.get("currentWeight", 0.0) or 0.0),
+                    "normalizedWeight": float(blendshape.get("normalizedWeight", 0.0) or 0.0),
+                    "index": int(blendshape.get("index", 0) or 0),
+                }
+            )
+    return details
+
+
+def build_allowed_blendshape_index(
+    export_payload: dict[str, Any],
+    avatar_path: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    allowed: dict[tuple[str, str], dict[str, Any]] = {}
+    for avatar in export_payload.get("avatars") or []:
+        if avatar.get("avatarPath") != avatar_path:
+            continue
+        for renderer in avatar.get("renderers") or []:
+            renderer_path = renderer.get("rendererPath", "")
+            for blendshape in renderer.get("blendshapes") or []:
+                allowed[(renderer_path, blendshape.get("name", ""))] = {
+                    "currentWeight": float(blendshape.get("currentWeight", 0.0) or 0.0),
+                }
+    return allowed
+
+
 def serialize_selected_avatar(selected_avatar: SelectedAvatar) -> dict[str, Any]:
     return {
         "avatarName": selected_avatar.avatar_name,
@@ -656,6 +1130,35 @@ def serialize_result(result: McpResult | None) -> dict[str, Any] | None:
         "stderr": result.stderr,
         "payload": result.payload,
     }
+
+
+def render_manual_blendshape_csharp(avatar_path: str, adjustments: list[dict[str, Any]]) -> str:
+    lines = [
+        "// Generated by dashboard manual blendshape apply",
+        f"RoslynExecutor.Log({json.dumps(f'Applying {len(adjustments)} manual blendshape adjustments for {avatar_path}', ensure_ascii=False)});",
+    ]
+    for item in adjustments:
+        lines.append(
+            "RoslynExecutor.SetBlendshapeWeight("
+            f"{json.dumps(avatar_path, ensure_ascii=False)}, "
+            f"{json.dumps(item['rendererPath'], ensure_ascii=False)}, "
+            f"{json.dumps(item['blendshapeName'], ensure_ascii=False)}, "
+            f"{float(item['targetWeight']):.2f}f);"
+        )
+    lines.append("RoslynExecutor.SaveProjectAssets();")
+    return "\n".join(lines)
+
+
+def push_manual_undo_snapshot(avatar_path: str, adjustments: list[dict[str, Any]]) -> None:
+    stack = DASHBOARD_RUNTIME.manual_undo_stack.setdefault(avatar_path, [])
+    stack.append(adjustments)
+    if len(stack) > 12:
+        del stack[0]
+
+
+def remember_loaded_avatar(avatar_name: str, avatar_path: str) -> None:
+    DASHBOARD_RUNTIME.current_avatar_name = avatar_name
+    DASHBOARD_RUNTIME.current_avatar_path = avatar_path
 
 
 def save_dashboard_artifacts(
@@ -710,6 +1213,302 @@ def save_dashboard_artifacts(
             "result": str(run_result_path) if result else None,
         },
     }
+
+
+def build_avatar_descriptor_scan_code() -> str:
+    return """
+var avatars = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(descriptor => descriptor != null
+        && descriptor.gameObject.scene.IsValid()
+        && descriptor.gameObject.scene.isLoaded
+        && !EditorUtility.IsPersistent(descriptor))
+    .OrderBy(descriptor => descriptor.name)
+    .Select(descriptor => new
+    {
+        avatarName = descriptor.name,
+        avatarPath = string.Join("/", descriptor.transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name)),
+        sceneName = descriptor.gameObject.scene.name
+    })
+    .ToList();
+return Newtonsoft.Json.JsonConvert.SerializeObject(avatars);
+""".strip()
+
+
+def build_clothes_scan_code(avatar_path: str | None) -> str:
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var keywords = new[] {{ "cloth", "outfit", "dress", "shirt", "skirt", "pants", "shoe", "jacket", "hood", "hat", "accessory", "wear", "top", "bottom", "衣", "服", "裙", "裤", "鞋", "帽" }};
+var root = Resources.FindObjectsOfTypeAll<Transform>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(avatarPath));
+if (root == null)
+{{
+    throw new InvalidOperationException($"Avatar root not found: {{avatarPath}}");
+}}
+var items = root
+    .GetComponentsInChildren<Transform>(true)
+    .Where(item => item != null && item != root)
+    .Where(item => item.GetComponent<Renderer>() != null || item.GetComponentInChildren<Renderer>(true) != null)
+    .Where(item => keywords.Any(keyword => item.name.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+    .Select(item => new
+    {{
+        name = item.name,
+        objectPath = GetPath(item),
+        active = item.gameObject.activeSelf
+    }})
+    .Distinct()
+    .OrderBy(item => item.name)
+    .ToList();
+if (items.Count == 0)
+{{
+    items = root
+        .GetComponentsInChildren<Transform>(true)
+        .Where(item => item.parent == root)
+        .Where(item => item != null && (item.GetComponent<Renderer>() != null || item.GetComponentInChildren<Renderer>(true) != null))
+        .Select(item => new
+        {{
+            name = item.name,
+            objectPath = GetPath(item),
+            active = item.gameObject.activeSelf
+        }})
+        .OrderBy(item => item.name)
+        .ToList();
+}}
+return Newtonsoft.Json.JsonConvert.SerializeObject(items);
+""".strip()
+
+
+def build_clothing_toggle_code(object_path: str, active: bool) -> str:
+    object_path_literal = json.dumps(object_path, ensure_ascii=False)
+    active_literal = "true" if active else "false"
+    return f"""
+string targetPath = {object_path_literal};
+bool targetActive = {active_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var target = Resources.FindObjectsOfTypeAll<Transform>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(targetPath));
+if (target == null)
+{{
+    throw new InvalidOperationException($"Clothing object not found: {{targetPath}}");
+}}
+target.gameObject.SetActive(targetActive);
+EditorUtility.SetDirty(target.gameObject);
+EditorSceneManager.MarkSceneDirty(target.gameObject.scene);
+RoslynExecutor.SaveProjectAssets();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    objectPath = targetPath,
+    active = target.gameObject.activeSelf
+}});
+""".strip()
+
+
+def build_clothes_fx_blueprint_code(avatar_path: str | None) -> str:
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var root = Resources.FindObjectsOfTypeAll<Transform>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(avatarPath));
+if (root == null)
+{{
+    throw new InvalidOperationException($"Avatar root not found: {{avatarPath}}");
+}}
+var clothes = root
+    .GetComponentsInChildren<Transform>(true)
+    .Where(item => item != null && item.GetComponent<Renderer>() != null)
+    .GroupBy(item => item.name)
+    .Select(group => new
+    {{
+        displayName = group.Key,
+        parameterName = $"Cloth_{{group.Key.Replace(" ", string.Empty)}}",
+        animationClipName = $"FX_{{group.Key.Replace(" ", string.Empty)}}_Toggle",
+        bindingCount = group.Count(),
+        sampleObjectPath = GetPath(group.First())
+    }})
+    .OrderBy(item => item.displayName)
+    .ToList();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    mode = "blueprint",
+    note = "MVP currently generates an FX blueprint and parameter naming suggestion. It does not yet author AnimatorController assets automatically.",
+    items = clothes
+}});
+""".strip()
+
+
+def build_parameter_scan_code(avatar_path: str | None) -> str:
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null)
+{{
+    throw new InvalidOperationException("Could not locate a VRCAvatarDescriptor for parameter scan.");
+}}
+var parametersAsset = descriptor.expressionParameters;
+var parameters = parametersAsset != null && parametersAsset.parameters != null
+    ? parametersAsset.parameters.Where(parameter => parameter != null).ToArray()
+    : Array.Empty<VRCExpressionParameters.Parameter>();
+var boolCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Bool);
+var intCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Int);
+var floatCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Float);
+var totalCost = parameters.Sum(parameter =>
+    parameter.valueType == VRCExpressionParameters.ValueType.Bool ? 1 :
+    parameter.valueType == VRCExpressionParameters.ValueType.Int ? 8 : 8);
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    boolCount,
+    intCount,
+    floatCount,
+    totalParameters = parameters.Length,
+    totalEstimatedCost = totalCost,
+    parameterNames = parameters.Select(parameter => new
+    {{
+        name = parameter.name,
+        valueType = parameter.valueType.ToString(),
+        saved = parameter.saved,
+        networkSynced = parameter.networkSynced,
+        defaultValue = parameter.defaultValue
+    }})
+}});
+""".strip()
+
+
+def build_parameter_optimization_code(avatar_path: str | None) -> str:
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null)
+{{
+    throw new InvalidOperationException("Could not locate a VRCAvatarDescriptor for parameter optimization.");
+}}
+var parametersAsset = descriptor.expressionParameters;
+var parameters = parametersAsset != null && parametersAsset.parameters != null
+    ? parametersAsset.parameters.Where(parameter => parameter != null).ToArray()
+    : Array.Empty<VRCExpressionParameters.Parameter>();
+var suggestions = parameters
+    .Where(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Int)
+    .Where(parameter =>
+        Math.Abs(parameter.defaultValue) <= 1.0f
+        || parameter.name.IndexOf("toggle", StringComparison.OrdinalIgnoreCase) >= 0
+        || parameter.name.IndexOf("enable", StringComparison.OrdinalIgnoreCase) >= 0
+        || parameter.name.IndexOf("show", StringComparison.OrdinalIgnoreCase) >= 0
+        || parameter.name.IndexOf("hide", StringComparison.OrdinalIgnoreCase) >= 0
+        || parameter.name.IndexOf("is", StringComparison.OrdinalIgnoreCase) == 0)
+    .Select(parameter => new
+    {{
+        name = parameter.name,
+        currentType = parameter.valueType.ToString(),
+        suggestedType = "Bool",
+        reason = "Heuristic match: this Int parameter looks binary and may be reducible to Bool."
+    }})
+    .ToList();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    suggestionCount = suggestions.Count,
+    suggestions,
+    note = "Suggestions are heuristic only. Review animator conditions and menu bindings before changing parameter types."
+}});
+""".strip()
+
+
+def build_screenshot_capture_code(output_path: Path, width: int, height: int) -> str:
+    output_path_literal = json.dumps(str(output_path), ensure_ascii=False)
+    safe_width = max(256, min(width, 2048))
+    safe_height = max(256, min(height, 2048))
+    return f"""
+string outputPath = {output_path_literal};
+int width = {safe_width};
+int height = {safe_height};
+var sceneView = SceneView.lastActiveSceneView;
+if (sceneView == null || sceneView.camera == null)
+{{
+    throw new InvalidOperationException("No active SceneView is available for screenshot capture.");
+}}
+Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+var camera = sceneView.camera;
+var renderTexture = new RenderTexture(width, height, 24);
+var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+var previousTarget = camera.targetTexture;
+var previousActive = RenderTexture.active;
+camera.targetTexture = renderTexture;
+RenderTexture.active = renderTexture;
+camera.Render();
+texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+texture.Apply();
+camera.targetTexture = previousTarget;
+RenderTexture.active = previousActive;
+var bytes = texture.EncodeToPNG();
+File.WriteAllBytes(outputPath, bytes);
+UnityEngine.Object.DestroyImmediate(renderTexture);
+UnityEngine.Object.DestroyImmediate(texture);
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    imagePath = outputPath,
+    width,
+    height
+}});
+""".strip()
+
+
+def to_artifact_url(path_value: str) -> str:
+    try:
+        path = resolve_local_path(path_value)
+        relative = path.relative_to(ARTIFACTS_DIR).as_posix()
+        return f"/artifacts/{relative}"
+    except Exception:
+        return ""
+
+
+def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dict[str, Any]:
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("The google-genai package is not installed.") from exc
+
+    api_key = str(api_config.get("api_key") or "").strip()
+    model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    if not api_key:
+        raise RuntimeError("Gemini API key is empty. Save a Gemini provider config before running vision audit.")
+
+    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    client = genai.Client(api_key=api_key)
+    image_bytes = image_path.read_bytes()
+    prompt = (
+        "你是 VRChat Avatar 视觉质检助手。检查这张 Avatar 截图是否存在明显穿模、衣物穿插、头发穿插或严重视觉问题。"
+        "只输出 JSON，不要 Markdown。格式为："
+        '{"status":"pass|clipping","summary":"一句话结论","issues":["问题1","问题2"]}'
+    )
+    response = client.models.generate_content(
+        model=model,
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+        ],
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    payload = try_parse_json(getattr(response, "text", "") or "")
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini Vision did not return valid JSON.")
+    return payload
 
 
 def build_event_message(event_type: str, payload: Any) -> dict[str, Any]:
@@ -838,6 +1637,9 @@ def serialize_dashboard_state() -> dict[str, Any]:
         "unityInstance": DASHBOARD_STATE.unity_instance,
         "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
         "statusPushIntervalSeconds": DASHBOARD_STATE.status_push_interval_seconds,
+        "currentAvatarName": DASHBOARD_RUNTIME.current_avatar_name,
+        "currentAvatarPath": DASHBOARD_RUNTIME.current_avatar_path,
+        "latestScreenshotUrl": DASHBOARD_RUNTIME.latest_screenshot_url,
     }
 
 

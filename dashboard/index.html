@@ -3,71 +3,79 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Avatar Control Deck</title>
+    <title>VRCAutoRig 控制台</title>
     <link rel="stylesheet" href="/dashboard/styles.css">
   </head>
   <body>
-    <div class="ambient ambient-a"></div>
-    <div class="ambient ambient-b"></div>
-    <div class="ambient ambient-c"></div>
+    <div class="background-grid"></div>
+    <div class="background-glow glow-a"></div>
+    <div class="background-glow glow-b"></div>
 
-    <div class="page-shell">
+    <div class="shell">
       <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">VRChat Blendshape Automation</p>
-          <h1>Avatar Control Deck</h1>
-          <p class="hero-text">
-            用一套零编译 dashboard 把 Unity MCP、工程切换、LLM 规划、Roslyn C# 生成和执行日志收进同一条链路里。
-            WebSocket 负责实时推送状态，前端不做轮询。
+        <div>
+          <p class="eyebrow">VRChat Avatar Automation</p>
+          <h1>VRCAutoRig 深色控制台</h1>
+          <p class="hero-copy">
+            一套不需要前端编译的中文 dashboard，把 Unity MCP、LLM 配置、捏脸、衣柜 FX、参数优化和视觉质检收进同一个实时控制面板。
           </p>
         </div>
-        <div class="hero-metrics">
-          <article class="metric-card">
-            <span class="metric-label">Socket</span>
-            <strong id="socket-status" class="metric-value metric-warn">Connecting</strong>
+        <div class="status-bar">
+          <article class="status-card">
+            <span class="status-label">Unity MCP</span>
+            <div class="status-value">
+              <span id="unity-status-light" class="light light-off"></span>
+              <strong id="unity-status-label">未连接</strong>
+            </div>
           </article>
-          <article class="metric-card">
-            <span class="metric-label">Unity MCP</span>
-            <strong id="unity-status-pill" class="metric-value metric-warn">Unknown</strong>
+          <article class="status-card">
+            <span class="status-label">当前 Provider</span>
+            <strong id="status-provider">Gemini</strong>
           </article>
-          <article class="metric-card">
-            <span class="metric-label">Active Project</span>
-            <strong id="active-project-name" class="metric-value">None</strong>
+          <article class="status-card">
+            <span class="status-label">当前 Model</span>
+            <strong id="status-model">gemini-2.5-flash</strong>
           </article>
-          <article class="metric-card">
-            <span class="metric-label">Provider</span>
-            <strong id="active-provider-name" class="metric-value">Gemini</strong>
+          <article class="status-card">
+            <span class="status-label">当前 Avatar</span>
+            <strong id="status-avatar">未加载</strong>
           </article>
-          <article class="metric-card">
-            <span class="metric-label">Model</span>
-            <strong id="active-model-name" class="metric-value">gemini-2.5-flash</strong>
-          </article>
-          <article class="metric-card">
-            <span class="metric-label">Execution Mode</span>
-            <strong id="active-execution-mode" class="metric-value">Mock</strong>
+          <article class="status-card">
+            <span class="status-label">Socket</span>
+            <strong id="socket-status">Connecting</strong>
           </article>
         </div>
       </header>
 
       <main class="dashboard-grid">
-        <section class="panel panel-controls">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Projects</p>
-              <h2>工程与连接</h2>
+              <p class="panel-kicker">工程管理</p>
+              <h2>Unity 工程与 Avatar</h2>
             </div>
-            <span id="project-count" class="chip">0 projects</span>
+            <span id="project-count" class="panel-chip">0 个工程</span>
           </div>
 
-          <div class="field-grid">
+          <div class="field-stack">
             <label class="field">
-              <span>工程选择</span>
+              <span>Unity 工程</span>
               <select id="project-select"></select>
             </label>
             <div class="button-row">
-              <button id="refresh-projects-btn" class="button button-ghost">刷新工程</button>
-              <button id="open-project-btn" class="button">打开工程</button>
-              <button id="install-project-btn" class="button button-accent">安装插件</button>
+              <button id="refresh-projects-btn" class="button button-ghost">刷新工程列表</button>
+              <button id="open-project-btn" class="button">一键打开工程</button>
+            </div>
+          </div>
+
+          <div class="field-stack">
+            <label class="field">
+              <span>场景 Avatar 列表</span>
+              <select id="scene-avatar-select"></select>
+            </label>
+            <div class="button-row">
+              <button id="refresh-avatars-btn" class="button button-accent">刷新 Avatar 列表</button>
+              <button id="load-blendshapes-btn" class="button">加载 Blendshape</button>
             </div>
           </div>
 
@@ -82,60 +90,26 @@
             </label>
             <label class="field">
               <span>Unity Instance</span>
-              <input id="unity-instance" type="text" placeholder="Project name or Name@hash">
+              <input id="unity-instance" type="text" placeholder="ProjectName 或 Name@hash">
             </label>
           </div>
 
           <div class="button-row">
-            <button id="sync-state-btn" class="button">同步状态</button>
+            <button id="sync-state-btn" class="button button-ghost">同步状态</button>
             <button id="unity-status-btn" class="button">检查连接</button>
-            <button id="unity-instances-btn" class="button">列出实例</button>
             <button id="unity-tools-btn" class="button button-ghost">工具列表</button>
           </div>
 
-          <div class="stack">
-            <div class="subpanel">
-              <div class="subpanel-head">
-                <h3>Unity 状态</h3>
-                <span id="unity-status-text" class="subtle">Waiting for WebSocket push</span>
-              </div>
-              <pre id="unity-status-output" class="code-block compact"></pre>
-            </div>
-            <div class="subpanel dual">
-              <div>
-                <div class="subpanel-head"><h3>实例</h3></div>
-                <pre id="unity-instances-output" class="code-block compact"></pre>
-              </div>
-              <div>
-                <div class="subpanel-head"><h3>工具</h3></div>
-                <pre id="unity-tools-output" class="code-block compact"></pre>
-              </div>
-            </div>
-          </div>
+          <pre id="unity-status-output" class="console compact"></pre>
         </section>
 
-        <section class="panel panel-controls">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">API Config</p>
-              <h2>Provider 与模型</h2>
+              <p class="panel-kicker">Provider</p>
+              <h2>API 配置</h2>
             </div>
-            <span id="config-path-tag" class="chip">config.json</span>
-          </div>
-
-          <div class="status-strip">
-            <div class="status-pill">
-              <span>当前生效 Provider</span>
-              <strong id="effective-provider-name">Gemini</strong>
-            </div>
-            <div class="status-pill">
-              <span>当前生效 Model</span>
-              <strong id="effective-model-name">gemini-2.5-flash</strong>
-            </div>
-            <div class="status-pill">
-              <span>鉴权方式</span>
-              <strong id="effective-auth-header">Authorization: Bearer</strong>
-            </div>
+            <span id="config-path-tag" class="panel-chip">config.json</span>
           </div>
 
           <div class="field-grid two-cols">
@@ -156,68 +130,60 @@
             </label>
           </div>
 
-          <div class="field-grid">
+          <div class="field-stack">
             <label class="field">
               <span id="api-key-label">API Key（Bearer token）</span>
-              <input id="api-key-input" type="password" placeholder="Paste provider API key">
-              <small class="field-note" id="api-key-note">保存到本地 config.json，保存后立即生效，不需要重启 dashboard。</small>
+              <input id="api-key-input" type="password" placeholder="输入 API Key">
+              <small id="api-key-note" class="field-note">保存到本地 config.json，实时生效，不需要重启。</small>
             </label>
-            <label class="field" id="api-base-url-field">
+            <label id="api-base-url-field" class="field">
               <span>Base URL</span>
               <input id="api-base-url" type="text" placeholder="https://api.example.com/v1">
-              <small class="field-note" id="api-base-url-note">非 Anthropic provider 统一走 OpenAI 兼容接口。</small>
+              <small id="api-base-url-note" class="field-note">非 Anthropic provider 统一走 OpenAI 兼容接口。</small>
             </label>
           </div>
 
           <div class="button-row">
-            <button id="reset-provider-btn" class="button button-ghost">恢复该 Provider 默认值</button>
-            <button id="save-config-btn" class="button button-accent">保存并立即生效</button>
+            <button id="reset-provider-btn" class="button button-ghost">恢复默认值</button>
+            <button id="save-config-btn" class="button button-accent">保存并生效</button>
           </div>
 
-          <div class="subpanel">
-            <div class="subpanel-head">
-              <h3>配置状态</h3>
-              <span id="config-save-status" class="subtle">Not saved yet</span>
-            </div>
-            <pre id="config-output" class="code-block compact"></pre>
+          <div class="inline-status">
+            <span class="inline-label">配置状态</span>
+            <strong id="config-save-status">未保存</strong>
           </div>
+          <pre id="config-output" class="console compact"></pre>
         </section>
 
-        <section class="panel panel-controls">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Pipeline</p>
-              <h2>规划与执行</h2>
+              <p class="panel-kicker">高级控制</p>
+              <h2>数据源与执行模式</h2>
             </div>
-            <span id="source-mode-badge" class="chip">mvp_sample</span>
+            <span id="source-mode-badge" class="panel-chip">unity_live_export</span>
           </div>
 
           <div class="field-grid two-cols">
             <label class="field">
-              <span>数据来源</span>
+              <span>数据源</span>
               <select id="source-mode">
-                <option value="mvp_sample">MVP Sample</option>
-                <option value="unity_live_export">Unity Live Export</option>
-                <option value="configured_export">Configured Export</option>
-                <option value="custom_export">Custom Export JSON</option>
+                <option value="unity_live_export">Unity 实时导出</option>
+                <option value="configured_export">配置文件导出路径</option>
+                <option value="custom_export">自定义导出 JSON</option>
+                <option value="mvp_sample">MVP 示例</option>
               </select>
             </label>
             <label class="field">
               <span>Local Plan JSON</span>
-              <input id="plan-json" type="text" placeholder="可留空，走实时 LLM 规划">
+              <input id="plan-json" type="text" placeholder="可留空，直接走 LLM">
             </label>
           </div>
 
-          <div class="field-grid two-cols">
-            <label class="field hidden" id="export-json-field">
-              <span>Export JSON</span>
-              <input id="export-json" type="text" placeholder="examples/mvp_blendshapes_export.json">
-            </label>
-            <label class="field">
-              <span>Avatar</span>
-              <select id="avatar-select"></select>
-            </label>
-          </div>
+          <label id="export-json-field" class="field hidden">
+            <span>Export JSON</span>
+            <input id="export-json" type="text" placeholder="examples/mvp_blendshapes_export.json">
+          </label>
 
           <div class="field-grid two-cols">
             <label class="field">
@@ -226,97 +192,142 @@
             </label>
             <div class="toggle-row">
               <label class="toggle">
-                <input id="mock-execute" type="checkbox" checked>
-                <span>Mock Execute</span>
+                <input id="mock-execute" type="checkbox">
+                <span>Mock 模式</span>
               </label>
               <label class="toggle">
                 <input id="allow-low-confidence" type="checkbox">
-                <span>Allow Low Confidence</span>
+                <span>允许低置信度</span>
               </label>
               <label class="toggle">
                 <input id="save-artifacts" type="checkbox" checked>
-                <span>Save Artifacts</span>
+                <span>保存产物</span>
               </label>
             </div>
+          </div>
+
+          <pre id="summary-output" class="console compact"></pre>
+        </section>
+
+        <section class="panel span-8">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">捏脸模块</p>
+              <h2>自然语言 + Blendshape 手调</h2>
+            </div>
+            <span id="blendshape-count-chip" class="panel-chip">0 个 Blendshape</span>
           </div>
 
           <label class="field">
             <span>自然语言指令</span>
-            <textarea id="instruction-input" rows="4" placeholder="把眼睛睁大，嘴角上扬"></textarea>
+            <textarea id="instruction-input" rows="4" placeholder="把眼睛睁大，嘴角上扬，表情更温和"></textarea>
           </label>
 
           <div class="button-row">
-            <button id="refresh-avatars-btn" class="button button-ghost">刷新 Avatar</button>
-            <button id="generate-plan-btn" class="button">生成计划</button>
-            <button id="run-pipeline-btn" class="button button-accent">运行全链路</button>
+            <button id="ai-run-btn" class="button button-accent">AI 生成并执行</button>
+            <button id="manual-apply-btn" class="button">应用滑块改动</button>
+            <button id="manual-undo-btn" class="button button-ghost">撤销上一步</button>
           </div>
 
-          <div class="subpanel">
-            <div class="subpanel-head">
-              <h3>执行摘要</h3>
-              <span id="summary-tag" class="subtle">Idle</span>
-            </div>
-            <pre id="summary-output" class="code-block"></pre>
+          <div class="inline-status spread">
+            <span class="inline-label">待应用改动</span>
+            <strong id="pending-count">0 项</strong>
           </div>
+
+          <div class="field-grid two-cols">
+            <label class="field">
+              <span>Blendshape 搜索</span>
+              <input id="blendshape-search" type="text" placeholder="搜索名字、Renderer 或 Mesh">
+            </label>
+            <div class="field">
+              <span>当前 Avatar 路径</span>
+              <div id="avatar-path-display" class="pill-box">未选择</div>
+            </div>
+          </div>
+
+          <div id="blendshape-list" class="blendshape-list"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Avatars</p>
-              <h2>Avatar 视图</h2>
+              <p class="panel-kicker">衣柜 FX 模块</p>
+              <h2>衣服扫描与开关</h2>
             </div>
-            <span id="avatar-source-tag" class="chip">No export yet</span>
+            <span id="clothes-count-chip" class="panel-chip">0 件</span>
           </div>
-          <div id="avatars-list" class="avatar-list"></div>
+
+          <div class="button-row">
+            <button id="scan-clothes-btn" class="button">扫描场景衣服</button>
+            <button id="generate-fx-btn" class="button button-accent">生成全套 FX 动画</button>
+          </div>
+
+          <div id="clothes-list" class="stack-list empty-state">还没有扫描到衣服对象</div>
+          <pre id="fx-output" class="console compact"></pre>
         </section>
 
-        <section class="panel">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Preview</p>
-              <h2>计划预览</h2>
+              <p class="panel-kicker">参数优化模块</p>
+              <h2>参数占用与建议</h2>
             </div>
-            <span id="plan-count-tag" class="chip">0 adjustments</span>
+            <span class="panel-chip">VRChat Parameters</span>
           </div>
-          <div class="stack">
-            <pre id="preview-output" class="code-block"></pre>
-            <pre id="plan-output" class="code-block"></pre>
+
+          <div class="stat-grid">
+            <article class="mini-stat">
+              <span>Bool</span>
+              <strong id="bool-count">0</strong>
+            </article>
+            <article class="mini-stat">
+              <span>Int</span>
+              <strong id="int-count">0</strong>
+            </article>
+            <article class="mini-stat">
+              <span>Float</span>
+              <strong id="float-count">0</strong>
+            </article>
           </div>
+
+          <div class="button-row">
+            <button id="scan-params-btn" class="button">扫描参数用量</button>
+            <button id="optimize-params-btn" class="button button-accent">一键优化建议</button>
+          </div>
+
+          <div id="param-suggestions" class="stack-list empty-state">暂无优化建议</div>
+          <pre id="param-output" class="console compact"></pre>
         </section>
 
-        <section class="panel">
+        <section class="panel span-4">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Roslyn</p>
-              <h2>C# 代码</h2>
+              <p class="panel-kicker">视觉质检模块</p>
+              <h2>截图预览与 Gemini Vision</h2>
             </div>
-            <span class="chip">Generated</span>
+            <span id="vision-status-chip" class="panel-chip">未审核</span>
           </div>
-          <pre id="csharp-output" class="code-block tall"></pre>
+
+          <div class="vision-preview">
+            <img id="vision-image" alt="Avatar screenshot preview" class="hidden">
+            <div id="vision-placeholder" class="vision-placeholder">还没有截图，先点击“捕获截图”</div>
+          </div>
+
+          <div class="button-row">
+            <button id="capture-screenshot-btn" class="button">捕获截图</button>
+            <button id="audit-vision-btn" class="button button-accent">Gemini Vision 审核</button>
+          </div>
+
+          <div id="vision-result" class="stack-list empty-state">审核结果会显示在这里</div>
         </section>
 
-        <section class="panel">
+        <section class="panel span-12">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Result</p>
-              <h2>执行结果</h2>
+              <p class="panel-kicker">操作日志</p>
+              <h2>实时滚动 Log</h2>
             </div>
-            <span id="artifact-tag" class="chip">Artifacts idle</span>
-          </div>
-          <div class="stack">
-            <pre id="result-output" class="code-block"></pre>
-            <div id="artifact-paths" class="artifact-list"></div>
-          </div>
-        </section>
-
-        <section class="panel panel-full">
-          <div class="panel-head">
-            <div>
-              <p class="panel-kicker">Live Feed</p>
-              <h2>Blendshape 操作日志</h2>
-            </div>
-            <button id="clear-logs-btn" class="button button-ghost">清空前端日志</button>
+            <button id="clear-logs-btn" class="button button-ghost">一键清空</button>
           </div>
           <div id="log-stream" class="log-stream"></div>
         </section>
