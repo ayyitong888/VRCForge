@@ -688,3 +688,63 @@ body {
     width: 100%;
   }
 }
+
+.tab-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(140, 161, 200, 0.18);
+  color: var(--muted-strong);
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tab-btn.tab-active {
+  background: var(--blue);
+  color: white;
+  border-color: var(--blue);
+}
+
+.vision-thumbs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.vision-thumb-card {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(140, 161, 200, 0.18);
+  background: var(--panel-strong);
+  display: flex;
+  flex-direction: column;
+}
+
+.vision-thumb-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+
+.vision-thumb-card .thumb-label {
+  padding: 0.4rem;
+  font-size: 0.75rem;
+  text-align: center;
+  color: var(--muted);
+  border-top: 1px solid rgba(140, 161, 200, 0.18);
+}

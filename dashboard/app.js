@@ -130,18 +130,33 @@ function cacheRefs() {
     "blendshape-list",
     "scan-clothes-btn",
     "generate-fx-btn",
+    "apply-fx-btn",
+    "fx-apply-panel",
+    "fx-apply-count",
+    "fx-dry-run",
+    "fx-csharp-preview",
     "clothes-count-chip",
     "clothes-list",
     "fx-output",
     "scan-params-btn",
     "optimize-params-btn",
+    "apply-params-btn",
+    "param-diff-panel",
+    "param-diff-count",
+    "param-dry-run",
+    "param-diff-list",
+    "param-csharp-preview",
     "bool-count",
     "int-count",
     "float-count",
     "param-suggestions",
     "param-output",
+    "vision-angle-tabs",
+    "vision-multi-thumbs",
     "capture-screenshot-btn",
+    "capture-multi-btn",
     "audit-vision-btn",
+    "audit-multi-btn",
     "vision-status-chip",
     "vision-image",
     "vision-placeholder",
@@ -175,12 +190,20 @@ function bindEvents() {
   refs["manual-undo-btn"].addEventListener("click", () => runButtonTask("manual-undo-btn", "撤销中...", undoManualBlendshapes));
   refs["scan-clothes-btn"].addEventListener("click", () => runButtonTask("scan-clothes-btn", "扫描中...", scanClothes));
   refs["generate-fx-btn"].addEventListener("click", () => runButtonTask("generate-fx-btn", "生成中...", generateFxBlueprint));
+  refs["apply-fx-btn"].addEventListener("click", () => runButtonTask("apply-fx-btn", "写入中...", applyClothesFx));
   refs["scan-params-btn"].addEventListener("click", () => runButtonTask("scan-params-btn", "扫描中...", scanParameters));
   refs["optimize-params-btn"].addEventListener("click", () => runButtonTask("optimize-params-btn", "分析中...", optimizeParameters));
+  refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
+  refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
   refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "审核中...", auditVision));
+  refs["audit-multi-btn"].addEventListener("click", () => runButtonTask("audit-multi-btn", "聚合审核中...", auditMultiVision));
   refs["clear-logs-btn"].addEventListener("click", clearLogView);
   refs["blendshape-search"].addEventListener("input", renderBlendshapeList);
+  
+  if (refs["vision-angle-tabs"]) {
+    refs["vision-angle-tabs"].addEventListener("click", onVisionAngleTabClick);
+  }
 
   ["api-model-input", "api-key-input", "api-base-url"].forEach((id) => {
     refs[id].addEventListener("input", markApiConfigDirty);
@@ -722,6 +745,31 @@ async function generateFxBlueprint() {
   refs["fx-output"].textContent = prettyJson(payload.fxBlueprint || payload);
 }
 
+async function applyClothesFx() {
+  if (!state.clothes.length) {
+    refs["fx-output"].textContent = "没有可写入的衣物对象";
+    return;
+  }
+  
+  const isDryRun = refs["fx-dry-run"].checked;
+  const payload = await postJson("/api/clothes/apply-fx", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    items: state.clothes,
+    dry_run: isDryRun,
+  });
+  
+  refs["fx-apply-panel"].classList.remove("hidden");
+  refs["fx-apply-count"].textContent = `${payload.createdCount ?? state.clothes.length} 件`;
+  refs["fx-csharp-preview"].textContent = payload.generatedCsharp || "";
+  
+  if (isDryRun) {
+    refs["fx-output"].textContent = "(Dry run) 预览如上所示，不会对 Unity 写入任何资产。";
+  } else {
+    refs["fx-output"].textContent = prettyJson(payload.result || payload);
+  }
+}
+
 async function scanParameters() {
   const payload = await postJson("/api/parameters/scan", {
     ...buildConnectionPayload(),
@@ -754,6 +802,40 @@ async function optimizeParameters() {
     `).join("");
   }
   refs["param-output"].textContent = prettyJson(payload.optimization || payload);
+  // 缓存 suggestions 供后续 apply 使用
+  state.paramSuggestions = suggestions;
+}
+
+async function applyParameterOptimization() {
+  const suggestions = state.paramSuggestions || [];
+  if (!suggestions.length) {
+    refs["param-output"].textContent = "没有可应用的参数建议，请先执行扫描与分析";
+    return;
+  }
+
+  const isDryRun = refs["param-dry-run"].checked;
+  const payload = await postJson("/api/parameters/apply-optimization", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    suggestions: suggestions,
+    dry_run: isDryRun,
+  });
+
+  refs["param-diff-panel"].classList.remove("hidden");
+  refs["param-diff-count"].textContent = `${payload.appliedCount ?? 0} 项`;
+  refs["param-diff-list"].innerHTML = (payload.diff || []).map((item) => `
+    <article class="info-card">
+      <strong>${escapeHtml(item.name)}</strong>
+      <span>${escapeHtml(item.from)} -> ${escapeHtml(item.to)}</span>
+    </article>
+  `).join("");
+  refs["param-csharp-preview"].textContent = payload.generatedCsharp || "";
+
+  if (isDryRun) {
+    refs["param-output"].textContent = "(Dry run) Diff 与代码预览如上，未执行实际回写。";
+  } else {
+    refs["param-output"].textContent = prettyJson(payload.result || payload);
+  }
 }
 
 async function captureScreenshot() {
@@ -794,6 +876,98 @@ async function auditVision() {
       <p>${escapeHtml((audit.issues || []).join(" / ") || "无额外问题")}</p>
     </article>
   `;
+}
+
+async function captureMultiScreenshot() {
+  const payload = await postJson("/api/vision/capture-multi", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    width: 960,
+    height: 960,
+    angles: ["front", "side_left", "side_right", "back"]
+  });
+  state.multiScreenshots = payload.results || [];
+  
+  if (state.multiScreenshots.length > 0) {
+    renderScreenshot(state.multiScreenshots[0].imageUrl);
+    renderMultiThumbs();
+    refs["vision-result"].innerHTML = `<div class="info-card"><strong>已捕获多视角截图</strong><span>共 ${state.multiScreenshots.length} 张</span></div>`;
+    refs["vision-status-chip"].textContent = "待审核";
+  }
+}
+
+function renderMultiThumbs() {
+  const container = refs["vision-multi-thumbs"];
+  if (!state.multiScreenshots || !state.multiScreenshots.length) {
+    container.classList.add("hidden");
+    return;
+  }
+  container.classList.remove("hidden");
+  container.innerHTML = state.multiScreenshots.map((item, i) => `
+    <div class="vision-thumb-card" style="cursor:pointer;" onclick="renderScreenshot('${item.imageUrl}')">
+      <img src="${item.imageUrl}?t=${Date.now()}" alt="thumb">
+      <div class="thumb-label">${escapeHtml(item.angle)}</div>
+    </div>
+  `).join("");
+}
+
+async function auditMultiVision() {
+  if (!state.multiScreenshots || !state.multiScreenshots.length) {
+    refs["vision-result"].innerHTML = "<div class='info-card result-fail'><strong>无多视角截图</strong><p>请先点击『多视角截图』</p></div>";
+    return;
+  }
+  
+  const payload = await postJson("/api/vision/audit-multi", {
+    ...buildConnectionPayload(),
+    image_paths: state.multiScreenshots.map(item => urlToArtifactPath(item.imageUrl))
+  });
+  
+  const isPass = payload.overallStatus === "pass";
+  refs["vision-status-chip"].textContent = isPass ? "全角度通过" : "多图穿模";
+  
+  let html = `
+    <article class="info-card ${isPass ? "result-pass" : "result-fail"}">
+      <strong>聚合审核结论: ${isPass ? "通过" : "穿模风险"}</strong>
+    </article>
+  `;
+  
+  for (const res of (payload.results || [])) {
+    const a = res.audit || {};
+    html += `
+      <article class="info-card ${a.status === "pass" ? "" : "result-fail"}" style="margin-top:0.5rem">
+        <strong>${escapeHtml(res.imagePath.split("/").pop())}: ${a.status}</strong>
+        <span>${escapeHtml(a.summary || "")}</span>
+        ${a.issues && a.issues.length ? `<p>${escapeHtml(a.issues.join(", "))}</p>` : ""}
+      </article>
+    `;
+  }
+  refs["vision-result"].innerHTML = html;
+}
+
+function onVisionAngleTabClick(e) {
+  if (!e.target.classList.contains("tab-btn")) return;
+  
+  document.querySelectorAll("#vision-angle-tabs .tab-btn").forEach(btn => btn.classList.remove("tab-active"));
+  e.target.classList.add("tab-active");
+  
+  const angle = e.target.dataset.angle;
+  if (angle === "") {
+    // Single capture tab
+    refs["capture-screenshot-btn"].classList.remove("hidden");
+    refs["audit-vision-btn"].classList.remove("hidden");
+    refs["capture-multi-btn"].classList.add("hidden");
+    refs["audit-multi-btn"].classList.add("hidden");
+    refs["vision-multi-thumbs"].classList.add("hidden");
+  } else {
+    // Multi capture tab (acts globally for multi)
+    refs["capture-screenshot-btn"].classList.add("hidden");
+    refs["audit-vision-btn"].classList.add("hidden");
+    refs["capture-multi-btn"].classList.remove("hidden");
+    refs["audit-multi-btn"].classList.remove("hidden");
+    if (state.multiScreenshots && state.multiScreenshots.length) {
+      refs["vision-multi-thumbs"].classList.remove("hidden");
+    }
+  }
 }
 
 function onProviderChanged() {

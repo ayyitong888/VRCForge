@@ -259,10 +259,24 @@
 
           <div class="button-row">
             <button id="scan-clothes-btn" class="button">扫描场景衣服</button>
-            <button id="generate-fx-btn" class="button button-accent">生成全套 FX 动画</button>
+            <button id="generate-fx-btn" class="button button-ghost">生成 FX Blueprint</button>
+            <button id="apply-fx-btn" class="button button-accent">写入 FX 资产</button>
           </div>
 
           <div id="clothes-list" class="stack-list empty-state">还没有扫描到衣服对象</div>
+
+          <div id="fx-apply-panel" class="hidden">
+            <div class="inline-status spread">
+              <span class="inline-label">待写入衣物</span>
+              <strong id="fx-apply-count">0 件</strong>
+            </div>
+            <label class="toggle">
+              <input id="fx-dry-run" type="checkbox" checked>
+              <span>Dry-run（仅预览 C#，不执行）</span>
+            </label>
+            <pre id="fx-csharp-preview" class="console compact"></pre>
+          </div>
+
           <pre id="fx-output" class="console compact"></pre>
         </section>
 
@@ -292,10 +306,25 @@
 
           <div class="button-row">
             <button id="scan-params-btn" class="button">扫描参数用量</button>
-            <button id="optimize-params-btn" class="button button-accent">一键优化建议</button>
+            <button id="optimize-params-btn" class="button button-ghost">一键优化建议</button>
+            <button id="apply-params-btn" class="button button-accent">应用建议</button>
           </div>
 
           <div id="param-suggestions" class="stack-list empty-state">暂无优化建议</div>
+
+          <div id="param-diff-panel" class="hidden">
+            <div class="inline-status spread">
+              <span class="inline-label">待变更参数</span>
+              <strong id="param-diff-count">0 项</strong>
+            </div>
+            <label class="toggle">
+              <input id="param-dry-run" type="checkbox" checked>
+              <span>Dry-run（仅预览 C#，不执行）</span>
+            </label>
+            <div id="param-diff-list" class="stack-list"></div>
+            <pre id="param-csharp-preview" class="console compact"></pre>
+          </div>
+
           <pre id="param-output" class="console compact"></pre>
         </section>
 
@@ -308,14 +337,28 @@
             <span id="vision-status-chip" class="panel-chip">未审核</span>
           </div>
 
+          <!-- 视角 Tab 栏 -->
+          <div class="tab-row" id="vision-angle-tabs">
+            <button class="tab-btn tab-active" data-angle="">单视角</button>
+            <button class="tab-btn" data-angle="front">正面</button>
+            <button class="tab-btn" data-angle="side_left">左侧</button>
+            <button class="tab-btn" data-angle="side_right">右侧</button>
+            <button class="tab-btn" data-angle="back">背面</button>
+          </div>
+
           <div class="vision-preview">
             <img id="vision-image" alt="Avatar screenshot preview" class="hidden">
             <div id="vision-placeholder" class="vision-placeholder">还没有截图，先点击“捕获截图”</div>
           </div>
 
+          <!-- 多视角缩略图条 -->
+          <div id="vision-multi-thumbs" class="vision-thumbs hidden"></div>
+
           <div class="button-row">
             <button id="capture-screenshot-btn" class="button">捕获截图</button>
+            <button id="capture-multi-btn" class="button button-ghost">多视角截图</button>
             <button id="audit-vision-btn" class="button button-accent">Gemini Vision 审核</button>
+            <button id="audit-multi-btn" class="button button-ghost">多图聚合审核</button>
           </div>
 
           <div id="vision-result" class="stack-list empty-state">审核结果会显示在这里</div>
