@@ -151,6 +151,29 @@ class VisionAuditRequest(ConnectionRequest):
     image_path: str | None = None
 
 
+class ClothingApplyFxRequest(AvatarScopedConnectionRequest):
+    """Trigger full FX asset authoring for detected clothing objects."""
+    items: list[dict] = Field(default_factory=list, description="Clothing items from /api/clothes/scan or /api/clothes/generate-fx.")
+    dry_run: bool = Field(default=True, description="If true return generated C# only without executing in Unity.")
+
+
+class ParameterApplyOptimizationRequest(AvatarScopedConnectionRequest):
+    """Apply selected Int->Bool parameter optimizations to VRCExpressionParameters."""
+    suggestions: list[dict] = Field(default_factory=list, description="Suggestions from /api/parameters/optimize.")
+    dry_run: bool = Field(default=True, description="If true return generated C# only without executing in Unity.")
+
+
+class VisionCaptureMultiRequest(ConnectionRequest):
+    avatar_path: str | None = None
+    angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back"])
+    width: int = 960
+    height: int = 960
+
+
+class VisionAuditMultiRequest(ConnectionRequest):
+    image_paths: list[str] = Field(default_factory=list)
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -525,6 +548,11 @@ async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[s
     return await asyncio.to_thread(generate_clothing_fx_sync, request)
 
 
+@app.post("/api/clothes/apply-fx")
+async def apply_clothing_fx(request: ClothingApplyFxRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_clothing_fx_sync, request)
+
+
 @app.post("/api/parameters/scan")
 async def scan_avatar_parameters(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
     return await asyncio.to_thread(scan_avatar_parameters_sync, request)
@@ -535,14 +563,29 @@ async def optimize_avatar_parameters(request: AvatarScopedConnectionRequest) -> 
     return await asyncio.to_thread(optimize_avatar_parameters_sync, request)
 
 
+@app.post("/api/parameters/apply-optimization")
+async def apply_parameter_optimization(request: ParameterApplyOptimizationRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_parameter_optimization_sync, request)
+
+
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
     return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
 
 
+@app.post("/api/vision/capture-multi")
+async def capture_avatar_multi_screenshot(request: VisionCaptureMultiRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(capture_avatar_multi_screenshot_sync, request)
+
+
 @app.post("/api/vision/audit")
 async def audit_avatar_screenshot(request: VisionAuditRequest) -> dict[str, Any]:
     return await asyncio.to_thread(audit_avatar_screenshot_sync, request)
+
+
+@app.post("/api/vision/audit-multi")
+async def audit_avatar_multi_screenshot(request: VisionAuditMultiRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(audit_avatar_multi_screenshot_sync, request)
 
 
 def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
@@ -814,6 +857,121 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         }
     except RuntimeError as exc:
         emit_log("error", "vision", "Failed to run Gemini Vision audit.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_clothing_fx_sync(request: ClothingApplyFxRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        items = request.items
+        if not items:
+            raise RuntimeError("No clothing items provided. Run /api/clothes/scan or /api/clothes/generate-fx first.")
+
+        csharp_code = build_clothes_fx_apply_code(avatar_path, items)
+
+        if request.dry_run:
+            emit_log("info", "fx", "Clothing FX apply-code generated (dry-run).", {"avatarPath": avatar_path, "itemCount": len(items)})
+            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "itemCount": len(items)}
+
+        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "clothing fx apply")
+        emit_log("success", "fx", "Clothing FX assets authored in Unity.", {"avatarPath": avatar_path, "itemCount": len(items)})
+        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "generatedCsharp": csharp_code, "result": payload, "itemCount": len(items)}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "fx", "Failed to apply clothing FX.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        suggestions = request.suggestions
+        if not suggestions:
+            raise RuntimeError("No optimization suggestions provided. Run /api/parameters/optimize first.")
+
+        csharp_code = build_parameter_apply_optimization_code(avatar_path, suggestions)
+        diff = [
+            {"name": s.get("name", ""), "from": s.get("currentType", "Int"), "to": s.get("suggestedType", "Bool")}
+            for s in suggestions
+        ]
+
+        if request.dry_run:
+            emit_log("info", "parameter", "Parameter optimization code generated (dry-run).", {"avatarPath": avatar_path, "count": len(suggestions)})
+            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions)}
+
+        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "parameter optimization apply")
+        emit_log("success", "parameter", "Parameter optimization applied in Unity.", {"avatarPath": avatar_path, "count": len(suggestions)})
+        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions), "result": payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "parameter", "Failed to apply parameter optimization.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+_ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
+    "front":      (15.0,   0.0,  0.0),
+    "side_left":  (10.0,  90.0,  0.0),
+    "side_right": (10.0, -90.0,  0.0),
+    "back":       (10.0, 180.0,  0.0),
+}
+
+
+def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        angles = [a.strip().lower() for a in (request.angles or list(_ANGLE_CAMERA_ROTATIONS.keys()))]
+        output_dir = (DASHBOARD_ARTIFACTS_DIR / "latest").resolve()
+        captures: list[dict[str, Any]] = []
+
+        for angle in angles:
+            out_path = output_dir / f"vision_{angle}.png"
+            pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS.get(angle, (10.0, 0.0, 0.0))
+            code = build_screenshot_multi_capture_code(out_path, pitch, yaw, roll, request.width, request.height)
+            result = execute_dashboard_code(
+                settings, code, [request.avatar_path] if request.avatar_path else None
+            )
+            payload = ensure_dict_payload(result, f"multi vision capture ({angle})")
+            image_path = payload.get("imagePath") or str(out_path)
+            image_url = to_artifact_url(image_path)
+            captures.append({"angle": angle, "imagePath": image_path, "imageUrl": image_url})
+
+        if captures:
+            DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
+            DASHBOARD_RUNTIME.latest_screenshot_url = captures[0]["imageUrl"]
+
+        emit_log("success", "vision", "Multi-angle screenshots captured.", {"angles": angles, "count": len(captures)})
+        return {"ok": True, "captures": captures}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "vision", "Failed to capture multi-angle screenshots.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict[str, Any]:
+    try:
+        image_paths = request.image_paths
+        if not image_paths:
+            raise RuntimeError("No image paths provided for multi-image audit.")
+
+        api_config = serialize_api_config(include_secret=True)
+        if api_config.get("provider") != "gemini":
+            raise RuntimeError("Gemini Vision audit currently requires the dashboard provider to be set to Gemini.")
+
+        results: list[dict[str, Any]] = []
+        for path_str in image_paths:
+            image_file = resolve_local_path(path_str)
+            if not image_file.exists():
+                results.append({"imagePath": path_str, "error": f"File not found: {image_file}"})
+                continue
+            audit = run_gemini_vision_audit(api_config, image_file)
+            results.append({"imagePath": str(image_file), "imageUrl": to_artifact_url(str(image_file)), "audit": audit})
+
+        overall_status = "clipping" if any(r.get("audit", {}).get("status") == "clipping" for r in results) else "pass"
+        emit_log("success", "vision", "Multi-image Gemini Vision audit completed.", {"imageCount": len(results), "overallStatus": overall_status})
+        return {"ok": True, "overallStatus": overall_status, "results": results}
+    except RuntimeError as exc:
+        emit_log("error", "vision", "Failed to run multi-image Gemini Vision audit.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -1465,6 +1623,211 @@ return Newtonsoft.Json.JsonConvert.SerializeObject(new
     width,
     height
 }});
+""".strip()
+
+
+def build_clothes_fx_apply_code(avatar_path: str | None, items: list[dict]) -> str:
+    """Generate C# that authors AnimationClip + FX Layer + VRCExpressionParameters + Menu for each clothing item."""
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    items_json = json.dumps(
+        [
+            {
+                "displayName": it.get("displayName") or it.get("name") or "",
+                "parameterName": it.get("parameterName") or f"Cloth_{(it.get('displayName') or it.get('name') or '').replace(' ', '')}",
+                "sampleObjectPath": it.get("sampleObjectPath") or it.get("objectPath") or "",
+                "animationClipName": it.get("animationClipName") or f"FX_{(it.get('displayName') or it.get('name') or '').replace(' ', '')}_Toggle",
+            }
+            for it in items
+        ],
+        ensure_ascii=False,
+    )
+    return f"""
+string avatarPath = {avatar_path_literal};
+var itemsJson = {json.dumps(items_json, ensure_ascii=False)};
+var itemList = Newtonsoft.Json.JsonConvert.DeserializeObject<System.Collections.Generic.List<Newtonsoft.Json.Linq.JObject>>(itemsJson);
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+string assetDir = "Assets/VRCAutoRig/Generated/FX";
+if (!System.IO.Directory.Exists(assetDir)) System.IO.Directory.CreateDirectory(assetDir);
+
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
+
+var fxController = descriptor.baseAnimationLayers
+    .FirstOrDefault(layer => layer.type == VRCAvatarDescriptor.AnimLayerType.FX).animatorController as UnityEditor.Animations.AnimatorController;
+if (fxController == null) throw new InvalidOperationException("No FX AnimatorController found on the avatar.");
+
+var parametersAsset = descriptor.expressionParameters;
+if (parametersAsset == null) throw new InvalidOperationException("No VRCExpressionParameters found on the avatar.");
+
+var menuAsset = descriptor.expressionsMenu;
+if (menuAsset == null) throw new InvalidOperationException("No VRCExpressionsMenu found on the avatar.");
+
+int createdCount = 0;
+foreach (var item in itemList)
+{{
+    string displayName = item["displayName"]?.ToString() ?? "";
+    string paramName   = item["parameterName"]?.ToString() ?? "";
+    string clipName    = item["animationClipName"]?.ToString() ?? "";
+    string objPath     = item["sampleObjectPath"]?.ToString() ?? "";
+
+    // --- AnimationClips ON / OFF ---
+    string clipOnPath  = $"{{assetDir}}/{{clipName}}_ON.anim";
+    string clipOffPath = $"{{assetDir}}/{{clipName}}_OFF.anim";
+
+    var clipOn  = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOnPath)  ?? new AnimationClip();
+    var clipOff = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOffPath) ?? new AnimationClip();
+    clipOn.name  = clipName + "_ON";
+    clipOff.name = clipName + "_OFF";
+
+    var bindingOn  = new EditorCurveBinding {{ path = objPath, type = typeof(GameObject), propertyName = "m_IsActive" }};
+    AnimationUtility.SetEditorCurve(clipOn,  bindingOn,  AnimationCurve.Constant(0f, 0f, 1f));
+    AnimationUtility.SetEditorCurve(clipOff, bindingOn, AnimationCurve.Constant(0f, 0f, 0f));
+
+    if (!AssetDatabase.Contains(clipOn))  AssetDatabase.CreateAsset(clipOn,  clipOnPath);
+    if (!AssetDatabase.Contains(clipOff)) AssetDatabase.CreateAsset(clipOff, clipOffPath);
+
+    // --- FX Layer ---
+    bool layerExists = fxController.layers.Any(l => l.name == paramName);
+    if (!layerExists)
+    {{
+        fxController.AddParameter(paramName, UnityEngine.AnimatorControllerParameterType.Bool);
+        fxController.AddLayer(paramName);
+        var layers = fxController.layers;
+        var layer  = layers[layers.Length - 1];
+        layer.defaultWeight = 1f;
+        var sm     = layer.stateMachine;
+        var stOn   = sm.AddState(displayName + "_ON");
+        var stOff  = sm.AddState(displayName + "_OFF");
+        stOn.motion  = clipOn;
+        stOff.motion = clipOff;
+        var tOn  = sm.AddAnyStateTransition(stOn);
+        tOn.hasExitTime  = false; tOn.duration = 0f;
+        tOn.AddCondition(UnityEditor.Animations.AnimatorConditionMode.If, 0, paramName);
+        var tOff = sm.AddAnyStateTransition(stOff);
+        tOff.hasExitTime = false; tOff.duration = 0f;
+        tOff.AddCondition(UnityEditor.Animations.AnimatorConditionMode.IfNot, 0, paramName);
+        fxController.layers = layers;
+    }}
+
+    // --- VRCExpressionParameters ---
+    bool paramExists = parametersAsset.parameters != null && parametersAsset.parameters.Any(p => p.name == paramName);
+    if (!paramExists)
+    {{
+        var newParam = new VRCExpressionParameters.Parameter
+        {{
+            name         = paramName,
+            valueType    = VRCExpressionParameters.ValueType.Bool,
+            defaultValue = 1f,
+            saved        = true,
+            networkSynced = true
+        }};
+        var list = parametersAsset.parameters?.ToList() ?? new System.Collections.Generic.List<VRCExpressionParameters.Parameter>();
+        list.Add(newParam);
+        parametersAsset.parameters = list.ToArray();
+        EditorUtility.SetDirty(parametersAsset);
+    }}
+
+    // --- VRCExpressionsMenu ---
+    bool menuExists = menuAsset.controls != null && menuAsset.controls.Any(c => c.parameter?.name == paramName);
+    if (!menuExists && menuAsset.controls != null && menuAsset.controls.Count < VRCExpressionsMenu.MAX_CONTROLS)
+    {{
+        var control = new VRCExpressionsMenu.Control
+        {{
+            name      = displayName,
+            type      = VRCExpressionsMenu.Control.ControlType.Toggle,
+            parameter = new VRCExpressionsMenu.Control.Parameter {{ name = paramName }},
+            value     = 1f
+        }};
+        menuAsset.controls.Add(control);
+        EditorUtility.SetDirty(menuAsset);
+    }}
+
+    createdCount++;
+}}
+
+EditorUtility.SetDirty(fxController);
+AssetDatabase.SaveAssets();
+AssetDatabase.Refresh();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ ok = true, createdCount, assetDir }});
+""".strip()
+
+
+def build_parameter_apply_optimization_code(avatar_path: str | None, suggestions: list[dict]) -> str:
+    """Generate C# that converts selected Int parameters to Bool in VRCExpressionParameters."""
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    names_json = json.dumps([s.get("name", "") for s in suggestions if s.get("name")], ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+var targetNames = new System.Collections.Generic.HashSet<string>({json.dumps(names_json, ensure_ascii=False).replace('"', '\"')});
+var targetNamesArr = Newtonsoft.Json.JsonConvert.DeserializeObject<string[]>({json.dumps(names_json, ensure_ascii=False)});
+var targetNamesSet = new System.Collections.Generic.HashSet<string>(targetNamesArr);
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
+var parametersAsset = descriptor.expressionParameters;
+if (parametersAsset == null || parametersAsset.parameters == null)
+    throw new InvalidOperationException("No VRCExpressionParameters found.");
+int changedCount = 0;
+foreach (var param in parametersAsset.parameters)
+{{
+    if (param == null) continue;
+    if (!targetNamesSet.Contains(param.name)) continue;
+    if (param.valueType != VRCExpressionParameters.ValueType.Int) continue;
+    param.valueType = VRCExpressionParameters.ValueType.Bool;
+    if (param.defaultValue > 1f) param.defaultValue = 1f;
+    changedCount++;
+}}
+EditorUtility.SetDirty(parametersAsset);
+AssetDatabase.SaveAssets();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ ok = true, changedCount }});
+""".strip()
+
+
+def build_screenshot_multi_capture_code(output_path: Path, pitch: float, yaw: float, roll: float, width: int, height: int) -> str:
+    """Generate C# that rotates the SceneView camera to a given Euler angle then captures a screenshot."""
+    output_path_literal = json.dumps(str(output_path), ensure_ascii=False)
+    safe_width = max(256, min(width, 2048))
+    safe_height = max(256, min(height, 2048))
+    return f"""
+string outputPath = {output_path_literal};
+int width = {safe_width};
+int height = {safe_height};
+float pitch = {pitch:.4f}f;
+float yaw   = {yaw:.4f}f;
+float roll  = {roll:.4f}f;
+var sceneView = SceneView.lastActiveSceneView;
+if (sceneView == null || sceneView.camera == null)
+    throw new InvalidOperationException("No active SceneView is available for screenshot capture.");
+var prevRotation = sceneView.rotation;
+var prevPivot    = sceneView.pivot;
+sceneView.rotation = Quaternion.Euler(pitch, yaw, roll);
+sceneView.Repaint();
+Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+var camera = sceneView.camera;
+var renderTexture = new RenderTexture(width, height, 24);
+var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+var previousTarget = camera.targetTexture;
+var previousActive = RenderTexture.active;
+camera.targetTexture = renderTexture;
+RenderTexture.active = renderTexture;
+camera.Render();
+texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+texture.Apply();
+camera.targetTexture = previousTarget;
+RenderTexture.active = previousActive;
+var bytes = texture.EncodeToPNG();
+File.WriteAllBytes(outputPath, bytes);
+UnityEngine.Object.DestroyImmediate(renderTexture);
+UnityEngine.Object.DestroyImmediate(texture);
+sceneView.rotation = prevRotation;
+sceneView.Repaint();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ imagePath = outputPath, width, height, pitch, yaw, roll }});
 """.strip()
 
 
