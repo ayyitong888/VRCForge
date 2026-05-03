@@ -232,6 +232,112 @@ class DashboardServerTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
 
+    def test_apply_parameter_optimization_non_dry_run_saves_snapshot_first(self) -> None:
+        suggestions = [
+            {"name": "IsWearing", "currentType": "Int", "suggestedType": "Bool", "reason": "heuristic"},
+        ]
+        original_snapshot_dir = dashboard_server.PARAMETER_SNAPSHOT_DIR
+        original_latest_snapshot = dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard_server.PARAMETER_SNAPSHOT_DIR = Path(temp_dir) / "parameter_snapshots"
+            dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = ""
+
+            calls: list[str] = []
+
+            def execute_side_effect(_settings, code, _target_avatar_paths=None):
+                calls.append(code)
+                if "capturedAtUtc" in code:
+                    return {
+                        "ok": True,
+                        "avatarPath": "MyAvatar",
+                        "parameterCount": 1,
+                        "parameters": [
+                            {
+                                "name": "IsWearing",
+                                "valueType": "Int",
+                                "defaultValue": 0.0,
+                                "saved": False,
+                                "networkSynced": True,
+                            }
+                        ],
+                    }
+                return {"ok": True, "changedCount": 1}
+
+            try:
+                with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
+                    "dashboard_server.execute_dashboard_code",
+                    side_effect=execute_side_effect,
+                ):
+                    with TestClient(dashboard_server.app) as client:
+                        response = client.post(
+                            "/api/parameters/apply-optimization",
+                            json={"avatar_path": "MyAvatar", "suggestions": suggestions, "dry_run": False},
+                        )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                self.assertFalse(payload["dryRun"])
+                self.assertIn("snapshotPath", payload)
+                self.assertTrue(Path(payload["snapshotPath"]).exists())
+                self.assertEqual(len(calls), 2)
+                self.assertIn("capturedAtUtc", calls[0])
+                self.assertIn("VRCExpressionParameters.ValueType.Bool", calls[1])
+            finally:
+                dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
+                dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot
+
+    def test_parameter_rollback_restores_explicit_snapshot(self) -> None:
+        original_snapshot_dir = dashboard_server.PARAMETER_SNAPSHOT_DIR
+        original_latest_snapshot = dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard_server.PARAMETER_SNAPSHOT_DIR = Path(temp_dir) / "parameter_snapshots"
+            dashboard_server.PARAMETER_SNAPSHOT_DIR.mkdir(parents=True)
+            snapshot_path = dashboard_server.PARAMETER_SNAPSHOT_DIR / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "avatarPath": "MyAvatar",
+                        "parameterCount": 1,
+                        "parameters": [
+                            {
+                                "name": "IsWearing",
+                                "valueType": "Int",
+                                "defaultValue": 0.0,
+                                "saved": False,
+                                "networkSynced": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            try:
+                with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
+                    "dashboard_server.execute_dashboard_code",
+                    return_value={"ok": True, "restoredCount": 1},
+                ) as mock_execute:
+                    with TestClient(dashboard_server.app) as client:
+                        response = client.post(
+                            "/api/parameters/rollback",
+                            json={"avatar_path": "MyAvatar", "snapshot_path": str(snapshot_path)},
+                        )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["restoredCount"], 1)
+                generated_code = mock_execute.call_args[0][1]
+                self.assertIn("ParameterSnapshotItem", generated_code)
+                self.assertIn("IsWearing", generated_code)
+            finally:
+                dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
+                dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot
+
     # ------------------------------------------------------------------
     # /api/vision/capture-multi (needs Unity — verify endpoint exists + 503)
     # ------------------------------------------------------------------
@@ -279,6 +385,29 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("IsWearing", code)
         self.assertIn("VRCExpressionParameters.ValueType.Bool", code)
         self.assertIn("changedCount", code)
+
+    def test_build_parameter_snapshot_and_rollback_code_contains_key_tokens(self) -> None:
+        snapshot_code = dashboard_server.build_parameter_snapshot_code("Avatar")
+        self.assertIn("capturedAtUtc", snapshot_code)
+        self.assertIn("parameterCount", snapshot_code)
+
+        rollback_code = dashboard_server.build_parameter_rollback_code(
+            "Avatar",
+            {
+                "parameters": [
+                    {
+                        "name": "IsWearing",
+                        "valueType": "Int",
+                        "defaultValue": 0.0,
+                        "saved": False,
+                        "networkSynced": True,
+                    }
+                ],
+            },
+        )
+        self.assertIn("ParameterSnapshotItem", rollback_code)
+        self.assertIn("VRCExpressionParameters.ValueType.Float", rollback_code)
+        self.assertIn("IsWearing", rollback_code)
 
     def test_build_screenshot_multi_capture_code_contains_rotation(self) -> None:
         from pathlib import Path

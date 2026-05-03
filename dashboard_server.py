@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import mimetypes
 import subprocess
 from collections import deque
@@ -53,6 +54,7 @@ from vrchat_blendshape_agent import (
 ROOT_DIR = Path(__file__).resolve().parent
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
 DASHBOARD_ARTIFACTS_DIR = ROOT_DIR / "artifacts" / "dashboard"
+PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
@@ -163,6 +165,11 @@ class ParameterApplyOptimizationRequest(AvatarScopedConnectionRequest):
     dry_run: bool = Field(default=True, description="If true return generated C# only without executing in Unity.")
 
 
+class ParameterRollbackRequest(AvatarScopedConnectionRequest):
+    """Restore VRCExpressionParameters from a snapshot saved before optimization."""
+    snapshot_path: str | None = Field(default=None, description="Snapshot JSON path returned by /api/parameters/apply-optimization.")
+
+
 class VisionCaptureMultiRequest(ConnectionRequest):
     avatar_path: str | None = None
     angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back"])
@@ -200,6 +207,7 @@ class DashboardRuntimeState:
     current_avatar_path: str = ""
     scene_avatars: list[dict[str, Any]] = field(default_factory=list)
     manual_undo_stack: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
+    latest_parameter_snapshot_path: str = ""
     latest_screenshot_path: str = ""
     latest_screenshot_url: str = ""
 
@@ -568,6 +576,11 @@ async def apply_parameter_optimization(request: ParameterApplyOptimizationReques
     return await asyncio.to_thread(apply_parameter_optimization_sync, request)
 
 
+@app.post("/api/parameters/rollback")
+async def rollback_parameter_optimization(request: ParameterRollbackRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(rollback_parameter_optimization_sync, request)
+
+
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
     return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
@@ -901,12 +914,68 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
             emit_log("info", "parameter", "Parameter optimization code generated (dry-run).", {"avatarPath": avatar_path, "count": len(suggestions)})
             return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions)}
 
+        snapshot_code = build_parameter_snapshot_code(avatar_path)
+        snapshot_payload = ensure_dict_payload(
+            execute_dashboard_code(settings, snapshot_code, [avatar_path] if avatar_path else None),
+            "parameter snapshot",
+        )
+        snapshot_info = save_parameter_snapshot_payload(snapshot_payload, avatar_path)
+        emit_log(
+            "info",
+            "parameter",
+            "Parameter snapshot saved before optimization.",
+            {"avatarPath": avatar_path, "snapshotPath": snapshot_info["snapshotPath"]},
+        )
+
         result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
         payload = ensure_dict_payload(result, "parameter optimization apply")
         emit_log("success", "parameter", "Parameter optimization applied in Unity.", {"avatarPath": avatar_path, "count": len(suggestions)})
-        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions), "result": payload}
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "dryRun": False,
+            "generatedCsharp": csharp_code,
+            "diff": diff,
+            "appliedCount": len(suggestions),
+            "snapshotPath": snapshot_info["snapshotPath"],
+            "snapshotUrl": snapshot_info["snapshotUrl"],
+            "result": payload,
+        }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "parameter", "Failed to apply parameter optimization.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def rollback_parameter_optimization_sync(request: ParameterRollbackRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        snapshot_path = resolve_parameter_snapshot_path(request.snapshot_path)
+        snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        if not isinstance(snapshot_payload, dict):
+            raise RuntimeError(f"Parameter snapshot is not a JSON object: {snapshot_path}")
+
+        avatar_path = request.avatar_path or snapshot_payload.get("avatarPath") or DASHBOARD_RUNTIME.current_avatar_path
+        csharp_code = build_parameter_rollback_code(avatar_path, snapshot_payload)
+        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
+        payload = ensure_dict_payload(result, "parameter rollback")
+        restored_count = payload.get("restoredCount", snapshot_payload.get("parameterCount", 0))
+        emit_log(
+            "success",
+            "parameter",
+            "Parameter snapshot restored in Unity.",
+            {"avatarPath": avatar_path, "snapshotPath": str(snapshot_path), "restoredCount": restored_count},
+        )
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "snapshotPath": str(snapshot_path),
+            "snapshotUrl": to_artifact_url(str(snapshot_path)),
+            "generatedCsharp": csharp_code,
+            "restoredCount": restored_count,
+            "result": payload,
+        }
+    except (RuntimeError, UnityMcpError, json.JSONDecodeError) as exc:
+        emit_log("error", "parameter", "Failed to rollback parameter optimization.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -1312,6 +1381,65 @@ def push_manual_undo_snapshot(avatar_path: str, adjustments: list[dict[str, Any]
     stack.append(adjustments)
     if len(stack) > 12:
         del stack[0]
+
+
+def sanitize_artifact_name(value: str, fallback: str = "avatar") -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in (value or "").strip())
+    cleaned = cleaned.strip("._")
+    return (cleaned or fallback)[:80]
+
+
+def save_parameter_snapshot_payload(snapshot_payload: dict[str, Any], avatar_path: str | None) -> dict[str, str]:
+    payload = dict(snapshot_payload)
+    payload.setdefault("avatarPath", avatar_path or "")
+    payload.setdefault("capturedBy", "dashboard")
+
+    PARAMETER_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    safe_avatar = sanitize_artifact_name(str(payload.get("avatarPath") or avatar_path or "avatar"))
+    snapshot_path = PARAMETER_SNAPSHOT_DIR / f"{timestamp}_{safe_avatar}.json"
+    latest_path = PARAMETER_SNAPSHOT_DIR / "latest.json"
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    snapshot_path.write_text(text, encoding="utf-8")
+    latest_path.write_text(text, encoding="utf-8")
+
+    DASHBOARD_RUNTIME.latest_parameter_snapshot_path = str(snapshot_path)
+    return {
+        "snapshotPath": str(snapshot_path),
+        "snapshotUrl": to_artifact_url(str(snapshot_path)),
+        "latestSnapshotPath": str(latest_path),
+        "latestSnapshotUrl": to_artifact_url(str(latest_path)),
+    }
+
+
+def resolve_parameter_snapshot_path(snapshot_path: str | None) -> Path:
+    if snapshot_path:
+        candidate = Path(snapshot_path)
+        if not candidate.is_absolute():
+            candidate = (ROOT_DIR / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+    elif DASHBOARD_RUNTIME.latest_parameter_snapshot_path:
+        candidate = Path(DASHBOARD_RUNTIME.latest_parameter_snapshot_path).resolve()
+    else:
+        candidates = [
+            path for path in PARAMETER_SNAPSHOT_DIR.glob("*.json")
+            if path.name.lower() != "latest.json"
+        ]
+        if not candidates:
+            raise RuntimeError("No parameter snapshot is available for rollback.")
+        candidate = max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+
+    snapshot_root = PARAMETER_SNAPSHOT_DIR.resolve()
+    try:
+        candidate.relative_to(snapshot_root)
+    except ValueError as exc:
+        raise RuntimeError("Parameter snapshot path must be under artifacts/dashboard/parameter_snapshots.") from exc
+
+    if not candidate.exists() or not candidate.is_file():
+        raise RuntimeError(f"Parameter snapshot does not exist: {candidate}")
+
+    return candidate
 
 
 def remember_loaded_avatar(avatar_name: str, avatar_path: str) -> None:
@@ -1759,10 +1887,10 @@ def build_parameter_apply_optimization_code(avatar_path: str | None, suggestions
     """Generate C# that converts selected Int parameters to Bool in VRCExpressionParameters."""
     avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
     names_json = json.dumps([s.get("name", "") for s in suggestions if s.get("name")], ensure_ascii=False)
+    target_names_json_literal = json.dumps(names_json, ensure_ascii=False)
     return f"""
 string avatarPath = {avatar_path_literal};
-var targetNames = new System.Collections.Generic.HashSet<string>({json.dumps(names_json, ensure_ascii=False).replace('"', '\"')});
-var targetNamesArr = Newtonsoft.Json.JsonConvert.DeserializeObject<string[]>({json.dumps(names_json, ensure_ascii=False)});
+var targetNamesArr = Newtonsoft.Json.JsonConvert.DeserializeObject<string[]>({target_names_json_literal});
 var targetNamesSet = new System.Collections.Generic.HashSet<string>(targetNamesArr);
 string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
 string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
@@ -1786,6 +1914,168 @@ foreach (var param in parametersAsset.parameters)
 EditorUtility.SetDirty(parametersAsset);
 AssetDatabase.SaveAssets();
 return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ ok = true, changedCount }});
+""".strip()
+
+
+def build_parameter_snapshot_code(avatar_path: str | None) -> str:
+    """Generate C# that serializes the current VRCExpressionParameters before a write."""
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    return f"""
+string avatarPath = {avatar_path_literal};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+bool ReadBoolMember(object target, string memberName, bool fallback)
+{{
+    if (target == null) return fallback;
+    var type = target.GetType();
+    var field = type.GetField(memberName);
+    if (field != null && field.FieldType == typeof(bool)) return (bool)field.GetValue(target);
+    var property = type.GetProperty(memberName);
+    if (property != null && property.PropertyType == typeof(bool)) return (bool)property.GetValue(target);
+    return fallback;
+}}
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
+var parametersAsset = descriptor.expressionParameters;
+if (parametersAsset == null || parametersAsset.parameters == null)
+    throw new InvalidOperationException("No VRCExpressionParameters found.");
+var snapshotParameters = parametersAsset.parameters
+    .Where(param => param != null)
+    .Select(param => new
+    {{
+        name = param.name,
+        valueType = param.valueType.ToString(),
+        defaultValue = param.defaultValue,
+        saved = ReadBoolMember(param, "saved", false),
+        networkSynced = ReadBoolMember(param, "networkSynced", true)
+    }})
+    .ToArray();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    ok = true,
+    avatarPath = Normalize(GetPath(descriptor.transform)),
+    requestedAvatarPath = avatarPath,
+    assetPath = AssetDatabase.GetAssetPath(parametersAsset),
+    capturedAtUtc = DateTime.UtcNow.ToString("o"),
+    parameterCount = snapshotParameters.Length,
+    parameters = snapshotParameters
+}});
+""".strip()
+
+
+def csharp_bool(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
+def csharp_float(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.0
+    if not math.isfinite(number):
+        number = 0.0
+    return f"{number:.8g}f"
+
+
+def build_parameter_rollback_code(avatar_path: str | None, snapshot_payload: dict[str, Any]) -> str:
+    """Generate C# that restores VRCExpressionParameters from a saved snapshot payload."""
+    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
+    raw_parameters = snapshot_payload.get("parameters") or []
+    if not isinstance(raw_parameters, list) or not raw_parameters:
+        raise RuntimeError("Parameter snapshot does not contain any parameters to restore.")
+
+    item_lines: list[str] = []
+    for item in raw_parameters:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        value_type = str(item.get("valueType") or "Float")
+        default_value = csharp_float(item.get("defaultValue", 0.0))
+        saved = csharp_bool(item.get("saved", False))
+        network_synced = csharp_bool(item.get("networkSynced", True))
+        item_lines.append(
+            "    new ParameterSnapshotItem { "
+            f"name = {json.dumps(name, ensure_ascii=False)}, "
+            f"valueType = {json.dumps(value_type, ensure_ascii=False)}, "
+            f"defaultValue = {default_value}, "
+            f"saved = {saved}, "
+            f"networkSynced = {network_synced} "
+            "},"
+        )
+
+    if not item_lines:
+        raise RuntimeError("Parameter snapshot does not contain named parameters to restore.")
+
+    items_literal = "\n".join(item_lines)
+    return f"""
+public class ParameterSnapshotItem
+{{
+    public string name;
+    public string valueType;
+    public float defaultValue;
+    public bool saved;
+    public bool networkSynced;
+}}
+
+string avatarPath = {avatar_path_literal};
+var restoreItems = new System.Collections.Generic.List<ParameterSnapshotItem>
+{{
+{items_literal}
+}};
+string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
+string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
+void SetBoolMember(object target, string memberName, bool value)
+{{
+    if (target == null) return;
+    var type = target.GetType();
+    var field = type.GetField(memberName);
+    if (field != null && field.FieldType == typeof(bool))
+    {{
+        field.SetValue(target, value);
+        return;
+    }}
+    var property = type.GetProperty(memberName);
+    if (property != null && property.PropertyType == typeof(bool) && property.CanWrite)
+    {{
+        property.SetValue(target, value);
+    }}
+}}
+var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
+    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
+    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
+if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
+var parametersAsset = descriptor.expressionParameters;
+if (parametersAsset == null)
+    throw new InvalidOperationException("No VRCExpressionParameters found.");
+parametersAsset.parameters = restoreItems.Select(item =>
+{{
+    VRCExpressionParameters.ValueType parsedType;
+    if (!Enum.TryParse(item.valueType, out parsedType))
+    {{
+        parsedType = VRCExpressionParameters.ValueType.Float;
+    }}
+    var restored = new VRCExpressionParameters.Parameter
+    {{
+        name = item.name,
+        valueType = parsedType,
+        defaultValue = item.defaultValue
+    }};
+    SetBoolMember(restored, "saved", item.saved);
+    SetBoolMember(restored, "networkSynced", item.networkSynced);
+    return restored;
+}}).ToArray();
+EditorUtility.SetDirty(parametersAsset);
+AssetDatabase.SaveAssets();
+return Newtonsoft.Json.JsonConvert.SerializeObject(new
+{{
+    ok = true,
+    restoredCount = parametersAsset.parameters.Length,
+    assetPath = AssetDatabase.GetAssetPath(parametersAsset)
+}});
 """.strip()
 
 

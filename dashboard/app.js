@@ -60,6 +60,7 @@ const state = {
   blendshapeBaseline: {},
   undoDepth: 0,
   clothes: [],
+  latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
 };
 
@@ -141,6 +142,7 @@ function cacheRefs() {
     "scan-params-btn",
     "optimize-params-btn",
     "apply-params-btn",
+    "rollback-params-btn",
     "param-diff-panel",
     "param-diff-count",
     "param-dry-run",
@@ -194,6 +196,7 @@ function bindEvents() {
   refs["scan-params-btn"].addEventListener("click", () => runButtonTask("scan-params-btn", "扫描中...", scanParameters));
   refs["optimize-params-btn"].addEventListener("click", () => runButtonTask("optimize-params-btn", "分析中...", optimizeParameters));
   refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
+  refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
   refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "审核中...", auditVision));
@@ -834,8 +837,20 @@ async function applyParameterOptimization() {
   if (isDryRun) {
     refs["param-output"].textContent = "(Dry run) Diff 与代码预览如上，未执行实际回写。";
   } else {
+    state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
     refs["param-output"].textContent = prettyJson(payload.result || payload);
   }
+}
+
+async function rollbackParameterOptimization() {
+  const payload = await postJson("/api/parameters/rollback", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    snapshot_path: state.latestParameterSnapshotPath || null,
+  });
+
+  state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
+  refs["param-output"].textContent = prettyJson(payload.result || payload);
 }
 
 async function captureScreenshot() {
