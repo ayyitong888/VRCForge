@@ -368,6 +368,36 @@ class DashboardServerTests(unittest.TestCase):
             response = client.post("/api/vision/audit-multi", json={"image_paths": []})
         self.assertEqual(response.status_code, 400)
 
+    def test_normalize_vision_audit_payload_keeps_position_annotations(self) -> None:
+        payload = dashboard_server.normalize_vision_audit_payload(
+            {
+                "status": "clipping",
+                "summary": "Hair clips through hood",
+                "issues": [{"summary": "hair/hood intersection"}],
+                "annotations": [
+                    {
+                        "label": "hood edge",
+                        "reason": "hair intersects the hood",
+                        "severity": "high",
+                        "box": {"x": 10, "y": 20, "width": 30, "height": 40},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(payload["status"], "clipping")
+        self.assertEqual(payload["issues"], ["hair/hood intersection"])
+        self.assertEqual(payload["annotations"][0]["severity"], "high")
+        self.assertAlmostEqual(payload["annotations"][0]["box"]["x"], 0.1)
+        self.assertAlmostEqual(payload["annotations"][0]["box"]["width"], 0.3)
+
+    def test_normalize_vision_box_accepts_gemini_1000_scale(self) -> None:
+        box = dashboard_server.normalize_vision_box({"x_min": 100, "y_min": 200, "x_max": 500, "y_max": 650})
+        self.assertIsNotNone(box)
+        self.assertAlmostEqual(box["x"], 0.1)
+        self.assertAlmostEqual(box["y"], 0.2)
+        self.assertAlmostEqual(box["width"], 0.4)
+        self.assertAlmostEqual(box["height"], 0.45)
+
     # ------------------------------------------------------------------
     # Code generator unit tests (no server)
     # ------------------------------------------------------------------

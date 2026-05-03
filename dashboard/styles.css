@@ -560,6 +560,7 @@ body {
 .vision-preview {
   position: relative;
   min-height: 16rem;
+  aspect-ratio: 1 / 1;
   border-radius: 22px;
   overflow: hidden;
   background: linear-gradient(180deg, rgba(8, 17, 31, 0.98), rgba(11, 21, 38, 0.94));
@@ -571,9 +572,52 @@ body {
 
 .vision-preview img {
   width: 100%;
-  height: 18rem;
+  height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.vision-annotations {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.vision-box {
+  position: absolute;
+  min-width: 1rem;
+  min-height: 1rem;
+  border: 2px solid rgba(255, 90, 122, 0.95);
+  background: rgba(255, 90, 122, 0.1);
+  box-shadow: 0 0 0 1px rgba(6, 13, 24, 0.55);
+}
+
+.vision-box.severity-low {
+  border-color: rgba(245, 158, 11, 0.95);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.vision-box.severity-high {
+  border-color: rgba(239, 68, 68, 0.95);
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.vision-box-label {
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  max-width: 12rem;
+  padding: 0.16rem 0.36rem;
+  border-radius: 6px 6px 6px 0;
+  background: rgba(6, 13, 24, 0.92);
+  color: var(--text);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .vision-placeholder {

@@ -62,6 +62,8 @@ const state = {
   clothes: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
+  multiScreenshots: [],
+  visionAuditsByImageUrl: {},
 };
 
 const refs = {};
@@ -161,6 +163,7 @@ function cacheRefs() {
     "audit-multi-btn",
     "vision-status-chip",
     "vision-image",
+    "vision-annotations",
     "vision-placeholder",
     "vision-result",
     "log-stream",
@@ -869,12 +872,53 @@ function renderScreenshot(imageUrl) {
   if (!imageUrl) {
     refs["vision-image"].classList.add("hidden");
     refs["vision-placeholder"].classList.remove("hidden");
+    renderVisionAnnotations([]);
     return;
   }
   state.latestScreenshotUrl = imageUrl;
   refs["vision-image"].src = `${imageUrl}?t=${Date.now()}`;
   refs["vision-image"].classList.remove("hidden");
   refs["vision-placeholder"].classList.add("hidden");
+  const audit = state.visionAuditsByImageUrl[imageUrl] || state.visionAuditsByImageUrl[urlToArtifactPath(imageUrl)];
+  renderVisionAnnotations(audit?.annotations || []);
+}
+
+function renderVisionAnnotations(annotations) {
+  const container = refs["vision-annotations"];
+  const items = Array.isArray(annotations) ? annotations.filter(item => item && item.box) : [];
+  if (!items.length) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+
+  container.classList.remove("hidden");
+  container.innerHTML = items.map((item) => {
+    const box = item.box || {};
+    const x = clampPercent(box.x);
+    const y = clampPercent(box.y);
+    const width = clampPercent(box.width);
+    const height = clampPercent(box.height);
+    const severity = normalizeSeverity(item.severity);
+    return `
+      <div class="vision-box severity-${severity}" style="left:${x}%;top:${y}%;width:${width}%;height:${height}%;">
+        <span class="vision-box-label">${escapeHtml(item.label || "风险区域")}</span>
+      </div>
+    `;
+  }).join("");
+}
+
+function normalizeSeverity(value) {
+  const severity = String(value || "medium").toLowerCase();
+  return ["low", "medium", "high"].includes(severity) ? severity : "medium";
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, number * 100));
 }
 
 async function auditVision() {
@@ -883,12 +927,16 @@ async function auditVision() {
     image_path: state.latestScreenshotUrl ? urlToArtifactPath(state.latestScreenshotUrl) : null,
   });
   const audit = payload.audit || {};
+  state.visionAuditsByImageUrl[payload.imageUrl || state.latestScreenshotUrl] = audit;
+  state.visionAuditsByImageUrl[urlToArtifactPath(payload.imageUrl || state.latestScreenshotUrl)] = audit;
+  renderVisionAnnotations(audit.annotations || []);
   refs["vision-status-chip"].textContent = audit.status === "pass" ? "通过" : "穿模";
   refs["vision-result"].innerHTML = `
     <article class="info-card ${audit.status === "pass" ? "result-pass" : "result-fail"}">
       <strong>${escapeHtml(audit.status === "pass" ? "通过" : "检测到穿模风险")}</strong>
       <span>${escapeHtml(audit.summary || "无结论")}</span>
       <p>${escapeHtml((audit.issues || []).join(" / ") || "无额外问题")}</p>
+      ${audit.annotations?.length ? `<p>${audit.annotations.length} 个可定位区域已标注在截图上</p>` : ""}
     </article>
   `;
 }
@@ -901,7 +949,7 @@ async function captureMultiScreenshot() {
     height: 960,
     angles: ["front", "side_left", "side_right", "back"]
   });
-  state.multiScreenshots = payload.results || [];
+  state.multiScreenshots = payload.captures || payload.results || [];
   
   if (state.multiScreenshots.length > 0) {
     renderScreenshot(state.multiScreenshots[0].imageUrl);
@@ -919,11 +967,22 @@ function renderMultiThumbs() {
   }
   container.classList.remove("hidden");
   container.innerHTML = state.multiScreenshots.map((item, i) => `
-    <div class="vision-thumb-card" style="cursor:pointer;" onclick="renderScreenshot('${item.imageUrl}')">
+    <div class="vision-thumb-card" data-index="${i}">
       <img src="${item.imageUrl}?t=${Date.now()}" alt="thumb">
       <div class="thumb-label">${escapeHtml(item.angle)}</div>
     </div>
   `).join("");
+  container.querySelectorAll(".vision-thumb-card").forEach((card) => {
+    card.addEventListener("click", () => showMultiScreenshot(Number(card.dataset.index)));
+  });
+}
+
+function showMultiScreenshot(index) {
+  const item = state.multiScreenshots[index];
+  if (!item) {
+    return;
+  }
+  renderScreenshot(item.imageUrl);
 }
 
 async function auditMultiVision() {
@@ -939,6 +998,12 @@ async function auditMultiVision() {
   
   const isPass = payload.overallStatus === "pass";
   refs["vision-status-chip"].textContent = isPass ? "全角度通过" : "多图穿模";
+  for (const res of (payload.results || [])) {
+    if (res.imageUrl && res.audit) {
+      state.visionAuditsByImageUrl[res.imageUrl] = res.audit;
+      state.visionAuditsByImageUrl[urlToArtifactPath(res.imageUrl)] = res.audit;
+    }
+  }
   
   let html = `
     <article class="info-card ${isPass ? "result-pass" : "result-fail"}">
@@ -953,10 +1018,15 @@ async function auditMultiVision() {
         <strong>${escapeHtml(res.imagePath.split("/").pop())}: ${a.status}</strong>
         <span>${escapeHtml(a.summary || "")}</span>
         ${a.issues && a.issues.length ? `<p>${escapeHtml(a.issues.join(", "))}</p>` : ""}
+        ${a.annotations && a.annotations.length ? `<p>${a.annotations.length} 个标注区域</p>` : ""}
       </article>
     `;
   }
   refs["vision-result"].innerHTML = html;
+  const firstAnnotated = (payload.results || []).find(res => res.imageUrl && res.audit?.annotations?.length);
+  if (firstAnnotated) {
+    renderScreenshot(firstAnnotated.imageUrl);
+  }
 }
 
 function onVisionAngleTabClick(e) {

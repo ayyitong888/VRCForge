@@ -861,6 +861,7 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
             raise RuntimeError("Gemini Vision audit currently requires the dashboard provider to be set to Gemini.")
 
         result = run_gemini_vision_audit(api_config, image_file)
+        save_vision_audit_artifact("vision_audit.json", {"imagePath": str(image_file), "audit": result})
         emit_log("success", "vision", "Gemini Vision audit completed.", {"status": result.get("status")})
         return {
             "ok": True,
@@ -1037,6 +1038,7 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
             results.append({"imagePath": str(image_file), "imageUrl": to_artifact_url(str(image_file)), "audit": audit})
 
         overall_status = "clipping" if any(r.get("audit", {}).get("status") == "clipping" for r in results) else "pass"
+        save_vision_audit_artifact("vision_audit_multi.json", {"overallStatus": overall_status, "results": results})
         emit_log("success", "vision", "Multi-image Gemini Vision audit completed.", {"imageCount": len(results), "overallStatus": overall_status})
         return {"ok": True, "overallStatus": overall_status, "results": results}
     except RuntimeError as exc:
@@ -2130,6 +2132,140 @@ def to_artifact_url(path_value: str) -> str:
         return ""
 
 
+def save_vision_audit_artifact(file_name: str, payload: dict[str, Any]) -> Path:
+    latest_dir = DASHBOARD_ARTIFACTS_DIR / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = latest_dir / file_name
+    audit_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return audit_path
+
+
+def clamp01(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    return min(1.0, max(0.0, number))
+
+
+def normalize_vision_box(raw_box: Any) -> dict[str, float] | None:
+    if not raw_box:
+        return None
+
+    x = y = width = height = None
+    x2 = y2 = None
+
+    if isinstance(raw_box, dict):
+        lowered = {str(key).lower().replace("-", "_"): value for key, value in raw_box.items()}
+        if {"x", "y", "width", "height"}.issubset(lowered):
+            x = lowered.get("x")
+            y = lowered.get("y")
+            width = lowered.get("width")
+            height = lowered.get("height")
+        elif {"x_min", "y_min", "x_max", "y_max"}.issubset(lowered):
+            x = lowered.get("x_min")
+            y = lowered.get("y_min")
+            x2 = lowered.get("x_max")
+            y2 = lowered.get("y_max")
+        elif {"xmin", "ymin", "xmax", "ymax"}.issubset(lowered):
+            x = lowered.get("xmin")
+            y = lowered.get("ymin")
+            x2 = lowered.get("xmax")
+            y2 = lowered.get("ymax")
+        elif {"left", "top", "right", "bottom"}.issubset(lowered):
+            x = lowered.get("left")
+            y = lowered.get("top")
+            x2 = lowered.get("right")
+            y2 = lowered.get("bottom")
+    elif isinstance(raw_box, (list, tuple)) and len(raw_box) >= 4:
+        x, y, width, height = raw_box[:4]
+
+    if x is None or y is None:
+        return None
+    if x2 is None and y2 is None and (width is None or height is None):
+        return None
+    if (x2 is None) != (y2 is None):
+        return None
+
+    values = [value for value in [x, y, width, height, x2, y2] if value is not None]
+    try:
+        numeric_values = [abs(float(value)) for value in values]
+    except (TypeError, ValueError):
+        return None
+
+    scale = 1.0
+    if numeric_values:
+        max_value = max(numeric_values)
+        if max_value > 100:
+            scale = 1000.0
+        elif max_value > 1:
+            scale = 100.0
+
+    def scaled(value: Any) -> float:
+        return clamp01(float(value) / scale)
+
+    if x2 is not None and y2 is not None:
+        left = scaled(x)
+        top = scaled(y)
+        right = scaled(x2)
+        bottom = scaled(y2)
+        x = min(left, right)
+        y = min(top, bottom)
+        width = abs(right - left)
+        height = abs(bottom - top)
+    else:
+        x = scaled(x)
+        y = scaled(y)
+        width = clamp01(float(width) / scale)
+        height = clamp01(float(height) / scale)
+
+    if width <= 0 or height <= 0:
+        return None
+
+    return {
+        "x": clamp01(x),
+        "y": clamp01(y),
+        "width": min(width, 1.0 - clamp01(x)),
+        "height": min(height, 1.0 - clamp01(y)),
+    }
+
+
+def normalize_vision_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    status = str(normalized.get("status") or "").strip().lower()
+    issues_raw = normalized.get("issues") or []
+    issues = [str(item.get("summary") or item.get("label") or item) if isinstance(item, dict) else str(item) for item in issues_raw]
+    annotations_raw = normalized.get("annotations") or normalized.get("regions") or normalized.get("boxes") or []
+
+    annotations: list[dict[str, Any]] = []
+    if isinstance(annotations_raw, list):
+        for item in annotations_raw:
+            if not isinstance(item, dict):
+                continue
+            box = normalize_vision_box(item.get("box") or item.get("bbox") or item.get("boundingBox") or item.get("bounding_box"))
+            if not box:
+                continue
+            annotations.append(
+                {
+                    "label": str(item.get("label") or item.get("title") or "风险区域"),
+                    "reason": str(item.get("reason") or item.get("summary") or ""),
+                    "severity": str(item.get("severity") or item.get("risk") or "medium"),
+                    "box": box,
+                }
+            )
+
+    if status not in {"pass", "clipping"}:
+        status = "clipping" if annotations or issues else "pass"
+
+    normalized["status"] = status
+    normalized["summary"] = str(normalized.get("summary") or ("检测到穿模风险" if status == "clipping" else "未发现明显穿模"))
+    normalized["issues"] = issues
+    normalized["annotations"] = annotations
+    return normalized
+
+
 def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dict[str, Any]:
     try:
         from google import genai
@@ -2147,8 +2283,11 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     image_bytes = image_path.read_bytes()
     prompt = (
         "你是 VRChat Avatar 视觉质检助手。检查这张 Avatar 截图是否存在明显穿模、衣物穿插、头发穿插或严重视觉问题。"
+        "如果发现问题，请给出可定位区域，坐标使用相对图片宽高的 0 到 1 小数。"
         "只输出 JSON，不要 Markdown。格式为："
-        '{"status":"pass|clipping","summary":"一句话结论","issues":["问题1","问题2"]}'
+        '{"status":"pass|clipping","summary":"一句话结论","issues":["问题1","问题2"],'
+        '"annotations":[{"label":"区域名","reason":"原因","severity":"low|medium|high",'
+        '"box":{"x":0.1,"y":0.2,"width":0.3,"height":0.2}}]}'
     )
     response = client.models.generate_content(
         model=model,
@@ -2161,7 +2300,7 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     payload = try_parse_json(getattr(response, "text", "") or "")
     if not isinstance(payload, dict):
         raise RuntimeError("Gemini Vision did not return valid JSON.")
-    return payload
+    return normalize_vision_audit_payload(payload)
 
 
 def build_event_message(event_type: str, payload: Any) -> dict[str, Any]:
