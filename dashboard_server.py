@@ -111,6 +111,10 @@ class ApiConfigRequest(BaseModel):
     model: str | None = None
 
 
+class ApiModelListRequest(ApiConfigRequest):
+    pass
+
+
 class AvatarSceneScanRequest(ConnectionRequest):
     pass
 
@@ -424,6 +428,43 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
             "model": DASHBOARD_API_CONFIG.model,
             "baseUrl": DASHBOARD_API_CONFIG.base_url or "(official endpoint)",
         },
+    )
+    return payload
+
+
+@app.post("/api/models")
+async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
+    config = normalize_api_config_request(request)
+    provider_label = provider_display_name(config.provider)
+
+    try:
+        models = await asyncio.to_thread(fetch_provider_models, config)
+    except Exception as exc:  # noqa: BLE001
+        await emit_log_async(
+            "error",
+            "config",
+            "Provider model list request failed.",
+            {
+                "provider": config.provider,
+                "baseUrl": config.base_url or "(official endpoint)",
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = {
+        "provider": config.provider,
+        "providerLabel": provider_label,
+        "baseUrl": config.base_url,
+        "models": models,
+        "modelCount": len(models),
+        "selectedModel": config.model,
+    }
+    await emit_log_async(
+        "success",
+        "config",
+        "Provider model list loaded.",
+        {"provider": config.provider, "modelCount": len(models)},
     )
     return payload
 
@@ -2572,6 +2613,88 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
         base_url=base_url,
         model=model,
     )
+
+
+def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+    if not config.api_key.strip():
+        raise RuntimeError(f"{provider_display_name(config.provider)} API key is empty. Enter an API key before loading models.")
+
+    if config.provider == "anthropic":
+        return fetch_anthropic_models(config)
+    return fetch_openai_compatible_models(config)
+
+
+def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+    if not config.base_url.strip():
+        raise RuntimeError("Base URL is empty. Enter a provider API endpoint before loading models.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("The openai package is not installed, so OpenAI-compatible model listing is unavailable.") from exc
+
+    client = OpenAI(api_key=config.api_key, base_url=config.base_url, timeout=20.0)
+    try:
+        response = client.models.list()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"{provider_display_name(config.provider)} model list request failed: {exc}") from exc
+
+    return normalize_provider_model_list(response, provider_display_name(config.provider))
+
+
+def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError("The anthropic package is not installed, so Anthropic model listing is unavailable.") from exc
+
+    client = anthropic.Anthropic(api_key=config.api_key)
+    models_api = getattr(client, "models", None)
+    list_models = getattr(models_api, "list", None)
+    if not callable(list_models):
+        raise RuntimeError("The installed Anthropic SDK does not expose models.list(). Use manual model input.")
+
+    try:
+        try:
+            response = list_models(limit=100)
+        except TypeError:
+            response = list_models()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Anthropic model list request failed: {exc}") from exc
+
+    return normalize_provider_model_list(response, "Anthropic")
+
+
+def normalize_provider_model_list(response: Any, provider_label: str) -> list[dict[str, str]]:
+    raw_items: Any = response
+    if isinstance(response, dict):
+        raw_items = response.get("data") or response.get("models") or []
+    else:
+        raw_items = getattr(response, "data", response)
+
+    try:
+        items = list(raw_items or [])
+    except TypeError:
+        items = []
+
+    models_by_id: dict[str, dict[str, str]] = {}
+    for item in items:
+        if isinstance(item, dict):
+            model_id = item.get("id") or item.get("name")
+        else:
+            model_id = getattr(item, "id", None) or getattr(item, "name", None)
+
+        if not model_id:
+            continue
+
+        model_id = str(model_id).strip()
+        if model_id:
+            models_by_id.setdefault(model_id, {"id": model_id, "label": model_id})
+
+    models = sorted(models_by_id.values(), key=lambda model: model["id"].casefold())
+    if not models:
+        raise RuntimeError(f"{provider_label} returned no models.")
+    return models
 
 
 def save_dashboard_api_config(config: DashboardApiConfig) -> None:

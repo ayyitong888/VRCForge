@@ -126,11 +126,17 @@
             </label>
             <label class="field">
               <span id="api-model-label">Model 名称</span>
-              <input id="api-model-input" type="text" placeholder="gemini-2.5-flash">
+              <select id="api-model-select"></select>
+              <small id="api-model-note" class="field-note">输入 API Key 后点击“读取模型列表”。</small>
             </label>
           </div>
 
           <div class="field-stack">
+            <label id="api-model-manual-field" class="field hidden">
+              <span>手动 Model 名称</span>
+              <input id="api-model-input" type="text" placeholder="无法读取列表时手动填写">
+              <small class="field-note">仅在模型列表读取失败，或需要填写列表外模型时使用。</small>
+            </label>
             <label class="field">
               <span id="api-key-label">API Key（Bearer token）</span>
               <input id="api-key-input" type="password" placeholder="输入 API Key">
@@ -144,6 +150,7 @@
           </div>
 
           <div class="button-row">
+            <button id="load-models-btn" class="button button-ghost">读取模型列表</button>
             <button id="reset-provider-btn" class="button button-ghost">恢复默认值</button>
             <button id="save-config-btn" class="button button-accent">保存并生效</button>
           </div>
@@ -379,6 +386,6 @@
       </main>
     </div>
 
-    <script src="/dashboard/app.js"></script>
+    <script src="/dashboard/app.js?v=20260507-model-picker"></script>
   </body>
 </html>

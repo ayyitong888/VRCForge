@@ -42,7 +42,7 @@ class DashboardServerTests(unittest.TestCase):
         with TestClient(dashboard_server.app) as client:
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
-            self.assertIn("VRCAutoRig 深色控制台", response.text)
+            self.assertIn("VRCAutoRig 控制台", response.text)
             self.assertIn("Gemini Vision 审核", response.text)
 
     def test_health_returns_defaults_and_state(self) -> None:
@@ -96,6 +96,49 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 dashboard_server.CONFIG_PATH = original_config_path
                 dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+
+    @patch("dashboard_server.fetch_provider_models")
+    def test_api_models_endpoint_reads_models_from_draft_config(self, mock_fetch_provider_models) -> None:
+        mock_fetch_provider_models.return_value = [
+            {"id": "gemini-2.5-flash", "label": "gemini-2.5-flash"},
+            {"id": "gemini-2.5-pro", "label": "gemini-2.5-pro"},
+        ]
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/models",
+                json={
+                    "provider": "gemini",
+                    "api_key": "draft-secret",
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+                    "model": "gemini-2.5-pro",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+
+            payload = response.json()
+            self.assertEqual(payload["provider"], "gemini")
+            self.assertEqual(payload["modelCount"], 2)
+            self.assertEqual(payload["selectedModel"], "gemini-2.5-pro")
+            self.assertEqual(payload["models"][1]["id"], "gemini-2.5-pro")
+
+            config = mock_fetch_provider_models.call_args.args[0]
+            self.assertEqual(config.api_key, "draft-secret")
+            self.assertEqual(config.model, "gemini-2.5-pro")
+
+    def test_api_models_endpoint_requires_api_key(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/models",
+                json={
+                    "provider": "openai",
+                    "api_key": "",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4.1-mini",
+                },
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("API key is empty", response.json()["detail"])
 
     @patch("dashboard_server.execute_dashboard_code")
     @patch("dashboard_server.load_dashboard_settings")

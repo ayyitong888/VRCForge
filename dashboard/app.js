@@ -43,6 +43,8 @@ const PROVIDER_PRESETS = {
   },
 };
 
+const MANUAL_MODEL_VALUE = "__manual_model__";
+
 const state = {
   socket: null,
   projects: [],
@@ -53,7 +55,9 @@ const state = {
   selectedAvatarName: "",
   recentLogs: [],
   apiConfig: null,
+  currentProvider: "",
   providerDrafts: {},
+  modelOptionsByProvider: {},
   apiConfigDirty: false,
   blendshapes: [],
   blendshapeWorking: {},
@@ -100,8 +104,11 @@ function cacheRefs() {
     "unity-status-output",
     "config-path-tag",
     "provider-select",
+    "api-model-select",
     "api-model-input",
     "api-model-label",
+    "api-model-note",
+    "api-model-manual-field",
     "api-key-input",
     "api-key-label",
     "api-key-note",
@@ -110,6 +117,7 @@ function cacheRefs() {
     "api-base-url-note",
     "config-save-status",
     "config-output",
+    "load-models-btn",
     "save-config-btn",
     "reset-provider-btn",
     "source-mode",
@@ -188,6 +196,8 @@ function bindEvents() {
   refs["unity-status-btn"].addEventListener("click", () => runButtonTask("unity-status-btn", "检测中...", loadUnityStatus));
   refs["unity-tools-btn"].addEventListener("click", () => runButtonTask("unity-tools-btn", "读取中...", loadUnityTools));
   refs["provider-select"].addEventListener("change", onProviderChanged);
+  refs["api-model-select"].addEventListener("change", onModelSelectChanged);
+  refs["load-models-btn"].addEventListener("click", () => runButtonTask("load-models-btn", "读取中...", loadProviderModels));
   refs["save-config-btn"].addEventListener("click", () => runButtonTask("save-config-btn", "保存中...", () => saveApiConfig(true)));
   refs["reset-provider-btn"].addEventListener("click", resetProviderDefaults);
   refs["ai-run-btn"].addEventListener("click", () => runButtonTask("ai-run-btn", "执行中...", runAiPipeline));
@@ -345,9 +355,10 @@ function applyApiConfigPayload(payload, preserveDraft) {
 
   refs["config-path-tag"].textContent = payload.configPath || "config.json";
   refs["provider-select"].value = provider;
+  state.currentProvider = provider;
   refs["api-key-input"].value = state.apiConfig.api_key;
   refs["api-base-url"].value = state.apiConfig.base_url || "";
-  refs["api-model-input"].value = state.apiConfig.model || "";
+  renderModelSelect(getCachedModelOptions(provider, state.apiConfig.model), state.apiConfig.model, !state.apiConfig.model);
   applyProviderFieldVisibility(provider);
   refs["status-provider"].textContent = effective.providerLabel || preset.providerLabel;
   refs["status-model"].textContent = effective.model || state.apiConfig.model || "未设置";
@@ -373,11 +384,71 @@ function applyProviderFieldVisibility(provider) {
     ? "Anthropic 走官方端点。"
     : "非 Anthropic provider 统一走 OpenAI 兼容接口。";
   refs["api-model-input"].placeholder = preset.model || "model-name";
+  const modelCount = (state.modelOptionsByProvider[provider] || []).length;
+  refs["api-model-note"].textContent = modelCount
+    ? `已缓存 ${modelCount} 个模型，可重新读取刷新。`
+    : "输入 API Key 后点击“读取模型列表”。";
   if (isAnthropic) {
     refs["api-base-url"].value = "";
   } else if (!refs["api-base-url"].value.trim()) {
     refs["api-base-url"].value = preset.base_url;
   }
+}
+
+function getCachedModelOptions(provider, selectedModel) {
+  const cached = state.modelOptionsByProvider[provider] || [];
+  if (cached.length) {
+    return cached;
+  }
+  return selectedModel ? [{ id: selectedModel, label: selectedModel }] : [];
+}
+
+function sanitizeModelOptions(models) {
+  const unique = new Map();
+  for (const model of models || []) {
+    const id = String(model.id || model.name || "").trim();
+    if (!id || unique.has(id)) {
+      continue;
+    }
+    unique.set(id, { id, label: String(model.label || id) });
+  }
+  return Array.from(unique.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function renderModelSelect(models, selectedModel = "", manualMode = false) {
+  const options = sanitizeModelOptions(models);
+  const selected = String(selectedModel || "").trim();
+  const hasSelected = selected && options.some((model) => model.id === selected);
+  if (selected && !hasSelected) {
+    options.unshift({ id: selected, label: `${selected}（当前）` });
+  }
+
+  const optionHtml = options.map((model) => {
+    return `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`;
+  }).join("");
+  refs["api-model-select"].innerHTML = `${optionHtml}<option value="${MANUAL_MODEL_VALUE}">手动输入...</option>`;
+
+  const useManual = manualMode || !options.length;
+  refs["api-model-select"].value = useManual ? MANUAL_MODEL_VALUE : (hasSelected || selected ? selected : options[0].id);
+  refs["api-model-input"].value = useManual ? selected : refs["api-model-select"].value;
+  refs["api-model-manual-field"].classList.toggle("hidden", !useManual);
+}
+
+function readSelectedModel() {
+  const selected = refs["api-model-select"].value;
+  if (selected === MANUAL_MODEL_VALUE) {
+    return refs["api-model-input"].value.trim();
+  }
+  return selected || refs["api-model-input"].value.trim();
+}
+
+function onModelSelectChanged() {
+  const manualMode = refs["api-model-select"].value === MANUAL_MODEL_VALUE;
+  refs["api-model-manual-field"].classList.toggle("hidden", !manualMode);
+  if (!manualMode) {
+    refs["api-model-input"].value = refs["api-model-select"].value;
+  }
+  markApiConfigDirty();
 }
 
 function updateModeVisibility() {
@@ -407,7 +478,7 @@ function buildDashboardRequest() {
     ...buildConnectionPayload(),
     avatar: state.selectedAvatarPath || null,
     instruction: refs["instruction-input"].value.trim() || null,
-    model: refs["api-model-input"].value.trim() || null,
+    model: readSelectedModel() || null,
     source_mode: refs["source-mode"].value,
     export_json: refs["export-json"].value.trim() || null,
     plan_json: refs["plan-json"].value.trim() || null,
@@ -1056,12 +1127,16 @@ function onVisionAngleTabClick(e) {
 }
 
 function onProviderChanged() {
-  rememberCurrentProviderDraft();
   const provider = refs["provider-select"].value;
+  const previousProvider = state.currentProvider || state.apiConfig?.provider || provider;
+  if (previousProvider !== provider) {
+    rememberCurrentProviderDraft(previousProvider);
+  }
+  state.currentProvider = provider;
   const draft = state.providerDrafts[provider] || buildDefaultProviderDraft(provider);
   refs["api-key-input"].value = draft.api_key || "";
   refs["api-base-url"].value = draft.base_url || "";
-  refs["api-model-input"].value = draft.model || "";
+  renderModelSelect(getCachedModelOptions(provider, draft.model), draft.model, !draft.model);
   applyProviderFieldVisibility(provider);
   markApiConfigDirty();
 }
@@ -1082,24 +1157,24 @@ function resetProviderDefaults() {
   const draft = buildDefaultProviderDraft(provider);
   refs["api-key-input"].value = "";
   refs["api-base-url"].value = draft.base_url || "";
-  refs["api-model-input"].value = draft.model || "";
+  delete state.modelOptionsByProvider[provider];
+  renderModelSelect(getCachedModelOptions(provider, draft.model), draft.model, !draft.model);
   applyProviderFieldVisibility(provider);
   markApiConfigDirty();
 }
 
-function rememberCurrentProviderDraft() {
-  const provider = refs["provider-select"].value;
-  state.providerDrafts[provider] = readApiForm();
+function rememberCurrentProviderDraft(providerOverride = refs["provider-select"].value) {
+  state.providerDrafts[providerOverride] = readApiForm(providerOverride);
 }
 
-function readApiForm() {
-  const provider = refs["provider-select"].value;
+function readApiForm(providerOverride = refs["provider-select"].value) {
+  const provider = providerOverride;
   const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
   return {
     provider,
     api_key: refs["api-key-input"].value.trim(),
     base_url: provider === "anthropic" ? "" : (refs["api-base-url"].value.trim() || preset.base_url),
-    model: refs["api-model-input"].value.trim() || preset.model,
+    model: readSelectedModel() || preset.model,
   };
 }
 
@@ -1112,6 +1187,33 @@ function setApiConfigDirty(isDirty) {
   state.apiConfigDirty = Boolean(isDirty);
   if (isDirty) {
     refs["config-save-status"].textContent = "有未保存改动";
+  }
+}
+
+async function loadProviderModels() {
+  const draft = readApiForm();
+  refs["api-model-note"].textContent = "正在从 provider API 读取模型列表...";
+
+  try {
+    const payload = await postJson("/api/models", draft);
+    const provider = payload.provider || draft.provider;
+    const models = sanitizeModelOptions(payload.models || []);
+    state.modelOptionsByProvider[provider] = models;
+    renderModelSelect(models, payload.selectedModel || draft.model || models[0]?.id || "", false);
+    rememberCurrentProviderDraft();
+    setApiConfigDirty(true);
+    refs["api-model-note"].textContent = models.length
+      ? `已读取 ${models.length} 个模型，选择后保存即可生效。`
+      : "没有读取到模型，可切换为手动输入。";
+    refs["config-output"].textContent = prettyJson({
+      provider,
+      modelCount: models.length,
+      selectedModel: readSelectedModel(),
+    });
+  } catch (error) {
+    renderModelSelect([], draft.model, true);
+    refs["api-model-note"].textContent = "模型列表读取失败，已切换为手动填写。";
+    throw error;
   }
 }
 
