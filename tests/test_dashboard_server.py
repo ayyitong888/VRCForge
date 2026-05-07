@@ -164,6 +164,22 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(projects[0]["hasUnityMcpPackage"])
             self.assertTrue(projects[0]["selected"])
 
+    def test_has_unity_mcp_dependency_accepts_utf8_bom_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = Path(temp_dir) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": {
+                            "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+                        }
+                    }
+                ),
+                encoding="utf-8-sig",
+            )
+
+            self.assertTrue(dashboard_server.has_unity_mcp_dependency(manifest_path))
+
     def test_to_artifact_url_maps_local_artifacts_path(self) -> None:
         path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
         url = dashboard_server.to_artifact_url(path)

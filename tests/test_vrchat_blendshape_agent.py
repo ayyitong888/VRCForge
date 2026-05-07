@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vrchat_blendshape_agent import (
     BlendshapeAdjustment,
@@ -17,6 +18,7 @@ from vrchat_blendshape_agent import (
     read_export_json,
     resolve_avatar_selection,
     render_preview,
+    run_unity_mcp_process,
     validate_plan,
 )
 
@@ -243,6 +245,33 @@ class MvpFlowTests(unittest.TestCase):
                 "status",
             ],
         )
+
+    def test_run_unity_mcp_process_forces_utf8_environment(self) -> None:
+        settings = Settings(
+            llm_provider="gemini",
+            llm_api_key="",
+            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            llm_model="gemini-2.5-flash",
+            llm_api_key_env="GEMINI_API_KEY",
+            gemini_thinking_level="",
+            unity_mcp_command=["unity-mcp"],
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_instance="",
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2.0,
+            unity_mcp_timeout_seconds=30,
+            export_tool_name="vrc_export_blendshapes",
+            execute_tool_name="vrc_execute_roslyn",
+            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            min_confidence=0.65,
+        )
+
+        with patch("vrchat_blendshape_agent.subprocess.run") as run_mock:
+            run_unity_mcp_process(settings, ["status"])
+
+        self.assertEqual(run_mock.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(run_mock.call_args.kwargs["env"]["PYTHONUTF8"], "1")
 
     def test_load_settings_allows_model_override(self) -> None:
         settings_payload = {

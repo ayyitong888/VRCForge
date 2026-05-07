@@ -251,7 +251,7 @@ namespace VRCAutoRig.Editor
 
         public static void Log(string message)
         {
-            Debug.Log($"[{ToolName}] {message}");
+            UnityEngine.Debug.Log($"[{ToolName}] {message}");
         }
 
         public static void SetBlendshapeWeight(string avatarPath, string rendererPath, string blendshapeName, float targetWeight)

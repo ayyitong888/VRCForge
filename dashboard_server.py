@@ -2371,7 +2371,7 @@ async def status_monitor_loop() -> None:
 
 def build_unity_status_snapshot() -> dict[str, Any]:
     settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
-    settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 5)
+    settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
 
     try:
         output = run_unity_mcp_passthrough(settings, ["-f", "json", "status"])
@@ -2499,7 +2499,7 @@ def has_unity_mcp_dependency(manifest_path: Path) -> bool:
         return False
 
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError:
         return False
 

@@ -977,6 +977,9 @@ def run_unity_mcp_passthrough(settings: Settings, cli_args: list[str]) -> str:
 
 def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess.CompletedProcess[str]:
     command = build_unity_mcp_command(settings, cli_args)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     try:
         return subprocess.run(
             command,
@@ -984,6 +987,7 @@ def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess
             capture_output=True,
             text=True,
             encoding="utf-8",
+            env=env,
             timeout=settings.unity_mcp_timeout_seconds,
         )
     except FileNotFoundError as exc:
