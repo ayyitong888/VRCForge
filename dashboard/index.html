@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>VRCAutoRig 控制台</title>
-    <link rel="stylesheet" href="/dashboard/styles.css">
+    <title>VRCFaceForge 控制台</title>
+    <link rel="stylesheet" href="/dashboard/styles.css?v=20260509-provider-sceneview">
   </head>
   <body>
     <div class="background-grid"></div>
@@ -14,8 +14,8 @@
     <div class="shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">VRChat Avatar Automation</p>
-          <h1>VRCAutoRig 控制台</h1>
+          <p class="eyebrow">VRCFaceForge</p>
+          <h1>VRCFaceForge 控制台</h1>
           <p class="hero-copy">
             一套不需要前端编译的中文 dashboard，把 Unity MCP、LLM 配置、捏脸、衣柜 FX、参数优化和视觉质检收进同一个实时控制面板。
           </p>
@@ -30,7 +30,7 @@
           </article>
           <article class="status-card">
             <span class="status-label">当前 Provider</span>
-            <strong id="status-provider">Gemini</strong>
+            <strong id="status-provider">Google AI Studio</strong>
           </article>
           <article class="status-card">
             <span class="status-label">当前 Model</span>
@@ -116,11 +116,13 @@
             <label class="field">
               <span>Provider</span>
               <select id="provider-select">
-                <option value="gemini">Gemini</option>
+                <option value="gemini">Google AI Studio</option>
                 <option value="deepseek">DeepSeek</option>
                 <option value="openai">OpenAI</option>
                 <option value="openrouter">OpenRouter</option>
                 <option value="anthropic">Anthropic</option>
+                <option value="ollama">Ollama</option>
+                <option value="vertexai">Google Vertex AI</option>
                 <option value="custom">自定义</option>
               </select>
             </label>
@@ -143,9 +145,9 @@
               <small id="api-key-note" class="field-note">保存到本地 config.json，实时生效，不需要重启。</small>
             </label>
             <label id="api-base-url-field" class="field">
-              <span>Base URL</span>
+              <span id="api-base-url-label">Base URL</span>
               <input id="api-base-url" type="text" placeholder="https://api.example.com/v1">
-              <small id="api-base-url-note" class="field-note">非 Anthropic provider 统一走 OpenAI 兼容接口。</small>
+              <small id="api-base-url-note" class="field-note">OpenAI-compatible provider 使用 Base URL；Google AI Studio 和 Anthropic 走官方接口。</small>
             </label>
           </div>
 
@@ -245,7 +247,7 @@
                 <button id="clear-reference-image-btn" class="button button-ghost" type="button">清除参考图</button>
               </div>
             </div>
-            <small id="reference-image-status" class="field-note">不传图时只按文字捏脸；传图时 Gemini 会先读图，再和文字指令一起规划 Blendshape。</small>
+            <small id="reference-image-status" class="field-note">不传图时只按文字捏脸；传图时会把图片和文字指令同一轮发送给当前模型。</small>
           </div>
 
           <div class="button-row">
@@ -366,9 +368,9 @@
           <div class="panel-head">
             <div>
               <p class="panel-kicker">视觉质检模块</p>
-              <h2>截图预览与 Gemini Vision</h2>
+              <h2>截图预览与识图分析</h2>
             </div>
-            <span id="vision-status-chip" class="panel-chip">未审核</span>
+            <span id="vision-status-chip" class="panel-chip">未分析</span>
           </div>
 
           <!-- 视角 Tab 栏 -->
@@ -392,11 +394,11 @@
           <div class="button-row">
             <button id="capture-screenshot-btn" class="button">捕获截图</button>
             <button id="capture-multi-btn" class="button button-ghost">多视角截图</button>
-            <button id="audit-vision-btn" class="button button-accent">Gemini Vision 审核</button>
-            <button id="audit-multi-btn" class="button button-ghost">多图聚合审核</button>
+            <button id="audit-vision-btn" class="button button-accent">识图分析</button>
+            <button id="audit-multi-btn" class="button button-ghost">多图聚合分析</button>
           </div>
 
-          <div id="vision-result" class="stack-list empty-state">审核结果会显示在这里</div>
+          <div id="vision-result" class="stack-list empty-state">识图分析结果会显示在这里</div>
         </section>
 
         <section class="panel span-12">
@@ -412,6 +414,6 @@
       </main>
     </div>
 
-    <script src="/dashboard/app.js?v=20260508-direct-tools-reference-image"></script>
+    <script src="/dashboard/app.js?v=20260509-provider-sceneview"></script>
   </body>
 </html>

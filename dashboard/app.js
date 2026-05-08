@@ -1,10 +1,10 @@
 const PROVIDER_PRESETS = {
   gemini: {
-    providerLabel: "Gemini",
-    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    providerLabel: "Google AI Studio",
+    base_url: "",
     model: "gemini-2.5-flash",
-    authHeader: "Authorization: Bearer",
-    usesBaseUrl: true,
+    authHeader: "API key",
+    usesBaseUrl: false,
   },
   deepseek: {
     providerLabel: "DeepSeek",
@@ -33,6 +33,20 @@ const PROVIDER_PRESETS = {
     model: "claude-opus-4-6",
     authHeader: "x-api-key",
     usesBaseUrl: false,
+  },
+  ollama: {
+    providerLabel: "Ollama",
+    base_url: "http://127.0.0.1:11434/v1",
+    model: "llama3.2",
+    authHeader: "optional",
+    usesBaseUrl: true,
+  },
+  vertexai: {
+    providerLabel: "Google Vertex AI",
+    base_url: "",
+    model: "gemini-2.5-flash",
+    authHeader: "ADC",
+    usesBaseUrl: true,
   },
   custom: {
     providerLabel: "自定义",
@@ -68,6 +82,7 @@ const state = {
   referenceImageName: "",
   referenceImagePath: "",
   lastAiChanges: [],
+  lastAiProof: null,
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -117,6 +132,7 @@ function cacheRefs() {
     "api-key-label",
     "api-key-note",
     "api-base-url-field",
+    "api-base-url-label",
     "api-base-url",
     "api-base-url-note",
     "config-save-status",
@@ -228,10 +244,10 @@ function bindEvents() {
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
-  refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "审核中...", auditVision));
-  refs["audit-multi-btn"].addEventListener("click", () => runButtonTask("audit-multi-btn", "聚合审核中...", auditMultiVision));
+  refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "分析中...", auditVision));
+  refs["audit-multi-btn"].addEventListener("click", () => runButtonTask("audit-multi-btn", "聚合分析中...", auditMultiVision));
   refs["clear-logs-btn"].addEventListener("click", clearLogView);
-  refs["blendshape-search"].addEventListener("input", renderBlendshapeList);
+  refs["blendshape-search"].addEventListener("input", onBlendshapeSearchChanged);
   
   if (refs["vision-angle-tabs"]) {
     refs["vision-angle-tabs"].addEventListener("click", onVisionAngleTabClick);
@@ -391,20 +407,36 @@ function applyApiConfigPayload(payload, preserveDraft) {
 function applyProviderFieldVisibility(provider) {
   const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.gemini;
   const isAnthropic = provider === "anthropic";
-  refs["api-key-label"].textContent = isAnthropic ? "API Key（x-api-key header）" : "API Key（Bearer token）";
-  refs["api-key-note"].textContent = isAnthropic
-    ? "Anthropic 直接走官方端点，不显示 Base URL。"
-    : "配置会保存到本地 config.json，并立即热更新。";
-  refs["api-base-url-field"].classList.toggle("hidden", isAnthropic);
-  refs["api-base-url-note"].textContent = isAnthropic
-    ? "Anthropic 走官方端点。"
-    : "非 Anthropic provider 统一走 OpenAI 兼容接口。";
+  const isGemini = provider === "gemini";
+  const isOllama = provider === "ollama";
+  const isVertex = provider === "vertexai";
+  const hideBaseField = isAnthropic || isGemini;
+
+  refs["api-key-label"].textContent =
+    isAnthropic ? "API Key（x-api-key header）"
+      : isGemini ? "API Key（Google AI Studio）"
+      : isOllama ? "API Key（可留空）"
+      : isVertex ? "认证（ADC / gcloud）"
+      : "API Key（Bearer token）";
+  refs["api-key-note"].textContent =
+    isVertex ? "Vertex AI 使用本机 Google Application Default Credentials；这里可留空。"
+      : isOllama ? "本地 Ollama 默认不校验 API Key；如代理要求密钥再填写。"
+      : "配置会保存到本地 config.json，并立即热更新。";
+  refs["api-base-url-field"].classList.toggle("hidden", hideBaseField);
+  refs["api-base-url-label"].textContent = isVertex ? "Project / Location" : "Base URL";
+  refs["api-base-url"].placeholder = isVertex ? "project=my-gcp-project;location=us-central1" : "https://api.example.com/v1";
+  refs["api-base-url-note"].textContent =
+    isAnthropic ? "Anthropic 走官方端点。"
+      : isGemini ? "Google AI Studio 走 google-genai 官方接口，不需要 Base URL。"
+      : isVertex ? "Vertex AI 不使用 Base URL；这里填写 project/location，或使用 GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION。"
+      : isOllama ? "Ollama 使用 OpenAI-compatible /v1 接口，默认 http://127.0.0.1:11434/v1。"
+      : "该 provider 使用 OpenAI-compatible 接口。";
   refs["api-model-input"].placeholder = preset.model || "model-name";
   const modelCount = (state.modelOptionsByProvider[provider] || []).length;
   refs["api-model-note"].textContent = modelCount
     ? `已缓存 ${modelCount} 个模型，可重新读取刷新。`
-    : "输入 API Key 后点击“读取模型列表”。";
-  if (isAnthropic) {
+    : (isOllama || isVertex ? "确认本地服务或 Vertex 认证后点击“读取模型列表”。" : "输入 API Key 后点击“读取模型列表”。");
+  if (hideBaseField) {
     refs["api-base-url"].value = "";
   } else if (!refs["api-base-url"].value.trim()) {
     refs["api-base-url"].value = preset.base_url;
@@ -577,7 +609,7 @@ function updateReferenceImageStatus() {
   } else if (state.referenceImagePath) {
     refs["reference-image-status"].textContent = `将使用参考图：${state.referenceImagePath}`;
   } else {
-    refs["reference-image-status"].textContent = "不传图时只按文字捏脸；传图时 Gemini 会先读图，再和文字指令一起规划 Blendshape。";
+    refs["reference-image-status"].textContent = "不传图时只按文字捏脸；传图时会把图片和文字指令同一轮发送给当前模型。";
   }
 }
 
@@ -702,28 +734,31 @@ async function loadBlendshapes() {
     state.blendshapeWorking[key] = Number(item.currentWeight || 0);
   }
   renderBlendshapeList();
-  refs["summary-output"].textContent = `已加载 ${state.blendshapes.length} 个 Blendshape`;
+  refs["summary-output"].textContent = `已加载 ${state.blendshapes.length} 个脸部 Blendshape`;
 }
 
 function renderBlendshapeList() {
-  const keyword = refs["blendshape-search"].value.trim().toLowerCase();
+  const keyword = refs["blendshape-search"].value.trim();
+  const searchTokens = tokenizeBlendshapeSearch(keyword);
   const filtered = state.blendshapes.filter((item) => {
-    if (!keyword) {
+    if (!searchTokens.length) {
       return true;
     }
-    return [
-      item.blendshapeName,
-      item.rendererName,
-      item.rendererPath,
-      item.meshName,
-    ].some((value) => String(value || "").toLowerCase().includes(keyword));
+    const haystack = buildBlendshapeSearchText(item);
+    const compactHaystack = compactSearchText(haystack);
+    return searchTokens.every((token) => haystack.includes(token) || compactHaystack.includes(compactSearchText(token)));
   });
 
   refs["blendshape-count-chip"].textContent = `${filtered.length} 个 Blendshape`;
   refs["pending-count"].textContent = `${collectPendingAdjustments().length} 项`;
 
+  if (!state.blendshapes.length) {
+    refs["blendshape-list"].innerHTML = '<div class="empty-state">还没有加载 Blendshape，先点“加载 Blendshape”。</div>';
+    return;
+  }
+
   if (!filtered.length) {
-    refs["blendshape-list"].innerHTML = '<div class="empty-state">没有匹配到 Blendshape</div>';
+    refs["blendshape-list"].innerHTML = `<div class="empty-state">没有匹配到 Blendshape：${escapeHtml(keyword)}</div>`;
     return;
   }
 
@@ -759,6 +794,64 @@ function renderBlendshapeList() {
   refs["blendshape-list"].querySelectorAll(".blendshape-number").forEach((input) => {
     input.addEventListener("input", () => updateBlendshapeValue(input.dataset.rendererPath, input.dataset.blendshapeName, Number(input.value), input));
   });
+}
+
+function onBlendshapeSearchChanged() {
+  renderBlendshapeList();
+  const keyword = refs["blendshape-search"].value.trim();
+  if (keyword) {
+    refs["summary-output"].textContent = `正在搜索 Blendshape：${keyword}`;
+  }
+}
+
+function tokenizeBlendshapeSearch(keyword) {
+  return normalizeSearchText(keyword)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function buildBlendshapeSearchText(item) {
+  const rawFields = [
+    item.blendshapeName,
+    item.rendererName,
+    item.rendererPath,
+    item.meshName,
+  ].join(" ");
+  return normalizeSearchText(`${rawFields} ${semanticBlendshapeAliases(rawFields)}`);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[_\-./\\:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactSearchText(value) {
+  return normalizeSearchText(value).replace(/\s+/g, "");
+}
+
+function semanticBlendshapeAliases(value) {
+  const text = String(value || "").toLowerCase();
+  const aliases = [];
+  const add = (terms, words) => {
+    if (terms.some((term) => text.includes(term))) {
+      aliases.push(words);
+    }
+  };
+
+  add(["eye", "pupil", "iris", "blink", "まばたき", "瞳", "目"], "眼 眼睛 眼球 瞳孔 眨眼 睁眼 闭眼 大眼 小眼");
+  add(["brow", "eyebrow", "眉"], "眉 眉毛 眉形 眉头 眉尾");
+  add(["mouth", "lip", "smile", "teeth", "口", "唇"], "嘴 嘴巴 口 唇 微笑 笑 开口 闭嘴");
+  add(["jaw", "chin", "cheek", "face", "morph", "round", "narrow", "顎"], "脸 脸型 脸颊 下巴 下颚 圆脸 瘦脸 窄脸 捏脸");
+  add(["nose", "鼻"], "鼻 鼻子 鼻梁");
+  add(["ear", "耳"], "耳 耳朵");
+  add(["tongue", "舌"], "舌 舌头");
+  add(["hair", "髪", "髮"], "头发 刘海 发型");
+  return aliases.join(" ");
 }
 
 function updateBlendshapeValue(rendererPath, blendshapeName, value, sourceElement) {
@@ -845,7 +938,8 @@ async function runAiPipeline() {
   applyPlanToBlendshapeState(payload.plan);
   state.undoDepth = payload.undoDepth || state.undoDepth;
   state.lastAiChanges = payload.changePreview || [];
-  renderAiChangePreview(state.lastAiChanges, payload.referenceImage);
+  state.lastAiProof = payload.visualProof || null;
+  renderAiChangePreview(state.lastAiChanges, payload.referenceImage, payload.verifiedChanges, state.lastAiProof);
   refs["summary-output"].textContent = payload.summary || payload.preview || "AI 执行完成";
 }
 
@@ -858,7 +952,7 @@ function applyPlanToBlendshapeState(plan) {
   renderBlendshapeList();
 }
 
-function renderAiChangePreview(changes, referenceImage) {
+function renderAiChangePreview(changes, referenceImage, verifiedChanges = [], visualProof = null) {
   const items = Array.isArray(changes) ? changes : [];
   refs["llm-change-count"].textContent = `${items.length} 项`;
   refs["llm-change-panel"].classList.remove("hidden");
@@ -871,13 +965,25 @@ function renderAiChangePreview(changes, referenceImage) {
   const referenceLine = referenceImage?.imagePath
     ? `<div class="change-reference">参考图：${escapeHtml(referenceImage.imagePath)}</div>`
     : "";
-  refs["llm-change-list"].innerHTML = `${referenceLine}${items.map((item) => {
+  const verificationByKey = new Map((Array.isArray(verifiedChanges) ? verifiedChanges : []).map((item) => [
+    blendshapeKey(item.rendererPath || "", item.blendshapeName || ""),
+    item,
+  ]));
+  const proofHtml = renderAiProofStrip(visualProof);
+  refs["llm-change-list"].innerHTML = `${referenceLine}${proofHtml}${items.map((item) => {
+    const verified = verificationByKey.get(blendshapeKey(item.rendererPath || "", item.blendshapeName || ""));
     const previous = Number(item.previousWeight ?? 0);
     const target = Number(item.targetWeight ?? 0);
     const delta = Number(item.delta ?? target - previous);
     const direction = delta >= 0 ? "+" : "";
+    const actual = verified?.actualWeight;
+    const difference = verified?.difference;
+    const hasActual = Number.isFinite(Number(actual));
+    const verificationLabel = verified
+      ? (verified.verified ? "Unity 已回读命中" : verified.verificationStatus === "unreadable" ? "Unity 回读失败" : "Unity 回读未吻合")
+      : "等待 Unity 回读";
     return `
-      <article class="change-row">
+      <article class="change-row ${verified?.verified ? "change-verified" : verified ? "change-unverified" : ""}">
         <div class="change-head">
           <strong>${escapeHtml(item.blendshapeName || "")}</strong>
           <span>${previous.toFixed(1)} -> ${target.toFixed(1)} (${direction}${delta.toFixed(1)})</span>
@@ -886,10 +992,44 @@ function renderAiChangePreview(changes, referenceImage) {
         <p>${escapeHtml(item.reason || "")}</p>
         <div class="change-meta">
           <span class="meta-chip">confidence ${Number(item.confidence ?? 0).toFixed(2)}</span>
+          <span class="meta-chip verification-chip">${escapeHtml(verificationLabel)}</span>
+          ${hasActual ? `<span class="meta-chip">Unity 实际 ${Number(actual).toFixed(1)}</span>` : ""}
+          ${Number.isFinite(Number(difference)) ? `<span class="meta-chip">误差 ${Number(difference).toFixed(2)}</span>` : ""}
         </div>
       </article>
     `;
   }).join("")}`;
+}
+
+function renderAiProofStrip(visualProof) {
+  const before = visualProof?.before;
+  const after = visualProof?.after;
+  const errors = Array.isArray(visualProof?.errors) ? visualProof.errors : [];
+  if (!before?.imageUrl && !after?.imageUrl && !errors.length) {
+    return "";
+  }
+
+  const imageCard = (label, item) => item?.imageUrl ? `
+    <figure class="proof-card">
+      <img src="${item.imageUrl}?t=${Date.now()}" alt="${escapeHtml(label)}">
+      <figcaption>${escapeHtml(label)}</figcaption>
+    </figure>
+  ` : "";
+
+  const errorHtml = errors.length
+    ? `<div class="proof-error">${errors.map((item) => `${escapeHtml(item.stage || "proof")}: ${escapeHtml(item.error || "")}`).join("<br>")}</div>`
+    : "";
+
+  return `
+    <div class="proof-block">
+      <div class="proof-title">捏脸前后对比</div>
+      <div class="proof-grid">
+        ${imageCard("执行前", before)}
+        ${imageCard("执行后", after)}
+      </div>
+      ${errorHtml}
+    </div>
+  `;
 }
 
 async function scanClothes() {
@@ -1086,7 +1226,7 @@ async function captureScreenshot() {
   });
   renderScreenshot(payload.imageUrl);
   refs["vision-result"].innerHTML = `<div class="info-card"><strong>截图已更新</strong><span>${escapeHtml(payload.imagePath)}</span></div>`;
-  refs["vision-status-chip"].textContent = "待审核";
+  refs["vision-status-chip"].textContent = "待分析";
 }
 
 function renderScreenshot(imageUrl) {
@@ -1176,7 +1316,7 @@ async function captureMultiScreenshot() {
     renderScreenshot(state.multiScreenshots[0].imageUrl);
     renderMultiThumbs();
     refs["vision-result"].innerHTML = `<div class="info-card"><strong>已捕获多视角截图</strong><span>共 ${state.multiScreenshots.length} 张</span></div>`;
-    refs["vision-status-chip"].textContent = "待审核";
+  refs["vision-status-chip"].textContent = "待分析";
   }
 }
 
@@ -1190,12 +1330,25 @@ function renderMultiThumbs() {
   container.innerHTML = state.multiScreenshots.map((item, i) => `
     <div class="vision-thumb-card" data-index="${i}">
       <img src="${item.imageUrl}?t=${Date.now()}" alt="thumb">
-      <div class="thumb-label">${escapeHtml(item.angle)}</div>
+      <div class="thumb-label">
+        <strong>${escapeHtml(formatAngleLabel(item.angle))}</strong>
+        <span>yaw ${Number(item.rotation?.yaw ?? item.capture?.yaw ?? 0).toFixed(0)}°</span>
+      </div>
     </div>
   `).join("");
   container.querySelectorAll(".vision-thumb-card").forEach((card) => {
     card.addEventListener("click", () => showMultiScreenshot(Number(card.dataset.index)));
   });
+}
+
+function formatAngleLabel(angle) {
+  const labels = {
+    front: "正面",
+    side_left: "左侧",
+    side_right: "右侧",
+    back: "背面",
+  };
+  return labels[angle] || angle || "视角";
 }
 
 function showMultiScreenshot(index) {
@@ -1228,7 +1381,7 @@ async function auditMultiVision() {
   
   let html = `
     <article class="info-card ${isPass ? "result-pass" : "result-fail"}">
-      <strong>聚合审核结论: ${isPass ? "通过" : "穿模风险"}</strong>
+      <strong>聚合分析结论: ${isPass ? "通过" : "穿模风险"}</strong>
     </article>
   `;
   
@@ -1323,7 +1476,7 @@ function readApiForm(providerOverride = refs["provider-select"].value) {
   return {
     provider,
     api_key: refs["api-key-input"].value.trim(),
-    base_url: provider === "anthropic" ? "" : (refs["api-base-url"].value.trim() || preset.base_url),
+    base_url: (provider === "anthropic" || provider === "gemini") ? "" : (refs["api-base-url"].value.trim() || preset.base_url),
     model: readSelectedModel() || preset.model,
   };
 }

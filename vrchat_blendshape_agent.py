@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -23,13 +24,43 @@ DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+DEFAULT_OLLAMA_MODEL = "llama3.2"
+DEFAULT_VERTEX_AI_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_VERTEX_AI_BASE_URL = ""
 DEFAULT_CUSTOM_BASE_URL = ""
 DEFAULT_LLM_PROVIDER = "gemini"
-SUPPORTED_LLM_PROVIDERS = ("gemini", "deepseek", "openai", "openrouter", "anthropic", "custom")
+SUPPORTED_LLM_PROVIDERS = (
+    "gemini",
+    "deepseek",
+    "openai",
+    "openrouter",
+    "anthropic",
+    "ollama",
+    "vertexai",
+    "custom",
+)
+PROVIDER_ALIASES = {
+    "google": "gemini",
+    "google_ai": "gemini",
+    "googleai": "gemini",
+    "google-ai": "gemini",
+    "google_ai_studio": "gemini",
+    "google-ai-studio": "gemini",
+    "ai_studio": "gemini",
+    "aistudio": "gemini",
+    "google_vertex": "vertexai",
+    "google-vertex": "vertexai",
+    "google_vertex_ai": "vertexai",
+    "google-vertex-ai": "vertexai",
+    "vertex": "vertexai",
+    "vertex_ai": "vertexai",
+    "vertex-ai": "vertexai",
+}
 
 
 class BlendshapeAdjustment(BaseModel):
@@ -350,6 +381,8 @@ def get_provider_defaults(provider: str) -> dict[str, str]:
         "openai": {"model": DEFAULT_OPENAI_MODEL, "base_url": DEFAULT_OPENAI_BASE_URL},
         "openrouter": {"model": DEFAULT_OPENROUTER_MODEL, "base_url": DEFAULT_OPENROUTER_BASE_URL},
         "anthropic": {"model": DEFAULT_ANTHROPIC_MODEL, "base_url": ""},
+        "ollama": {"model": DEFAULT_OLLAMA_MODEL, "base_url": DEFAULT_OLLAMA_BASE_URL},
+        "vertexai": {"model": DEFAULT_VERTEX_AI_MODEL, "base_url": DEFAULT_VERTEX_AI_BASE_URL},
         "custom": {"model": "", "base_url": DEFAULT_CUSTOM_BASE_URL},
     }
     return defaults[normalized]
@@ -362,12 +395,15 @@ def default_api_key_env_for_provider(provider: str) -> str:
         "openai": "OPENAI_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
+        "ollama": "OLLAMA_API_KEY",
+        "vertexai": "GOOGLE_APPLICATION_CREDENTIALS",
         "custom": "LLM_API_KEY",
     }[normalize_provider_name(provider)]
 
 
 def normalize_provider_name(provider: str | None) -> str:
-    normalized = str(provider or DEFAULT_LLM_PROVIDER).strip().lower()
+    normalized = str(provider or DEFAULT_LLM_PROVIDER).strip().lower().replace(" ", "_")
+    normalized = PROVIDER_ALIASES.get(normalized, normalized)
     if normalized not in SUPPORTED_LLM_PROVIDERS:
         raise RuntimeError(
             f"Unsupported LLM provider '{provider}'. Supported values: {', '.join(SUPPORTED_LLM_PROVIDERS)}."
@@ -376,11 +412,16 @@ def normalize_provider_name(provider: str | None) -> str:
 
 
 def normalize_base_url(base_url: Any, provider: str, default_base_url: str) -> str:
-    if normalize_provider_name(provider) == "anthropic":
+    normalized = normalize_provider_name(provider)
+    if normalized in {"anthropic", "gemini"}:
         return ""
 
     resolved = str(base_url if base_url is not None else default_base_url).strip()
     return resolved.rstrip("/")
+
+
+def provider_requires_api_key(provider: str) -> bool:
+    return normalize_provider_name(provider) not in {"ollama", "vertexai"}
 
 
 def export_blendshapes(settings: Settings) -> dict[str, Any]:
@@ -581,16 +622,355 @@ def build_planning_payload(export_payload: dict[str, Any], selected_avatar: Sele
     }
 
 
-def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], instruction: str) -> BlendshapePlan:
-    if not settings.llm_api_key:
+FACE_BLENDSHAPE_TERMS = (
+    "eye",
+    "eyelid",
+    "blink",
+    "pupil",
+    "iris",
+    "hitomi",
+    "brow",
+    "eyebrow",
+    "mouth",
+    "lip",
+    "smile",
+    "jaw",
+    "chin",
+    "cheek",
+    "face",
+    "morph",
+    "nose",
+    "tongue",
+    "tooth",
+    "teeth",
+    "fang",
+    "giza",
+    "ear",
+    "まばたき",
+    "瞳",
+    "目",
+    "眉",
+    "口",
+    "唇",
+    "顎",
+    "頬",
+    "顔",
+    "鼻",
+    "舌",
+    "歯",
+    "耳",
+)
+
+NON_FACE_BLENDSHAPE_TERMS = (
+    "breast",
+    "bust",
+    "chest",
+    "waist",
+    "hip",
+    "hips",
+    "butt",
+    "leg",
+    "arm",
+    "hand",
+    "foot",
+    "feet",
+    "body size",
+    "shoulder",
+    "elbow",
+    "knee",
+    "thigh",
+    "belly",
+    "navel",
+    "nipple",
+    "panty",
+    "pants",
+    "orifice",
+    "genital",
+    "shrink",
+    "back-",
+    "adjust",
+    "ribbon",
+    "earring",
+    "necklace",
+    "accessory",
+    "hair",
+    "ahoge",
+    "bang",
+    "cloth",
+    "clothing",
+    "outfit",
+    "dress",
+    "skirt",
+    "sleeve",
+    "shoe",
+    "sock",
+    "tail",
+    "wing",
+    "胸",
+    "腰",
+    "尻",
+    "肩",
+    "膝",
+    "腹",
+    "臍",
+    "脚",
+    "腕",
+    "手",
+    "足",
+    "髪",
+    "髮",
+    "毛",
+    "服",
+    "衣",
+    "裙",
+    "靴",
+    "尾",
+    "調整",
+)
+
+FACE_RENDERER_CONTEXT_TERMS = (
+    "body",
+    "face",
+    "head",
+    "atama",
+    "avatar",
+    "facial",
+    "顔",
+    "頭",
+)
+
+NON_FACE_RENDERER_CONTEXT_TERMS = (
+    "costume",
+    "cloth",
+    "clothing",
+    "outfit",
+    "shirt",
+    "shorts",
+    "skirt",
+    "shoe",
+    "socks",
+    "hair",
+    "ahoge",
+    "accessory",
+    "bracelet",
+    "ribbon",
+    "earring",
+    "tail",
+    "wing",
+    "服",
+    "衣",
+    "裙",
+    "靴",
+    "髪",
+    "髮",
+    "毛",
+)
+
+VISEME_BLENDSHAPE_NAMES = (
+    "aa",
+    "ih",
+    "ou",
+    "ee",
+    "oh",
+    "ch",
+    "dd",
+    "e",
+    "ff",
+    "kk",
+    "nn",
+    "pp",
+    "rr",
+    "sil",
+    "ss",
+    "th",
+)
+
+FACIAL_TRACKING_BLENDSHAPE_TERMS = (
+    "vrc.",
+    "vrc_",
+    "viseme",
+    "lipsync",
+    "lip_sync",
+    "face_tracking",
+    "facetracking",
+    "tracking",
+    "arkit",
+    "blink",
+    "looking_",
+    "look_up",
+    "look_down",
+    "look_left",
+    "look_right",
+)
+
+ARKIT_TRACKING_COMPACT_NAMES = (
+    "eyeblinkleft",
+    "eyeblinkright",
+    "eyelookdownleft",
+    "eyelookdownright",
+    "eyelookinleft",
+    "eyelookinright",
+    "eyelookoutleft",
+    "eyelookoutright",
+    "eyelookupleft",
+    "eyelookupright",
+    "jawforward",
+    "jawleft",
+    "jawright",
+    "jawopen",
+    "mouthclose",
+    "mouthfunnel",
+    "mouthpucker",
+    "mouthleft",
+    "mouthright",
+    "mouthsmileleft",
+    "mouthsmileright",
+    "mouthfrownleft",
+    "mouthfrownright",
+    "mouthdimpleleft",
+    "mouthdimpleright",
+    "mouthstretchleft",
+    "mouthstretchright",
+    "mouthrolllower",
+    "mouthrollupper",
+    "mouthshruglower",
+    "mouthshrugupper",
+    "mouthpressleft",
+    "mouthpressright",
+    "mouthlowerdownleft",
+    "mouthlowerdownright",
+    "mouthupperupleft",
+    "mouthupperupright",
+    "browdownleft",
+    "browdownright",
+    "browinnerup",
+    "browouterupleft",
+    "browouterupright",
+    "cheekpuff",
+    "cheeksquintleft",
+    "cheeksquintright",
+    "nosesneerleft",
+    "nosesneerright",
+    "tongueout",
+)
+
+
+def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) -> dict[str, Any]:
+    filtered_avatars: list[dict[str, Any]] = []
+    renderer_count = 0
+    blendshape_count = 0
+
+    for avatar in export_payload.get("avatars") or []:
+        filtered_renderers: list[dict[str, Any]] = []
+        for renderer in avatar.get("renderers") or []:
+            filtered_blendshapes = [
+                blendshape
+                for blendshape in renderer.get("blendshapes") or []
+                if is_face_related_blendshape(renderer, blendshape)
+            ]
+            if not filtered_blendshapes:
+                continue
+
+            renderer_copy = dict(renderer)
+            renderer_copy["blendshapes"] = filtered_blendshapes
+            renderer_copy["blendshapeCount"] = len(filtered_blendshapes)
+            filtered_renderers.append(renderer_copy)
+            blendshape_count += len(filtered_blendshapes)
+
+        if filtered_renderers:
+            avatar_copy = dict(avatar)
+            avatar_copy["renderers"] = filtered_renderers
+            filtered_avatars.append(avatar_copy)
+            renderer_count += len(filtered_renderers)
+
+    payload = dict(export_payload)
+    payload["avatars"] = filtered_avatars
+    summary = dict(payload.get("summary") or {})
+    summary["avatarCount"] = len(filtered_avatars)
+    summary["rendererCount"] = renderer_count
+    summary["blendshapeCount"] = blendshape_count
+    payload["summary"] = summary
+    payload["planningFilter"] = {
+        "scope": "face",
+        "note": "Only face-related blendshapes are exposed to the natural-language face editor.",
+    }
+    return payload
+
+
+def is_face_related_blendshape(renderer: dict[str, Any], blendshape: dict[str, Any]) -> bool:
+    name_text = str(blendshape.get("name") or "").lower()
+    context_text = " ".join(
+        str(value or "")
+        for value in (
+            renderer.get("rendererName"),
+            renderer.get("rendererPath"),
+            renderer.get("relativeRendererPath"),
+            renderer.get("meshName"),
+        )
+    ).lower()
+    renderer_name = str(renderer.get("rendererName") or "").lower()
+    renderer_leaf = context_text.replace("\\", "/").split("/")[-1].strip()
+
+    if is_facial_tracking_blendshape_name(name_text):
+        return False
+
+    if any(term in name_text for term in NON_FACE_BLENDSHAPE_TERMS):
+        return False
+
+    renderer_is_face_candidate = (
+        not any(term in context_text for term in NON_FACE_RENDERER_CONTEXT_TERMS)
+        and (
+            renderer_name in {"body", "face", "head", "headmesh", "facemesh", "atama"}
+            or renderer_leaf in {"body", "face", "head", "headmesh", "facemesh", "atama"}
+            or any(term in context_text for term in ("face", "headmesh", "facemesh", "facial", "顔"))
+        )
+    )
+
+    if renderer_is_face_candidate and any(term in name_text for term in FACE_BLENDSHAPE_TERMS):
+        return True
+
+    if any(term in context_text for term in FACE_RENDERER_CONTEXT_TERMS):
+        return renderer_is_face_candidate and not any(term in context_text for term in NON_FACE_BLENDSHAPE_TERMS)
+
+    return False
+
+
+def is_facial_tracking_blendshape_name(name_text: str) -> bool:
+    normalized = name_text.replace("\\", "/").replace("-", "_").replace(".", "_")
+    compact = "".join(ch for ch in normalized if ch.isalnum())
+    tokens = [token for token in normalized.split("_") if token]
+    if any(term in normalized for term in FACIAL_TRACKING_BLENDSHAPE_TERMS):
+        return True
+    if "vrc" in tokens and "v" in tokens:
+        return True
+    if normalized.startswith("vrc_v_"):
+        return True
+    return (
+        normalized in VISEME_BLENDSHAPE_NAMES
+        or normalized.startswith("vrc.v_")
+        or compact in ARKIT_TRACKING_COMPACT_NAMES
+    )
+
+
+def create_blendshape_plan(
+    settings: Settings,
+    export_payload: dict[str, Any],
+    instruction: str,
+    reference_image_path: str | Path | None = None,
+) -> BlendshapePlan:
+    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
         provider_name = provider_display_name(settings.llm_provider)
         raise RuntimeError(
             f"{provider_name} API key is empty. Set {settings.llm_api_key_env} or use --plan-json for a local MVP run."
         )
 
-    prompt = build_planner_prompt(export_payload, instruction)
+    prompt = build_planner_prompt(
+        export_payload,
+        instruction,
+        has_reference_image=bool(reference_image_path),
+    )
 
-    raw_response_text = request_llm_plan(settings, prompt)
+    raw_response_text = request_llm_plan(settings, prompt, reference_image_path=reference_image_path)
     raw_json = extract_json_block(raw_response_text)
     if not raw_json:
         raise RuntimeError(
@@ -598,24 +978,129 @@ def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], i
         )
 
     try:
-        return BlendshapePlan.model_validate(json.loads(raw_json))
+        return filter_plan_by_instruction_relevance(
+            BlendshapePlan.model_validate(json.loads(raw_json)),
+            instruction,
+        )
     except (json.JSONDecodeError, ValidationError) as exc:
         raise RuntimeError(
             f"{provider_display_name(settings.llm_provider)} returned invalid blendshape JSON:\n{raw_response_text}"
         ) from exc
 
 
-def request_llm_plan(settings: Settings, prompt: str) -> str:
+def filter_plan_by_instruction_relevance(plan: BlendshapePlan, instruction: str) -> BlendshapePlan:
+    allowed_categories = infer_instruction_categories(instruction)
+    if not allowed_categories:
+        return plan
+
+    kept: list[BlendshapeAdjustment] = []
+    dropped: list[BlendshapeAdjustment] = []
+    for adjustment in plan.adjustments:
+        adjustment_categories = infer_adjustment_categories(adjustment)
+        if adjustment_categories and adjustment_categories.isdisjoint(allowed_categories):
+            dropped.append(adjustment)
+        else:
+            kept.append(adjustment)
+
+    if not dropped:
+        return plan
+
+    warnings = list(plan.warnings)
+    dropped_names = ", ".join(f"{item.renderer_path}::{item.blendshape_name}" for item in dropped[:8])
+    warnings.append(
+        "Dropped unrelated planner adjustments before Unity execution because they did not match the user instruction: "
+        + dropped_names
+    )
+    if not kept:
+        warnings.append("No instruction-relevant blendshape adjustments remained after safety filtering.")
+
+    return BlendshapePlan(summary=plan.summary, warnings=warnings, adjustments=kept)
+
+
+def infer_instruction_categories(instruction: str) -> set[str]:
+    text = str(instruction or "").lower()
+    categories: set[str] = set()
+
+    def has_any(terms: tuple[str, ...]) -> bool:
+        return any(term in text for term in terms)
+
+    if has_any(("eye", "眼", "眯", "睁", "瞳", "目", "blink")):
+        categories.add("eye")
+    if has_any(("brow", "眉")):
+        categories.add("brow")
+    if has_any(("mouth", "lip", "smile", "嘴", "口", "唇", "笑")):
+        categories.add("mouth")
+    if has_any(("face", "jaw", "chin", "cheek", "脸", "下巴", "下颚", "脸颊", "圆", "瘦", "捏脸")):
+        categories.add("face")
+    if has_any(("tooth", "teeth", "fang", "giza", "牙", "齿")):
+        categories.add("teeth")
+    if has_any(("hair", "ahoge", "头发", "呆毛", "刘海", "发型", "髪", "髮")):
+        categories.add("hair")
+    if has_any(("breast", "bust", "chest", "body", "胸", "身材", "身体", "体型")):
+        categories.add("body")
+    if has_any(("cloth", "clothing", "outfit", "衣", "裙", "鞋", "帽", "配饰")):
+        categories.add("clothing")
+    if has_any(("expression", "表情", "温柔", "可爱", "柔和", "自然")):
+        categories.update({"eye", "brow", "mouth", "face"})
+
+    return categories
+
+
+def infer_adjustment_categories(adjustment: BlendshapeAdjustment) -> set[str]:
+    text = " ".join(
+        (
+            adjustment.renderer_path,
+            adjustment.blendshape_name,
+            adjustment.reason,
+        )
+    ).lower()
+    categories: set[str] = set()
+
+    def has_any(terms: tuple[str, ...]) -> bool:
+        return any(term in text for term in terms)
+
+    if has_any(("eye", "pupil", "iris", "blink", "tare", "tsuri", "まばたき", "瞳", "目")):
+        categories.add("eye")
+    if has_any(("brow", "eyebrow", "眉")):
+        categories.add("brow")
+    if has_any(("mouth", "lip", "smile", "口", "唇")):
+        categories.add("mouth")
+    if has_any(("jaw", "chin", "cheek", "face", "morph", "round", "narrow", "顎")):
+        categories.add("face")
+    if has_any(("tooth", "teeth", "fang", "giza", "牙", "齿")):
+        categories.add("teeth")
+        categories.discard("mouth")
+    if has_any(("hair", "ahoge", "髪", "髮", "head")):
+        categories.add("hair")
+    if has_any(("breast", "bust", "chest", "body size", "胸")):
+        categories.add("body")
+    if has_any(("cloth", "clothing", "outfit", "dress", "skirt", "衣", "服", "裙", "靴", "shoe")):
+        categories.add("clothing")
+
+    return categories
+
+
+def request_llm_plan(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+) -> str:
     provider = normalize_provider_name(settings.llm_provider)
     if provider == "gemini":
-        return request_gemini_plan(settings, prompt)
+        return request_gemini_plan(settings, prompt, reference_image_path=reference_image_path)
+    if provider == "vertexai":
+        return request_vertex_ai_plan(settings, prompt, reference_image_path=reference_image_path)
     if provider == "anthropic":
-        return request_anthropic_plan(settings, prompt)
+        return request_anthropic_plan(settings, prompt, reference_image_path=reference_image_path)
 
-    return request_openai_compatible_plan(settings, prompt)
+    return request_openai_compatible_plan(settings, prompt, reference_image_path=reference_image_path)
 
 
-def request_gemini_plan(settings: Settings, prompt: str) -> str:
+def request_gemini_plan(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+) -> str:
     try:
         from google import genai
     except ImportError as exc:
@@ -623,18 +1108,69 @@ def request_gemini_plan(settings: Settings, prompt: str) -> str:
             "The 'google-genai' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
+    contents: Any = prompt
+    if reference_image_path:
+        from google.genai import types
+
+        image_part = build_google_genai_image_part(types, reference_image_path)
+        contents = [prompt, image_part]
+
     client = genai.Client(api_key=settings.llm_api_key)
     try:
         response = client.models.generate_content(
             model=settings.llm_model,
-            contents=prompt,
+            contents=contents,
         )
         return getattr(response, "text", "") or ""
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Gemini request failed for model {settings.llm_model}: {exc}") from exc
+        raise RuntimeError(format_multimodal_error(exc, settings, bool(reference_image_path), "Gemini")) from exc
 
 
-def request_openai_compatible_plan(settings: Settings, prompt: str) -> str:
+def request_vertex_ai_plan(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+) -> str:
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'google-genai' package is not installed. Run pip install -r requirements.txt and try again."
+        ) from exc
+
+    project, location = resolve_vertex_ai_project_location(settings.llm_base_url)
+    contents: Any = prompt
+    if reference_image_path:
+        from google.genai import types
+
+        image_part = build_google_genai_image_part(types, reference_image_path)
+        contents = [prompt, image_part]
+
+    try:
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = client.models.generate_content(
+            model=settings.llm_model,
+            contents=contents,
+        )
+        return getattr(response, "text", "") or ""
+    except Exception as exc:  # noqa: BLE001
+        detail = (
+            f"Google Vertex AI request failed for model {settings.llm_model} "
+            f"in project '{project}' / location '{location}': {exc}"
+        )
+        if reference_image_path:
+            detail = (
+                f"Google Vertex AI model '{settings.llm_model}' does not appear to support image input, "
+                f"or the selected Vertex endpoint rejected multimodal content.\nOriginal error: {exc}"
+            )
+        raise RuntimeError(detail) from exc
+
+
+def request_openai_compatible_plan(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+) -> str:
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
         raise RuntimeError(f"{provider_name} requires a Base URL for OpenAI-compatible requests.")
@@ -646,7 +1182,14 @@ def request_openai_compatible_plan(settings: Settings, prompt: str) -> str:
             "The 'openai' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    user_content: Any = prompt
+    if reference_image_path:
+        user_content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_path_to_data_url(reference_image_path)}},
+        ]
+
+    client = OpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
     try:
         response = client.chat.completions.create(
             model=settings.llm_model,
@@ -656,15 +1199,21 @@ def request_openai_compatible_plan(settings: Settings, prompt: str) -> str:
                     "role": "system",
                     "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
                 },
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ],
         )
         return extract_openai_message_text(response)
     except Exception as exc:  # noqa: BLE001
+        if reference_image_path:
+            raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
         raise RuntimeError(format_openai_compatible_error(exc, settings)) from exc
 
 
-def request_anthropic_plan(settings: Settings, prompt: str) -> str:
+def request_anthropic_plan(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+) -> str:
     try:
         import anthropic
     except ImportError as exc:
@@ -672,17 +1221,94 @@ def request_anthropic_plan(settings: Settings, prompt: str) -> str:
             "The 'anthropic' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
+    user_content: Any = prompt
+    if reference_image_path:
+        image_path = resolve_existing_image_path(reference_image_path)
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        user_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+                },
+            },
+        ]
+
     client = anthropic.Anthropic(api_key=settings.llm_api_key)
     try:
         response = client.messages.create(
             model=settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
             max_tokens=1400,
             system="You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": user_content}],
         )
         return extract_anthropic_message_text(response)
     except Exception as exc:  # noqa: BLE001
+        if reference_image_path:
+            raise RuntimeError(format_multimodal_error(exc, settings, True, "Anthropic")) from exc
         raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
+
+
+def resolve_existing_image_path(image_path: str | Path) -> Path:
+    resolved = Path(image_path).expanduser()
+    if not resolved.is_absolute():
+        resolved = Path.cwd() / resolved
+    resolved = resolved.resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise RuntimeError(f"Reference image file does not exist: {resolved}")
+    return resolved
+
+
+def image_path_to_data_url(image_path: str | Path) -> str:
+    resolved = resolve_existing_image_path(image_path)
+    mime_type = mimetypes.guess_type(str(resolved))[0] or "image/png"
+    encoded = base64.b64encode(resolved.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def build_google_genai_image_part(types_module: Any, image_path: str | Path) -> Any:
+    resolved = resolve_existing_image_path(image_path)
+    mime_type = mimetypes.guess_type(str(resolved))[0] or "image/png"
+    return types_module.Part.from_bytes(data=resolved.read_bytes(), mime_type=mime_type)
+
+
+def resolve_vertex_ai_project_location(base_url: str) -> tuple[str, str]:
+    """Resolve Vertex AI project/location from env or a compact dashboard field.
+
+    The dashboard Base URL field is reused for Vertex metadata because Vertex
+    does not use an OpenAI-style endpoint. Supported values include
+    ``project=my-project;location=us-central1`` and ``my-project/us-central1``.
+    """
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GOOGLE_GENAI_PROJECT") or ""
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_GENAI_LOCATION") or "us-central1"
+    value = (base_url or "").strip()
+
+    if value:
+        parsed: dict[str, str] = {}
+        for part in value.replace(",", ";").split(";"):
+            if "=" not in part:
+                continue
+            key, raw_value = part.split("=", 1)
+            parsed[key.strip().lower()] = raw_value.strip()
+        if parsed:
+            project = parsed.get("project") or parsed.get("project_id") or project
+            location = parsed.get("location") or parsed.get("region") or location
+        elif "/" in value:
+            left, right = value.split("/", 1)
+            project = left.strip() or project
+            location = right.strip() or location
+        else:
+            project = value
+
+    if not project:
+        raise RuntimeError(
+            "Google Vertex AI requires a project id. Set GOOGLE_CLOUD_PROJECT or enter "
+            "project=<id>;location=<region> in the dashboard Vertex config field."
+        )
+    return project, location or "us-central1"
 
 
 def extract_openai_message_text(response: Any) -> str:
@@ -769,13 +1395,33 @@ def format_anthropic_error(exc: Exception, model: str) -> str:
     return f"Anthropic request failed for model '{model}' with HTTP {status_code}.\nOriginal error: {message}"
 
 
+def format_multimodal_error(exc: Exception, settings: Settings, has_image: bool, provider_name: str) -> str:
+    if not has_image:
+        status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None) or "unknown"
+        return (
+            f"{provider_name} request failed for model '{settings.llm_model}' with HTTP {status_code}.\n"
+            f"Original error: {str(exc).strip()}"
+        )
+
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None) or "unknown"
+    message = str(exc).strip()
+    return (
+        f"{provider_name} model '{settings.llm_model}' does not support image input, "
+        "or this provider endpoint rejected the text+image request.\n"
+        "Use a vision-capable model for reference-image face editing, or remove the reference image.\n"
+        f"HTTP {status_code}. Original error: {message}"
+    )
+
+
 def provider_display_name(provider: str) -> str:
     return {
-        "gemini": "Gemini",
+        "gemini": "Google AI Studio",
         "deepseek": "DeepSeek",
         "openai": "OpenAI",
         "openrouter": "OpenRouter",
         "anthropic": "Anthropic",
+        "ollama": "Ollama",
+        "vertexai": "Google Vertex AI",
         "custom": "Custom",
     }[normalize_provider_name(provider)]
 
@@ -795,7 +1441,11 @@ def read_plan_json(path: Path) -> BlendshapePlan:
         raise RuntimeError(f"Plan JSON does not match the expected schema: {path}") from exc
 
 
-def build_planner_prompt(export_payload: dict[str, Any], instruction: str) -> str:
+def build_planner_prompt(
+    export_payload: dict[str, Any],
+    instruction: str,
+    has_reference_image: bool = False,
+) -> str:
     schema = {
         "summary": "string",
         "warnings": ["string"],
@@ -811,6 +1461,13 @@ def build_planner_prompt(export_payload: dict[str, Any], instruction: str) -> st
         ],
     }
 
+    image_note = (
+        "A reference image is attached in this same request. Use the image and text together as the desired face/expression target. "
+        "Only translate visible facial style/expression cues into available face blendshapes; do not identify people or infer private traits.\n\n"
+        if has_reference_image
+        else ""
+    )
+
     return (
         "You are a VRChat avatar blendshape planning assistant.\n"
         "Task: read the exported blendshape list, semantically match the user's intent, and return a JSON-only plan.\n"
@@ -821,9 +1478,15 @@ def build_planner_prompt(export_payload: dict[str, Any], instruction: str) -> st
         "4. If naming is inconsistent, do your best semantic match and explain ambiguities in warnings.\n"
         "5. Prefer a small, high-quality set of edits. Usually 3 to 12 adjustments is enough.\n"
         "6. If there is no safe match, return an empty adjustments array and explain why in warnings.\n\n"
+        "7. Every adjustment must be directly supported by the user's instruction. Do not alter chest, body size, hair, teeth, "
+        "clothing, or accessories unless the instruction explicitly asks for those areas.\n"
+        "8. For face-expression requests, prefer eye, brow, cheek, jaw/face, mouth, and lip blendshapes. Do not use teeth/giza "
+        "blendshapes unless teeth are explicitly requested.\n\n"
+        f"{image_note}"
         f"Output JSON shape example: {json.dumps(schema, ensure_ascii=False)}\n\n"
-        f"User instruction: {instruction}\n\n"
-        f"Exported Unity / VRChat blendshape data:\n{json.dumps(export_payload, ensure_ascii=False, indent=2)}"
+        f"User instruction, authoritative: {instruction}\n\n"
+        f"Exported Unity / VRChat blendshape data:\n{json.dumps(export_payload, ensure_ascii=False, indent=2)}\n\n"
+        f"Before returning JSON, re-check that every adjustment directly answers this exact instruction: {instruction}"
     )
 
 

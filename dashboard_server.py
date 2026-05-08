@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import subprocess
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ from vrchat_blendshape_agent import (
     create_blendshape_plan,
     execute_csharp,
     export_blendshapes,
+    filter_planning_payload_to_face_blendshapes,
+    is_face_related_blendshape,
     get_provider_defaults,
     invoke_unity_mcp,
     load_export_payload,
@@ -39,6 +42,7 @@ from vrchat_blendshape_agent import (
     normalize_base_url,
     normalize_provider_name,
     provider_display_name,
+    provider_requires_api_key,
     read_plan_json,
     render_csharp,
     render_preview,
@@ -254,7 +258,7 @@ class DashboardEventBus:
             self._clients.discard(websocket)
 
     def broadcast_from_sync(self, event_type: str, payload: Any) -> None:
-        if self._loop is None:
+        if self._loop is None or self._loop.is_closed():
             return
 
         asyncio.run_coroutine_threadsafe(self.broadcast(event_type, payload), self._loop)
@@ -711,6 +715,8 @@ def read_avatar_blendshapes_sync(request: AvatarBlendshapeListRequest) -> dict[s
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "selectedAvatar": serialize_selected_avatar(selected_avatar),
             "blendshapes": blendshapes,
+            "filterScope": "face",
+            "filterNote": "Only face-related blendshapes are shown for the face editor.",
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "blendshape", "Failed to load blendshape list.", {"error": str(exc)})
@@ -893,6 +899,7 @@ def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, A
             output_path=output_path,
             width=request.width,
             height=request.height,
+            avatar_path=request.avatar_path,
             set_rotation=False,
         )
         image_path = payload.get("imagePath") or str(output_path)
@@ -910,7 +917,7 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
     try:
         image_path = request.image_path or DASHBOARD_RUNTIME.latest_screenshot_path
         if not image_path:
-            raise RuntimeError("No screenshot is available yet. Capture a screenshot before running Gemini Vision audit.")
+            raise RuntimeError("No screenshot is available yet. Capture a screenshot before running image analysis.")
 
         image_file = resolve_local_path(image_path)
         if not image_file.exists():
@@ -918,11 +925,11 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
 
         api_config = serialize_api_config(include_secret=True)
         if api_config.get("provider") != "gemini":
-            raise RuntimeError("Gemini Vision audit currently requires the dashboard provider to be set to Gemini.")
+            raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
 
         result = run_gemini_vision_audit(api_config, image_file)
         save_vision_audit_artifact("vision_audit.json", {"imagePath": str(image_file), "audit": result})
-        emit_log("success", "vision", "Gemini Vision audit completed.", {"status": result.get("status")})
+        emit_log("success", "vision", "Image analysis completed.", {"status": result.get("status")})
         return {
             "ok": True,
             "imagePath": str(image_file),
@@ -930,7 +937,7 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
             "audit": result,
         }
     except RuntimeError as exc:
-        emit_log("error", "vision", "Failed to run Gemini Vision audit.", {"error": str(exc)})
+        emit_log("error", "vision", "Failed to run image analysis.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -1060,10 +1067,20 @@ def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> 
                 yaw=yaw,
                 roll=roll,
                 set_rotation=True,
+                avatar_path=request.avatar_path,
+                capture_scope="face",
             )
             image_path = payload.get("imagePath") or str(out_path)
             image_url = to_artifact_url(image_path)
-            captures.append({"angle": angle, "imagePath": image_path, "imageUrl": image_url})
+            captures.append(
+                {
+                    "angle": angle,
+                    "imagePath": image_path,
+                    "imageUrl": image_url,
+                    "rotation": {"pitch": pitch, "yaw": yaw, "roll": roll},
+                    "capture": payload,
+                }
+            )
 
         if captures:
             DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
@@ -1084,7 +1101,7 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
 
         api_config = serialize_api_config(include_secret=True)
         if api_config.get("provider") != "gemini":
-            raise RuntimeError("Gemini Vision audit currently requires the dashboard provider to be set to Gemini.")
+            raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
 
         results: list[dict[str, Any]] = []
         for path_str in image_paths:
@@ -1097,10 +1114,10 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
 
         overall_status = "clipping" if any(r.get("audit", {}).get("status") == "clipping" for r in results) else "pass"
         save_vision_audit_artifact("vision_audit_multi.json", {"overallStatus": overall_status, "results": results})
-        emit_log("success", "vision", "Multi-image Gemini Vision audit completed.", {"imageCount": len(results), "overallStatus": overall_status})
+        emit_log("success", "vision", "Multi-image analysis completed.", {"imageCount": len(results), "overallStatus": overall_status})
         return {"ok": True, "overallStatus": overall_status, "results": results}
     except RuntimeError as exc:
-        emit_log("error", "vision", "Failed to run multi-image Gemini Vision audit.", {"error": str(exc)})
+        emit_log("error", "vision", "Failed to run multi-image analysis.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -1110,7 +1127,15 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
         selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
         remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
-        planning_payload = build_planning_payload(export_payload, selected_avatar)
+        planning_payload = filter_planning_payload_to_face_blendshapes(
+            build_planning_payload(export_payload, selected_avatar)
+        )
+        face_blendshape_count = int((planning_payload.get("summary") or {}).get("blendshapeCount", 0) or 0)
+        if face_blendshape_count == 0:
+            raise RuntimeError(
+                "No face-related blendshapes were found for the selected avatar. "
+                "The natural-language face editor only exposes eye, brow, mouth, jaw/face, nose, tongue, teeth, ear, and VRC viseme blendshapes."
+            )
 
         emit_log(
             "info",
@@ -1121,6 +1146,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                 "mode": "execute" if execute else "plan",
                 "executionMode": "mock" if using_mock_execute else "live-unity",
                 "source": export_source,
+                "faceBlendshapeCount": face_blendshape_count,
             },
         )
 
@@ -1132,12 +1158,12 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             if not request.instruction:
                 raise RuntimeError("instruction is required unless a local plan_json path is provided.")
             reference_context = build_reference_image_context(request)
-            effective_instruction = enrich_instruction_with_reference_image(
-                settings=settings,
-                instruction=request.instruction,
-                reference_context=reference_context,
+            plan = create_blendshape_plan(
+                settings,
+                planning_payload,
+                request.instruction,
+                reference_image_path=reference_context.get("imagePath") if reference_context else None,
             )
-            plan = create_blendshape_plan(settings, planning_payload, effective_instruction)
             emit_log(
                 "info",
                 "pipeline",
@@ -1174,6 +1200,8 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
         preview = render_preview(selected_avatar, plan, export_source, using_mock_execute)
         csharp_code = render_csharp(plan)
         change_preview = build_plan_change_preview(plan, export_payload, selected_avatar)
+        visual_proof: dict[str, Any] | None = None
+        verified_changes: list[dict[str, Any]] = []
 
         result: McpResult | None = None
         summary: str | None = None
@@ -1184,10 +1212,28 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             elif using_mock_execute:
                 result = mock_execute_csharp(csharp_code, selected_avatar, export_source)
             else:
+                visual_proof = capture_blendshape_visual_proof(
+                    settings=settings,
+                    selected_avatar=selected_avatar,
+                    stage="before",
+                    current_proof=visual_proof,
+                )
                 direct_adjustments = build_direct_blendshape_adjustments_from_plan(plan)
                 undo_items = build_undo_items_from_change_preview(change_preview)
                 result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
                 push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+                time.sleep(0.15)
+                visual_proof = capture_blendshape_visual_proof(
+                    settings=settings,
+                    selected_avatar=selected_avatar,
+                    stage="after",
+                    current_proof=visual_proof,
+                )
+                verified_changes = verify_live_blendshape_changes(
+                    settings=settings,
+                    selected_avatar=selected_avatar,
+                    change_preview=change_preview,
+                )
             summary = render_summary(selected_avatar, plan, result, using_mock_execute)
             emit_log(
                 "success",
@@ -1214,6 +1260,8 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             "availableAvatars": serialize_avatar_list(export_payload),
             "plan": plan.model_dump(),
             "changePreview": change_preview,
+            "verifiedChanges": verified_changes,
+            "visualProof": visual_proof,
             "referenceImage": reference_context,
             "preview": preview,
             "csharp": csharp_code,
@@ -1446,6 +1494,8 @@ def serialize_blendshape_details(export_payload: dict[str, Any], selected_avatar
         renderer_name = renderer.get("rendererName", "")
         mesh_name = renderer.get("meshName", "")
         for blendshape in renderer.get("blendshapes") or []:
+            if not is_face_related_blendshape(renderer, blendshape):
+                continue
             details.append(
                 {
                     "avatarPath": selected_avatar.avatar_path,
@@ -1591,10 +1641,12 @@ def capture_scene_view_direct(
     output_path: Path,
     width: int,
     height: int,
+    avatar_path: str | None = None,
     pitch: float = 0.0,
     yaw: float = 0.0,
     roll: float = 0.0,
     set_rotation: bool = False,
+    capture_scope: str = "avatar",
 ) -> dict[str, Any]:
     result = invoke_unity_mcp(
         settings,
@@ -1608,6 +1660,8 @@ def capture_scene_view_direct(
             "roll": roll,
             "setRotation": set_rotation,
             "restoreView": True,
+            "avatarPath": avatar_path or "",
+            "captureScope": capture_scope,
         },
     )
     payload = extract_tool_result_payload(result)
@@ -1623,6 +1677,8 @@ def capture_scene_view_direct(
             "yaw": yaw,
             "roll": roll,
             "setRotation": set_rotation,
+            "avatarPath": avatar_path or "",
+            "captureScope": capture_scope,
         }
 
     return ensure_dict_payload(payload, "vision capture")
@@ -1753,6 +1809,103 @@ def build_plan_change_preview(
             }
         )
     return changes
+
+
+def capture_blendshape_visual_proof(
+    settings: Settings,
+    selected_avatar: SelectedAvatar,
+    stage: str,
+    current_proof: dict[str, Any] | None,
+) -> dict[str, Any]:
+    proof = dict(current_proof or {})
+    output_dir = (DASHBOARD_ARTIFACTS_DIR / "latest").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"blendshape_{stage}.png"
+
+    try:
+        payload = capture_scene_view_direct(
+            settings=settings,
+            output_path=output_path,
+            width=960,
+            height=960,
+            avatar_path=selected_avatar.avatar_path,
+            set_rotation=False,
+        )
+        image_path = payload.get("imagePath") or str(output_path)
+        proof[stage] = {
+            "imagePath": image_path,
+            "imageUrl": to_artifact_url(image_path),
+            "capture": payload,
+        }
+        emit_log("info", "pipeline", f"Captured blendshape {stage} proof image.", {"imagePath": image_path})
+    except Exception as exc:
+        proof.setdefault("errors", []).append({"stage": stage, "error": str(exc)})
+        emit_log("warning", "pipeline", f"Failed to capture blendshape {stage} proof image.", {"error": str(exc)})
+
+    return proof
+
+
+def verify_live_blendshape_changes(
+    settings: Settings,
+    selected_avatar: SelectedAvatar,
+    change_preview: list[dict[str, Any]],
+    tolerance: float = 0.25,
+) -> list[dict[str, Any]]:
+    if not change_preview:
+        return []
+
+    try:
+        export_payload = export_blendshapes(settings)
+        live_index = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+    except Exception as exc:
+        emit_log("warning", "pipeline", "Failed to re-read blendshape export for verification.", {"error": str(exc)})
+        return [
+            {
+                **item,
+                "verified": False,
+                "verificationStatus": "unreadable",
+                "verificationError": str(exc),
+            }
+            for item in change_preview
+        ]
+
+    verified: list[dict[str, Any]] = []
+    for item in change_preview:
+        renderer_path = str(item.get("rendererPath") or "")
+        blendshape_name = str(item.get("blendshapeName") or "")
+        live_entry = live_index.get((renderer_path, blendshape_name))
+        target_weight = float(item.get("targetWeight", 0.0) or 0.0)
+        actual_weight = None
+        if live_entry is not None:
+            actual_weight = float(live_entry.get("currentWeight", 0.0) or 0.0)
+
+        if actual_weight is None:
+            status = "missing"
+            verified_item = False
+            difference = None
+        else:
+            difference = abs(actual_weight - target_weight)
+            verified_item = difference <= tolerance
+            status = "verified" if verified_item else "mismatch"
+
+        verified.append(
+            {
+                **item,
+                "actualWeight": actual_weight,
+                "difference": difference,
+                "verified": verified_item,
+                "verificationStatus": status,
+                "verificationTolerance": tolerance,
+            }
+        )
+
+    emit_log(
+        "info",
+        "pipeline",
+        "Blendshape live values re-read after execution.",
+        {"verified": sum(1 for item in verified if item.get("verified")), "count": len(verified)},
+    )
+    return verified
 
 
 def build_undo_items_from_change_preview(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2535,22 +2688,15 @@ def build_reference_image_context(request: DashboardRequest) -> dict[str, Any] |
     if image_path is None:
         return None
 
-    api_config = serialize_api_config(include_secret=True)
-    if api_config.get("provider") != "gemini":
-        raise RuntimeError("Reference image planning currently requires the dashboard provider to be set to Gemini.")
-
-    description = describe_reference_face_with_gemini(
-        api_config=api_config,
-        image_path=image_path,
-        instruction=request.instruction or "",
-    )
+    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
     context = {
         "imagePath": str(image_path),
         "imageUrl": to_artifact_url(str(image_path)),
-        "description": description,
+        "mimeType": mime_type,
+        "mode": "text_image_same_request",
     }
     save_vision_audit_artifact("reference_face_context.json", context)
-    emit_log("success", "pipeline", "Reference image analyzed for blendshape planning.", {"imagePath": str(image_path)})
+    emit_log("info", "pipeline", "Reference image attached to blendshape planning request.", {"imagePath": str(image_path)})
     return context
 
 
@@ -2600,65 +2746,6 @@ def save_reference_image_data_url(data_url: str) -> Path:
     output_path = (latest_dir / f"reference_image{suffix}").resolve()
     output_path.write_bytes(image_bytes)
     return output_path
-
-
-def enrich_instruction_with_reference_image(
-    settings: Settings,
-    instruction: str,
-    reference_context: dict[str, Any] | None,
-) -> str:
-    if not reference_context:
-        return instruction
-
-    description = reference_context.get("description") or {}
-    return (
-        f"{instruction}\n\n"
-        "Additional visual reference for the desired face/expression:\n"
-        f"{json.dumps(description, ensure_ascii=False, indent=2)}\n\n"
-        "Use the reference image as style and expression guidance only. "
-        "Do not infer identity. Convert visible facial traits into available VRChat blendshape edits."
-    )
-
-
-def describe_reference_face_with_gemini(api_config: dict[str, Any], image_path: Path, instruction: str) -> dict[str, Any]:
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError as exc:
-        raise RuntimeError("The google-genai package is not installed.") from exc
-
-    api_key = str(api_config.get("api_key") or "").strip()
-    model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-    if not api_key:
-        raise RuntimeError("Gemini API key is empty. Save a Gemini provider config before using a reference image.")
-
-    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    client = genai.Client(api_key=api_key)
-    prompt = (
-        "You are helping plan VRChat avatar face blendshape edits from a reference image.\n"
-        "Analyze only visible expression and stylized facial traits that can be translated into blendshapes. "
-        "Do not identify the person, do not infer private attributes, and do not describe sexualized traits.\n"
-        "Focus on actionable controls: eye openness, eyelid mood, eyebrow angle, mouth smile/width, cheek fullness, "
-        "face softness/roundness, and overall emotion.\n"
-        f"User request: {instruction}\n"
-        "Return JSON only with this shape: "
-        '{"summary":"short visual target","blendshapeGuidance":["actionable hint"],"cautions":["risk or ambiguity"]}'
-    )
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            prompt,
-            types.Part.from_bytes(data=image_path.read_bytes(), mime_type=mime_type),
-        ],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    payload = try_parse_json(getattr(response, "text", "") or "")
-    if not isinstance(payload, dict):
-        raise RuntimeError("Gemini did not return valid JSON while analyzing the reference image.")
-    payload.setdefault("summary", "")
-    payload.setdefault("blendshapeGuidance", [])
-    payload.setdefault("cautions", [])
-    return payload
 
 
 def clamp01(value: Any) -> float:
@@ -2797,7 +2884,7 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     api_key = str(api_config.get("api_key") or "").strip()
     model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     if not api_key:
-        raise RuntimeError("Gemini API key is empty. Save a Gemini provider config before running vision audit.")
+        raise RuntimeError("Google AI Studio API key is empty. Save a Google AI Studio provider config before running image analysis.")
 
     mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
     client = genai.Client(api_key=api_key)
@@ -2820,7 +2907,7 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     )
     payload = try_parse_json(getattr(response, "text", "") or "")
     if not isinstance(payload, dict):
-        raise RuntimeError("Gemini Vision did not return valid JSON.")
+        raise RuntimeError("Image analysis did not return valid JSON.")
     return normalize_vision_audit_payload(payload)
 
 
@@ -3096,9 +3183,13 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
 
 
 def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, str]]:
-    if not config.api_key.strip():
+    if provider_requires_api_key(config.provider) and not config.api_key.strip():
         raise RuntimeError(f"{provider_display_name(config.provider)} API key is empty. Enter an API key before loading models.")
 
+    if config.provider == "gemini":
+        return fetch_google_ai_studio_models(config)
+    if config.provider == "vertexai":
+        return fetch_vertex_ai_models(config)
     if config.provider == "anthropic":
         return fetch_anthropic_models(config)
     return fetch_openai_compatible_models(config)
@@ -3113,13 +3204,61 @@ def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str,
     except ImportError as exc:
         raise RuntimeError("The openai package is not installed, so OpenAI-compatible model listing is unavailable.") from exc
 
-    client = OpenAI(api_key=config.api_key, base_url=config.base_url, timeout=20.0)
+    client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url, timeout=20.0)
     try:
         response = client.models.list()
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"{provider_display_name(config.provider)} model list request failed: {exc}") from exc
 
     return normalize_provider_model_list(response, provider_display_name(config.provider))
+
+
+def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError("The google-genai package is not installed, so Google AI Studio model listing is unavailable.") from exc
+
+    client = genai.Client(api_key=config.api_key)
+    try:
+        response = client.models.list()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Google AI Studio model list request failed: {exc}") from exc
+
+    return normalize_provider_model_list(response, "Google AI Studio")
+
+
+def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError("The google-genai package is not installed, so Google Vertex AI model listing is unavailable.") from exc
+
+    project, location = resolve_vertex_project_location(config.base_url)
+    try:
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = client.models.list()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Google Vertex AI model list request failed for project '{project}' / location '{location}': {exc}"
+        ) from exc
+
+    return normalize_provider_model_list(response, "Google Vertex AI")
+
+
+def resolve_vertex_project_location(value: str) -> tuple[str, str]:
+    settings = load_settings(
+        resolve_local_path(DEFAULT_SETTINGS_PATH),
+        llm_override={
+            "provider": "vertexai",
+            "api_key": "",
+            "base_url": value,
+            "model": get_provider_defaults("vertexai")["model"],
+        },
+    )
+    from vrchat_blendshape_agent import resolve_vertex_ai_project_location
+
+    return resolve_vertex_ai_project_location(settings.llm_base_url)
 
 
 def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, str]]:
@@ -3198,8 +3337,9 @@ def serialize_api_config(include_secret: bool) -> dict[str, Any]:
         "apiKeyPresent": bool(config.api_key),
         "base_url": config.base_url,
         "model": config.model,
-        "usesBaseUrl": config.provider != "anthropic",
-        "authHeader": "x-api-key" if config.provider == "anthropic" else "Authorization: Bearer",
+        "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
+        "authHeader": provider_auth_label(config.provider),
+        "apiKeyRequired": provider_requires_api_key(config.provider),
     }
 
 
@@ -3210,8 +3350,22 @@ def build_effective_model_summary() -> dict[str, Any]:
         "providerLabel": provider_display_name(config.provider),
         "model": config.model,
         "baseUrl": config.base_url,
-        "authHeader": "x-api-key" if config.provider == "anthropic" else "Authorization: Bearer",
+        "authHeader": provider_auth_label(config.provider),
+        "apiKeyRequired": provider_requires_api_key(config.provider),
     }
+
+
+def provider_auth_label(provider: str) -> str:
+    provider = normalize_provider_name(provider)
+    if provider == "anthropic":
+        return "x-api-key"
+    if provider == "gemini":
+        return "API key"
+    if provider == "ollama":
+        return "optional"
+    if provider == "vertexai":
+        return "Google ADC"
+    return "Authorization: Bearer"
 
 
 def mask_secret(value: str) -> str:

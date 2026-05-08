@@ -1,4 +1,4 @@
-# VRCAutoRig 功能作用与使用手册
+# VRCFaceForge 功能作用与使用手册
 
 这份手册写给实际使用 dashboard 的人。它不要求你会写代码，只需要你知道 Unity、VRChat Avatar、Blendshape、FX、参数这些基础概念。
 
@@ -6,7 +6,7 @@
 
 ## 一句话说明
 
-VRCAutoRig 是一套本地 VRChat Avatar 自动化控制台。它把 Unity 工程、Unity MCP、LLM API、Blendshape 调整、衣柜 FX、参数优化和视觉质检集中到浏览器里的一个 dashboard 页面中。
+VRCFaceForge 是一套本地 VRChat Avatar 自动化控制台。它把 Unity 工程、Unity MCP、LLM API、Blendshape 调整、衣柜 FX、参数优化和识图分析集中到浏览器里的一个 dashboard 页面中。仓库内部的 Unity 工具目录仍叫 `Assets/VRCAutoRig`，这是已有 Unity 菜单和脚本路径，暂时保留以避免破坏工程接入。
 
 默认 dashboard 地址：
 
@@ -27,7 +27,7 @@ http://127.0.0.1:8757
 | Unity Editor | 打开真实 VRChat Avatar 工程，承载模型和资产 | 保持工程打开，确认没有红色编译错误 |
 | MCP server | 让 dashboard 能和 Unity 通信 | 确认服务已启动，dashboard 顶部显示已连接 |
 | Dashboard | 浏览器里的中文控制台 | 主要操作都在这里完成 |
-| Provider API | 让 AI 根据文字生成调整计划，或做视觉审核 | 填 API Key，读取模型列表，保存配置 |
+| Provider API | 让 AI 根据文字生成调整计划，或做识图分析 | 填 API Key，读取模型列表，保存配置 |
 | Unity 插件脚本 | 在 Unity 内导出数据、执行 C#、连接 MCP | 不需要手动改代码 |
 | Artifacts | 保存计划、截图、结果、快照等产物 | 出问题时可发给开发者排查 |
 
@@ -50,12 +50,12 @@ http://127.0.0.1:8757
 | --- | --- | --- | --- |
 | 状态栏 | 显示 Unity、Provider、Avatar、Socket 的当前状态 | 判断系统是否连通 | 只读 |
 | 工程管理 | 选择、打开、同步 Unity 工程 | 切换测试工程，检查 MCP 连接 | 低 |
-| API 配置 | 配置 AI provider、API Key、模型 | 让 AI 规划和视觉审核可用 | 中 |
+| API 配置 | 配置 AI provider、API Key、模型 | 让 AI 规划和识图分析可用 | 中 |
 | 数据源与执行模式 | 选择从 Unity 实时导出、样例数据或本地 JSON 运行 | 切换真测或离线测试 | 中 |
 | 自然语言 + Blendshape | 手动或 AI 调整 Avatar Blendshape | 捏脸、调表情、验证写入 | 中 |
 | 衣柜 FX | 扫描衣服对象，生成衣柜开关 FX | 自动创建衣服开关动画和菜单 | 高 |
 | 参数优化 | 扫描表达参数并给出优化建议 | 节省 Avatar 参数占用 | 高 |
-| 视觉质检 | Unity 截图并交给 Gemini Vision 审核 | 检查穿模和外观问题 | 中 |
+| 视觉质检 | Unity 截图并交给识图模型分析 | 检查穿模和外观问题 | 中 |
 | 操作日志 | 记录每次操作和错误 | 报错排查、复现问题 | 只读 |
 
 ## 状态栏
@@ -116,7 +116,7 @@ API 配置决定 AI 功能使用哪个服务、哪个模型。
 
 | 控件 | 作用 |
 | --- | --- |
-| `Provider` | 选择 AI 服务，例如 Gemini、DeepSeek、OpenAI、OpenRouter、Anthropic、自定义 |
+| `Provider` | 选择 AI 服务，例如 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter、自定义 |
 | `Model 名称` | 从 API 读取到的模型列表里选择模型 |
 | `读取模型列表` | 用当前 API Key 和 Base URL 请求 provider，读取可用模型 |
 | `手动 Model 名称` | 读取失败或需要列表外模型时手动填写 |
@@ -137,8 +137,11 @@ API 配置决定 AI 功能使用哪个服务、哪个模型。
 说明：
 
 - `config.json` 是本地配置文件，已经被 `.gitignore` 忽略，不应该提交真实密钥。
-- Gemini、DeepSeek、OpenAI、OpenRouter、自定义 provider 走 OpenAI-compatible 接口。
+- Google AI Studio 走 `google-genai` 官方接口，不使用 Base URL。
+- OpenAI、OpenRouter、DeepSeek、自定义 provider 走 OpenAI-compatible 接口。
+- Ollama 走本地 OpenAI-compatible `/v1` 接口，默认 `http://127.0.0.1:11434/v1`，API Key 可留空。
 - Anthropic 走官方 SDK，不使用 Base URL。
+- Google Vertex AI 走 `google-genai` 的 Vertex AI 模式，使用本机 Google ADC；Project/Location 可在配置栏填写。
 - 如果模型列表读取失败，页面会切换到手动填写模式。
 
 ## 数据源与执行模式
@@ -214,7 +217,7 @@ AI 执行流程：
 7. 不满意就撤销；想继续微调时，在上一轮结果基础上继续输入新的自然语言。
 
 建议第一次只使用“轻微”“一点”“稍微”这类保守描述。
-参考图片功能目前优先给 Gemini 使用；图片会转成捏脸方向提示，再和自然语言一起送进 Blendshape 规划。
+参考图片会和自然语言指令同一轮发送给当前模型。只要 provider/model 支持图片输入，就会直接按“文字 + 图片”规划 Blendshape；如果模型不支持图片，页面会报“该模型不支持图片或接口拒绝图片输入”。
 
 ## 衣柜 FX
 
@@ -287,26 +290,26 @@ AI 执行流程：
 
 ## 视觉质检
 
-视觉质检用于让 Unity 截图，再让 Gemini Vision 判断外观是否有问题，例如穿模。
+视觉质检用于让 Unity 截图，再让识图模型判断外观是否有问题，例如穿模。
 
 主要控件：
 
 | 控件 | 作用 |
 | --- | --- |
 | `捕获截图` | 从 Unity SceneView 获取单张截图 |
-| `Gemini Vision 审核` | 对当前截图做 AI 视觉审核 |
+| `识图分析` | 对当前截图做 AI 视觉分析 |
 | `多视角截图` | 从正面、侧面、背面等角度截图 |
-| `多图聚合审核` | 对多张图一起审核，得到整体结论 |
+| `多图聚合分析` | 对多张图一起分析，得到整体结论 |
 | 视角 Tab | 切换查看单视角、正面、左侧、右侧、背面 |
 
 推荐流程：
 
-1. 确认 Provider 是 Gemini。
+1. 确认 Provider 是 Google AI Studio。
 2. 确认 API Key 和模型配置可用。
 3. 点 `捕获截图`。
 4. 看截图是否正常显示。
-5. 点 `Gemini Vision 审核`。
-6. 如果需要更稳，再点 `多视角截图` 和 `多图聚合审核`。
+5. 点 `识图分析`。
+6. 如果需要更稳，再点 `多视角截图` 和 `多图聚合分析`。
 
 结果会显示：
 
@@ -318,8 +321,8 @@ AI 执行流程：
 风险提示：
 
 - 截图本身不会改 Unity 工程。
-- 审核依赖 Gemini provider。
-- 如果 SceneView 角度不对，审核结果也可能不准。
+- 当前识图分析依赖 Google AI Studio provider。
+- 如果 SceneView 角度不对，识图分析结果也可能不准。
 
 ## 操作日志
 
@@ -355,7 +358,7 @@ AI 执行流程：
 | 参数优化真实写入 | 会改参数资产 | 高风险，确认后再做 |
 | 回滚参数 | 会改参数资产 | 只在需要恢复时使用 |
 | 截图 | 不会 | 可以放心 |
-| 视觉审核 | 不会 | 依赖 API |
+| 识图分析 | 不会 | 依赖 API |
 
 ## 推荐的第一次完整测试流程
 
@@ -428,13 +431,13 @@ http://127.0.0.1:8757
 - 模型列表读取失败后没有手动填写 model。
 - 低置信度被拦截。
 
-### 截图或视觉审核失败
+### 截图或识图分析失败
 
 常见原因：
 
 - Unity SceneView 不可用。
-- Provider 不是 Gemini。
-- Gemini API Key 或模型不可用。
+- Provider 不是 Google AI Studio。
+- API Key 或模型不可用。
 - 截图路径不存在。
 
 ## 报错反馈模板

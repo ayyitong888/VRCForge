@@ -11,7 +11,10 @@ from vrchat_blendshape_agent import (
     Settings,
     build_custom_tool_cli_args,
     build_unity_mcp_command,
+    create_blendshape_plan,
     extract_unity_mcp_stdout_error,
+    filter_plan_by_instruction_relevance,
+    filter_planning_payload_to_face_blendshapes,
     build_planning_payload,
     humanize_unity_mcp_error,
     load_settings,
@@ -110,6 +113,53 @@ class PlanningValidationTests(unittest.TestCase):
         self.assertEqual(len(self.planning_payload["avatars"]), 1)
         self.assertEqual(self.planning_payload["avatars"][0]["avatarPath"], "Scene/HeroAvatar")
 
+    def test_create_blendshape_plan_passes_reference_image_to_llm_request(self) -> None:
+        settings = Settings(
+            llm_provider="openai",
+            llm_api_key="test-key",
+            llm_base_url="https://api.openai.com/v1",
+            llm_model="gpt-4.1-mini",
+            llm_api_key_env="OPENAI_API_KEY",
+            gemini_thinking_level="",
+            unity_mcp_command=["unity-mcp"],
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_instance="",
+            unity_mcp_retries=1,
+            unity_mcp_retry_backoff_seconds=0.0,
+            unity_mcp_timeout_seconds=30,
+            export_tool_name="vrc_export_blendshapes",
+            execute_tool_name="vrc_execute_roslyn",
+            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            min_confidence=0.65,
+        )
+        raw_plan = {
+            "summary": "Smile",
+            "warnings": [],
+            "adjustments": [
+                {
+                    "avatar_path": "Scene/HeroAvatar",
+                    "renderer_path": "Scene/HeroAvatar/Body/Face",
+                    "blendshape_name": "Smile",
+                    "target_weight": 40,
+                    "reason": "Match the requested smile.",
+                    "confidence": 0.95,
+                }
+            ],
+        }
+
+        with patch("vrchat_blendshape_agent.request_llm_plan", return_value=json.dumps(raw_plan)) as request_mock:
+            plan = create_blendshape_plan(
+                settings,
+                self.planning_payload,
+                "make the smile softer",
+                reference_image_path=Path("reference.png"),
+            )
+
+        self.assertEqual(plan.adjustments[0].blendshape_name, "Smile")
+        self.assertEqual(request_mock.call_args.kwargs["reference_image_path"], Path("reference.png"))
+        self.assertIn("reference image is attached", request_mock.call_args.args[1].lower())
+
     def test_rejects_invalid_targets(self) -> None:
         plan = BlendshapePlan(
             summary="Test",
@@ -204,6 +254,103 @@ class PlanningValidationTests(unittest.TestCase):
         self.assertEqual(len(validated.adjustments), 1)
         self.assertEqual(validated.adjustments[0].target_weight, 60)
         self.assertTrue(any("duplicate edits" in warning for warning in validated.warnings))
+
+    def test_instruction_relevance_filter_drops_unrequested_body_hair_and_teeth(self) -> None:
+        plan = BlendshapePlan(
+            summary="Wrong drift",
+            adjustments=[
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Body",
+                    blendshape_name="Breast_big",
+                    target_weight=100,
+                    reason="Make breasts larger.",
+                    confidence=1.0,
+                ),
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Hair",
+                    blendshape_name="Hair_front_ahoge 1_x",
+                    target_weight=100,
+                    reason="Hide ahoge.",
+                    confidence=0.95,
+                ),
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Body/Face",
+                    blendshape_name="mouth_giza (tooth)",
+                    target_weight=100,
+                    reason="Show jagged teeth.",
+                    confidence=1.0,
+                ),
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Body/Face",
+                    blendshape_name="Smile",
+                    target_weight=45,
+                    reason="Raise the mouth corners.",
+                    confidence=0.9,
+                ),
+            ],
+        )
+
+        filtered = filter_plan_by_instruction_relevance(plan, "把嘴角明显上扬一些，眼睛稍微眯一点")
+
+        self.assertEqual([item.blendshape_name for item in filtered.adjustments], ["Smile"])
+        self.assertTrue(any("Dropped unrelated" in warning for warning in filtered.warnings))
+
+    def test_face_planning_payload_filter_is_generic(self) -> None:
+        payload = {
+            "summary": {"avatarCount": 1, "rendererCount": 3, "blendshapeCount": 6},
+            "avatars": [
+                {
+                    "avatarName": "GenericAvatar",
+                    "avatarPath": "GenericAvatar",
+                    "sceneName": "Scene",
+                    "renderers": [
+                        {
+                            "rendererName": "Body",
+                            "rendererPath": "GenericAvatar/Body",
+                            "meshName": "Body",
+                            "blendshapes": [
+                                {"name": "eye_narrow", "currentWeight": 0},
+                                {"name": "mouth_smile", "currentWeight": 0},
+                                {"name": "Breast_big", "currentWeight": 0},
+                                {"name": "Hair_front_ahoge_x", "currentWeight": 0},
+                                {"name": "Earring_Left_X", "currentWeight": 0},
+                                {"name": "Shrink_Shoulder", "currentWeight": 0},
+                                {"name": "vrc.v_aa", "currentWeight": 0},
+                                {"name": "EyeBlinkLeft", "currentWeight": 0},
+                                {"name": "MouthSmileLeft", "currentWeight": 0},
+                            ],
+                        },
+                        {
+                            "rendererName": "Hair",
+                            "rendererPath": "GenericAvatar/Hair",
+                            "meshName": "Hair",
+                            "blendshapes": [{"name": "eye_decoy", "currentWeight": 0}],
+                        },
+                        {
+                            "rendererName": "FaceRenderer",
+                            "rendererPath": "GenericAvatar/FaceRenderer",
+                            "meshName": "FaceMesh",
+                            "blendshapes": [{"name": "cheek_soft", "currentWeight": 0}],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        filtered = filter_planning_payload_to_face_blendshapes(payload)
+        names = [
+            blendshape["name"]
+            for avatar in filtered["avatars"]
+            for renderer in avatar["renderers"]
+            for blendshape in renderer["blendshapes"]
+        ]
+
+        self.assertEqual(names, ["eye_narrow", "mouth_smile", "cheek_soft"])
+        self.assertEqual(filtered["summary"]["blendshapeCount"], 3)
 
 
 class MvpFlowTests(unittest.TestCase):
@@ -390,11 +537,39 @@ class MvpFlowTests(unittest.TestCase):
             settings = load_settings(settings_path, gemini_model_override="gemini-2.5-flash")
             self.assertEqual(settings.llm_provider, "gemini")
             self.assertEqual(settings.llm_model, "gemini-2.5-flash")
-            self.assertEqual(settings.llm_base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+            self.assertEqual(settings.llm_base_url, "")
             self.assertEqual(settings.llm_api_key_env, "TEST_GEMINI_API_KEY")
             self.assertEqual(settings.unity_mcp_host, "127.0.0.1")
             self.assertEqual(settings.unity_mcp_port, 8080)
             self.assertEqual(settings.unity_mcp_instance, "Karin FT Rework@abc123")
+
+    def test_load_settings_supports_ollama_and_vertex_ai_providers(self) -> None:
+        settings_payload = {
+            "llm": {
+                "provider": "ollama",
+                "model": "qwen3-vl:8b",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(settings_payload, ensure_ascii=False), encoding="utf-8")
+
+            settings = load_settings(settings_path)
+            self.assertEqual(settings.llm_provider, "ollama")
+            self.assertEqual(settings.llm_base_url, "http://127.0.0.1:11434/v1")
+            self.assertEqual(settings.llm_model, "qwen3-vl:8b")
+
+            vertex_settings = load_settings(
+                settings_path,
+                llm_override={
+                    "provider": "google-vertex-ai",
+                    "model": "gemini-2.5-flash",
+                    "base_url": "project=my-project;location=asia-northeast1",
+                },
+            )
+            self.assertEqual(vertex_settings.llm_provider, "vertexai")
+            self.assertEqual(vertex_settings.llm_base_url, "project=my-project;location=asia-northeast1")
 
     def test_load_settings_accepts_llm_override(self) -> None:
         settings_payload = {

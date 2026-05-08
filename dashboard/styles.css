@@ -557,6 +557,70 @@ textarea {
   border-color: rgba(0, 107, 95, 0.28);
 }
 
+.change-row.change-verified {
+  background: var(--md-success-container);
+  border-color: rgba(20, 108, 67, 0.36);
+}
+
+.change-row.change-unverified {
+  background: var(--md-warning-container);
+  border-color: rgba(114, 90, 0, 0.36);
+}
+
+.proof-block {
+  display: grid;
+  gap: 0.6rem;
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-lowest);
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  box-shadow: var(--shadow-1);
+}
+
+.proof-title {
+  color: var(--md-primary);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.proof-card {
+  margin: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-low);
+}
+
+.proof-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+
+.proof-card figcaption {
+  padding: 0.42rem 0.5rem;
+  text-align: center;
+  color: var(--md-on-surface-variant);
+  font-weight: 800;
+  border-top: 1px solid var(--md-outline-variant);
+}
+
+.proof-error {
+  color: var(--md-on-error-container);
+  background: var(--md-error-container);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .change-head {
   display: flex;
   justify-content: space-between;
@@ -946,6 +1010,17 @@ textarea {
   color: var(--md-on-surface-variant);
   border-top: 1px solid var(--md-outline-variant);
   font-weight: 700;
+  display: grid;
+  gap: 0.1rem;
+}
+
+.vision-thumb-card .thumb-label strong {
+  color: var(--md-on-surface);
+}
+
+.vision-thumb-card .thumb-label span {
+  font-size: 0.68rem;
+  color: var(--md-on-surface-variant);
 }
 
 ::-webkit-scrollbar {

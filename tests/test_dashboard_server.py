@@ -44,8 +44,8 @@ class DashboardServerTests(unittest.TestCase):
         with TestClient(dashboard_server.app) as client:
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
-            self.assertIn("VRCAutoRig 控制台", response.text)
-            self.assertIn("Gemini Vision 审核", response.text)
+            self.assertIn("VRCFaceForge 控制台", response.text)
+            self.assertIn("识图分析", response.text)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -165,6 +165,25 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("API key is empty", response.json()["detail"])
 
+    @patch("dashboard_server.fetch_openai_compatible_models")
+    def test_api_models_endpoint_allows_ollama_without_api_key(self, mock_fetch_openai_compatible_models) -> None:
+        mock_fetch_openai_compatible_models.return_value = [{"id": "llama3.2", "label": "llama3.2"}]
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/models",
+                json={
+                    "provider": "ollama",
+                    "api_key": "",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "model": "llama3.2",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["provider"], "ollama")
+        self.assertEqual(response.json()["models"][0]["id"], "llama3.2")
+
     @patch("dashboard_server.export_blendshapes")
     @patch("dashboard_server.load_dashboard_settings")
     def test_scene_avatar_scan_endpoint_returns_vrchat_avatars_from_export(
@@ -267,6 +286,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
         self.assertEqual(params["adjustments"][0]["targetWeight"], 42.0)
 
+    @patch("dashboard_server.capture_blendshape_visual_proof")
+    @patch("dashboard_server.verify_live_blendshape_changes")
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     @patch("dashboard_server.load_dashboard_export_payload")
@@ -277,6 +298,8 @@ class DashboardServerTests(unittest.TestCase):
         mock_load_dashboard_export_payload,
         mock_load_settings,
         mock_invoke_unity_mcp,
+        mock_verify_live_blendshape_changes,
+        mock_capture_blendshape_visual_proof,
     ) -> None:
         mock_load_settings.return_value = SimpleNamespace(
             llm_provider="gemini",
@@ -321,6 +344,26 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"ok": True, "appliedCount": 1},
         )
+        mock_verify_live_blendshape_changes.return_value = [
+            {
+                "rendererPath": "Scene/HeroAvatar/Face",
+                "blendshapeName": "Smile",
+                "targetWeight": 55.0,
+                "actualWeight": 55.0,
+                "verified": True,
+                "verificationStatus": "verified",
+            }
+        ]
+
+        def capture_proof_side_effect(*, stage, current_proof, **_kwargs):
+            proof = dict(current_proof or {})
+            proof[stage] = {
+                "imagePath": f"artifacts/dashboard/latest/blendshape_{stage}.png",
+                "imageUrl": f"/artifacts/dashboard/latest/blendshape_{stage}.png",
+            }
+            return proof
+
+        mock_capture_blendshape_visual_proof.side_effect = capture_proof_side_effect
 
         with TestClient(dashboard_server.app) as client:
             response = client.post(
@@ -338,6 +381,9 @@ class DashboardServerTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["changePreview"][0]["previousWeight"], 10.0)
         self.assertEqual(payload["changePreview"][0]["targetWeight"], 55.0)
+        self.assertTrue(payload["verifiedChanges"][0]["verified"])
+        self.assertIn("before", payload["visualProof"])
+        self.assertIn("after", payload["visualProof"])
         self.assertEqual(payload["undoDepth"], 1)
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_apply_blendshapes")
@@ -429,6 +475,55 @@ class DashboardServerTests(unittest.TestCase):
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_capture_scene_view")
         self.assertFalse(params["setRotation"])
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+
+    @patch("dashboard_server.load_dashboard_export_payload")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_avatar_blendshape_list_is_limited_to_face_scope(
+        self,
+        mock_load_settings,
+        mock_load_dashboard_export_payload,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "Scene",
+                        "renderers": [
+                            {
+                                "rendererName": "Body",
+                                "rendererPath": "Scene/HeroAvatar/Body",
+                                "meshName": "Body",
+                                "blendshapes": [
+                                    {"name": "Smile", "currentWeight": 0},
+                                    {"name": "Breast_big", "currentWeight": 0},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            False,
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/avatar/blendshapes",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": False,
+                    "avatar": "Scene/HeroAvatar",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["blendshapeName"] for item in payload["blendshapes"]], ["Smile"])
+        self.assertEqual(payload["filterScope"], "face")
 
     def test_discover_projects_reads_unity_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -805,6 +900,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Quaternion.Euler", code)
         self.assertIn("15.0000f", code)
         self.assertIn("front.png", code)
+
+    @patch("dashboard_server.export_blendshapes")
+    def test_verify_live_blendshape_changes_reports_actual_weight(self, mock_export_blendshapes) -> None:
+        selected_avatar = dashboard_server.SelectedAvatar(
+            avatar_name="HeroAvatar",
+            avatar_path="Scene/HeroAvatar",
+            scene_name="Scene",
+            renderer_count=1,
+            blendshape_count=1,
+        )
+        mock_export_blendshapes.return_value = {
+            "avatars": [
+                {
+                    "avatarPath": "Scene/HeroAvatar",
+                    "renderers": [
+                        {
+                            "rendererPath": "Scene/HeroAvatar/Face",
+                            "blendshapes": [{"name": "Smile", "currentWeight": 55.0}],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        verified = dashboard_server.verify_live_blendshape_changes(
+            SimpleNamespace(),
+            selected_avatar,
+            [
+                {
+                    "rendererPath": "Scene/HeroAvatar/Face",
+                    "blendshapeName": "Smile",
+                    "targetWeight": 55.0,
+                    "previousWeight": 10.0,
+                }
+            ],
+        )
+
+        self.assertTrue(verified[0]["verified"])
+        self.assertEqual(verified[0]["actualWeight"], 55.0)
+        self.assertEqual(verified[0]["verificationStatus"], "verified")
 
 
 if __name__ == "__main__":
