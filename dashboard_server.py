@@ -29,6 +29,7 @@ from vrchat_blendshape_agent import (
     build_planning_payload,
     create_blendshape_plan,
     execute_csharp,
+    export_blendshapes,
     get_provider_defaults,
     invoke_unity_mcp,
     load_export_payload,
@@ -663,14 +664,23 @@ def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
 def scan_scene_avatars_sync(request: AvatarSceneScanRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
-        result = execute_dashboard_code(settings, build_avatar_descriptor_scan_code())
-        avatars = ensure_list_payload(result, "scene avatar scan")
+        export_payload = export_blendshapes(settings)
+        avatars = serialize_avatar_list(export_payload)
+        vrchat_avatars = [avatar for avatar in avatars if avatar.get("isVrChatAvatar")]
+        avatars = vrchat_avatars or avatars
         DASHBOARD_RUNTIME.scene_avatars = avatars
-        emit_log("info", "avatar", "Scene avatar scan completed.", {"count": len(avatars)})
+        emit_log(
+            "info",
+            "avatar",
+            "Scene avatar scan completed from blendshape export.",
+            {"count": len(avatars), "summary": export_payload.get("summary", {})},
+        )
         return {
             "ok": True,
             "avatars": avatars,
             "avatarCount": len(avatars),
+            "summary": export_payload.get("summary", {}),
+            "exportSource": "unity-mcp export",
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "avatar", "Failed to scan scene avatars.", {"error": str(exc)})
@@ -739,11 +749,11 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
                 }
             )
 
-        code = render_manual_blendshape_csharp(selected_avatar.avatar_path, validated_adjustments)
         if using_mock_execute:
+            code = render_manual_blendshape_csharp(selected_avatar.avatar_path, validated_adjustments)
             result = mock_execute_csharp(code, selected_avatar, export_source)
         else:
-            result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+            result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, validated_adjustments)
 
         push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
         emit_log(
@@ -777,8 +787,7 @@ def undo_manual_blendshapes_sync(request: UndoBlendshapeRequest) -> dict[str, An
 
         settings = load_dashboard_settings(request)
         undo_items = stack.pop()
-        code = render_manual_blendshape_csharp(avatar_path, undo_items)
-        result = execute_csharp(settings, code, [avatar_path])
+        result = apply_blendshapes_direct(settings, avatar_path, undo_items)
         emit_log("success", "blendshape", "Manual blendshape undo applied.", {"avatarPath": avatar_path, "count": len(undo_items)})
         return {
             "ok": True,
@@ -1417,6 +1426,22 @@ def render_manual_blendshape_csharp(avatar_path: str, adjustments: list[dict[str
         )
     lines.append("RoslynExecutor.SaveProjectAssets();")
     return "\n".join(lines)
+
+
+def apply_blendshapes_direct(
+    settings: Settings,
+    avatar_path: str,
+    adjustments: list[dict[str, Any]],
+) -> McpResult:
+    return invoke_unity_mcp(
+        settings,
+        "vrc_apply_blendshapes",
+        {
+            "avatarPath": avatar_path,
+            "adjustments": adjustments,
+            "saveAssets": True,
+        },
+    )
 
 
 def push_manual_undo_snapshot(avatar_path: str, adjustments: list[dict[str, Any]]) -> None:

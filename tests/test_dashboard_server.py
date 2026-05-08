@@ -140,12 +140,12 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("API key is empty", response.json()["detail"])
 
-    @patch("dashboard_server.execute_dashboard_code")
+    @patch("dashboard_server.export_blendshapes")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_scene_avatar_scan_endpoint_returns_unity_descriptor_list(
+    def test_scene_avatar_scan_endpoint_returns_vrchat_avatars_from_export(
         self,
         mock_load_settings,
-        mock_execute_dashboard_code,
+        mock_export_blendshapes,
     ) -> None:
         mock_load_settings.return_value = SimpleNamespace(
             unity_mcp_timeout_seconds=30,
@@ -153,18 +153,94 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_port=8080,
             unity_mcp_instance="",
         )
-        mock_execute_dashboard_code.return_value = [
-            {"avatarName": "HeroAvatar", "avatarPath": "Scene/HeroAvatar", "sceneName": "AvatarScene"},
-            {"avatarName": "VillainAvatar", "avatarPath": "Scene/VillainAvatar", "sceneName": "AvatarScene"},
-        ]
+        mock_export_blendshapes.return_value = {
+            "summary": {"avatarCount": 2, "rendererCount": 2, "blendshapeCount": 3},
+            "avatars": [
+                {
+                    "avatarName": "HeroAvatar",
+                    "avatarPath": "Scene/HeroAvatar",
+                    "sceneName": "AvatarScene",
+                    "isVrChatAvatar": True,
+                    "renderers": [{"blendshapes": [{"name": "Smile"}, {"name": "Blink"}]}],
+                },
+                {
+                    "avatarName": "PreviewProxy",
+                    "avatarPath": "PreviewProxy",
+                    "sceneName": "___NDMF Preview___",
+                    "isVrChatAvatar": False,
+                    "renderers": [{"blendshapes": [{"name": "Proxy"}]}],
+                },
+            ],
+        }
 
         with TestClient(dashboard_server.app) as client:
             response = client.post("/api/scene/avatars", json={"unity_host": "127.0.0.1", "unity_port": 8080})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["avatarCount"], 2)
+        self.assertEqual(payload["avatarCount"], 1)
         self.assertEqual(payload["avatars"][0]["avatarName"], "HeroAvatar")
+        self.assertEqual(payload["avatars"][0]["blendshapeCount"], 2)
+
+    @patch("dashboard_server.load_dashboard_export_payload")
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_manual_blendshape_apply_uses_direct_unity_tool(
+        self,
+        mock_invoke_unity_mcp,
+        mock_load_settings,
+        mock_load_dashboard_export_payload,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "AvatarScene",
+                        "renderers": [
+                            {
+                                "rendererPath": "Scene/HeroAvatar/Face",
+                                "blendshapes": [{"name": "Smile", "currentWeight": 10.0}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            False,
+        )
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"ok": True, "appliedCount": 1},
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/blendshapes/apply",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": False,
+                    "avatar": "Scene/HeroAvatar",
+                    "adjustments": [
+                        {
+                            "renderer_path": "Scene/HeroAvatar/Face",
+                            "blendshape_name": "Smile",
+                            "target_weight": 42.0,
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mock_invoke_unity_mcp.assert_called_once()
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_apply_blendshapes")
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+        self.assertEqual(params["adjustments"][0]["targetWeight"], 42.0)
 
     def test_discover_projects_reads_unity_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -382,14 +385,73 @@ def normalize_base_url(base_url: Any, provider: str, default_base_url: str) -> s
 
 def export_blendshapes(settings: Settings) -> dict[str, Any]:
     export_params = {"outputPath": settings.export_path.as_posix(), "refreshAssets": True}
-    invoke_unity_mcp(settings, settings.export_tool_name, export_params)
+    result = invoke_unity_mcp(settings, settings.export_tool_name, export_params)
 
-    if not settings.export_path.exists():
+    export_path = resolve_export_result_path(settings, result)
+    if export_path is None:
         raise UnityMcpError(
-            f"Unity export tool reported success but the export file was not created: {settings.export_path}"
+            "Unity export tool reported success but the export file was not created. "
+            f"Checked: {settings.export_path}"
         )
 
-    return json.loads(settings.export_path.read_text(encoding="utf-8"))
+    return json.loads(export_path.read_text(encoding="utf-8"))
+
+
+def resolve_export_result_path(settings: Settings, result: McpResult) -> Path | None:
+    candidates: list[Path] = []
+    payload_path = extract_export_path_from_payload(result.payload)
+    stdout_path = extract_unity_mcp_output_field(result.stdout, "absoluteOutputPath")
+
+    if payload_path:
+        candidates.append(Path(payload_path))
+    if stdout_path:
+        candidates.append(Path(stdout_path))
+    candidates.append(settings.export_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def extract_export_path_from_payload(payload: Any | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    candidate: Any = payload
+    visited = set()
+    while isinstance(candidate, dict):
+        marker = id(candidate)
+        if marker in visited:
+            break
+        visited.add(marker)
+
+        for key in ("absoluteOutputPath", "absolute_output_path", "outputPath", "output_path"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        next_candidate = None
+        for key in ("data", "result", "payload", "value"):
+            if isinstance(candidate.get(key), dict):
+                next_candidate = candidate[key]
+                break
+        if next_candidate is None:
+            break
+        candidate = next_candidate
+
+    return None
+
+
+def extract_unity_mcp_output_field(stdout: str, field_name: str) -> str | None:
+    prefix = f"{field_name}:"
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            value = stripped[len(prefix):].strip()
+            return value or None
+    return None
 
 
 def load_export_payload(
@@ -933,13 +995,7 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
         try:
             completed = run_unity_mcp_process(
                 settings,
-                [
-                    "editor",
-                    "custom-tool",
-                    tool_name,
-                    "--params",
-                    json.dumps(params, ensure_ascii=False),
-                ],
+                build_custom_tool_cli_args(settings, tool_name, params),
             )
             payload = try_parse_json(completed.stdout)
             result = McpResult(
@@ -950,10 +1006,11 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
             )
 
             payload_error = extract_mcp_error(result.payload)
-            if completed.returncode == 0 and not payload_error:
+            stdout_error = extract_unity_mcp_stdout_error(result.stdout)
+            if completed.returncode == 0 and not payload_error and not stdout_error:
                 return result
 
-            error_text = payload_error or result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
+            error_text = payload_error or stdout_error or result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
             raise UnityMcpError(humanize_unity_mcp_error(error_text))
         except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
             last_error = exc
@@ -961,7 +1018,34 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
                 break
             time.sleep(settings.unity_mcp_retry_backoff_seconds * attempt)
 
-    raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries.") from last_error
+    detail = f": {last_error}" if last_error else "."
+    raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries{detail}") from last_error
+
+
+def build_custom_tool_cli_args(settings: Settings, tool_name: str, params: dict[str, Any]) -> list[str]:
+    params_json = json.dumps(params, ensure_ascii=False)
+    if uses_unity_mcp_powershell_wrapper(settings.unity_mcp_command):
+        params_b64 = base64.b64encode(params_json.encode("utf-8")).decode("ascii")
+        return ["editor", "custom-tool", tool_name, "--params-b64", params_b64]
+
+    return ["editor", "custom-tool", tool_name, "--params", params_json]
+
+
+def uses_unity_mcp_powershell_wrapper(command: list[str]) -> bool:
+    return any(str(part).lower().endswith("unity-mcp-cli.ps1") for part in command)
+
+
+def extract_unity_mcp_stdout_error(stdout: str) -> str | None:
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+
+    for line in stripped.splitlines():
+        clean_line = line.strip()
+        if clean_line.startswith("❌ Error:"):
+            return clean_line.replace("❌ Error:", "", 1).strip() or clean_line
+
+    return None
 
 
 def run_unity_mcp_passthrough(settings: Settings, cli_args: list[str]) -> str:
@@ -977,6 +1061,7 @@ def run_unity_mcp_passthrough(settings: Settings, cli_args: list[str]) -> str:
 
 def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess.CompletedProcess[str]:
     command = build_unity_mcp_command(settings, cli_args)
+    command = resolve_unity_mcp_wrapper_command(command)
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
@@ -1006,6 +1091,95 @@ def build_unity_mcp_command(settings: Settings, cli_args: list[str]) -> list[str
         command.extend(["--instance", settings.unity_mcp_instance])
     command.extend(cli_args)
     return command
+
+
+def resolve_unity_mcp_wrapper_command(command: list[str]) -> list[str]:
+    wrapper_index = next(
+        (index for index, part in enumerate(command) if str(part).lower().endswith("unity-mcp-cli.ps1")),
+        None,
+    )
+    if wrapper_index is None:
+        return command
+
+    resolved_prefix = find_unity_mcp_executable_prefix()
+    if not resolved_prefix:
+        return command
+
+    cli_args = decode_params_base64_args(command[wrapper_index + 1:])
+    return resolved_prefix + cli_args
+
+
+def find_unity_mcp_executable_prefix() -> list[str] | None:
+    unity_mcp_path = shutil.which("unity-mcp.exe") or shutil.which("unity-mcp")
+    if unity_mcp_path:
+        return [unity_mcp_path]
+
+    candidates: list[Path] = []
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidates.append(Path(virtual_env) / "Scripts" / "unity-mcp.exe")
+    candidates.append(Path(sys.executable).parent / "Scripts" / "unity-mcp.exe")
+
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.extend(
+            [
+                Path(appdata) / "Python" / "Python314" / "Scripts" / "unity-mcp.exe",
+                Path(appdata) / "Python" / "Scripts" / "unity-mcp.exe",
+            ]
+        )
+
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "unity-mcp.exe")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return [str(candidate)]
+
+    uvx_path = shutil.which("uvx.exe") or shutil.which("uvx")
+    uvx_candidates: list[Path] = []
+    if virtual_env:
+        uvx_candidates.append(Path(virtual_env) / "Scripts" / "uvx.exe")
+    uvx_candidates.append(Path(sys.executable).parent / "Scripts" / "uvx.exe")
+    if appdata:
+        uvx_candidates.extend(
+            [
+                Path(appdata) / "Python" / "Python314" / "Scripts" / "uvx.exe",
+                Path(appdata) / "Python" / "Scripts" / "uvx.exe",
+            ]
+        )
+    if localappdata:
+        uvx_candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "uvx.exe")
+
+    for candidate in uvx_candidates:
+        if candidate.exists():
+            uvx_path = str(candidate)
+            break
+
+    if uvx_path:
+        return [uvx_path, "--from", "mcpforunityserver", "unity-mcp"]
+
+    return None
+
+
+def decode_params_base64_args(args: list[str]) -> list[str]:
+    converted: list[str] = []
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument not in ("--params-b64", "--params-base64"):
+            converted.append(argument)
+            index += 1
+            continue
+
+        if index + 1 >= len(args):
+            raise UnityMcpError(f"Missing value after {argument}.")
+        decoded = base64.b64decode(args[index + 1]).decode("utf-8")
+        converted.extend(["--params", decoded])
+        index += 2
+
+    return converted
 
 
 def humanize_unity_mcp_error(detail: str) -> str:

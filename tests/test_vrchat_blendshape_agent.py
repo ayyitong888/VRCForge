@@ -7,8 +7,11 @@ from unittest.mock import patch
 from vrchat_blendshape_agent import (
     BlendshapeAdjustment,
     BlendshapePlan,
+    McpResult,
     Settings,
+    build_custom_tool_cli_args,
     build_unity_mcp_command,
+    extract_unity_mcp_stdout_error,
     build_planning_payload,
     humanize_unity_mcp_error,
     load_settings,
@@ -16,6 +19,8 @@ from vrchat_blendshape_agent import (
     mock_execute_csharp,
     read_plan_json,
     read_export_json,
+    resolve_export_result_path,
+    resolve_unity_mcp_wrapper_command,
     resolve_avatar_selection,
     render_preview,
     run_unity_mcp_process,
@@ -245,6 +250,97 @@ class MvpFlowTests(unittest.TestCase):
                 "status",
             ],
         )
+
+    def test_build_custom_tool_cli_args_uses_base64_for_powershell_wrapper(self) -> None:
+        settings = Settings(
+            llm_provider="gemini",
+            llm_api_key="",
+            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            llm_model="gemini-2.5-flash",
+            llm_api_key_env="GEMINI_API_KEY",
+            gemini_thinking_level="",
+            unity_mcp_command=["powershell", "-File", "tools/unity-mcp-cli.ps1"],
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_instance="Karin FT Rework@abc123",
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2.0,
+            unity_mcp_timeout_seconds=30,
+            export_tool_name="vrc_export_blendshapes",
+            execute_tool_name="vrc_execute_roslyn",
+            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            min_confidence=0.65,
+        )
+
+        args = build_custom_tool_cli_args(settings, "vrc_execute_roslyn", {"code": 'return "ok";'})
+
+        self.assertEqual(args[:3], ["editor", "custom-tool", "vrc_execute_roslyn"])
+        self.assertEqual(args[3], "--params-b64")
+        self.assertNotIn("--params", args)
+
+    def test_resolve_unity_mcp_wrapper_command_decodes_base64_params_for_direct_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_cli = Path(temp_dir) / "unity-mcp.exe"
+            fake_cli.write_text("", encoding="utf-8")
+            command = [
+                "powershell",
+                "-File",
+                "tools/unity-mcp-cli.ps1",
+                "--host",
+                "127.0.0.1",
+                "editor",
+                "custom-tool",
+                "vrc_export_blendshapes",
+                "--params-b64",
+                "eyJvdXRwdXRQYXRoIjogIkFzc2V0cy9leHBvcnQuanNvbiJ9",
+            ]
+
+            with patch("vrchat_blendshape_agent.find_unity_mcp_executable_prefix", return_value=[str(fake_cli)]):
+                resolved = resolve_unity_mcp_wrapper_command(command)
+
+        self.assertEqual(resolved[0], str(fake_cli))
+        self.assertIn("--params", resolved)
+        self.assertIn('{"outputPath": "Assets/export.json"}', resolved)
+        self.assertNotIn("--params-b64", resolved)
+
+    def test_extract_unity_mcp_stdout_error_reads_cli_error_prefix(self) -> None:
+        message = extract_unity_mcp_stdout_error(
+            "❌ Error: Roslyn runtime is disabled. Install the Roslyn DLLs.\n"
+        )
+
+        self.assertEqual(message, "Roslyn runtime is disabled. Install the Roslyn DLLs.")
+
+    def test_resolve_export_result_path_uses_absolute_stdout_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "unity-export.json"
+            export_path.write_text("{}", encoding="utf-8")
+            settings = Settings(
+                llm_provider="gemini",
+                llm_api_key="",
+                llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                llm_model="gemini-2.5-flash",
+                llm_api_key_env="GEMINI_API_KEY",
+                gemini_thinking_level="",
+                unity_mcp_command=["unity-mcp"],
+                unity_mcp_host="127.0.0.1",
+                unity_mcp_port=8080,
+                unity_mcp_instance="",
+                unity_mcp_retries=3,
+                unity_mcp_retry_backoff_seconds=2.0,
+                unity_mcp_timeout_seconds=30,
+                export_tool_name="vrc_export_blendshapes",
+                execute_tool_name="vrc_execute_roslyn",
+                export_path=Path("missing-local-export.json"),
+                min_confidence=0.65,
+            )
+            result = McpResult(
+                exit_code=0,
+                stdout=f"absoluteOutputPath: {export_path.as_posix()}\n✅ Executed custom tool",
+                stderr="",
+                payload=None,
+            )
+
+            self.assertEqual(resolve_export_result_path(settings, result), export_path)
 
     def test_run_unity_mcp_process_forces_utf8_environment(self) -> None:
         settings = Settings(

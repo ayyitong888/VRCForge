@@ -108,10 +108,37 @@ Install either:
 "@
 }
 
+function Convert-ParamsBase64Arguments {
+    param(
+        [string[]]$Arguments
+    )
+
+    $converted = @()
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $argument = $Arguments[$index]
+        if ($argument -ne "--params-b64" -and $argument -ne "--params-base64") {
+            $converted += $argument
+            continue
+        }
+
+        if ($index + 1 -ge $Arguments.Count) {
+            throw "Missing value after $argument"
+        }
+
+        $encoded = $Arguments[$index + 1]
+        $json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))
+        $converted += "--params"
+        $converted += $json.Replace('"', '\"')
+        $index++
+    }
+
+    return $converted
+}
+
 $resolved = Get-UnityMcpCommand
 $arguments = @()
 $arguments += $resolved.Prefix
-$arguments += $CliArgs
+$arguments += Convert-ParamsBase64Arguments -Arguments $CliArgs
 
 & $resolved.FilePath @arguments
 exit $LASTEXITCODE
