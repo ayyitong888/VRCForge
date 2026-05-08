@@ -230,6 +230,24 @@
             <textarea id="instruction-input" rows="4" placeholder="把眼睛睁大，嘴角上扬，表情更温和"></textarea>
           </label>
 
+          <div class="reference-panel">
+            <label class="field">
+              <span>参考脸图（可选）</span>
+              <input id="reference-image-file" type="file" accept="image/*">
+            </label>
+            <div class="field-grid two-cols">
+              <label class="field">
+                <span>参考图路径</span>
+                <input id="reference-image-path" type="text" placeholder="可填本地图片路径，或使用最近截图">
+              </label>
+              <div class="button-row reference-actions">
+                <button id="use-latest-screenshot-ref-btn" class="button button-ghost" type="button">使用最近截图</button>
+                <button id="clear-reference-image-btn" class="button button-ghost" type="button">清除参考图</button>
+              </div>
+            </div>
+            <small id="reference-image-status" class="field-note">不传图时只按文字捏脸；传图时 Gemini 会先读图，再和文字指令一起规划 Blendshape。</small>
+          </div>
+
           <div class="button-row">
             <button id="ai-run-btn" class="button button-accent">AI 生成并执行</button>
             <button id="manual-apply-btn" class="button">应用滑块改动</button>
@@ -239,6 +257,14 @@
           <div class="inline-status spread">
             <span class="inline-label">待应用改动</span>
             <strong id="pending-count">0 项</strong>
+          </div>
+
+          <div id="llm-change-panel" class="change-panel hidden">
+            <div class="inline-status spread">
+              <span class="inline-label">LLM 本次改动</span>
+              <strong id="llm-change-count">0 项</strong>
+            </div>
+            <div id="llm-change-list" class="change-list"></div>
           </div>
 
           <div class="field-grid two-cols">
@@ -265,7 +291,7 @@
           </div>
 
           <div class="button-row">
-            <button id="scan-clothes-btn" class="button">扫描场景衣服</button>
+            <button id="scan-clothes-btn" class="button">读取菜单/参数</button>
             <button id="generate-fx-btn" class="button button-ghost">生成 FX Blueprint</button>
             <button id="apply-fx-btn" class="button button-accent">写入 FX 资产</button>
           </div>
@@ -386,6 +412,6 @@
       </main>
     </div>
 
-    <script src="/dashboard/app.js?v=20260507-model-picker"></script>
+    <script src="/dashboard/app.js?v=20260508-direct-tools-reference-image"></script>
   </body>
 </html>

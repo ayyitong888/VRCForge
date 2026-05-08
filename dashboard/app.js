@@ -64,6 +64,10 @@ const state = {
   blendshapeBaseline: {},
   undoDepth: 0,
   clothes: [],
+  referenceImageDataUrl: "",
+  referenceImageName: "",
+  referenceImagePath: "",
+  lastAiChanges: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -131,11 +135,19 @@ function cacheRefs() {
     "save-artifacts",
     "summary-output",
     "instruction-input",
+    "reference-image-file",
+    "reference-image-path",
+    "use-latest-screenshot-ref-btn",
+    "clear-reference-image-btn",
+    "reference-image-status",
     "ai-run-btn",
     "manual-apply-btn",
     "manual-undo-btn",
     "blendshape-count-chip",
     "pending-count",
+    "llm-change-panel",
+    "llm-change-count",
+    "llm-change-list",
     "blendshape-search",
     "avatar-path-display",
     "blendshape-list",
@@ -200,6 +212,10 @@ function bindEvents() {
   refs["load-models-btn"].addEventListener("click", () => runButtonTask("load-models-btn", "读取中...", loadProviderModels));
   refs["save-config-btn"].addEventListener("click", () => runButtonTask("save-config-btn", "保存中...", () => saveApiConfig(true)));
   refs["reset-provider-btn"].addEventListener("click", resetProviderDefaults);
+  refs["reference-image-file"].addEventListener("change", onReferenceImageFileChanged);
+  refs["reference-image-path"].addEventListener("input", onReferenceImagePathChanged);
+  refs["use-latest-screenshot-ref-btn"].addEventListener("click", useLatestScreenshotAsReference);
+  refs["clear-reference-image-btn"].addEventListener("click", clearReferenceImage);
   refs["ai-run-btn"].addEventListener("click", () => runButtonTask("ai-run-btn", "执行中...", runAiPipeline));
   refs["manual-apply-btn"].addEventListener("click", () => runButtonTask("manual-apply-btn", "应用中...", applyManualBlendshapes));
   refs["manual-undo-btn"].addEventListener("click", () => runButtonTask("manual-undo-btn", "撤销中...", undoManualBlendshapes));
@@ -479,6 +495,8 @@ function buildDashboardRequest() {
     avatar: state.selectedAvatarPath || null,
     instruction: refs["instruction-input"].value.trim() || null,
     model: readSelectedModel() || null,
+    reference_image_path: refs["reference-image-path"].value.trim() || state.referenceImagePath || null,
+    reference_image_data_url: state.referenceImageDataUrl || null,
     source_mode: refs["source-mode"].value,
     export_json: refs["export-json"].value.trim() || null,
     plan_json: refs["plan-json"].value.trim() || null,
@@ -487,6 +505,80 @@ function buildDashboardRequest() {
     allow_low_confidence: refs["allow-low-confidence"].checked,
     save_artifacts: refs["save-artifacts"].checked,
   };
+}
+
+function onReferenceImageFileChanged() {
+  const file = refs["reference-image-file"].files?.[0];
+  if (!file) {
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    refs["reference-image-status"].textContent = "请选择图片文件。";
+    return;
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    refs["reference-image-status"].textContent = "参考图超过 8 MB，请换一张小一点的图。";
+    refs["reference-image-file"].value = "";
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.addEventListener("load", () => {
+    state.referenceImageDataUrl = String(reader.result || "");
+    state.referenceImageName = file.name;
+    state.referenceImagePath = "";
+    refs["reference-image-path"].value = "";
+    updateReferenceImageStatus();
+  });
+  reader.addEventListener("error", () => {
+    refs["reference-image-status"].textContent = "参考图读取失败。";
+  });
+  reader.readAsDataURL(file);
+}
+
+function onReferenceImagePathChanged() {
+  const value = refs["reference-image-path"].value.trim();
+  if (value) {
+    state.referenceImageDataUrl = "";
+    state.referenceImageName = "";
+    state.referenceImagePath = value;
+    refs["reference-image-file"].value = "";
+  } else {
+    state.referenceImagePath = "";
+  }
+  updateReferenceImageStatus();
+}
+
+function useLatestScreenshotAsReference() {
+  if (!state.latestScreenshotUrl) {
+    refs["reference-image-status"].textContent = "还没有可用截图，请先在视觉质检模块捕获截图。";
+    return;
+  }
+  state.referenceImageDataUrl = "";
+  state.referenceImageName = "";
+  state.referenceImagePath = urlToArtifactPath(state.latestScreenshotUrl);
+  refs["reference-image-file"].value = "";
+  refs["reference-image-path"].value = state.referenceImagePath;
+  updateReferenceImageStatus();
+}
+
+function clearReferenceImage() {
+  state.referenceImageDataUrl = "";
+  state.referenceImageName = "";
+  state.referenceImagePath = "";
+  refs["reference-image-file"].value = "";
+  refs["reference-image-path"].value = "";
+  updateReferenceImageStatus();
+}
+
+function updateReferenceImageStatus() {
+  if (state.referenceImageDataUrl) {
+    refs["reference-image-status"].textContent = `已选择参考图：${state.referenceImageName || "浏览器上传图片"}`;
+  } else if (state.referenceImagePath) {
+    refs["reference-image-status"].textContent = `将使用参考图：${state.referenceImagePath}`;
+  } else {
+    refs["reference-image-status"].textContent = "不传图时只按文字捏脸；传图时 Gemini 会先读图，再和文字指令一起规划 Blendshape。";
+  }
 }
 
 async function runButtonTask(buttonId, loadingText, task) {
@@ -751,6 +843,9 @@ async function runAiPipeline() {
     setActiveAvatar(payload.selectedAvatar.avatarName, payload.selectedAvatar.avatarPath);
   }
   applyPlanToBlendshapeState(payload.plan);
+  state.undoDepth = payload.undoDepth || state.undoDepth;
+  state.lastAiChanges = payload.changePreview || [];
+  renderAiChangePreview(state.lastAiChanges, payload.referenceImage);
   refs["summary-output"].textContent = payload.summary || payload.preview || "AI 执行完成";
 }
 
@@ -761,6 +856,40 @@ function applyPlanToBlendshapeState(plan) {
     state.blendshapeWorking[key] = Number(adjustment.target_weight);
   }
   renderBlendshapeList();
+}
+
+function renderAiChangePreview(changes, referenceImage) {
+  const items = Array.isArray(changes) ? changes : [];
+  refs["llm-change-count"].textContent = `${items.length} 项`;
+  refs["llm-change-panel"].classList.remove("hidden");
+
+  if (!items.length) {
+    refs["llm-change-list"].innerHTML = '<div class="empty-state">LLM 没有返回可执行的 Blendshape 改动</div>';
+    return;
+  }
+
+  const referenceLine = referenceImage?.imagePath
+    ? `<div class="change-reference">参考图：${escapeHtml(referenceImage.imagePath)}</div>`
+    : "";
+  refs["llm-change-list"].innerHTML = `${referenceLine}${items.map((item) => {
+    const previous = Number(item.previousWeight ?? 0);
+    const target = Number(item.targetWeight ?? 0);
+    const delta = Number(item.delta ?? target - previous);
+    const direction = delta >= 0 ? "+" : "";
+    return `
+      <article class="change-row">
+        <div class="change-head">
+          <strong>${escapeHtml(item.blendshapeName || "")}</strong>
+          <span>${previous.toFixed(1)} -> ${target.toFixed(1)} (${direction}${delta.toFixed(1)})</span>
+        </div>
+        <div class="blendshape-subline">${escapeHtml(item.rendererPath || "")}</div>
+        <p>${escapeHtml(item.reason || "")}</p>
+        <div class="change-meta">
+          <span class="meta-chip">confidence ${Number(item.confidence ?? 0).toFixed(2)}</span>
+        </div>
+      </article>
+    `;
+  }).join("")}`;
 }
 
 async function scanClothes() {
@@ -782,12 +911,17 @@ function renderClothes() {
 
   refs["clothes-list"].classList.remove("empty-state");
   refs["clothes-list"].innerHTML = state.clothes.map((item, index) => `
-    <label class="switch-row">
+    <label class="switch-row ${item.canToggleSceneObject ? "" : "disabled"}">
       <div>
-        <strong>${escapeHtml(item.name)}</strong>
-        <span>${escapeHtml(item.objectPath)}</span>
+        <strong>${escapeHtml(item.displayName || item.name || item.parameterName || "Unnamed")}</strong>
+        <span>${escapeHtml(item.menuPath || item.objectPath || item.parameterName || "")}</span>
+        <div class="change-meta">
+          <span class="meta-chip">${escapeHtml(sourceLabel(item.source))}</span>
+          ${item.parameterName ? `<span class="meta-chip">${escapeHtml(item.parameterName)}</span>` : ""}
+          ${item.valueType ? `<span class="meta-chip">${escapeHtml(item.valueType)}</span>` : ""}
+        </div>
       </div>
-      <input data-clothing-index="${index}" type="checkbox" ${item.active ? "checked" : ""}>
+      <input data-clothing-index="${index}" type="checkbox" ${item.active ? "checked" : ""} ${item.canToggleSceneObject ? "" : "disabled"}>
     </label>
   `).join("");
 
@@ -795,6 +929,9 @@ function renderClothes() {
     checkbox.addEventListener("change", async () => {
       const index = Number(checkbox.dataset.clothingIndex);
       const item = state.clothes[index];
+      if (!item.canToggleSceneObject || !item.objectPath) {
+        return;
+      }
       const nextValue = checkbox.checked;
       checkbox.disabled = true;
       try {
@@ -812,6 +949,19 @@ function renderClothes() {
       }
     });
   });
+}
+
+function sourceLabel(source) {
+  if (source === "menu_control") {
+    return "Menu";
+  }
+  if (source === "parameter") {
+    return "Parameter";
+  }
+  if (source === "scene_object") {
+    return "Scene";
+  }
+  return source || "Unknown";
 }
 
 async function generateFxBlueprint() {
@@ -837,7 +987,7 @@ async function applyClothesFx() {
   });
   
   refs["fx-apply-panel"].classList.remove("hidden");
-  refs["fx-apply-count"].textContent = `${payload.createdCount ?? state.clothes.length} 件`;
+  refs["fx-apply-count"].textContent = `${payload.result?.createdCount ?? payload.createdCount ?? state.clothes.length} 件`;
   refs["fx-csharp-preview"].textContent = payload.generatedCsharp || "";
   
   if (isDryRun) {

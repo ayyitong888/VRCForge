@@ -74,7 +74,7 @@ Write-Host ""
 Write-Host "Next steps inside Unity:"
 Write-Host "1. Open the project and wait for package resolution."
 Write-Host "2. Confirm MCP for Unity finished importing."
-Write-Host "3. Install Roslyn support for MCP for Unity, then enable USE_ROSLYN if needed."
+Write-Host "3. Optional: run tools/install-roslyn-support.ps1 for the legacy Roslyn fallback. USE_ROSLYN is not required."
 Write-Host "4. Start the Unity MCP server."
 Write-Host "5. Re-run python vrchat_blendshape_agent.py --unity-status"
 

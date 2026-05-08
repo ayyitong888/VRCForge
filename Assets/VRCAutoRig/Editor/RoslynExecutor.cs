@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using MCPForUnity.Editor.Helpers;
@@ -13,12 +14,6 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
-
-#if USE_ROSLYN
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Scripting;
-using Microsoft.CodeAnalysis.Scripting;
-#endif
 
 namespace VRCAutoRig.Editor
 {
@@ -119,10 +114,11 @@ namespace VRCAutoRig.Editor
                 return new ErrorResponse("Missing required parameter: code");
             }
 
-#if !USE_ROSLYN
-            return new ErrorResponse(
-                "Roslyn runtime is disabled. Install the Roslyn DLLs in MCP for Unity and add USE_ROSLYN to Player Settings > Scripting Define Symbols.");
-#else
+            if (!TryResolveRoslynRuntime(out var runtimeError))
+            {
+                return new ErrorResponse(runtimeError);
+            }
+
             try
             {
                 var startedAt = Stopwatch.StartNew();
@@ -149,11 +145,9 @@ namespace VRCAutoRig.Editor
                         durationMs = startedAt.Elapsed.TotalMilliseconds
                     });
             }
-            catch (CompilationErrorException ex)
+            catch (Exception ex) when (IsCompilationErrorException(ex))
             {
-                var diagnostics = string.Join(
-                    Environment.NewLine,
-                    ex.Diagnostics.Select(FormatDiagnostic));
+                var diagnostics = FormatCompilationDiagnostics(ex);
                 return new ErrorResponse($"Roslyn compilation failed:{Environment.NewLine}{diagnostics}");
             }
             catch (TimeoutException ex)
@@ -164,10 +158,8 @@ namespace VRCAutoRig.Editor
             {
                 return new ErrorResponse($"Roslyn execution failed: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             }
-#endif
         }
 
-#if USE_ROSLYN
         private static (object result, int writeDefaultsUpdated) ExecuteSnippet(
             string code,
             bool enforceWriteDefaultsOn,
@@ -175,7 +167,7 @@ namespace VRCAutoRig.Editor
         {
             var options = BuildScriptOptions();
             var globals = new ScriptGlobals();
-            var evaluation = CSharpScript.EvaluateAsync<object>(code, options, globals, typeof(ScriptGlobals));
+            var evaluation = EvaluateScriptAsync(code, options, globals);
             var completed = Task.WhenAny(evaluation, Task.Delay(ExecutionTimeout)).GetAwaiter().GetResult();
 
             if (completed != evaluation)
@@ -191,25 +183,30 @@ namespace VRCAutoRig.Editor
             return (result, writeDefaultsUpdated);
         }
 
-        private static ScriptOptions BuildScriptOptions()
+        private static object BuildScriptOptions()
         {
-            var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var metadata = new List<MetadataReference>();
-
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            var scriptOptionsType = ResolveRoslynType(
+                "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
+                "Microsoft.CodeAnalysis.Scripting");
+            var options = scriptOptionsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static)
+                ?.GetValue(null);
+            if (options == null)
             {
-                if (assembly.IsDynamic || string.IsNullOrWhiteSpace(assembly.Location))
-                {
-                    continue;
-                }
-
-                if (!references.Add(assembly.Location))
-                {
-                    continue;
-                }
-
-                metadata.Add(MetadataReference.CreateFromFile(assembly.Location));
+                throw new InvalidOperationException("Roslyn ScriptOptions.Default was not available.");
             }
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(assembly => !assembly.IsDynamic && !string.IsNullOrWhiteSpace(assembly.Location))
+                .GroupBy(assembly => assembly.Location, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToArray();
+
+            options = InvokeScriptOptionsMethod(
+                scriptOptionsType,
+                options,
+                "AddReferences",
+                typeof(Assembly[]),
+                assemblies);
 
             var imports = new List<string>
             {
@@ -230,24 +227,195 @@ namespace VRCAutoRig.Editor
                 imports.Add("VRC.SDK3.Avatars.ScriptableObjects");
             }
 
-            return ScriptOptions.Default
-                .AddReferences(metadata)
-                .AddImports(imports);
+            return InvokeScriptOptionsMethod(
+                scriptOptionsType,
+                options,
+                "AddImports",
+                typeof(string[]),
+                imports.ToArray());
         }
 
-        private static string FormatDiagnostic(Diagnostic diagnostic)
+        private static object InvokeScriptOptionsMethod(
+            Type scriptOptionsType,
+            object options,
+            string methodName,
+            Type parameterType,
+            object argument)
         {
-            var span = diagnostic.Location.GetLineSpan();
-            if (!span.IsValid)
+            var method = scriptOptionsType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(candidate =>
+                {
+                    if (candidate.Name != methodName)
+                    {
+                        return false;
+                    }
+
+                    var parameters = candidate.GetParameters();
+                    return parameters.Length == 1 && parameters[0].ParameterType == parameterType;
+                });
+
+            if (method == null)
+            {
+                throw new InvalidOperationException($"Roslyn ScriptOptions.{methodName} overload was not available.");
+            }
+
+            return method.Invoke(options, new[] { argument });
+        }
+
+        private static Task<object> EvaluateScriptAsync(string code, object options, ScriptGlobals globals)
+        {
+            var csharpScriptType = ResolveRoslynType(
+                "Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript",
+                "Microsoft.CodeAnalysis.CSharp.Scripting");
+            var scriptOptionsType = ResolveRoslynType(
+                "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
+                "Microsoft.CodeAnalysis.Scripting");
+            var method = csharpScriptType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(candidate => candidate.Name == "EvaluateAsync" && candidate.IsGenericMethodDefinition)
+                .FirstOrDefault(candidate =>
+                {
+                    var parameters = candidate.GetParameters();
+                    return parameters.Length == 5
+                        && parameters[0].ParameterType == typeof(string)
+                        && parameters[1].ParameterType == scriptOptionsType
+                        && parameters[2].ParameterType == typeof(object)
+                        && parameters[3].ParameterType == typeof(Type)
+                        && parameters[4].ParameterType == typeof(CancellationToken);
+                });
+
+            if (method == null)
+            {
+                throw new InvalidOperationException("Roslyn CSharpScript.EvaluateAsync overload was not available.");
+            }
+
+            var task = method.MakeGenericMethod(typeof(object)).Invoke(
+                null,
+                new object[] { code, options, globals, typeof(ScriptGlobals), CancellationToken.None });
+            return (Task<object>)task;
+        }
+
+        private static bool TryResolveRoslynRuntime(out string error)
+        {
+            error = string.Empty;
+            try
+            {
+                ResolveRoslynType(
+                    "Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript",
+                    "Microsoft.CodeAnalysis.CSharp.Scripting");
+                ResolveRoslynType(
+                    "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
+                    "Microsoft.CodeAnalysis.Scripting");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error =
+                    "Roslyn runtime is unavailable. Install Roslyn DLLs under Assets/Plugins/Roslyn or run tools/install-roslyn-support.ps1. "
+                    + ex.Message;
+                return false;
+            }
+        }
+
+        private static Type ResolveRoslynType(string fullName, string assemblyName)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    var type = assembly.GetType(fullName, false);
+                    if (type != null)
+                    {
+                        return type;
+                    }
+                }
+                catch
+                {
+                    // Ignore editor reload races.
+                }
+            }
+
+            try
+            {
+                var loadedType = Type.GetType($"{fullName}, {assemblyName}", false);
+                if (loadedType != null)
+                {
+                    return loadedType;
+                }
+            }
+            catch
+            {
+                // Try loading from the conventional project plugin folder below.
+            }
+
+            var dllPath = Path.Combine(Application.dataPath, "Plugins", "Roslyn", $"{assemblyName}.dll");
+            if (File.Exists(dllPath))
+            {
+                var assembly = Assembly.LoadFrom(dllPath);
+                var type = assembly.GetType(fullName, false);
+                if (type != null)
+                {
+                    return type;
+                }
+            }
+
+            throw new InvalidOperationException($"Could not load Roslyn type '{fullName}'.");
+        }
+
+        private static bool IsCompilationErrorException(Exception ex)
+        {
+            return ex.GetType().FullName == "Microsoft.CodeAnalysis.Scripting.CompilationErrorException";
+        }
+
+        private static string FormatCompilationDiagnostics(Exception ex)
+        {
+            try
+            {
+                var diagnostics = ex.GetType().GetProperty("Diagnostics")?.GetValue(ex) as System.Collections.IEnumerable;
+                if (diagnostics == null)
+                {
+                    return ex.Message;
+                }
+
+                var lines = diagnostics.Cast<object>().Select(FormatDiagnosticObject).ToArray();
+                return lines.Length > 0 ? string.Join(Environment.NewLine, lines) : ex.Message;
+            }
+            catch
+            {
+                return ex.Message;
+            }
+        }
+
+        private static string FormatDiagnosticObject(object diagnostic)
+        {
+            try
+            {
+                var diagnosticType = diagnostic.GetType();
+                var severity = diagnosticType.GetProperty("Severity")?.GetValue(diagnostic)?.ToString() ?? "Diagnostic";
+                var message = diagnosticType.GetMethod("GetMessage", Type.EmptyTypes)?.Invoke(diagnostic, null)?.ToString()
+                    ?? diagnostic.ToString();
+                var location = diagnosticType.GetProperty("Location")?.GetValue(diagnostic);
+                var span = location?.GetType().GetMethod("GetLineSpan", Type.EmptyTypes)?.Invoke(location, null);
+                var isValid = (bool?)span?.GetType().GetProperty("IsValid")?.GetValue(span) ?? false;
+                if (!isValid)
+                {
+                    return diagnostic.ToString();
+                }
+
+                var start = span.GetType().GetProperty("StartLinePosition")?.GetValue(span);
+                if (start == null)
+                {
+                    return diagnostic.ToString();
+                }
+
+                var line = (int)start.GetType().GetProperty("Line").GetValue(start) + 1;
+                var character = (int)start.GetType().GetProperty("Character").GetValue(start) + 1;
+                return $"{severity} L{line}:C{character} {message}";
+            }
+            catch
             {
                 return diagnostic.ToString();
             }
-
-            var line = span.StartLinePosition.Line + 1;
-            var character = span.StartLinePosition.Character + 1;
-            return $"{diagnostic.Severity} L{line}:C{character} {diagnostic.GetMessage()}";
         }
-#endif
 
         public static void Log(string message)
         {

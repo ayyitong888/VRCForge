@@ -517,7 +517,24 @@ textarea {
   padding-right: 0.15rem;
 }
 
+.reference-panel,
+.change-panel {
+  display: grid;
+  gap: 0.8rem;
+  margin: 0.9rem 0;
+}
+
+.reference-actions {
+  align-self: end;
+}
+
+.change-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
 .blendshape-row,
+.change-row,
 .info-card,
 .switch-row,
 .log-entry,
@@ -531,6 +548,55 @@ textarea {
 .blendshape-row {
   border-radius: var(--radius-md);
   padding: 0.95rem;
+}
+
+.change-row {
+  border-radius: var(--radius-md);
+  padding: 0.85rem 0.95rem;
+  background: var(--md-tertiary-container);
+  border-color: rgba(0, 107, 95, 0.28);
+}
+
+.change-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: start;
+}
+
+.change-head strong {
+  color: var(--md-on-surface);
+}
+
+.change-head span,
+.change-reference {
+  color: var(--md-on-surface-variant);
+  font-weight: 800;
+  font-size: 0.82rem;
+}
+
+.change-row p {
+  margin: 0.45rem 0 0;
+  color: var(--md-on-surface-variant);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.change-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.meta-chip {
+  border-radius: 999px;
+  background: var(--md-surface-container-high);
+  color: var(--md-on-surface-variant);
+  border: 1px solid var(--md-outline-variant);
+  padding: 0.22rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .blendshape-row.changed {
@@ -636,6 +702,10 @@ textarea {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
+}
+
+.switch-row.disabled {
+  opacity: 0.86;
 }
 
 .switch-row strong,

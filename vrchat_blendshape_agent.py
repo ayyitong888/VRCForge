@@ -232,7 +232,7 @@ def main() -> int:
         if using_mock_execute:
             result = mock_execute_csharp(code, selected_avatar, export_source)
         else:
-            result = execute_csharp(settings, code, [selected_avatar.avatar_path])
+            result = apply_blendshape_plan_direct(settings, selected_avatar, plan)
 
         if args.save_result:
             save_result(args.save_result, result)
@@ -607,10 +607,31 @@ def create_blendshape_plan(settings: Settings, export_payload: dict[str, Any], i
 
 def request_llm_plan(settings: Settings, prompt: str) -> str:
     provider = normalize_provider_name(settings.llm_provider)
+    if provider == "gemini":
+        return request_gemini_plan(settings, prompt)
     if provider == "anthropic":
         return request_anthropic_plan(settings, prompt)
 
     return request_openai_compatible_plan(settings, prompt)
+
+
+def request_gemini_plan(settings: Settings, prompt: str) -> str:
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'google-genai' package is not installed. Run pip install -r requirements.txt and try again."
+        ) from exc
+
+    client = genai.Client(api_key=settings.llm_api_key)
+    try:
+        response = client.models.generate_content(
+            model=settings.llm_model,
+            contents=prompt,
+        )
+        return getattr(response, "text", "") or ""
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Gemini request failed for model {settings.llm_model}: {exc}") from exc
 
 
 def request_openai_compatible_plan(settings: Settings, prompt: str) -> str:
@@ -967,6 +988,30 @@ def execute_csharp(settings: Settings, code: str, target_avatar_paths: list[str]
             "code": code,
             "enforceWriteDefaultsOn": True,
             "targetAvatarPaths": target_avatar_paths,
+        },
+    )
+
+
+def apply_blendshape_plan_direct(settings: Settings, selected_avatar: SelectedAvatar, plan: BlendshapePlan) -> McpResult:
+    adjustments = [
+        {
+            "rendererPath": adjustment.renderer_path,
+            "blendshapeName": adjustment.blendshape_name,
+            "targetWeight": adjustment.target_weight,
+        }
+        for adjustment in plan.adjustments
+    ]
+    if not adjustments:
+        payload = {"ok": True, "appliedCount": 0, "applied": []}
+        return McpResult(exit_code=0, stdout=json.dumps(payload, ensure_ascii=False), stderr="", payload=payload)
+
+    return invoke_unity_mcp(
+        settings,
+        "vrc_apply_blendshapes",
+        {
+            "avatarPath": selected_avatar.avatar_path,
+            "adjustments": adjustments,
+            "saveAssets": True,
         },
     )
 

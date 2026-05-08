@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import math
 import mimetypes
@@ -68,6 +69,8 @@ class DashboardRequest(BaseModel):
     instruction: str | None = Field(default=None, description="Natural language instruction for LLM planning.")
     avatar: str | None = Field(default=None, description="Exact or partial avatar path/name.")
     model: str | None = Field(default=None, description="Optional model override.")
+    reference_image_path: str | None = Field(default=None, description="Optional local path or artifact URL for a face reference image.")
+    reference_image_data_url: str | None = Field(default=None, description="Optional browser-uploaded image as a data URL.")
     source_mode: Literal["unity_live_export", "configured_export", "custom_export", "mvp_sample"] = "mvp_sample"
     export_json: str | None = Field(default=None, description="Optional local export JSON path.")
     plan_json: str | None = Field(default=None, description="Optional local plan JSON path.")
@@ -338,7 +341,7 @@ def read_health() -> dict[str, Any]:
             "unityInstance": DASHBOARD_STATE.unity_instance,
         },
         "state": serialize_dashboard_state(),
-        "apiConfig": serialize_api_config(include_secret=True),
+        "apiConfig": serialize_api_config(include_secret=False),
         "projects": project_snapshot_payload(),
         "recentLogs": list(RECENT_LOGS),
         "unityStatus": CURRENT_UNITY_STATUS,
@@ -650,6 +653,8 @@ def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
         avatars = serialize_avatar_list(export_payload)
         emit_log("info", "avatar", "Blendshape avatar export loaded.", {"count": len(avatars), "source": export_source})
         return {
+            "ok": True,
+            "executed": execute,
             "exportSource": export_source,
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "summary": export_payload.get("summary", {}),
@@ -805,14 +810,15 @@ def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        result = execute_dashboard_code(settings, build_clothes_scan_code(avatar_path), [avatar_path] if avatar_path else None)
-        clothes = ensure_list_payload(result, "clothes scan")
-        emit_log("info", "fx", "Clothing scan completed.", {"avatarPath": avatar_path, "count": len(clothes)})
+        payload = scan_avatar_controls_direct(settings, avatar_path)
+        clothes = ensure_list_payload(payload.get("items") or payload.get("clothes") or [], "avatar menu/parameter scan")
+        emit_log("info", "fx", "Avatar menu/parameter scan completed.", {"avatarPath": avatar_path, "count": len(clothes)})
         return {
             "ok": True,
             "avatarPath": avatar_path,
             "clothes": clothes,
             "count": len(clothes),
+            "jsonPath": payload.get("jsonPath"),
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "fx", "Failed to scan clothing objects.", {"error": str(exc)})
@@ -822,7 +828,7 @@ def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
 def toggle_clothing_sync(request: ClothingToggleRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
-        result = execute_dashboard_code(settings, build_clothing_toggle_code(request.object_path, request.active))
+        result = toggle_scene_object_direct(settings, request.object_path, request.active)
         payload = ensure_dict_payload(result, "clothing toggle")
         emit_log(
             "success",
@@ -840,8 +846,7 @@ def generate_clothing_fx_sync(request: AvatarScopedConnectionRequest) -> dict[st
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        result = execute_dashboard_code(settings, build_clothes_fx_blueprint_code(avatar_path), [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "clothing fx blueprint")
+        payload = build_clothing_fx_blueprint_from_controls(settings, avatar_path)
         emit_log("success", "fx", "Clothing FX blueprint generated.", {"avatarPath": avatar_path, "itemCount": len(payload.get("items") or [])})
         return {"ok": True, "avatarPath": avatar_path, "fxBlueprint": payload}
     except (RuntimeError, UnityMcpError) as exc:
@@ -853,8 +858,7 @@ def scan_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> dict[
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        result = execute_dashboard_code(settings, build_parameter_scan_code(avatar_path), [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "parameter scan")
+        payload = scan_avatar_parameters_direct(settings, avatar_path)
         emit_log("info", "parameter", "Avatar parameter scan completed.", {"avatarPath": avatar_path})
         return {"ok": True, "avatarPath": avatar_path, "stats": payload}
     except (RuntimeError, UnityMcpError) as exc:
@@ -866,8 +870,13 @@ def optimize_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> d
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        result = execute_dashboard_code(settings, build_parameter_optimization_code(avatar_path), [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "parameter optimization")
+        stats = scan_avatar_parameters_direct(settings, avatar_path)
+        suggestions = stats.get("suggestions") or []
+        payload = {
+            "suggestionCount": len(suggestions),
+            "suggestions": suggestions,
+            "note": stats.get("note") or "Suggestions are heuristic only. Review animator conditions and menu bindings before changing parameter types.",
+        }
         emit_log("success", "parameter", "Avatar parameter optimization suggestions generated.", {"avatarPath": avatar_path})
         return {"ok": True, "avatarPath": avatar_path, "optimization": payload}
     except (RuntimeError, UnityMcpError) as exc:
@@ -879,12 +888,13 @@ def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, A
     try:
         settings = load_dashboard_settings(request)
         output_path = (DASHBOARD_ARTIFACTS_DIR / "latest" / "vision_capture.png").resolve()
-        result = execute_dashboard_code(
-            settings,
-            build_screenshot_capture_code(output_path, request.width, request.height),
-            [request.avatar_path] if request.avatar_path else None,
+        payload = capture_scene_view_direct(
+            settings=settings,
+            output_path=output_path,
+            width=request.width,
+            height=request.height,
+            set_rotation=False,
         )
-        payload = ensure_dict_payload(result, "vision capture")
         image_path = payload.get("imagePath") or str(output_path)
         image_url = to_artifact_url(image_path)
         DASHBOARD_RUNTIME.latest_screenshot_path = image_path
@@ -938,8 +948,7 @@ def apply_clothing_fx_sync(request: ClothingApplyFxRequest) -> dict[str, Any]:
             emit_log("info", "fx", "Clothing FX apply-code generated (dry-run).", {"avatarPath": avatar_path, "itemCount": len(items)})
             return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "itemCount": len(items)}
 
-        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "clothing fx apply")
+        payload = apply_clothing_fx_direct(settings, avatar_path, items)
         emit_log("success", "fx", "Clothing FX assets authored in Unity.", {"avatarPath": avatar_path, "itemCount": len(items)})
         return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "generatedCsharp": csharp_code, "result": payload, "itemCount": len(items)}
     except (RuntimeError, UnityMcpError) as exc:
@@ -965,11 +974,7 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
             emit_log("info", "parameter", "Parameter optimization code generated (dry-run).", {"avatarPath": avatar_path, "count": len(suggestions)})
             return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions)}
 
-        snapshot_code = build_parameter_snapshot_code(avatar_path)
-        snapshot_payload = ensure_dict_payload(
-            execute_dashboard_code(settings, snapshot_code, [avatar_path] if avatar_path else None),
-            "parameter snapshot",
-        )
+        snapshot_payload = scan_avatar_parameters_direct(settings, avatar_path)
         snapshot_info = save_parameter_snapshot_payload(snapshot_payload, avatar_path)
         emit_log(
             "info",
@@ -978,8 +983,7 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
             {"avatarPath": avatar_path, "snapshotPath": snapshot_info["snapshotPath"]},
         )
 
-        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "parameter optimization apply")
+        payload = apply_parameter_optimization_direct(settings, avatar_path, suggestions)
         emit_log("success", "parameter", "Parameter optimization applied in Unity.", {"avatarPath": avatar_path, "count": len(suggestions)})
         return {
             "ok": True,
@@ -1007,8 +1011,7 @@ def rollback_parameter_optimization_sync(request: ParameterRollbackRequest) -> d
 
         avatar_path = request.avatar_path or snapshot_payload.get("avatarPath") or DASHBOARD_RUNTIME.current_avatar_path
         csharp_code = build_parameter_rollback_code(avatar_path, snapshot_payload)
-        result = execute_dashboard_code(settings, csharp_code, [avatar_path] if avatar_path else None)
-        payload = ensure_dict_payload(result, "parameter rollback")
+        payload = rollback_parameters_direct(settings, avatar_path, snapshot_payload)
         restored_count = payload.get("restoredCount", snapshot_payload.get("parameterCount", 0))
         emit_log(
             "success",
@@ -1048,11 +1051,16 @@ def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> 
         for angle in angles:
             out_path = output_dir / f"vision_{angle}.png"
             pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS.get(angle, (10.0, 0.0, 0.0))
-            code = build_screenshot_multi_capture_code(out_path, pitch, yaw, roll, request.width, request.height)
-            result = execute_dashboard_code(
-                settings, code, [request.avatar_path] if request.avatar_path else None
+            payload = capture_scene_view_direct(
+                settings=settings,
+                output_path=out_path,
+                width=request.width,
+                height=request.height,
+                pitch=pitch,
+                yaw=yaw,
+                roll=roll,
+                set_rotation=True,
             )
-            payload = ensure_dict_payload(result, f"multi vision capture ({angle})")
             image_path = payload.get("imagePath") or str(out_path)
             image_url = to_artifact_url(image_path)
             captures.append({"angle": angle, "imagePath": image_path, "imageUrl": image_url})
@@ -1116,13 +1124,20 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             },
         )
 
+        reference_context: dict[str, Any] | None = None
         if request.plan_json:
             plan = read_plan_json(resolve_local_path(request.plan_json))
             emit_log("info", "pipeline", "Loaded local plan JSON.", {"planJson": request.plan_json})
         else:
             if not request.instruction:
                 raise RuntimeError("instruction is required unless a local plan_json path is provided.")
-            plan = create_blendshape_plan(settings, planning_payload, request.instruction)
+            reference_context = build_reference_image_context(request)
+            effective_instruction = enrich_instruction_with_reference_image(
+                settings=settings,
+                instruction=request.instruction,
+                reference_context=reference_context,
+            )
+            plan = create_blendshape_plan(settings, planning_payload, effective_instruction)
             emit_log(
                 "info",
                 "pipeline",
@@ -1131,6 +1146,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                     "instruction": request.instruction,
                     "provider": settings.llm_provider,
                     "model": settings.llm_model,
+                    "referenceImage": reference_context.get("imagePath") if reference_context else None,
                 },
             )
 
@@ -1157,15 +1173,21 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
 
         preview = render_preview(selected_avatar, plan, export_source, using_mock_execute)
         csharp_code = render_csharp(plan)
+        change_preview = build_plan_change_preview(plan, export_payload, selected_avatar)
 
         result: McpResult | None = None
         summary: str | None = None
         if execute:
-            emit_log("info", "pipeline", "Executing generated C# snippet.", {"executionMode": "mock" if using_mock_execute else "live-unity"})
-            if using_mock_execute:
+            emit_log("info", "pipeline", "Executing blendshape plan.", {"executionMode": "mock" if using_mock_execute else "live-unity"})
+            if not plan.adjustments:
+                emit_log("info", "pipeline", "Plan contains no blendshape adjustments; execution skipped.", {})
+            elif using_mock_execute:
                 result = mock_execute_csharp(csharp_code, selected_avatar, export_source)
             else:
-                result = execute_csharp(settings, csharp_code, [selected_avatar.avatar_path])
+                direct_adjustments = build_direct_blendshape_adjustments_from_plan(plan)
+                undo_items = build_undo_items_from_change_preview(change_preview)
+                result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
+                push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
             summary = render_summary(selected_avatar, plan, result, using_mock_execute)
             emit_log(
                 "success",
@@ -1191,11 +1213,14 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             "selectedAvatar": serialize_selected_avatar(selected_avatar),
             "availableAvatars": serialize_avatar_list(export_payload),
             "plan": plan.model_dump(),
+            "changePreview": change_preview,
+            "referenceImage": reference_context,
             "preview": preview,
             "csharp": csharp_code,
             "result": serialize_result(result),
             "summary": summary,
             "artifacts": artifacts,
+            "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "pipeline", "Pipeline failed.", {"error": str(exc)})
@@ -1310,6 +1335,13 @@ def ensure_dict_payload(payload: Any, scope: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected {scope} to return a JSON object, got: {type(payload).__name__}")
     return payload
+
+
+def build_dashboard_artifact_path(prefix: str, avatar_path: str | None, suffix: str) -> Path:
+    latest_dir = ARTIFACTS_DIR / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    safe_avatar = sanitize_artifact_name(str(avatar_path or "avatar"))
+    return latest_dir / f"{prefix}_{safe_avatar}.{suffix.lstrip('.')}"
 
 
 def run_unity_cli_json(settings: Settings, cli_args: list[str]) -> dict[str, Any]:
@@ -1442,6 +1474,238 @@ def apply_blendshapes_direct(
             "saveAssets": True,
         },
     )
+
+
+def scan_avatar_controls_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
+    output_path = build_dashboard_artifact_path("avatar_controls", avatar_path, "json")
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_scan_avatar_controls",
+        {
+            "avatarPath": avatar_path or "",
+            "outputPath": str(output_path),
+        },
+    )
+    if output_path.exists():
+        payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+        payload.setdefault("jsonPath", str(output_path))
+        return ensure_dict_payload(payload, "avatar menu/parameter scan")
+
+    payload = extract_tool_result_payload(result)
+    return ensure_dict_payload(payload, "avatar menu/parameter scan")
+
+
+def toggle_scene_object_direct(settings: Settings, object_path: str, active: bool) -> Any:
+    return extract_tool_result_payload(
+        invoke_unity_mcp(
+            settings,
+            "vrc_toggle_scene_object",
+            {
+                "objectPath": object_path,
+                "active": active,
+                "saveAssets": True,
+            },
+        )
+    )
+
+
+def scan_avatar_parameters_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
+    output_path = build_dashboard_artifact_path("avatar_parameters", avatar_path, "json")
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_scan_avatar_parameters",
+        {
+            "avatarPath": avatar_path or "",
+            "outputPath": str(output_path),
+        },
+    )
+    if output_path.exists():
+        payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+        payload.setdefault("jsonPath", str(output_path))
+        return ensure_dict_payload(payload, "parameter scan")
+
+    payload = extract_tool_result_payload(result)
+    return ensure_dict_payload(payload, "parameter scan")
+
+
+def capture_scene_view_direct(
+    settings: Settings,
+    output_path: Path,
+    width: int,
+    height: int,
+    pitch: float = 0.0,
+    yaw: float = 0.0,
+    roll: float = 0.0,
+    set_rotation: bool = False,
+) -> dict[str, Any]:
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_capture_scene_view",
+        {
+            "outputPath": str(output_path),
+            "width": width,
+            "height": height,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+            "setRotation": set_rotation,
+            "restoreView": True,
+        },
+    )
+    payload = extract_tool_result_payload(result)
+    if isinstance(payload, dict):
+        return payload
+
+    if output_path.exists():
+        return {
+            "imagePath": str(output_path),
+            "width": width,
+            "height": height,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+            "setRotation": set_rotation,
+        }
+
+    return ensure_dict_payload(payload, "vision capture")
+
+
+def build_clothing_fx_blueprint_from_controls(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
+    payload = scan_avatar_controls_direct(settings, avatar_path)
+    controls = ensure_list_payload(payload.get("items") or [], "avatar menu/parameter scan")
+
+    items: list[dict[str, Any]] = []
+    for control in controls:
+        if not isinstance(control, dict):
+            continue
+        display_name = str(control.get("displayName") or control.get("name") or control.get("parameterName") or "").strip()
+        if not display_name:
+            continue
+        parameter_name = str(control.get("parameterName") or f"Cloth_{sanitize_fx_identifier(display_name)}").strip()
+        object_path = str(control.get("objectPath") or "").strip()
+        items.append(
+            {
+                "displayName": display_name,
+                "parameterName": parameter_name,
+                "animationClipName": f"FX_{sanitize_fx_identifier(display_name)}_Toggle",
+                "sampleObjectPath": object_path,
+                "source": control.get("source") or "",
+                "bindingCount": 1 if object_path else 0,
+                "note": "" if object_path else "Loaded from menu/parameter; no scene object binding was detected.",
+            }
+        )
+
+    return {
+        "items": items,
+        "itemCount": len(items),
+        "note": "Blueprint is built from avatar menu/parameter data. Items without scene object paths are existing controls and may not need new FX assets.",
+    }
+
+
+def sanitize_fx_identifier(value: str) -> str:
+    cleaned = "".join(ch for ch in value if ch.isalnum())
+    return cleaned or "Clothing"
+
+
+def apply_clothing_fx_direct(settings: Settings, avatar_path: str | None, items: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = extract_tool_result_payload(
+        invoke_unity_mcp(
+            settings,
+            "vrc_apply_clothing_fx",
+            {
+                "avatarPath": avatar_path or "",
+                "items": items,
+            },
+        )
+    )
+    return ensure_dict_payload(payload, "clothing fx apply")
+
+
+def apply_parameter_optimization_direct(
+    settings: Settings,
+    avatar_path: str | None,
+    suggestions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = extract_tool_result_payload(
+        invoke_unity_mcp(
+            settings,
+            "vrc_apply_parameter_optimization",
+            {
+                "avatarPath": avatar_path or "",
+                "suggestions": suggestions,
+            },
+        )
+    )
+    return ensure_dict_payload(payload, "parameter optimization apply")
+
+
+def rollback_parameters_direct(
+    settings: Settings,
+    avatar_path: str | None,
+    snapshot_payload: dict[str, Any],
+) -> dict[str, Any]:
+    payload = extract_tool_result_payload(
+        invoke_unity_mcp(
+            settings,
+            "vrc_rollback_avatar_parameters",
+            {
+                "avatarPath": avatar_path or "",
+                "parameterNames": snapshot_payload.get("parameterNames") or snapshot_payload.get("parameters") or [],
+            },
+        )
+    )
+    return ensure_dict_payload(payload, "parameter rollback")
+
+
+def build_direct_blendshape_adjustments_from_plan(plan: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "rendererPath": adjustment.renderer_path,
+            "blendshapeName": adjustment.blendshape_name,
+            "targetWeight": adjustment.target_weight,
+        }
+        for adjustment in plan.adjustments
+    ]
+
+
+def build_plan_change_preview(
+    plan: Any,
+    export_payload: dict[str, Any],
+    selected_avatar: SelectedAvatar,
+) -> list[dict[str, Any]]:
+    allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+    changes: list[dict[str, Any]] = []
+    for adjustment in plan.adjustments:
+        current_weight = allowed_targets.get(
+            (adjustment.renderer_path, adjustment.blendshape_name),
+            {},
+        ).get("currentWeight", 0.0)
+        target_weight = float(adjustment.target_weight)
+        previous_weight = float(current_weight)
+        changes.append(
+            {
+                "avatarPath": adjustment.avatar_path,
+                "rendererPath": adjustment.renderer_path,
+                "blendshapeName": adjustment.blendshape_name,
+                "previousWeight": previous_weight,
+                "targetWeight": target_weight,
+                "delta": target_weight - previous_weight,
+                "reason": adjustment.reason,
+                "confidence": adjustment.confidence,
+            }
+        )
+    return changes
+
+
+def build_undo_items_from_change_preview(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "rendererPath": str(item.get("rendererPath") or ""),
+            "blendshapeName": str(item.get("blendshapeName") or ""),
+            "targetWeight": float(item.get("previousWeight", 0.0) or 0.0),
+        }
+        for item in changes
+    ]
 
 
 def push_manual_undo_snapshot(avatar_path: str, adjustments: list[dict[str, Any]]) -> None:
@@ -2204,6 +2468,137 @@ def save_vision_audit_artifact(file_name: str, payload: dict[str, Any]) -> Path:
     audit_path = latest_dir / file_name
     audit_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return audit_path
+
+
+def build_reference_image_context(request: DashboardRequest) -> dict[str, Any] | None:
+    image_path = resolve_reference_image_path(request)
+    if image_path is None:
+        return None
+
+    api_config = serialize_api_config(include_secret=True)
+    if api_config.get("provider") != "gemini":
+        raise RuntimeError("Reference image planning currently requires the dashboard provider to be set to Gemini.")
+
+    description = describe_reference_face_with_gemini(
+        api_config=api_config,
+        image_path=image_path,
+        instruction=request.instruction or "",
+    )
+    context = {
+        "imagePath": str(image_path),
+        "imageUrl": to_artifact_url(str(image_path)),
+        "description": description,
+    }
+    save_vision_audit_artifact("reference_face_context.json", context)
+    emit_log("success", "pipeline", "Reference image analyzed for blendshape planning.", {"imagePath": str(image_path)})
+    return context
+
+
+def resolve_reference_image_path(request: DashboardRequest) -> Path | None:
+    data_url = (request.reference_image_data_url or "").strip()
+    if data_url:
+        return save_reference_image_data_url(data_url)
+
+    path_value = (request.reference_image_path or "").strip()
+    if not path_value:
+        return None
+
+    if path_value.startswith("/artifacts/"):
+        image_path = (ARTIFACTS_DIR / path_value[len("/artifacts/"):]).resolve()
+    else:
+        image_path = resolve_local_path(path_value)
+
+    if not image_path.exists() or not image_path.is_file():
+        raise RuntimeError(f"Reference image file does not exist: {image_path}")
+    return image_path
+
+
+def save_reference_image_data_url(data_url: str) -> Path:
+    if "," not in data_url or not data_url.lower().startswith("data:"):
+        raise RuntimeError("Uploaded reference image must be a browser data URL.")
+
+    header, encoded = data_url.split(",", 1)
+    mime_type = header[5:].split(";", 1)[0].strip().lower() or "image/png"
+    if not mime_type.startswith("image/"):
+        raise RuntimeError(f"Uploaded reference file is not an image: {mime_type}")
+
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise RuntimeError("Uploaded reference image could not be decoded.") from exc
+
+    max_bytes = 8 * 1024 * 1024
+    if len(image_bytes) > max_bytes:
+        raise RuntimeError("Uploaded reference image is larger than 8 MB.")
+
+    suffix = mimetypes.guess_extension(mime_type) or ".png"
+    if suffix == ".jpe":
+        suffix = ".jpg"
+
+    latest_dir = DASHBOARD_ARTIFACTS_DIR / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    output_path = (latest_dir / f"reference_image{suffix}").resolve()
+    output_path.write_bytes(image_bytes)
+    return output_path
+
+
+def enrich_instruction_with_reference_image(
+    settings: Settings,
+    instruction: str,
+    reference_context: dict[str, Any] | None,
+) -> str:
+    if not reference_context:
+        return instruction
+
+    description = reference_context.get("description") or {}
+    return (
+        f"{instruction}\n\n"
+        "Additional visual reference for the desired face/expression:\n"
+        f"{json.dumps(description, ensure_ascii=False, indent=2)}\n\n"
+        "Use the reference image as style and expression guidance only. "
+        "Do not infer identity. Convert visible facial traits into available VRChat blendshape edits."
+    )
+
+
+def describe_reference_face_with_gemini(api_config: dict[str, Any], image_path: Path, instruction: str) -> dict[str, Any]:
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("The google-genai package is not installed.") from exc
+
+    api_key = str(api_config.get("api_key") or "").strip()
+    model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    if not api_key:
+        raise RuntimeError("Gemini API key is empty. Save a Gemini provider config before using a reference image.")
+
+    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "You are helping plan VRChat avatar face blendshape edits from a reference image.\n"
+        "Analyze only visible expression and stylized facial traits that can be translated into blendshapes. "
+        "Do not identify the person, do not infer private attributes, and do not describe sexualized traits.\n"
+        "Focus on actionable controls: eye openness, eyelid mood, eyebrow angle, mouth smile/width, cheek fullness, "
+        "face softness/roundness, and overall emotion.\n"
+        f"User request: {instruction}\n"
+        "Return JSON only with this shape: "
+        '{"summary":"short visual target","blendshapeGuidance":["actionable hint"],"cautions":["risk or ambiguity"]}'
+    )
+    response = client.models.generate_content(
+        model=model,
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=image_path.read_bytes(), mime_type=mime_type),
+        ],
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    payload = try_parse_json(getattr(response, "text", "") or "")
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini did not return valid JSON while analyzing the reference image.")
+    payload.setdefault("summary", "")
+    payload.setdefault("blendshapeGuidance", [])
+    payload.setdefault("cautions", [])
+    return payload
 
 
 def clamp01(value: Any) -> float:

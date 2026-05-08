@@ -8,10 +8,12 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan
 
 
 class DashboardServerTests(unittest.TestCase):
     def setUp(self) -> None:
+        dashboard_server.DASHBOARD_RUNTIME.manual_undo_stack.clear()
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -242,6 +244,169 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
         self.assertEqual(params["adjustments"][0]["targetWeight"], 42.0)
 
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.load_dashboard_export_payload")
+    @patch("dashboard_server.create_blendshape_plan")
+    def test_pipeline_run_live_uses_direct_apply_and_returns_change_preview(
+        self,
+        mock_create_blendshape_plan,
+        mock_load_dashboard_export_payload,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="gemini",
+            llm_model="gemini-test",
+            min_confidence=0.65,
+        )
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "AvatarScene",
+                        "renderers": [
+                            {
+                                "rendererPath": "Scene/HeroAvatar/Face",
+                                "blendshapes": [{"name": "Smile", "currentWeight": 10.0}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            False,
+        )
+        mock_create_blendshape_plan.return_value = BlendshapePlan(
+            summary="Make the face rounder.",
+            adjustments=[
+                BlendshapeAdjustment(
+                    avatar_path="Scene/HeroAvatar",
+                    renderer_path="Scene/HeroAvatar/Face",
+                    blendshape_name="Smile",
+                    target_weight=55.0,
+                    reason="Smile softens the face.",
+                    confidence=0.9,
+                )
+            ],
+        )
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"ok": True, "appliedCount": 1},
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/pipeline/run",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": False,
+                    "avatar": "Scene/HeroAvatar",
+                    "instruction": "把脸变得更圆润一些",
+                    "allow_low_confidence": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["changePreview"][0]["previousWeight"], 10.0)
+        self.assertEqual(payload["changePreview"][0]["targetWeight"], 55.0)
+        self.assertEqual(payload["undoDepth"], 1)
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_apply_blendshapes")
+        self.assertEqual(params["adjustments"][0]["blendshapeName"], "Smile")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_clothes_scan_reads_avatar_menu_and_parameters(
+        self,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "items": [
+                        {
+                            "displayName": "Jacket",
+                            "source": "menu_control",
+                            "menuPath": "Clothes/Jacket",
+                            "parameterName": "Cloth_Jacket",
+                            "active": True,
+                            "canToggleSceneObject": False,
+                        }
+                    ]
+                }
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/clothes/scan", json={"avatar_path": "Scene/HeroAvatar"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["clothes"][0]["parameterName"], "Cloth_Jacket")
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_scan_avatar_controls")
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_parameter_scan_uses_direct_unity_tool(
+        self,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"boolCount": 2, "intCount": 1, "floatCount": 3, "suggestions": []}},
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/parameters/scan", json={"avatar_path": "Scene/HeroAvatar"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["stats"]["boolCount"], 2)
+        _settings, tool_name, _params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_scan_avatar_parameters")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_vision_capture_uses_direct_scene_view_tool(
+        self,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        image_path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": image_path, "width": 960, "height": 960}},
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/vision/capture", json={"avatar_path": "Scene/HeroAvatar"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["imageUrl"], "/artifacts/dashboard/latest/vision_capture.png")
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_capture_scene_view")
+        self.assertFalse(params["setRotation"])
+
     def test_discover_projects_reads_unity_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -380,29 +545,41 @@ class DashboardServerTests(unittest.TestCase):
 
             calls: list[str] = []
 
-            def execute_side_effect(_settings, code, _target_avatar_paths=None):
-                calls.append(code)
-                if "capturedAtUtc" in code:
-                    return {
-                        "ok": True,
-                        "avatarPath": "MyAvatar",
-                        "parameterCount": 1,
-                        "parameters": [
-                            {
-                                "name": "IsWearing",
-                                "valueType": "Int",
-                                "defaultValue": 0.0,
-                                "saved": False,
-                                "networkSynced": True,
+            def invoke_side_effect(_settings, tool_name, _params):
+                calls.append(tool_name)
+                if tool_name == "vrc_scan_avatar_parameters":
+                    return dashboard_server.McpResult(
+                        exit_code=0,
+                        stdout="ok",
+                        stderr="",
+                        payload={
+                            "data": {
+                                "ok": True,
+                                "avatarPath": "MyAvatar",
+                                "parameterCount": 1,
+                                "parameterNames": [
+                                    {
+                                        "name": "IsWearing",
+                                        "valueType": "Int",
+                                        "defaultValue": 0.0,
+                                        "saved": False,
+                                        "networkSynced": True,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                return {"ok": True, "changedCount": 1}
+                        },
+                    )
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "appliedCount": 1}},
+                )
 
             try:
                 with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
-                    "dashboard_server.execute_dashboard_code",
-                    side_effect=execute_side_effect,
+                    "dashboard_server.invoke_unity_mcp",
+                    side_effect=invoke_side_effect,
                 ):
                     with TestClient(dashboard_server.app) as client:
                         response = client.post(
@@ -417,8 +594,8 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("snapshotPath", payload)
                 self.assertTrue(Path(payload["snapshotPath"]).exists())
                 self.assertEqual(len(calls), 2)
-                self.assertIn("capturedAtUtc", calls[0])
-                self.assertIn("VRCExpressionParameters.ValueType.Bool", calls[1])
+                self.assertEqual(calls[0], "vrc_scan_avatar_parameters")
+                self.assertEqual(calls[1], "vrc_apply_parameter_optimization")
             finally:
                 dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
                 dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot
@@ -453,9 +630,14 @@ class DashboardServerTests(unittest.TestCase):
 
             try:
                 with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
-                    "dashboard_server.execute_dashboard_code",
-                    return_value={"ok": True, "restoredCount": 1},
-                ) as mock_execute:
+                    "dashboard_server.invoke_unity_mcp",
+                    return_value=dashboard_server.McpResult(
+                        exit_code=0,
+                        stdout="ok",
+                        stderr="",
+                        payload={"data": {"ok": True, "restoredCount": 1}},
+                    ),
+                ) as mock_invoke:
                     with TestClient(dashboard_server.app) as client:
                         response = client.post(
                             "/api/parameters/rollback",
@@ -466,9 +648,9 @@ class DashboardServerTests(unittest.TestCase):
                 payload = response.json()
                 self.assertTrue(payload["ok"])
                 self.assertEqual(payload["restoredCount"], 1)
-                generated_code = mock_execute.call_args[0][1]
-                self.assertIn("ParameterSnapshotItem", generated_code)
-                self.assertIn("IsWearing", generated_code)
+                _settings, tool_name, params = mock_invoke.call_args.args
+                self.assertEqual(tool_name, "vrc_rollback_avatar_parameters")
+                self.assertEqual(params["parameterNames"][0]["name"], "IsWearing")
             finally:
                 dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
                 dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot
@@ -476,10 +658,10 @@ class DashboardServerTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # /api/vision/capture-multi (needs Unity — verify endpoint exists + 503)
     # ------------------------------------------------------------------
-    @patch("dashboard_server.execute_dashboard_code", side_effect=dashboard_server.UnityMcpError("not connected"))
+    @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
     @patch("dashboard_server.load_dashboard_settings")
     def test_capture_multi_endpoint_fails_gracefully_when_unity_offline(
-        self, mock_load_settings, _mock_execute
+        self, mock_load_settings, _mock_invoke
     ) -> None:
         mock_load_settings.return_value = SimpleNamespace(
             unity_mcp_timeout_seconds=5,
