@@ -1297,32 +1297,90 @@ def execute_dashboard_code(
 
 def extract_tool_result_payload(result: McpResult) -> Any:
     candidate: Any = result.payload
-    visited = set()
-    while isinstance(candidate, dict):
-        marker = id(candidate)
-        if marker in visited:
-            break
-        visited.add(marker)
+    if isinstance(candidate, dict):
+        visited = set()
+        while isinstance(candidate, dict):
+            marker = id(candidate)
+            if marker in visited:
+                break
+            visited.add(marker)
 
-        if "data" in candidate and isinstance(candidate["data"], dict):
-            candidate = candidate["data"]
-            continue
-        if "result" in candidate:
-            candidate = candidate["result"]
-            continue
-        if "payload" in candidate:
-            candidate = candidate["payload"]
-            continue
-        if "value" in candidate:
-            candidate = candidate["value"]
-            continue
-        break
+            if "data" in candidate and isinstance(candidate["data"], dict):
+                candidate = candidate["data"]
+                continue
+            if "result" in candidate:
+                candidate = candidate["result"]
+                continue
+            if "payload" in candidate:
+                candidate = candidate["payload"]
+                continue
+            if "value" in candidate:
+                candidate = candidate["value"]
+                continue
+            break
+
+        if isinstance(candidate, str):
+            parsed = try_parse_json(candidate)
+            return parsed if parsed is not None else candidate
+        return candidate
+
+    stdout_payload = parse_flat_unity_stdout_payload(result.stdout)
+    if stdout_payload:
+        return stdout_payload
 
     if isinstance(candidate, str):
         parsed = try_parse_json(candidate)
         return parsed if parsed is not None else candidate
 
     return candidate
+
+
+def parse_flat_unity_stdout_payload(stdout: str) -> dict[str, Any]:
+    """Parse unity-mcp's flattened custom-tool stdout into a small dict.
+
+    Some project-scoped custom tools are returned by the CLI as:
+    ``key: value`` lines instead of a JSON object. ``try_parse_json`` can also
+    accidentally pick up fragments like ``[0 items]`` as a list, so dashboard
+    endpoints that expect objects need this stdout fallback.
+    """
+    payload: dict[str, Any] = {}
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("[") or line.startswith("✅") or line.startswith("Executed custom tool"):
+            continue
+        if ": " not in line:
+            continue
+
+        key, value = line.split(": ", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not all(ch.isalnum() or ch == "_" for ch in key):
+            continue
+
+        payload[key] = parse_flat_unity_stdout_value(value)
+
+    return payload
+
+
+def parse_flat_unity_stdout_value(value: str) -> Any:
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if value.startswith("[") and value.endswith("items]"):
+        return []
+
+    parsed = try_parse_json(value)
+    if parsed is not None:
+        return parsed
+
+    try:
+        if all(ch not in value for ch in ".eE"):
+            return int(value)
+        return float(value)
+    except ValueError:
+        return value
 
 
 def ensure_list_payload(payload: Any, scope: str) -> list[Any]:
@@ -1725,6 +1783,8 @@ def save_parameter_snapshot_payload(snapshot_payload: dict[str, Any], avatar_pat
     payload = dict(snapshot_payload)
     payload.setdefault("avatarPath", avatar_path or "")
     payload.setdefault("capturedBy", "dashboard")
+    if "parameters" not in payload and isinstance(payload.get("parameterNames"), list):
+        payload["parameters"] = payload["parameterNames"]
 
     PARAMETER_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
@@ -2314,7 +2374,7 @@ def csharp_float(value: Any) -> str:
 def build_parameter_rollback_code(avatar_path: str | None, snapshot_payload: dict[str, Any]) -> str:
     """Generate C# that restores VRCExpressionParameters from a saved snapshot payload."""
     avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    raw_parameters = snapshot_payload.get("parameters") or []
+    raw_parameters = snapshot_payload.get("parameters") or snapshot_payload.get("parameterNames") or []
     if not isinstance(raw_parameters, list) or not raw_parameters:
         raise RuntimeError("Parameter snapshot does not contain any parameters to restore.")
 

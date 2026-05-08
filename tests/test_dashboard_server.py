@@ -62,6 +62,29 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(payload["defaults"]["sourceMode"], "unity_live_export")
             self.assertFalse(payload["defaults"]["mockExecute"])
 
+    def test_extract_tool_result_payload_falls_back_to_flat_stdout(self) -> None:
+        result = dashboard_server.McpResult(
+            exit_code=0,
+            stdout=(
+                "objectPath: Avatar/Hood\n"
+                "active: False\n"
+                "createdCount: 1\n"
+                "skipped: [0 items]\n"
+                "assetDir: Assets/VRCAutoRig/Generated/FX\n"
+                "✅ Executed custom tool: vrc_toggle_scene_object"
+            ),
+            stderr="",
+            payload=[0],
+        )
+
+        payload = dashboard_server.extract_tool_result_payload(result)
+
+        self.assertEqual(payload["objectPath"], "Avatar/Hood")
+        self.assertFalse(payload["active"])
+        self.assertEqual(payload["createdCount"], 1)
+        self.assertEqual(payload["skipped"], [])
+        self.assertEqual(payload["assetDir"], "Assets/VRCAutoRig/Generated/FX")
+
     def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             original_config_path = dashboard_server.CONFIG_PATH
@@ -531,6 +554,26 @@ class DashboardServerTests(unittest.TestCase):
                 json={"avatar_path": "MyAvatar", "suggestions": [], "dry_run": True},
             )
         self.assertEqual(response.status_code, 400)
+
+    def test_parameter_rollback_code_accepts_scanner_parameter_names(self) -> None:
+        code = dashboard_server.build_parameter_rollback_code(
+            "MyAvatar",
+            {
+                "parameterNames": [
+                    {
+                        "name": "DPS",
+                        "valueType": "Int",
+                        "defaultValue": 0.0,
+                        "saved": True,
+                        "networkSynced": True,
+                    }
+                ]
+            },
+        )
+
+        self.assertIn('name = "DPS"', code)
+        self.assertIn('valueType = "Int"', code)
+        self.assertIn("Enum.TryParse", code)
 
     def test_apply_parameter_optimization_non_dry_run_saves_snapshot_first(self) -> None:
         suggestions = [
