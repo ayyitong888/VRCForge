@@ -1,10 +1,12 @@
-.venv/
+﻿.venv/
 __pycache__/
+pycache/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
 .mypy_cache/
+.gemini/
 artifacts/
 config.json
 

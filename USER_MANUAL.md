@@ -1,12 +1,12 @@
-# VRCFaceForge 功能作用与使用手册
+# VRCForge 使用手册
 
-这份手册写给实际使用 dashboard 的人。它不要求你会写代码，只需要你知道 Unity、VRChat Avatar、Blendshape、FX、参数这些基础概念。
+这份手册说明 VRCForge dashboard 的主要功能、使用流程和注意事项。
 
-核心目标很简单：让你知道每个区域有什么功能、它的作用是什么、什么时候该用、用的时候要注意什么。
+VRCForge 面向 VRChat Avatar 的本地 Unity 工作流，适合用来读取 Avatar 数据、调整 Blendshape、生成衣柜 FX、检查参数占用，并通过截图辅助视觉检查。
 
 ## 一句话说明
 
-VRCFaceForge 是一套本地 VRChat Avatar 自动化控制台。它把 Unity 工程、Unity MCP、LLM API、Blendshape 调整、衣柜 FX、参数优化和识图分析集中到浏览器里的一个 dashboard 页面中。仓库内部的 Unity 工具目录仍叫 `Assets/VRCAutoRig`，这是已有 Unity 菜单和脚本路径，暂时保留以避免破坏工程接入。
+VRCForge 是一套本地 VRChat Avatar 自动化控制台。它把 Unity 工程、Unity MCP、LLM API、Blendshape 调整、衣柜 FX、参数优化和识图分析集中到浏览器里的一个 dashboard 页面中。
 
 默认 dashboard 地址：
 
@@ -22,14 +22,14 @@ http://127.0.0.1:8757
 
 ## 系统由哪些部分组成
 
-| 部分 | 作用 | 普通用户需要做什么 |
+| 部分 | 作用 | 需要确认 |
 | --- | --- | --- |
 | Unity Editor | 打开真实 VRChat Avatar 工程，承载模型和资产 | 保持工程打开，确认没有红色编译错误 |
 | MCP server | 让 dashboard 能和 Unity 通信 | 确认服务已启动，dashboard 顶部显示已连接 |
 | Dashboard | 浏览器里的中文控制台 | 主要操作都在这里完成 |
 | Provider API | 让 AI 根据文字生成调整计划，或做识图分析 | 填 API Key，读取模型列表，保存配置 |
 | Unity 插件脚本 | 在 Unity 内导出数据、执行 C#、连接 MCP | 不需要手动改代码 |
-| Artifacts | 保存计划、截图、结果、快照等产物 | 出问题时可发给开发者排查 |
+| 输出文件 | 保存计划、截图、结果、快照等产物 | 用于回看执行结果和定位问题 |
 
 ## 使用前检查
 
@@ -136,7 +136,7 @@ API 配置决定 AI 功能使用哪个服务、哪个模型。
 
 说明：
 
-- `config.json` 是本地配置文件，已经被 `.gitignore` 忽略，不应该提交真实密钥。
+- 配置保存后会立即热更新后端，不需要重启 dashboard。
 - Google AI Studio 走 `google-genai` 官方接口，不使用 Base URL。
 - OpenAI、OpenRouter、DeepSeek、自定义 provider 走 OpenAI-compatible 接口。
 - Ollama 走本地 OpenAI-compatible `/v1` 接口，默认 `http://127.0.0.1:11434/v1`，API Key 可留空。
@@ -334,7 +334,7 @@ AI 执行流程：
 - 查 provider 请求失败原因。
 - 查 Unity MCP 连接失败原因。
 - 查 Roslyn 编译或执行错误。
-- 给开发者复现问题。
+- 复现问题。
 
 报错时优先看：
 
@@ -442,7 +442,7 @@ http://127.0.0.1:8757
 
 ## 报错反馈模板
 
-出问题时，把下面信息发给开发者最有用：
+排查问题时，建议记录下面信息：
 
 ```text
 工程：
