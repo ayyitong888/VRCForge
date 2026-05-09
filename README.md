@@ -20,7 +20,7 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地 Unity dashboard。
 | Avatar and facial Blendshape loading | 读取 Avatar 与脸部 Blendshape | 已可用 / Available |
 | Manual slider editing and undo | 手动滑块调整与撤销 | 已可用 / Available |
 | Natural-language Blendshape planning | 自然语言生成 Blendshape 调整 | 已可用 / Available |
-| Reference-image assisted face editing | 参考图辅助捏脸 | 开发中 / In development |
+| Reference-image assisted face editing | 参考图辅助捏脸 | 可测试 / Beta |
 | Before/after screenshot comparison | 执行前后截图对比 | 开发中 / In development |
 | Wardrobe FX scanning and generation | 衣柜 FX 扫描与生成 | 开发中 / In development |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 开发中 / In development |
