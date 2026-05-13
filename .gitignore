@@ -10,5 +10,11 @@ pycache/
 artifacts/
 config.json
 
+AGENTS.md
+PROJECT_STATUS.md
+NON_TECHNICAL_TEST_GUIDE.md
+*.local.md
+*.private.md
+
 Assets/VRCAutoRig/blendshapes_export.json
 Assets/VRCAutoRig/*.log
