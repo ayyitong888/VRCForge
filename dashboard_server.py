@@ -271,7 +271,7 @@ class DashboardEventBus:
         asyncio.run_coroutine_threadsafe(self.broadcast(event_type, payload), self._loop)
 
 
-app = FastAPI(title="VRCAutoRig Dashboard", version="0.2.0")
+app = FastAPI(title="VRCAutoRig Dashboard", version="0.3.0-alpha")
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
