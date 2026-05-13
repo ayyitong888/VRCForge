@@ -599,6 +599,15 @@ textarea {
   object-fit: cover;
 }
 
+.reference-open {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: zoom-in;
+}
+
 .reference-path-preview {
   padding: 0.8rem;
   text-align: center;
@@ -646,6 +655,37 @@ textarea {
 
 .reference-remove:hover {
   background: #93000a;
+}
+
+.reference-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  gap: 1rem;
+  padding: 2rem;
+  background: rgba(15, 23, 42, 0.82);
+  cursor: zoom-out;
+}
+
+.reference-lightbox img {
+  max-width: min(92vw, 1200px);
+  max-height: 82vh;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-lowest);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
+  object-fit: contain;
+}
+
+.reference-lightbox-title {
+  max-width: min(92vw, 1200px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #fff;
+  font-weight: 800;
+  text-align: center;
 }
 
 .reference-actions {

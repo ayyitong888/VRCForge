@@ -253,6 +253,9 @@ function cacheRefs() {
     "vision-result",
     "log-stream",
     "clear-logs-btn",
+    "reference-lightbox",
+    "reference-lightbox-image",
+    "reference-lightbox-title",
   ];
 
   for (const id of ids) {
@@ -294,6 +297,12 @@ function bindEvents() {
   refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "分析中...", auditVision));
   refs["audit-multi-btn"].addEventListener("click", () => runButtonTask("audit-multi-btn", "聚合分析中...", auditMultiVision));
   refs["clear-logs-btn"].addEventListener("click", clearLogView);
+  refs["reference-lightbox"].addEventListener("click", closeReferenceLightbox);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeReferenceLightbox();
+    }
+  });
   refs["blendshape-search"].addEventListener("input", onBlendshapeSearchChanged);
   
   if (refs["vision-angle-tabs"]) {
@@ -810,10 +819,15 @@ function removeReferenceImage(group, index) {
 
 function onReferencePreviewClick(group, event) {
   const removeButton = event.target.closest("[data-reference-remove]");
-  if (!removeButton) {
+  if (removeButton) {
+    removeReferenceImage(group, Number(removeButton.dataset.referenceRemove));
     return;
   }
-  removeReferenceImage(group, Number(removeButton.dataset.referenceRemove));
+
+  const openButton = event.target.closest("[data-reference-open]");
+  if (openButton) {
+    openReferenceLightbox(group, Number(openButton.dataset.referenceOpen));
+  }
 }
 
 function updateAllReferenceImageStatus() {
@@ -845,7 +859,7 @@ function renderReferencePreviewGrid(group) {
     const title = item.name || item.path || "参考图";
     const preview = item.previewUrl || item.dataUrl;
     const body = preview
-      ? `<img src="${escapeHtml(preview)}" alt="${escapeHtml(title)}">`
+      ? `<button class="reference-open" type="button" data-reference-open="${index}" aria-label="放大查看 ${escapeHtml(title)}"><img src="${escapeHtml(preview)}" alt="${escapeHtml(title)}"></button>`
       : `<div class="reference-path-preview"><strong>PATH</strong><span>${escapeHtml(title)}</span></div>`;
     return `
       <article class="reference-thumb">
@@ -855,6 +869,30 @@ function renderReferencePreviewGrid(group) {
       </article>
     `;
   }).join("");
+}
+
+function openReferenceLightbox(group, index) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const item = state[config.stateKey]?.[index];
+  const preview = item?.previewUrl || item?.dataUrl;
+  if (!preview) {
+    return;
+  }
+
+  const title = item.name || item.path || "参考图";
+  refs["reference-lightbox-image"].src = preview;
+  refs["reference-lightbox-image"].alt = title;
+  refs["reference-lightbox-title"].textContent = title;
+  refs["reference-lightbox"].classList.remove("hidden");
+}
+
+function closeReferenceLightbox() {
+  if (!refs["reference-lightbox"] || refs["reference-lightbox"].classList.contains("hidden")) {
+    return;
+  }
+  refs["reference-lightbox"].classList.add("hidden");
+  refs["reference-lightbox-image"].removeAttribute("src");
+  refs["reference-lightbox-title"].textContent = "";
 }
 
 function summarizeReferenceImages(storedImages) {
