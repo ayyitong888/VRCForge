@@ -157,8 +157,46 @@ class PlanningValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(plan.adjustments[0].blendshape_name, "Smile")
-        self.assertEqual(request_mock.call_args.kwargs["reference_image_path"], Path("reference.png"))
-        self.assertIn("reference image is attached", request_mock.call_args.args[1].lower())
+        self.assertEqual(request_mock.call_args.kwargs["reference_image_paths"], [Path("reference.png")])
+        self.assertIn("image(s) are attached", request_mock.call_args.args[1].lower())
+
+    def test_create_blendshape_plan_passes_multiple_reference_images_with_labels(self) -> None:
+        settings = Settings(
+            llm_provider="openai",
+            llm_api_key="test-key",
+            llm_base_url="https://api.openai.com/v1",
+            llm_model="gpt-4.1-mini",
+            llm_api_key_env="OPENAI_API_KEY",
+            gemini_thinking_level="",
+            unity_mcp_command=["unity-mcp"],
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_instance="",
+            unity_mcp_retries=1,
+            unity_mcp_retry_backoff_seconds=0.0,
+            unity_mcp_timeout_seconds=30,
+            export_tool_name="vrc_export_blendshapes",
+            execute_tool_name="vrc_execute_roslyn",
+            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            min_confidence=0.65,
+        )
+        raw_plan = {"summary": "Noop", "warnings": [], "adjustments": []}
+        image_paths = [Path("before.png"), Path("target-a.png"), Path("target-b.png")]
+        labels = ["原图 / 当前脸 1", "目标参考图 1", "目标参考图 2"]
+
+        with patch("vrchat_blendshape_agent.request_llm_plan", return_value=json.dumps(raw_plan)) as request_mock:
+            create_blendshape_plan(
+                settings,
+                self.planning_payload,
+                "match the target face",
+                reference_image_paths=image_paths,
+                reference_image_labels=labels,
+            )
+
+        self.assertEqual(request_mock.call_args.kwargs["reference_image_paths"], image_paths)
+        prompt = request_mock.call_args.args[1]
+        self.assertIn("Image 1: 原图 / 当前脸 1", prompt)
+        self.assertIn("Image 3: 目标参考图 2", prompt)
 
     def test_rejects_invalid_targets(self) -> None:
         plan = BlendshapePlan(

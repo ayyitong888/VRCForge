@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -957,6 +958,8 @@ def create_blendshape_plan(
     export_payload: dict[str, Any],
     instruction: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+    reference_image_labels: Sequence[str] | None = None,
 ) -> BlendshapePlan:
     if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
         provider_name = provider_display_name(settings.llm_provider)
@@ -964,13 +967,16 @@ def create_blendshape_plan(
             f"{provider_name} API key is empty. Set {settings.llm_api_key_env} or use --plan-json for a local MVP run."
         )
 
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     prompt = build_planner_prompt(
         export_payload,
         instruction,
-        has_reference_image=bool(reference_image_path),
+        has_reference_image=bool(image_paths),
+        reference_image_count=len(image_paths),
+        reference_image_labels=reference_image_labels,
     )
 
-    raw_response_text = request_llm_plan(settings, prompt, reference_image_path=reference_image_path)
+    raw_response_text = request_llm_plan(settings, prompt, reference_image_paths=image_paths)
     raw_json = extract_json_block(raw_response_text)
     if not raw_json:
         raise RuntimeError(
@@ -1084,22 +1090,25 @@ def request_llm_plan(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
     if provider == "gemini":
-        return request_gemini_plan(settings, prompt, reference_image_path=reference_image_path)
+        return request_gemini_plan(settings, prompt, reference_image_paths=image_paths)
     if provider == "vertexai":
-        return request_vertex_ai_plan(settings, prompt, reference_image_path=reference_image_path)
+        return request_vertex_ai_plan(settings, prompt, reference_image_paths=image_paths)
     if provider == "anthropic":
-        return request_anthropic_plan(settings, prompt, reference_image_path=reference_image_path)
+        return request_anthropic_plan(settings, prompt, reference_image_paths=image_paths)
 
-    return request_openai_compatible_plan(settings, prompt, reference_image_path=reference_image_path)
+    return request_openai_compatible_plan(settings, prompt, reference_image_paths=image_paths)
 
 
 def request_gemini_plan(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
     try:
         from google import genai
@@ -1108,12 +1117,13 @@ def request_gemini_plan(
             "The 'google-genai' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     contents: Any = prompt
-    if reference_image_path:
+    if image_paths:
         from google.genai import types
 
-        image_part = build_google_genai_image_part(types, reference_image_path)
-        contents = [prompt, image_part]
+        image_parts = [build_google_genai_image_part(types, path) for path in image_paths]
+        contents = [prompt, *image_parts]
 
     client = genai.Client(api_key=settings.llm_api_key)
     try:
@@ -1123,13 +1133,14 @@ def request_gemini_plan(
         )
         return getattr(response, "text", "") or ""
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(format_multimodal_error(exc, settings, bool(reference_image_path), "Gemini")) from exc
+        raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
 
 
 def request_vertex_ai_plan(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
     try:
         from google import genai
@@ -1139,12 +1150,13 @@ def request_vertex_ai_plan(
         ) from exc
 
     project, location = resolve_vertex_ai_project_location(settings.llm_base_url)
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     contents: Any = prompt
-    if reference_image_path:
+    if image_paths:
         from google.genai import types
 
-        image_part = build_google_genai_image_part(types, reference_image_path)
-        contents = [prompt, image_part]
+        image_parts = [build_google_genai_image_part(types, path) for path in image_paths]
+        contents = [prompt, *image_parts]
 
     try:
         client = genai.Client(vertexai=True, project=project, location=location)
@@ -1158,7 +1170,7 @@ def request_vertex_ai_plan(
             f"Google Vertex AI request failed for model {settings.llm_model} "
             f"in project '{project}' / location '{location}': {exc}"
         )
-        if reference_image_path:
+        if image_paths:
             detail = (
                 f"Google Vertex AI model '{settings.llm_model}' does not appear to support image input, "
                 f"or the selected Vertex endpoint rejected multimodal content.\nOriginal error: {exc}"
@@ -1170,6 +1182,7 @@ def request_openai_compatible_plan(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
@@ -1182,11 +1195,15 @@ def request_openai_compatible_plan(
             "The 'openai' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     user_content: Any = prompt
-    if reference_image_path:
+    if image_paths:
         user_content = [
             {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": image_path_to_data_url(reference_image_path)}},
+            *[
+                {"type": "image_url", "image_url": {"url": image_path_to_data_url(path)}}
+                for path in image_paths
+            ],
         ]
 
     client = OpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
@@ -1204,7 +1221,7 @@ def request_openai_compatible_plan(
         )
         return extract_openai_message_text(response)
     except Exception as exc:  # noqa: BLE001
-        if reference_image_path:
+        if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
         raise RuntimeError(format_openai_compatible_error(exc, settings)) from exc
 
@@ -1213,6 +1230,7 @@ def request_anthropic_plan(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
     try:
         import anthropic
@@ -1221,20 +1239,26 @@ def request_anthropic_plan(
             "The 'anthropic' package is not installed. Run pip install -r requirements.txt and try again."
         ) from exc
 
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     user_content: Any = prompt
-    if reference_image_path:
-        image_path = resolve_existing_image_path(reference_image_path)
-        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    if image_paths:
+        image_blocks = []
+        for image_path_value in image_paths:
+            image_path = resolve_existing_image_path(image_path_value)
+            mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+            image_blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+                    },
+                }
+            )
         user_content = [
             {"type": "text", "text": prompt},
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": mime_type,
-                    "data": base64.b64encode(image_path.read_bytes()).decode("ascii"),
-                },
-            },
+            *image_blocks,
         ]
 
     client = anthropic.Anthropic(api_key=settings.llm_api_key)
@@ -1247,9 +1271,32 @@ def request_anthropic_plan(
         )
         return extract_anthropic_message_text(response)
     except Exception as exc:  # noqa: BLE001
-        if reference_image_path:
+        if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, "Anthropic")) from exc
         raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
+
+
+def normalize_reference_image_paths(
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | str | Path | None = None,
+) -> list[str | Path]:
+    candidates: list[str | Path] = []
+    if reference_image_path:
+        candidates.append(reference_image_path)
+    if isinstance(reference_image_paths, (str, Path)):
+        candidates.append(reference_image_paths)
+    elif reference_image_paths:
+        candidates.extend(path for path in reference_image_paths if path)
+
+    image_paths: list[str | Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        image_paths.append(path)
+    return image_paths
 
 
 def resolve_existing_image_path(image_path: str | Path) -> Path:
@@ -1445,6 +1492,8 @@ def build_planner_prompt(
     export_payload: dict[str, Any],
     instruction: str,
     has_reference_image: bool = False,
+    reference_image_count: int = 0,
+    reference_image_labels: Sequence[str] | None = None,
 ) -> str:
     schema = {
         "summary": "string",
@@ -1461,12 +1510,19 @@ def build_planner_prompt(
         ],
     }
 
-    image_note = (
-        "A reference image is attached in this same request. Use the image and text together as the desired face/expression target. "
-        "Only translate visible facial style/expression cues into available face blendshapes; do not identify people or infer private traits.\n\n"
-        if has_reference_image
-        else ""
-    )
+    image_note = ""
+    if has_reference_image:
+        labels = [str(label) for label in (reference_image_labels or []) if str(label).strip()]
+        label_text = "\n".join(f"- Image {index + 1}: {label}" for index, label in enumerate(labels))
+        if not label_text:
+            label_text = f"- {reference_image_count or 1} reference image(s) attached."
+        image_note = (
+            f"{reference_image_count or 1} image(s) are attached in this same request.\n"
+            f"{label_text}\n"
+            "Use original/current-face images only as the before/current baseline. Use target/reference images as the desired face or expression. "
+            "If only target/reference images are provided, use them as the desired result. If only original/current images are provided, use them as visual context for the text instruction. "
+            "Only translate visible facial style/expression cues into available face blendshapes; do not identify people or infer private traits.\n\n"
+        )
 
     return (
         "You are a VRChat avatar blendshape planning assistant.\n"

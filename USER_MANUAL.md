@@ -13,7 +13,7 @@ This manual explains the public workflow and feature status without project-spec
 | Avatar and facial Blendshape loading | 读取 Avatar 与脸部 Blendshape | 已可用 / Available |
 | Manual slider editing and undo | 手动滑块调整与撤销 | 已可用 / Available |
 | Natural-language Blendshape planning | 自然语言生成 Blendshape 调整 | 已可用 / Available |
-| Reference-image assisted face editing | 参考图辅助捏脸 | 开发中 / In development |
+| Reference-image assisted face editing | 参考图辅助捏脸 | 可测试 / Beta |
 | Before/after screenshot comparison | 执行前后截图对比 | 开发中 / In development |
 | Wardrobe FX scanning and generation | 衣柜 FX 扫描与生成 | 开发中 / In development |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 开发中 / In development |
@@ -81,12 +81,15 @@ This manual explains the public workflow and feature status without project-spec
 | Wardrobe FX | Builds wardrobe toggle assets | 衣柜 FX | 生成衣柜开关相关资产 |
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
-| Logs | Shows operation results and errors | 日志 | 显示操作结果和错误 |
+| Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |
 
 ## Provider Notes / 模型服务说明
 
 VRCForge supports Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints.
 VRCForge 支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。
+
+For face editing, original/current images and target reference images are both optional. Each group supports multiple uploaded files, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the dashboard.
+捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持多文件上传、手填图片路径、使用最近 Unity 截图，或从 dashboard 直接捕获新的 Unity 截图。
 
 Image input depends on the selected provider and model. If image input is not supported, the dashboard reports the provider error.
 图片输入能力取决于所选 provider 和模型。如果模型不支持图片输入，dashboard 会显示对应错误。

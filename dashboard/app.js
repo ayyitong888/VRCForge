@@ -78,9 +78,8 @@ const state = {
   blendshapeBaseline: {},
   undoDepth: 0,
   clothes: [],
-  referenceImageDataUrl: "",
-  referenceImageName: "",
-  referenceImagePath: "",
+  sourceReferenceImages: [],
+  targetReferenceImages: [],
   lastAiChanges: [],
   lastAiProof: null,
   latestParameterSnapshotPath: "",
@@ -91,12 +90,40 @@ const state = {
 
 const refs = {};
 
+const REFERENCE_GROUP_CONFIG = {
+  source: {
+    stateKey: "sourceReferenceImages",
+    fileId: "source-reference-image-file",
+    pathsId: "source-reference-image-paths",
+    countId: "source-reference-count",
+    statusId: "source-reference-status",
+    useLatestId: "source-use-latest-screenshot-ref-btn",
+    captureId: "source-capture-screenshot-ref-btn",
+    clearId: "source-clear-reference-image-btn",
+    label: "原图",
+    emptyText: "可选：上传当前脸/原图，或用 Unity 截图作为修改前参考。",
+  },
+  target: {
+    stateKey: "targetReferenceImages",
+    fileId: "target-reference-image-file",
+    pathsId: "target-reference-image-paths",
+    countId: "target-reference-count",
+    statusId: "target-reference-status",
+    useLatestId: "target-use-latest-screenshot-ref-btn",
+    captureId: "target-capture-screenshot-ref-btn",
+    clearId: "target-clear-reference-image-btn",
+    label: "目标图",
+    emptyText: "可选：上传想要的脸/表情参考图，或用 Unity 截图作为目标参考。",
+  },
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   cacheRefs();
   bindEvents();
   connectSocket();
   updateModeVisibility();
   syncMockModeText();
+  updateAllReferenceImageStatus();
 });
 
 function cacheRefs() {
@@ -151,10 +178,20 @@ function cacheRefs() {
     "save-artifacts",
     "summary-output",
     "instruction-input",
-    "reference-image-file",
-    "reference-image-path",
-    "use-latest-screenshot-ref-btn",
-    "clear-reference-image-btn",
+    "source-reference-image-file",
+    "source-reference-image-paths",
+    "source-reference-count",
+    "source-use-latest-screenshot-ref-btn",
+    "source-capture-screenshot-ref-btn",
+    "source-clear-reference-image-btn",
+    "source-reference-status",
+    "target-reference-image-file",
+    "target-reference-image-paths",
+    "target-reference-count",
+    "target-use-latest-screenshot-ref-btn",
+    "target-capture-screenshot-ref-btn",
+    "target-clear-reference-image-btn",
+    "target-reference-status",
     "reference-image-status",
     "ai-run-btn",
     "manual-apply-btn",
@@ -228,10 +265,8 @@ function bindEvents() {
   refs["load-models-btn"].addEventListener("click", () => runButtonTask("load-models-btn", "读取中...", loadProviderModels));
   refs["save-config-btn"].addEventListener("click", () => runButtonTask("save-config-btn", "保存中...", () => saveApiConfig(true)));
   refs["reset-provider-btn"].addEventListener("click", resetProviderDefaults);
-  refs["reference-image-file"].addEventListener("change", onReferenceImageFileChanged);
-  refs["reference-image-path"].addEventListener("input", onReferenceImagePathChanged);
-  refs["use-latest-screenshot-ref-btn"].addEventListener("click", useLatestScreenshotAsReference);
-  refs["clear-reference-image-btn"].addEventListener("click", clearReferenceImage);
+  bindReferenceGroupEvents("source");
+  bindReferenceGroupEvents("target");
   refs["ai-run-btn"].addEventListener("click", () => runButtonTask("ai-run-btn", "执行中...", runAiPipeline));
   refs["manual-apply-btn"].addEventListener("click", () => runButtonTask("manual-apply-btn", "应用中...", applyManualBlendshapes));
   refs["manual-undo-btn"].addEventListener("click", () => runButtonTask("manual-undo-btn", "撤销中...", undoManualBlendshapes));
@@ -518,13 +553,16 @@ function buildConnectionPayload() {
 }
 
 function buildDashboardRequest() {
+  const referencePayload = buildReferenceImagePayload();
   return {
     ...buildConnectionPayload(),
     avatar: state.selectedAvatarPath || null,
     instruction: refs["instruction-input"].value.trim() || null,
     model: readSelectedModel() || null,
-    reference_image_path: refs["reference-image-path"].value.trim() || state.referenceImagePath || null,
-    reference_image_data_url: state.referenceImageDataUrl || null,
+    source_reference_image_paths: referencePayload.source.paths,
+    source_reference_image_data_urls: referencePayload.source.dataUrls,
+    target_reference_image_paths: referencePayload.target.paths,
+    target_reference_image_data_urls: referencePayload.target.dataUrls,
     source_mode: refs["source-mode"].value,
     export_json: refs["export-json"].value.trim() || null,
     plan_json: refs["plan-json"].value.trim() || null,
@@ -535,78 +573,151 @@ function buildDashboardRequest() {
   };
 }
 
-function onReferenceImageFileChanged() {
-  const file = refs["reference-image-file"].files?.[0];
-  if (!file) {
-    return;
-  }
-  if (!file.type.startsWith("image/")) {
-    refs["reference-image-status"].textContent = "请选择图片文件。";
-    return;
-  }
-  if (file.size > 8 * 1024 * 1024) {
-    refs["reference-image-status"].textContent = "参考图超过 8 MB，请换一张小一点的图。";
-    refs["reference-image-file"].value = "";
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.addEventListener("load", () => {
-    state.referenceImageDataUrl = String(reader.result || "");
-    state.referenceImageName = file.name;
-    state.referenceImagePath = "";
-    refs["reference-image-path"].value = "";
-    updateReferenceImageStatus();
-  });
-  reader.addEventListener("error", () => {
-    refs["reference-image-status"].textContent = "参考图读取失败。";
-  });
-  reader.readAsDataURL(file);
+function bindReferenceGroupEvents(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  refs[config.fileId].addEventListener("change", () => onReferenceImageFilesChanged(group));
+  refs[config.pathsId].addEventListener("input", () => updateReferenceImageStatus(group));
+  refs[config.useLatestId].addEventListener("click", () => useLatestScreenshotAsReference(group));
+  refs[config.captureId].addEventListener("click", () => runButtonTask(config.captureId, "截图中...", () => captureScreenshotAsReference(group)));
+  refs[config.clearId].addEventListener("click", () => clearReferenceImages(group));
 }
 
-function onReferenceImagePathChanged() {
-  const value = refs["reference-image-path"].value.trim();
-  if (value) {
-    state.referenceImageDataUrl = "";
-    state.referenceImageName = "";
-    state.referenceImagePath = value;
-    refs["reference-image-file"].value = "";
-  } else {
-    state.referenceImagePath = "";
-  }
-  updateReferenceImageStatus();
+function buildReferenceImagePayload() {
+  return {
+    source: buildReferenceGroupPayload("source"),
+    target: buildReferenceGroupPayload("target"),
+  };
 }
 
-function useLatestScreenshotAsReference() {
+function buildReferenceGroupPayload(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const storedImages = state[config.stateKey] || [];
+  const typedPaths = parseReferencePathInput(refs[config.pathsId].value);
+  return {
+    paths: [
+      ...typedPaths,
+      ...storedImages.filter((item) => item.path).map((item) => item.path),
+    ],
+    dataUrls: storedImages.filter((item) => item.dataUrl).map((item) => item.dataUrl),
+  };
+}
+
+function parseReferencePathInput(value) {
+  return String(value || "")
+    .split(/\r?\n|;/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function onReferenceImageFilesChanged(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const files = Array.from(refs[config.fileId].files || []);
+  if (!files.length) {
+    return;
+  }
+
+  const invalid = files.find((file) => !file.type.startsWith("image/"));
+  if (invalid) {
+    refs[config.statusId].textContent = `${config.label}包含非图片文件：${invalid.name}`;
+    refs[config.fileId].value = "";
+    return;
+  }
+
+  const tooLarge = files.find((file) => file.size > 8 * 1024 * 1024);
+  if (tooLarge) {
+    refs[config.statusId].textContent = `${tooLarge.name} 超过 8 MB，请换一张小一点的图。`;
+    refs[config.fileId].value = "";
+    return;
+  }
+
+  try {
+    const images = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      dataUrl: await readFileAsDataUrl(file),
+    })));
+    state[config.stateKey].push(...images);
+    refs[config.fileId].value = "";
+    updateReferenceImageStatus(group);
+  } catch (_error) {
+    refs[config.statusId].textContent = `${config.label}读取失败。`;
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", reject);
+    reader.readAsDataURL(file);
+  });
+}
+
+function useLatestScreenshotAsReference(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
   if (!state.latestScreenshotUrl) {
-    refs["reference-image-status"].textContent = "还没有可用截图，请先在视觉质检模块捕获截图。";
+    refs[config.statusId].textContent = "还没有可用截图，请先在视觉质检模块捕获截图。";
     return;
   }
-  state.referenceImageDataUrl = "";
-  state.referenceImageName = "";
-  state.referenceImagePath = urlToArtifactPath(state.latestScreenshotUrl);
-  refs["reference-image-file"].value = "";
-  refs["reference-image-path"].value = state.referenceImagePath;
-  updateReferenceImageStatus();
+  addReferencePath(group, urlToArtifactPath(state.latestScreenshotUrl), "最近截图");
 }
 
-function clearReferenceImage() {
-  state.referenceImageDataUrl = "";
-  state.referenceImageName = "";
-  state.referenceImagePath = "";
-  refs["reference-image-file"].value = "";
-  refs["reference-image-path"].value = "";
-  updateReferenceImageStatus();
+async function captureScreenshotAsReference(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const payload = await postJson("/api/vision/capture", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    width: 960,
+    height: 960,
+  });
+  renderScreenshot(payload.imageUrl);
+  refs["vision-result"].innerHTML = `<div class="info-card"><strong>截图已加入${escapeHtml(config.label)}</strong><span>${escapeHtml(payload.imagePath)}</span></div>`;
+  refs["vision-status-chip"].textContent = "待分析";
+  addReferencePath(group, payload.imagePath, "Unity 截图");
 }
 
-function updateReferenceImageStatus() {
-  if (state.referenceImageDataUrl) {
-    refs["reference-image-status"].textContent = `已选择参考图：${state.referenceImageName || "浏览器上传图片"}`;
-  } else if (state.referenceImagePath) {
-    refs["reference-image-status"].textContent = `将使用参考图：${state.referenceImagePath}`;
-  } else {
-    refs["reference-image-status"].textContent = "不传图时只按文字捏脸；传图时会把图片和文字指令同一轮发送给当前模型。";
-  }
+function addReferencePath(group, path, name) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  state[config.stateKey].push({ name, path });
+  updateReferenceImageStatus(group);
+}
+
+function clearReferenceImages(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  state[config.stateKey] = [];
+  refs[config.fileId].value = "";
+  refs[config.pathsId].value = "";
+  updateReferenceImageStatus(group);
+}
+
+function updateAllReferenceImageStatus() {
+  updateReferenceImageStatus("source");
+  updateReferenceImageStatus("target");
+}
+
+function updateReferenceImageStatus(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const storedImages = state[config.stateKey] || [];
+  const typedPaths = parseReferencePathInput(refs[config.pathsId].value);
+  const total = storedImages.length + typedPaths.length;
+  refs[config.countId].textContent = `${total} 张`;
+  refs[config.statusId].textContent = total
+    ? `${config.label}已加入 ${total} 张：${summarizeReferenceImages(storedImages, typedPaths)}`
+    : config.emptyText;
+
+  const sourceCount = (state.sourceReferenceImages || []).length + parseReferencePathInput(refs["source-reference-image-paths"].value).length;
+  const targetCount = (state.targetReferenceImages || []).length + parseReferencePathInput(refs["target-reference-image-paths"].value).length;
+  refs["reference-image-status"].textContent = sourceCount || targetCount
+    ? `捏脸请求将同时发送：原图 ${sourceCount} 张，目标图 ${targetCount} 张。两组都可为空。`
+    : "不传图时只按文字捏脸；传图时会把文字、原图和目标图同一轮发送给当前模型。";
+}
+
+function summarizeReferenceImages(storedImages, typedPaths) {
+  const names = [
+    ...storedImages.map((item) => item.name || item.path || "上传图片"),
+    ...typedPaths.map((path) => path.split(/[\\/]/).pop() || path),
+  ];
+  const shown = names.slice(0, 3).join("、");
+  return names.length > 3 ? `${shown} 等` : shown;
 }
 
 async function runButtonTask(buttonId, loadingText, task) {
@@ -967,9 +1078,7 @@ function renderAiChangePreview(changes, referenceImage, verifiedChanges = [], vi
     return;
   }
 
-  const referenceLine = referenceImage?.imagePath
-    ? `<div class="change-reference">参考图：${escapeHtml(referenceImage.imagePath)}</div>`
-    : "";
+  const referenceLine = renderReferenceContextSummary(referenceImage);
   const verificationByKey = new Map((Array.isArray(verifiedChanges) ? verifiedChanges : []).map((item) => [
     blendshapeKey(item.rendererPath || "", item.blendshapeName || ""),
     item,
@@ -1004,6 +1113,26 @@ function renderAiChangePreview(changes, referenceImage, verifiedChanges = [], vi
       </article>
     `;
   }).join("")}`;
+}
+
+function renderReferenceContextSummary(referenceImage) {
+  if (!referenceImage) {
+    return "";
+  }
+  const groups = Array.isArray(referenceImage.groups) ? referenceImage.groups : [];
+  if (groups.length) {
+    const summary = groups
+      .map((group) => `${group.label || group.role || "参考图"} ${Array.isArray(group.images) ? group.images.length : 0} 张`)
+      .join(" / ");
+    return `<div class="change-reference">参考图：${escapeHtml(summary)}</div>`;
+  }
+  if (Array.isArray(referenceImage.images) && referenceImage.images.length) {
+    return `<div class="change-reference">参考图：${referenceImage.images.length} 张</div>`;
+  }
+  if (referenceImage.imagePath) {
+    return `<div class="change-reference">参考图：${escapeHtml(referenceImage.imagePath)}</div>`;
+  }
+  return "";
 }
 
 function renderAiProofStrip(visualProof) {

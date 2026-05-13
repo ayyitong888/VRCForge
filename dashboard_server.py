@@ -78,6 +78,10 @@ class DashboardRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override.")
     reference_image_path: str | None = Field(default=None, description="Optional local path or artifact URL for a face reference image.")
     reference_image_data_url: str | None = Field(default=None, description="Optional browser-uploaded image as a data URL.")
+    source_reference_image_paths: list[str] = Field(default_factory=list, description="Optional before/current-face image paths or artifact URLs.")
+    source_reference_image_data_urls: list[str] = Field(default_factory=list, description="Optional before/current-face uploaded images as data URLs.")
+    target_reference_image_paths: list[str] = Field(default_factory=list, description="Optional target face image paths or artifact URLs.")
+    target_reference_image_data_urls: list[str] = Field(default_factory=list, description="Optional target face uploaded images as data URLs.")
     source_mode: Literal["unity_live_export", "configured_export", "custom_export", "mvp_sample"] = "mvp_sample"
     export_json: str | None = Field(default=None, description="Optional local export JSON path.")
     plan_json: str | None = Field(default=None, description="Optional local plan JSON path.")
@@ -1166,7 +1170,8 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                 settings,
                 planning_payload,
                 request.instruction,
-                reference_image_path=reference_context.get("imagePath") if reference_context else None,
+                reference_image_paths=reference_context.get("imagePaths") if reference_context else None,
+                reference_image_labels=reference_context.get("imageLabels") if reference_context else None,
             )
             emit_log(
                 "info",
@@ -1176,7 +1181,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                     "instruction": request.instruction,
                     "provider": settings.llm_provider,
                     "model": settings.llm_model,
-                    "referenceImage": reference_context.get("imagePath") if reference_context else None,
+                    "referenceImageCount": reference_context.get("count") if reference_context else 0,
                 },
             )
 
@@ -2687,21 +2692,82 @@ def save_vision_audit_artifact(file_name: str, payload: dict[str, Any]) -> Path:
     return audit_path
 
 
+REFERENCE_GROUP_LABELS = {
+    "source": "原图 / 当前脸",
+    "target": "目标参考图",
+}
+
+
 def build_reference_image_context(request: DashboardRequest) -> dict[str, Any] | None:
-    image_path = resolve_reference_image_path(request)
-    if image_path is None:
+    source_images = resolve_reference_image_entries(
+        role="source",
+        path_values=request.source_reference_image_paths,
+        data_urls=request.source_reference_image_data_urls,
+    )
+    target_paths = list(request.target_reference_image_paths)
+    target_data_urls = list(request.target_reference_image_data_urls)
+    if request.reference_image_path:
+        target_paths.append(request.reference_image_path)
+    if request.reference_image_data_url:
+        target_data_urls.append(request.reference_image_data_url)
+    target_images = resolve_reference_image_entries(
+        role="target",
+        path_values=target_paths,
+        data_urls=target_data_urls,
+    )
+    images = [*source_images, *target_images]
+    if not images:
         return None
 
-    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    groups = []
+    if source_images:
+        groups.append({"role": "source", "label": REFERENCE_GROUP_LABELS["source"], "images": source_images})
+    if target_images:
+        groups.append({"role": "target", "label": REFERENCE_GROUP_LABELS["target"], "images": target_images})
+
     context = {
+        "imagePath": images[0]["imagePath"],
+        "imageUrl": images[0]["imageUrl"],
+        "mimeType": images[0]["mimeType"],
+        "imagePaths": [image["imagePath"] for image in images],
+        "imageLabels": [image["label"] for image in images],
+        "images": images,
+        "groups": groups,
+        "count": len(images),
+        "mode": "text_images_same_request",
+    }
+    save_vision_audit_artifact("reference_face_context.json", context)
+    emit_log("info", "pipeline", "Reference images attached to blendshape planning request.", {"count": len(images)})
+    return context
+
+
+def resolve_reference_image_entries(
+    role: str,
+    path_values: list[str] | None = None,
+    data_urls: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for data_url in data_urls or []:
+        image_path = save_reference_image_data_url(data_url, role=role, index=len(entries) + 1)
+        entries.append(build_reference_image_entry(image_path, role, len(entries) + 1))
+    for path_value in path_values or []:
+        image_path = resolve_reference_image_path_value(path_value)
+        if image_path is None:
+            continue
+        entries.append(build_reference_image_entry(image_path, role, len(entries) + 1))
+    return entries
+
+
+def build_reference_image_entry(image_path: Path, role: str, index: int) -> dict[str, Any]:
+    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    role_label = REFERENCE_GROUP_LABELS.get(role, role)
+    return {
+        "role": role,
+        "label": f"{role_label} {index}",
         "imagePath": str(image_path),
         "imageUrl": to_artifact_url(str(image_path)),
         "mimeType": mime_type,
-        "mode": "text_image_same_request",
     }
-    save_vision_audit_artifact("reference_face_context.json", context)
-    emit_log("info", "pipeline", "Reference image attached to blendshape planning request.", {"imagePath": str(image_path)})
-    return context
 
 
 def resolve_reference_image_path(request: DashboardRequest) -> Path | None:
@@ -2709,7 +2775,11 @@ def resolve_reference_image_path(request: DashboardRequest) -> Path | None:
     if data_url:
         return save_reference_image_data_url(data_url)
 
-    path_value = (request.reference_image_path or "").strip()
+    return resolve_reference_image_path_value(request.reference_image_path)
+
+
+def resolve_reference_image_path_value(path_value: str | None) -> Path | None:
+    path_value = (path_value or "").strip()
     if not path_value:
         return None
 
@@ -2723,7 +2793,7 @@ def resolve_reference_image_path(request: DashboardRequest) -> Path | None:
     return image_path
 
 
-def save_reference_image_data_url(data_url: str) -> Path:
+def save_reference_image_data_url(data_url: str, role: str = "target", index: int = 1) -> Path:
     if "," not in data_url or not data_url.lower().startswith("data:"):
         raise RuntimeError("Uploaded reference image must be a browser data URL.")
 
@@ -2747,7 +2817,8 @@ def save_reference_image_data_url(data_url: str) -> Path:
 
     latest_dir = DASHBOARD_ARTIFACTS_DIR / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
-    output_path = (latest_dir / f"reference_image{suffix}").resolve()
+    safe_role = "".join(char for char in role.lower() if char.isalnum() or char in {"_", "-"}) or "target"
+    output_path = (latest_dir / f"reference_{safe_role}_{index:02d}{suffix}").resolve()
     output_path.write_bytes(image_bytes)
     return output_path
 

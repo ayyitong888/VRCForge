@@ -48,6 +48,8 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("VRCFaceForge 控制台", response.text)
             self.assertIn("识图分析", response.text)
+            self.assertIn("原图 / 当前脸", response.text)
+            self.assertIn("目标参考图", response.text)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -138,6 +140,35 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_artifacts_dir
                 dashboard_server.LOCAL_LOG_PATH = original_log_path
+
+    def test_reference_image_context_supports_optional_source_and_target_images(self) -> None:
+        data_url = "data:image/png;base64,aW1hZ2U="
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
+            original_dashboard_artifacts_dir = dashboard_server.DASHBOARD_ARTIFACTS_DIR
+            temp_artifacts = Path(temp_dir) / "artifacts"
+            dashboard_server.ARTIFACTS_DIR = temp_artifacts
+            dashboard_server.DASHBOARD_ARTIFACTS_DIR = temp_artifacts / "dashboard"
+            try:
+                request = dashboard_server.DashboardRequest(
+                    instruction="match target",
+                    source_reference_image_data_urls=[data_url],
+                    target_reference_image_data_urls=[data_url, data_url],
+                )
+
+                context = dashboard_server.build_reference_image_context(request)
+
+                self.assertIsNotNone(context)
+                self.assertEqual(context["count"], 3)
+                self.assertEqual(len(context["imagePaths"]), 3)
+                self.assertEqual([group["role"] for group in context["groups"]], ["source", "target"])
+                self.assertEqual(len(context["groups"][0]["images"]), 1)
+                self.assertEqual(len(context["groups"][1]["images"]), 2)
+                self.assertIn("原图", context["imageLabels"][0])
+                self.assertIn("目标参考图", context["imageLabels"][1])
+            finally:
+                dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
+                dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_dashboard_artifacts_dir
 
     def test_extract_tool_result_payload_falls_back_to_flat_stdout(self) -> None:
         result = dashboard_server.McpResult(

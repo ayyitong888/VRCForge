@@ -526,8 +526,18 @@ textarea {
   margin: 0.9rem 0;
 }
 
+.reference-group {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-lowest);
+  padding: 0.9rem;
+}
+
 .reference-actions {
-  align-self: end;
+  align-self: start;
+  flex-wrap: wrap;
 }
 
 .change-list {
