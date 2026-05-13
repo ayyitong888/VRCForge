@@ -88,8 +88,8 @@ This manual explains the public workflow and feature status without project-spec
 VRCForge supports Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints.
 VRCForge 支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。
 
-For face editing, original/current images and target reference images are both optional. Each group supports multiple uploaded files, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the dashboard.
-捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持多文件上传、手填图片路径、使用最近 Unity 截图，或从 dashboard 直接捕获新的 Unity 截图。
+For face editing, original/current images and target reference images are both optional. Each group supports pasted images, local image selection, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the dashboard. Added images show as removable previews.
+捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持粘贴图片、选择本地图片、手填图片路径、使用最近 Unity 截图，或从 dashboard 直接捕获新的 Unity 截图。加入后的图片会显示为可单独删除的预览。
 
 Image input depends on the selected provider and model. If image input is not supported, the dashboard reports the provider error.
 图片输入能力取决于所选 provider 和模型。如果模型不支持图片输入，dashboard 会显示对应错误。

@@ -50,6 +50,8 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("识图分析", response.text)
             self.assertIn("原图 / 当前脸", response.text)
             self.assertIn("目标参考图", response.text)
+            self.assertIn("粘贴图片", response.text)
+            self.assertIn("选择本地图片", response.text)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:

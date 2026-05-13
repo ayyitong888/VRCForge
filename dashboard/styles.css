@@ -535,6 +535,119 @@ textarea {
   padding: 0.9rem;
 }
 
+.reference-picker {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px dashed var(--md-outline);
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-low);
+  padding: 0.9rem;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.reference-picker:focus-within,
+.reference-picker.is-dragging {
+  border-color: var(--md-primary);
+  background: var(--md-primary-container);
+  box-shadow: 0 0 0 4px var(--state-focus);
+}
+
+.reference-picker-copy {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--md-on-surface-variant);
+}
+
+.reference-picker-copy strong {
+  color: var(--md-on-surface);
+}
+
+.reference-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.reference-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.7rem;
+}
+
+.reference-thumb {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-sm);
+  background: var(--md-surface-container-low);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+}
+
+.reference-thumb img,
+.reference-path-preview {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  background: var(--md-surface-container-high);
+  object-fit: cover;
+}
+
+.reference-path-preview {
+  padding: 0.8rem;
+  text-align: center;
+  color: var(--md-on-surface-variant);
+}
+
+.reference-path-preview span,
+.reference-thumb > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reference-path-preview span {
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.reference-thumb > span {
+  display: block;
+  padding: 0.45rem 0.55rem;
+  color: var(--md-on-surface-variant);
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reference-remove {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  display: inline-grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  border: 1px solid rgba(186, 26, 26, 0.45);
+  border-radius: 999px;
+  background: #ba1a1a;
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+}
+
+.reference-remove:hover {
+  background: #93000a;
+}
+
 .reference-actions {
   align-self: start;
   flex-wrap: wrap;
@@ -1132,6 +1245,10 @@ textarea {
 
   .button {
     width: 100%;
+  }
+
+  .reference-input-row {
+    grid-template-columns: 1fr;
   }
 
   .vision-thumbs {

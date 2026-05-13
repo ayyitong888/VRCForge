@@ -238,16 +238,18 @@
                 <span class="inline-label">原图 / 当前脸（可选，多图）</span>
                 <strong id="source-reference-count">0 张</strong>
               </div>
-              <div class="field-grid two-cols">
-                <label class="field">
-                  <span>选择图片文件</span>
-                  <input id="source-reference-image-file" type="file" accept="image/*" multiple>
-                </label>
-                <label class="field">
-                  <span>图片路径</span>
-                  <textarea id="source-reference-image-paths" rows="2" placeholder="每行一个本地图片路径，或用下方 Unity 截图按钮"></textarea>
-                </label>
+              <div id="source-reference-dropzone" class="reference-picker" tabindex="0">
+                <div class="reference-picker-copy">
+                  <strong>粘贴图片、拖入图片，或输入图片路径</strong>
+                  <span>Ctrl+V 可直接粘贴截图；输入路径后按 Enter 加入列表。</span>
+                </div>
+                <div class="reference-input-row">
+                  <input id="source-reference-image-path" type="text" placeholder="本地图片路径，或在此处直接粘贴图片">
+                  <button id="source-reference-choose-btn" class="button button-ghost" type="button">选择本地图片</button>
+                  <input id="source-reference-image-file" class="hidden-file-input" type="file" accept="image/*" multiple>
+                </div>
               </div>
+              <div id="source-reference-preview" class="reference-preview-grid"></div>
               <div class="button-row reference-actions">
                 <button id="source-use-latest-screenshot-ref-btn" class="button button-ghost" type="button">使用最近截图</button>
                 <button id="source-capture-screenshot-ref-btn" class="button button-ghost" type="button">Unity 截图加入原图</button>
@@ -261,16 +263,18 @@
                 <span class="inline-label">目标参考图（可选，多图）</span>
                 <strong id="target-reference-count">0 张</strong>
               </div>
-              <div class="field-grid two-cols">
-                <label class="field">
-                  <span>选择图片文件</span>
-                  <input id="target-reference-image-file" type="file" accept="image/*" multiple>
-                </label>
-                <label class="field">
-                  <span>图片路径</span>
-                  <textarea id="target-reference-image-paths" rows="2" placeholder="每行一个目标图片路径，或用下方 Unity 截图按钮"></textarea>
-                </label>
+              <div id="target-reference-dropzone" class="reference-picker" tabindex="0">
+                <div class="reference-picker-copy">
+                  <strong>粘贴图片、拖入图片，或输入图片路径</strong>
+                  <span>Ctrl+V 可直接粘贴参考图；输入路径后按 Enter 加入列表。</span>
+                </div>
+                <div class="reference-input-row">
+                  <input id="target-reference-image-path" type="text" placeholder="目标图片路径，或在此处直接粘贴图片">
+                  <button id="target-reference-choose-btn" class="button button-ghost" type="button">选择本地图片</button>
+                  <input id="target-reference-image-file" class="hidden-file-input" type="file" accept="image/*" multiple>
+                </div>
               </div>
+              <div id="target-reference-preview" class="reference-preview-grid"></div>
               <div class="button-row reference-actions">
                 <button id="target-use-latest-screenshot-ref-btn" class="button button-ghost" type="button">使用最近截图</button>
                 <button id="target-capture-screenshot-ref-btn" class="button button-ghost" type="button">Unity 截图加入目标</button>
@@ -446,6 +450,6 @@
       </main>
     </div>
 
-    <script src="/dashboard/app.js?v=20260513-multi-reference-images"></script>
+    <script src="/dashboard/app.js?v=20260514-reference-picker"></script>
   </body>
 </html>

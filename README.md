@@ -40,8 +40,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地 Unity dashboard。
 
 ## Providers / 模型接入
 
-Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints. Face editing can send optional original/current images and optional target images; each group supports multiple uploads or Unity screenshots. Image input depends on the selected model.
-支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。捏脸可选传原图/当前脸和目标参考图，每组都支持多图上传或 Unity 截图。图片输入能力取决于所选模型。
+Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints. Face editing can send optional original/current images and optional target images; each group supports paste, local image selection, typed paths, or Unity screenshots. Image input depends on the selected model.
+支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。捏脸可选传原图/当前脸和目标参考图，每组都支持粘贴图片、选择本地图片、手填路径或 Unity 截图。图片输入能力取决于所选模型。
 
 ## Documentation / 文档
 

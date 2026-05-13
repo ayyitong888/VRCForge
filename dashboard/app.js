@@ -94,7 +94,10 @@ const REFERENCE_GROUP_CONFIG = {
   source: {
     stateKey: "sourceReferenceImages",
     fileId: "source-reference-image-file",
-    pathsId: "source-reference-image-paths",
+    pathInputId: "source-reference-image-path",
+    chooseBtnId: "source-reference-choose-btn",
+    dropzoneId: "source-reference-dropzone",
+    previewId: "source-reference-preview",
     countId: "source-reference-count",
     statusId: "source-reference-status",
     useLatestId: "source-use-latest-screenshot-ref-btn",
@@ -106,7 +109,10 @@ const REFERENCE_GROUP_CONFIG = {
   target: {
     stateKey: "targetReferenceImages",
     fileId: "target-reference-image-file",
-    pathsId: "target-reference-image-paths",
+    pathInputId: "target-reference-image-path",
+    chooseBtnId: "target-reference-choose-btn",
+    dropzoneId: "target-reference-dropzone",
+    previewId: "target-reference-preview",
     countId: "target-reference-count",
     statusId: "target-reference-status",
     useLatestId: "target-use-latest-screenshot-ref-btn",
@@ -179,14 +185,20 @@ function cacheRefs() {
     "summary-output",
     "instruction-input",
     "source-reference-image-file",
-    "source-reference-image-paths",
+    "source-reference-image-path",
+    "source-reference-choose-btn",
+    "source-reference-dropzone",
+    "source-reference-preview",
     "source-reference-count",
     "source-use-latest-screenshot-ref-btn",
     "source-capture-screenshot-ref-btn",
     "source-clear-reference-image-btn",
     "source-reference-status",
     "target-reference-image-file",
-    "target-reference-image-paths",
+    "target-reference-image-path",
+    "target-reference-choose-btn",
+    "target-reference-dropzone",
+    "target-reference-preview",
     "target-reference-count",
     "target-use-latest-screenshot-ref-btn",
     "target-capture-screenshot-ref-btn",
@@ -553,6 +565,7 @@ function buildConnectionPayload() {
 }
 
 function buildDashboardRequest() {
+  flushReferencePathInputs();
   const referencePayload = buildReferenceImagePayload();
   return {
     ...buildConnectionPayload(),
@@ -576,7 +589,29 @@ function buildDashboardRequest() {
 function bindReferenceGroupEvents(group) {
   const config = REFERENCE_GROUP_CONFIG[group];
   refs[config.fileId].addEventListener("change", () => onReferenceImageFilesChanged(group));
-  refs[config.pathsId].addEventListener("input", () => updateReferenceImageStatus(group));
+  refs[config.chooseBtnId].addEventListener("click", () => refs[config.fileId].click());
+  refs[config.pathInputId].addEventListener("paste", (event) => onReferenceImagePaste(group, event));
+  refs[config.pathInputId].addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addReferencePathsFromInput(group);
+    }
+  });
+  refs[config.pathInputId].addEventListener("blur", () => addReferencePathsFromInput(group));
+  refs[config.dropzoneId].addEventListener("paste", (event) => onReferenceImagePaste(group, event));
+  refs[config.dropzoneId].addEventListener("click", (event) => {
+    if (event.target.closest("button") || event.target.closest("input")) {
+      return;
+    }
+    refs[config.pathInputId].focus();
+  });
+  refs[config.dropzoneId].addEventListener("dragover", (event) => {
+    event.preventDefault();
+    refs[config.dropzoneId].classList.add("is-dragging");
+  });
+  refs[config.dropzoneId].addEventListener("dragleave", () => refs[config.dropzoneId].classList.remove("is-dragging"));
+  refs[config.dropzoneId].addEventListener("drop", (event) => onReferenceImageDrop(group, event));
+  refs[config.previewId].addEventListener("click", (event) => onReferencePreviewClick(group, event));
   refs[config.useLatestId].addEventListener("click", () => useLatestScreenshotAsReference(group));
   refs[config.captureId].addEventListener("click", () => runButtonTask(config.captureId, "截图中...", () => captureScreenshotAsReference(group)));
   refs[config.clearId].addEventListener("click", () => clearReferenceImages(group));
@@ -592,21 +627,10 @@ function buildReferenceImagePayload() {
 function buildReferenceGroupPayload(group) {
   const config = REFERENCE_GROUP_CONFIG[group];
   const storedImages = state[config.stateKey] || [];
-  const typedPaths = parseReferencePathInput(refs[config.pathsId].value);
   return {
-    paths: [
-      ...typedPaths,
-      ...storedImages.filter((item) => item.path).map((item) => item.path),
-    ],
+    paths: storedImages.filter((item) => item.path).map((item) => item.path),
     dataUrls: storedImages.filter((item) => item.dataUrl).map((item) => item.dataUrl),
   };
-}
-
-function parseReferencePathInput(value) {
-  return String(value || "")
-    .split(/\r?\n|;/)
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 async function onReferenceImageFilesChanged(group) {
@@ -631,10 +655,7 @@ async function onReferenceImageFilesChanged(group) {
   }
 
   try {
-    const images = await Promise.all(files.map(async (file) => ({
-      name: file.name,
-      dataUrl: await readFileAsDataUrl(file),
-    })));
+    const images = await buildReferenceImageItemsFromFiles(files);
     state[config.stateKey].push(...images);
     refs[config.fileId].value = "";
     updateReferenceImageStatus(group);
@@ -652,13 +673,66 @@ function readFileAsDataUrl(file) {
   });
 }
 
+async function onReferenceImagePaste(group, event) {
+  event.stopPropagation();
+  const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+  if (!files.length) {
+    window.setTimeout(() => addReferencePathsFromInput(group), 0);
+    return;
+  }
+
+  event.preventDefault();
+  await addReferenceFiles(group, files);
+}
+
+async function onReferenceImageDrop(group, event) {
+  event.preventDefault();
+  const config = REFERENCE_GROUP_CONFIG[group];
+  refs[config.dropzoneId].classList.remove("is-dragging");
+  const files = Array.from(event.dataTransfer?.files || []).filter((file) => file.type.startsWith("image/"));
+  if (!files.length) {
+    refs[config.statusId].textContent = "拖入内容里没有图片文件。";
+    return;
+  }
+  await addReferenceFiles(group, files);
+}
+
+async function addReferenceFiles(group, files) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const tooLarge = files.find((file) => file.size > 8 * 1024 * 1024);
+  if (tooLarge) {
+    refs[config.statusId].textContent = `${tooLarge.name} 超过 8 MB，请换一张小一点的图。`;
+    return;
+  }
+
+  try {
+    const images = await buildReferenceImageItemsFromFiles(files);
+    state[config.stateKey].push(...images);
+    updateReferenceImageStatus(group);
+  } catch (_error) {
+    refs[config.statusId].textContent = `${config.label}读取失败。`;
+  }
+}
+
+function buildReferenceImageItemsFromFiles(files) {
+  return Promise.all(files.map(async (file) => {
+    const dataUrl = await readFileAsDataUrl(file);
+    return {
+      id: makeReferenceImageId(),
+      name: file.name || "粘贴图片",
+      dataUrl,
+      previewUrl: dataUrl,
+    };
+  }));
+}
+
 function useLatestScreenshotAsReference(group) {
   const config = REFERENCE_GROUP_CONFIG[group];
   if (!state.latestScreenshotUrl) {
     refs[config.statusId].textContent = "还没有可用截图，请先在视觉质检模块捕获截图。";
     return;
   }
-  addReferencePath(group, urlToArtifactPath(state.latestScreenshotUrl), "最近截图");
+  addReferencePath(group, urlToArtifactPath(state.latestScreenshotUrl), "最近截图", state.latestScreenshotUrl);
 }
 
 async function captureScreenshotAsReference(group) {
@@ -672,21 +746,74 @@ async function captureScreenshotAsReference(group) {
   renderScreenshot(payload.imageUrl);
   refs["vision-result"].innerHTML = `<div class="info-card"><strong>截图已加入${escapeHtml(config.label)}</strong><span>${escapeHtml(payload.imagePath)}</span></div>`;
   refs["vision-status-chip"].textContent = "待分析";
-  addReferencePath(group, payload.imagePath, "Unity 截图");
+  addReferencePath(group, payload.imagePath, "Unity 截图", payload.imageUrl ? `${payload.imageUrl}?t=${Date.now()}` : "");
 }
 
-function addReferencePath(group, path, name) {
+function addReferencePath(group, path, name, previewUrl = "") {
   const config = REFERENCE_GROUP_CONFIG[group];
-  state[config.stateKey].push({ name, path });
+  state[config.stateKey].push({
+    id: makeReferenceImageId(),
+    name,
+    path,
+    previewUrl: previewUrl || pathToReferencePreviewUrl(path),
+  });
   updateReferenceImageStatus(group);
+}
+
+function addReferencePathsFromInput(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const input = refs[config.pathInputId];
+  const paths = parseReferencePathInput(input.value);
+  if (!paths.length) {
+    return;
+  }
+  for (const path of paths) {
+    addReferencePath(group, path, path.split(/[\\/]/).pop() || path);
+  }
+  input.value = "";
+  updateReferenceImageStatus(group);
+}
+
+function parseReferencePathInput(value) {
+  return String(value || "")
+    .split(/\r?\n|;/)
+    .map((item) => item.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
+function pathToReferencePreviewUrl(path) {
+  if (!path) {
+    return "";
+  }
+  if (path.startsWith("/artifacts/")) {
+    return path;
+  }
+  if (path.startsWith("artifacts/")) {
+    return `/artifacts/${path.slice("artifacts/".length)}`;
+  }
+  return "";
 }
 
 function clearReferenceImages(group) {
   const config = REFERENCE_GROUP_CONFIG[group];
   state[config.stateKey] = [];
   refs[config.fileId].value = "";
-  refs[config.pathsId].value = "";
+  refs[config.pathInputId].value = "";
   updateReferenceImageStatus(group);
+}
+
+function removeReferenceImage(group, index) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  state[config.stateKey].splice(index, 1);
+  updateReferenceImageStatus(group);
+}
+
+function onReferencePreviewClick(group, event) {
+  const removeButton = event.target.closest("[data-reference-remove]");
+  if (!removeButton) {
+    return;
+  }
+  removeReferenceImage(group, Number(removeButton.dataset.referenceRemove));
 }
 
 function updateAllReferenceImageStatus() {
@@ -697,27 +824,55 @@ function updateAllReferenceImageStatus() {
 function updateReferenceImageStatus(group) {
   const config = REFERENCE_GROUP_CONFIG[group];
   const storedImages = state[config.stateKey] || [];
-  const typedPaths = parseReferencePathInput(refs[config.pathsId].value);
-  const total = storedImages.length + typedPaths.length;
+  const total = storedImages.length;
   refs[config.countId].textContent = `${total} 张`;
   refs[config.statusId].textContent = total
-    ? `${config.label}已加入 ${total} 张：${summarizeReferenceImages(storedImages, typedPaths)}`
+    ? `${config.label}已加入 ${total} 张：${summarizeReferenceImages(storedImages)}`
     : config.emptyText;
+  renderReferencePreviewGrid(group);
 
-  const sourceCount = (state.sourceReferenceImages || []).length + parseReferencePathInput(refs["source-reference-image-paths"].value).length;
-  const targetCount = (state.targetReferenceImages || []).length + parseReferencePathInput(refs["target-reference-image-paths"].value).length;
+  const sourceCount = (state.sourceReferenceImages || []).length;
+  const targetCount = (state.targetReferenceImages || []).length;
   refs["reference-image-status"].textContent = sourceCount || targetCount
     ? `捏脸请求将同时发送：原图 ${sourceCount} 张，目标图 ${targetCount} 张。两组都可为空。`
     : "不传图时只按文字捏脸；传图时会把文字、原图和目标图同一轮发送给当前模型。";
 }
 
-function summarizeReferenceImages(storedImages, typedPaths) {
-  const names = [
-    ...storedImages.map((item) => item.name || item.path || "上传图片"),
-    ...typedPaths.map((path) => path.split(/[\\/]/).pop() || path),
-  ];
+function renderReferencePreviewGrid(group) {
+  const config = REFERENCE_GROUP_CONFIG[group];
+  const storedImages = state[config.stateKey] || [];
+  refs[config.previewId].innerHTML = storedImages.map((item, index) => {
+    const title = item.name || item.path || "参考图";
+    const preview = item.previewUrl || item.dataUrl;
+    const body = preview
+      ? `<img src="${escapeHtml(preview)}" alt="${escapeHtml(title)}">`
+      : `<div class="reference-path-preview"><strong>PATH</strong><span>${escapeHtml(title)}</span></div>`;
+    return `
+      <article class="reference-thumb">
+        ${body}
+        <button class="reference-remove" type="button" data-reference-remove="${index}" aria-label="移除 ${escapeHtml(title)}">×</button>
+        <span>${escapeHtml(title)}</span>
+      </article>
+    `;
+  }).join("");
+}
+
+function summarizeReferenceImages(storedImages) {
+  const names = storedImages.map((item) => item.name || item.path || "上传图片");
   const shown = names.slice(0, 3).join("、");
   return names.length > 3 ? `${shown} 等` : shown;
+}
+
+function flushReferencePathInputs() {
+  addReferencePathsFromInput("source");
+  addReferencePathsFromInput("target");
+}
+
+function makeReferenceImageId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `ref-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function runButtonTask(buttonId, loadingText, task) {
