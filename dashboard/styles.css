@@ -503,16 +503,18 @@ textarea {
 
 .console.compact {
   min-height: 7.5rem;
+  max-height: min(14rem, 36vh);
 }
 
 .blendshape-list,
-.log-stream {
+.log-stream,
+.connection-stream {
   display: grid;
   gap: 0.8rem;
 }
 
 .blendshape-list {
-  max-height: 48rem;
+  max-height: min(32rem, 52vh);
   overflow: auto;
   padding-right: 0.15rem;
 }
@@ -531,6 +533,27 @@ textarea {
 .change-list {
   display: grid;
   gap: 0.7rem;
+}
+
+#llm-change-list,
+#clothes-list,
+#param-suggestions,
+#param-diff-list,
+#vision-result {
+  max-height: min(24rem, 44vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.2rem;
+}
+
+#fx-csharp-preview,
+#fx-output,
+#param-csharp-preview,
+#param-output,
+#summary-output,
+#config-output,
+#unity-status-output {
+  max-height: min(16rem, 40vh);
 }
 
 .blendshape-row,
@@ -881,10 +904,15 @@ textarea {
   background: var(--md-error-container);
 }
 
-.log-stream {
-  max-height: 28rem;
+.log-stream,
+.connection-stream {
+  max-height: min(18rem, 36vh);
   overflow: auto;
   padding-right: 0.2rem;
+}
+
+.connection-stream {
+  align-items: stretch;
 }
 
 .log-entry {

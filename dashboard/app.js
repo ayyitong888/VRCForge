@@ -67,12 +67,12 @@ const state = {
   sceneAvatars: [],
   selectedAvatarPath: "",
   selectedAvatarName: "",
-  recentLogs: [],
   apiConfig: null,
   currentProvider: "",
   providerDrafts: {},
   modelOptionsByProvider: {},
   apiConfigDirty: false,
+  connectionNotices: {},
   blendshapes: [],
   blendshapeWorking: {},
   blendshapeBaseline: {},
@@ -262,14 +262,15 @@ function connectSocket() {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${scheme}://${window.location.host}/ws`);
   state.socket = socket;
-  setSocketStatus("Connecting", false);
+  setSocketStatus("Connecting", false, "正在连接 dashboard websocket");
 
-  socket.addEventListener("open", () => setSocketStatus("Live", true));
-  socket.addEventListener("close", () => {
-    setSocketStatus("Offline", false);
+  socket.addEventListener("open", () => setSocketStatus("Live", true, ""));
+  socket.addEventListener("close", (event) => {
+    const reason = event.reason || `WebSocket closed with code ${event.code}`;
+    setSocketStatus("Offline", false, reason);
     setTimeout(connectSocket, 1500);
   });
-  socket.addEventListener("error", () => setSocketStatus("Error", false));
+  socket.addEventListener("error", () => setSocketStatus("Error", false, "WebSocket 连接失败，请确认 dashboard 服务仍在运行"));
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     handleSocketEvent(message.type, message.payload);
@@ -294,7 +295,6 @@ function handleSocketEvent(type, payload) {
       applyApiConfigPayload(payload, false);
       break;
     case "log":
-      appendLog(payload, true);
       break;
     default:
       break;
@@ -323,11 +323,6 @@ function applyBootstrap(payload) {
     applyUnityStatus(payload.unityStatus);
   }
 
-  refs["log-stream"].innerHTML = "";
-  for (const logEntry of payload.recentLogs || []) {
-    appendLog(logEntry, false);
-  }
-
   updateModeVisibility();
   syncMockModeText();
 }
@@ -351,7 +346,8 @@ function applyUnityStatus(payload) {
   const connected = Boolean(payload.connected);
   refs["unity-status-label"].textContent = connected ? "已连接" : "未连接";
   refs["unity-status-light"].className = `light ${connected ? "light-on" : "light-off"}`;
-  refs["unity-status-output"].textContent = prettyJson(payload.parsed || payload) || payload.error || "";
+  refs["unity-status-output"].textContent = formatConnectionResult("Unity MCP", connected, getConnectionFailureReason(payload));
+  renderConnectionNotice("Unity MCP", connected, getConnectionFailureReason(payload));
 }
 
 function renderProjects(payload) {
@@ -623,7 +619,13 @@ async function runButtonTask(buttonId, loadingText, task) {
   try {
     await task();
   } catch (error) {
-    refs["summary-output"].textContent = error.message || String(error);
+    const message = error.message || String(error);
+    if (buttonId === "unity-status-btn" || buttonId === "unity-tools-btn") {
+      refs["unity-status-output"].textContent = formatConnectionResult("Unity MCP", false, message);
+      renderConnectionNotice("Unity MCP", false, message);
+    } else {
+      refs["summary-output"].textContent = message;
+    }
   } finally {
     button.disabled = false;
     button.classList.remove("is-loading");
@@ -675,12 +677,15 @@ async function openProject() {
 
 async function loadUnityStatus() {
   const payload = await postJson("/api/unity/status", buildConnectionPayload());
-  refs["unity-status-output"].textContent = prettyJson(payload.parsed || payload);
+  applyUnityStatus(payload);
 }
 
 async function loadUnityTools() {
   const payload = await postJson("/api/unity/tools", buildConnectionPayload());
-  refs["unity-status-output"].textContent = prettyJson(payload.parsed || payload);
+  const connected = !payload.error && payload.connected !== false;
+  const reason = getConnectionFailureReason(payload);
+  refs["unity-status-output"].textContent = formatConnectionResult("Unity MCP tools", connected, reason);
+  renderConnectionNotice("Unity MCP tools", connected, reason);
 }
 
 async function refreshSceneAvatars() {
@@ -1535,9 +1540,10 @@ async function ensureApiConfigSaved() {
   await saveApiConfig(false);
 }
 
-function setSocketStatus(text, connected) {
+function setSocketStatus(text, connected, reason = "") {
   refs["socket-status"].textContent = text;
   refs["socket-status"].className = connected ? "status-live" : "status-dead";
+  renderConnectionNotice("Dashboard socket", connected, reason);
 }
 
 function selectProjectOption(projectPath) {
@@ -1556,26 +1562,59 @@ function setActiveAvatar(avatarName, avatarPath) {
   }
 }
 
-function appendLog(entry, autoScroll) {
-  state.recentLogs.push(entry);
-  const node = document.createElement("article");
-  node.className = `log-entry log-${entry.level || "info"}`;
-  node.innerHTML = `
-    <div class="log-entry-head">
-      <span class="log-scope">${escapeHtml(entry.scope || "system")}</span>
-      <span>${escapeHtml(formatTimestamp(entry.timestamp))}</span>
-    </div>
-    <p class="log-message">${escapeHtml(entry.message || "")}</p>
-    ${entry.data && Object.keys(entry.data).length ? `<pre class="log-data">${escapeHtml(prettyJson(entry.data))}</pre>` : ""}
-  `;
-  refs["log-stream"].appendChild(node);
-  if (autoScroll) {
-    refs["log-stream"].scrollTop = refs["log-stream"].scrollHeight;
+function renderConnectionNotice(scope, connected, reason = "") {
+  const container = refs["log-stream"];
+  if (!container) {
+    return;
   }
+  state.connectionNotices[scope] = {
+    connected,
+    reason,
+    timestamp: new Date().toISOString(),
+  };
+  const notices = Object.entries(state.connectionNotices);
+  container.classList.remove("empty-state");
+  container.innerHTML = notices.map(([noticeScope, notice]) => {
+    const message = notice.connected
+      ? `${noticeScope} 连接成功`
+      : `${noticeScope} 连接未成功${notice.reason ? `：${notice.reason}` : ""}`;
+    return `
+    <article class="log-entry ${notice.connected ? "log-success" : "log-error"}">
+      <div class="log-entry-head">
+        <span class="log-scope">${escapeHtml(noticeScope)}</span>
+        <span>${escapeHtml(formatTimestamp(notice.timestamp))}</span>
+      </div>
+      <p class="log-message">${escapeHtml(message)}</p>
+    </article>
+  `;
+  }).join("");
+}
+
+function formatConnectionResult(scope, connected, reason = "") {
+  if (connected) {
+    return `${scope}: 连接成功`;
+  }
+  return `${scope}: 连接未成功${reason ? `\n原因：${reason}` : ""}`;
+}
+
+function getConnectionFailureReason(payload) {
+  if (!payload) {
+    return "没有收到后端响应";
+  }
+  const parsed = payload.parsed || {};
+  return payload.error
+    || payload.reason
+    || payload.message
+    || parsed.error
+    || parsed.reason
+    || parsed.message
+    || "";
 }
 
 function clearLogView() {
-  refs["log-stream"].innerHTML = "";
+  state.connectionNotices = {};
+  refs["log-stream"].classList.add("empty-state");
+  refs["log-stream"].textContent = "等待连接结果";
 }
 
 function urlToArtifactPath(url) {

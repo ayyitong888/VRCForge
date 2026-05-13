@@ -1,6 +1,8 @@
 import json
+import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -61,6 +63,81 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("configPath", payload)
             self.assertEqual(payload["defaults"]["sourceMode"], "unity_live_export")
             self.assertFalse(payload["defaults"]["mockExecute"])
+            self.assertNotIn("recentLogs", payload)
+            self.assertEqual(payload["logRetentionHours"], 24)
+
+    def test_recent_log_snapshot_keeps_only_last_24_hours(self) -> None:
+        dashboard_server.RECENT_LOGS.clear()
+        old_entry = {
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            "level": "info",
+            "scope": "test",
+            "message": "old",
+            "data": {},
+        }
+        fresh_entry = {
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            "level": "info",
+            "scope": "test",
+            "message": "fresh",
+            "data": {},
+        }
+        dashboard_server.RECENT_LOGS.extend([old_entry, fresh_entry])
+
+        self.assertEqual(dashboard_server.recent_log_snapshot(), [fresh_entry])
+
+    def test_local_log_file_keeps_only_last_24_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_log_path = dashboard_server.LOCAL_LOG_PATH
+            dashboard_server.LOCAL_LOG_PATH = Path(temp_dir) / "dashboard.log"
+            try:
+                old_entry = {
+                    "timestamp": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+                    "message": "old",
+                }
+                fresh_entry = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "message": "fresh",
+                }
+                dashboard_server.LOCAL_LOG_PATH.write_text(
+                    json.dumps(old_entry, ensure_ascii=False) + "\n"
+                    + json.dumps(fresh_entry, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+
+                dashboard_server.prune_local_log_file()
+
+                lines = dashboard_server.LOCAL_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(json.loads(lines[0])["message"], "fresh")
+            finally:
+                dashboard_server.LOCAL_LOG_PATH = original_log_path
+
+    def test_prune_stale_dashboard_log_files_removes_old_sidecar_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_artifacts_dir = dashboard_server.DASHBOARD_ARTIFACTS_DIR
+            original_log_path = dashboard_server.LOCAL_LOG_PATH
+            temp_path = Path(temp_dir)
+            dashboard_server.DASHBOARD_ARTIFACTS_DIR = temp_path
+            dashboard_server.LOCAL_LOG_PATH = temp_path / "dashboard.log"
+            try:
+                stale_log = temp_path / "dashboard_stdout.log"
+                fresh_log = temp_path / "dashboard_stderr.log"
+                current_log = dashboard_server.LOCAL_LOG_PATH
+                stale_log.write_text("old", encoding="utf-8")
+                fresh_log.write_text("fresh", encoding="utf-8")
+                current_log.write_text("current", encoding="utf-8")
+                old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).timestamp()
+                os.utime(stale_log, (old_time, old_time))
+
+                dashboard_server.prune_stale_dashboard_log_files()
+
+                self.assertFalse(stale_log.exists())
+                self.assertTrue(fresh_log.exists())
+                self.assertTrue(current_log.exists())
+            finally:
+                dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_artifacts_dir
+                dashboard_server.LOCAL_LOG_PATH = original_log_path
 
     def test_extract_tool_result_payload_falls_back_to_flat_stdout(self) -> None:
         result = dashboard_server.McpResult(

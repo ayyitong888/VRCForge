@@ -10,8 +10,9 @@ import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 
 import uvicorn
@@ -65,6 +66,8 @@ ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
 CONFIG_PATH = ROOT_DIR / "config.json"
+LOCAL_LOG_PATH = DASHBOARD_ARTIFACTS_DIR / "dashboard.log"
+LOG_RETENTION = timedelta(hours=24)
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -270,6 +273,7 @@ app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifac
 
 EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
+LOCAL_LOG_LOCK = Lock()
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
@@ -347,7 +351,7 @@ def read_health() -> dict[str, Any]:
         "state": serialize_dashboard_state(),
         "apiConfig": serialize_api_config(include_secret=False),
         "projects": project_snapshot_payload(),
-        "recentLogs": list(RECENT_LOGS),
+        "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
 
@@ -2925,13 +2929,13 @@ def utc_now_iso() -> str:
 
 def emit_log(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
     entry = build_log_entry(level, scope, message, data)
-    RECENT_LOGS.append(entry)
+    record_log_entry(entry)
     EVENT_BUS.broadcast_from_sync("log", entry)
 
 
 async def emit_log_async(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
     entry = build_log_entry(level, scope, message, data)
-    RECENT_LOGS.append(entry)
+    record_log_entry(entry)
     await EVENT_BUS.broadcast("log", entry)
 
 
@@ -2944,6 +2948,89 @@ def build_log_entry(level: str, scope: str, message: str, data: dict[str, Any] |
         "message": message,
         "data": data or {},
     }
+
+
+def record_log_entry(entry: dict[str, Any]) -> None:
+    RECENT_LOGS.append(entry)
+    prune_recent_logs()
+    append_local_log(entry)
+
+
+def recent_log_snapshot() -> list[dict[str, Any]]:
+    prune_recent_logs()
+    return list(RECENT_LOGS)
+
+
+def prune_recent_logs() -> None:
+    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
+    while RECENT_LOGS:
+        timestamp = parse_log_timestamp(RECENT_LOGS[0].get("timestamp"))
+        if timestamp is not None and timestamp >= cutoff:
+            break
+        RECENT_LOGS.popleft()
+
+
+def append_local_log(entry: dict[str, Any]) -> None:
+    with LOCAL_LOG_LOCK:
+        LOCAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOCAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        prune_local_log_file()
+        prune_stale_dashboard_log_files()
+
+
+def prune_local_log_file() -> None:
+    if not LOCAL_LOG_PATH.exists():
+        return
+
+    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
+    kept_lines: list[str] = []
+    for line in LOCAL_LOG_PATH.read_text(encoding="utf-8").splitlines():
+        if should_keep_log_line(line, cutoff):
+            kept_lines.append(line)
+
+    LOCAL_LOG_PATH.write_text(("\n".join(kept_lines) + "\n") if kept_lines else "", encoding="utf-8")
+
+
+def prune_stale_dashboard_log_files() -> None:
+    if not DASHBOARD_ARTIFACTS_DIR.exists():
+        return
+
+    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
+    for log_path in DASHBOARD_ARTIFACTS_DIR.glob("*.log"):
+        if log_path == LOCAL_LOG_PATH:
+            continue
+        try:
+            modified_at = datetime.fromtimestamp(log_path.stat().st_mtime, timezone.utc)
+        except OSError:
+            continue
+        if modified_at < cutoff:
+            log_path.unlink(missing_ok=True)
+
+
+def should_keep_log_line(line: str, cutoff: datetime) -> bool:
+    if not line.strip():
+        return False
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+
+    timestamp = parse_log_timestamp(payload.get("timestamp"))
+    return timestamp is not None and timestamp >= cutoff
+
+
+def parse_log_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 async def status_monitor_loop() -> None:
@@ -3023,7 +3110,6 @@ def build_bootstrap_payload() -> dict[str, Any]:
         },
         "projects": project_snapshot_payload(),
         "unityStatus": status,
-        "recentLogs": list(RECENT_LOGS),
     }
 
 
