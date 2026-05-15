@@ -3,6 +3,20 @@
 [![Version](https://img.shields.io/badge/version-v0.3.1--alpha-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.3.1-alpha)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
+## Official Repository / 官方仓库
+
+Official repository: https://github.com/ayyitong888/VRCForge
+
+VRCForge is distributed under GPL-3.0. If you obtained VRCForge from any third-party source, please verify that the copyright notice, GPL-3.0 license, and source code access are preserved.
+
+Unofficial paid copies or modified versions are not endorsed by the original author unless they clearly preserve the GPL-3.0 license, copyright notice, and source code availability.
+
+VRCForge 官方仓库为：https://github.com/ayyitong888/VRCForge
+
+VRCForge 使用 GPL-3.0 协议发布。如果你从第三方渠道获得本项目，请确认其保留了版权声明、GPL-3.0 许可证以及源码获取方式。
+
+未经官方确认的付费副本或修改版本，不代表原作者认可；除非其清楚保留 GPL-3.0 许可证、版权声明以及源码获取方式。
+
 > **WIP / 开发中**
 >
 > VRCForge is under active development. Back up your avatar project before writing Unity assets.
@@ -49,7 +63,9 @@ Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRou
 
 ## Documentation / 文档
 
+[NOTICE](NOTICE)
 [DEPENDENCIES.md](DEPENDENCIES.md)
+[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
 [USER_MANUAL.md](USER_MANUAL.md)
 
 ## License / 许可证
