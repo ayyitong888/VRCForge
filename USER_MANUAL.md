@@ -28,6 +28,7 @@ This manual explains the public workflow and feature status without project-spec
 - Python
 - MCP for Unity
 - An LLM provider account for AI-assisted features
+- Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
 - Windows
 - Unity 2022.3 LTS
@@ -35,6 +36,7 @@ This manual explains the public workflow and feature status without project-spec
 - Python
 - MCP for Unity
 - 用于 AI 辅助功能的模型服务账号
+- 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
 ## Start / 启动
 

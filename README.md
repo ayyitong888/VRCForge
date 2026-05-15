@@ -39,6 +39,9 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地 Unity dashboard。
 4. Start MCP for Unity inside Unity, then select an Avatar and load Blendshapes.
    在 Unity 中启动 MCP for Unity，然后选择 Avatar 并加载 Blendshape。
 
+Dependency details: [DEPENDENCIES.md](DEPENDENCIES.md)
+依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
+
 ## Providers / 模型接入
 
 Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints. Face editing can send optional original/current images and optional target images; each group supports paste, local image selection, typed paths, or Unity screenshots. Image input depends on the selected model.
@@ -46,6 +49,7 @@ Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRou
 
 ## Documentation / 文档
 
+[DEPENDENCIES.md](DEPENDENCIES.md)
 [USER_MANUAL.md](USER_MANUAL.md)
 
 ## License / 许可证

@@ -1,7 +1,19 @@
-anthropic>=0.34.0
+# VRCForge Python dependencies.
+# Tested with Python 3.12+; Python 3.14 should also work as long as wheels are available.
+
+# Dashboard server and API models.
 fastapi>=0.115.0
-google-genai>=1.16.1
-mcpforunityserver>=9.6.8
-openai>=1.30.0
 pydantic>=2.7.0,<3.0.0
 uvicorn>=0.30.0
+
+# LLM providers.
+anthropic>=0.34.0
+google-genai>=1.16.1
+openai>=1.30.0
+
+# Unity MCP bridge client/server helper.
+mcpforunityserver>=9.6.8
+
+# Local validation and tests.
+httpx>=0.27.0
+pytest>=8.0.0
