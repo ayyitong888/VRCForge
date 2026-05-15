@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.3.0--alpha-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.3.0-alpha)
+[![Version](https://img.shields.io/badge/version-v0.3.1--alpha-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.3.1-alpha)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 > **WIP / 开发中**
