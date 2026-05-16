@@ -425,6 +425,25 @@
           <pre id="param-output" class="console compact"></pre>
         </section>
 
+        <section class="panel span-8">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Shader MVP</p>
+              <h2>Shader / Material Tuning</h2>
+            </div>
+            <span id="shader-material-count-chip" class="panel-chip">0 materials</span>
+          </div>
+
+          <p class="field-note">Scan avatar renderers and material slots. This checkpoint is read-only and does not modify Unity materials.</p>
+
+          <div class="button-row">
+            <button id="scan-shader-materials-btn" class="button">Scan Materials</button>
+          </div>
+
+          <div id="shader-materials-table" class="stack-list empty-state">No material inventory yet. Click Scan Materials.</div>
+          <pre id="shader-output" class="console compact"></pre>
+        </section>
+
         <section class="panel span-4">
           <div class="panel-head">
             <div>

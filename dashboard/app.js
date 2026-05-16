@@ -86,6 +86,9 @@ const state = {
   tuningHistory: [],
   tuningPresets: [],
   lockedBlendshapes: [],
+  shaderInventory: null,
+  shaderMaterials: [],
+  shaderCategoryOverrides: {},
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -256,6 +259,10 @@ function cacheRefs() {
     "float-count",
     "param-suggestions",
     "param-output",
+    "scan-shader-materials-btn",
+    "shader-material-count-chip",
+    "shader-materials-table",
+    "shader-output",
     "vision-angle-tabs",
     "vision-multi-thumbs",
     "capture-screenshot-btn",
@@ -314,6 +321,8 @@ function bindEvents() {
   refs["optimize-params-btn"].addEventListener("click", () => runButtonTask("optimize-params-btn", "分析中...", optimizeParameters));
   refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
+  refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "Scanning...", scanShaderMaterials));
+  refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
   refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "分析中...", auditVision));
@@ -1945,6 +1954,88 @@ async function rollbackParameterOptimization() {
 
   state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
   refs["param-output"].textContent = prettyJson(payload.result || payload);
+}
+
+async function scanShaderMaterials() {
+  const payload = await postJson("/api/shader/materials/scan", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    category_overrides: state.shaderCategoryOverrides || {},
+  });
+  state.shaderInventory = payload.inventory || null;
+  state.shaderMaterials = payload.materials || [];
+  renderShaderMaterialInventory(payload.summary || {});
+  refs["shader-output"].textContent = prettyJson({
+    summary: payload.summary || {},
+    jsonPath: payload.jsonPath || "",
+  });
+}
+
+function renderShaderMaterialInventory(summary = {}) {
+  const materials = state.shaderMaterials || [];
+  refs["shader-material-count-chip"].textContent = `${materials.length} materials`;
+  if (!materials.length) {
+    refs["shader-materials-table"].innerHTML = '<div class="empty-state">No material inventory yet. Click Scan Materials.</div>';
+    return;
+  }
+
+  const rows = materials.map((item) => {
+    const id = item.material_id || "";
+    const category = state.shaderCategoryOverrides[id] || item.category || "unknown";
+    return `
+      <tr>
+        <td><code>${escapeHtml(item.item_path || item.renderer_path || "")}</code></td>
+        <td>${escapeHtml(item.renderer_name || "")}</td>
+        <td>${escapeHtml(item.mesh_name || "")}</td>
+        <td>${Number(item.slot_index ?? 0)}</td>
+        <td>${escapeHtml(item.material_name || "")}</td>
+        <td>${escapeHtml(item.shader_family || "Unsupported")}</td>
+        <td>
+          <select class="shader-category-select" data-material-id="${escapeHtml(id)}">
+            ${["skin", "eyes", "hair", "clothes", "accessory", "unknown"].map((option) => (
+              `<option value="${option}" ${option === category ? "selected" : ""}>${option}</option>`
+            )).join("")}
+          </select>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  refs["shader-materials-table"].innerHTML = `
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Object path</th>
+            <th>Renderer</th>
+            <th>Mesh</th>
+            <th>Slot</th>
+            <th>Material</th>
+            <th>Shader</th>
+            <th>Category</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="field-note">lilToon: ${Number(summary.lilToonCount || 0)}, Poiyomi: ${Number(summary.poiyomiCount || 0)}, Unsupported: ${Number(summary.unsupportedCount || 0)}</div>
+  `;
+}
+
+function onShaderMaterialCategoryChanged(event) {
+  const select = event.target.closest(".shader-category-select");
+  if (!select) {
+    return;
+  }
+  const materialId = select.dataset.materialId || "";
+  if (!materialId) {
+    return;
+  }
+  state.shaderCategoryOverrides[materialId] = select.value;
+  const material = (state.shaderMaterials || []).find((item) => item.material_id === materialId);
+  if (material) {
+    material.category = select.value;
+  }
 }
 
 async function captureScreenshot() {

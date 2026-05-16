@@ -721,11 +721,53 @@ textarea {
 #clothes-list,
 #param-suggestions,
 #param-diff-list,
+#shader-materials-table,
 #vision-result {
   max-height: min(24rem, 44vh);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 0.2rem;
+}
+
+.table-scroll {
+  max-height: min(24rem, 44vh);
+  overflow: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 58rem;
+  font-size: 0.86rem;
+}
+
+.data-table th,
+.data-table td {
+  border-bottom: 1px solid var(--md-outline-variant);
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--md-surface-container-low);
+  color: var(--md-on-surface-variant);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.data-table code {
+  color: var(--md-on-surface-variant);
+  font-size: 0.78rem;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.shader-category-select {
+  min-width: 8rem;
 }
 
 #fx-csharp-preview,

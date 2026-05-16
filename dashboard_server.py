@@ -180,6 +180,10 @@ class AvatarScopedConnectionRequest(ConnectionRequest):
     avatar_path: str | None = None
 
 
+class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
+    category_overrides: dict[str, str] = Field(default_factory=dict)
+
+
 class ClothingToggleRequest(ConnectionRequest):
     object_path: str
     active: bool
@@ -726,6 +730,11 @@ async def apply_parameter_optimization(request: ParameterApplyOptimizationReques
 @app.post("/api/parameters/rollback")
 async def rollback_parameter_optimization(request: ParameterRollbackRequest) -> dict[str, Any]:
     return await asyncio.to_thread(rollback_parameter_optimization_sync, request)
+
+
+@app.post("/api/shader/materials/scan")
+async def scan_shader_materials(request: ShaderMaterialScanRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(scan_shader_materials_sync, request)
 
 
 @app.post("/api/vision/capture")
@@ -1524,6 +1533,41 @@ def optimize_avatar_parameters_sync(request: AvatarScopedConnectionRequest) -> d
         return {"ok": True, "avatarPath": avatar_path, "optimization": payload}
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "parameter", "Failed to build parameter optimization suggestions.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        inventory = scan_shader_materials_direct(settings, avatar_path)
+        materials = ensure_list_payload(inventory.get("materials") or [], "shader material inventory")
+        overrides = dict(request.category_overrides or {})
+        if overrides:
+            for material in materials:
+                if not isinstance(material, dict):
+                    continue
+                material_id = str(material.get("material_id") or "")
+                override = overrides.get(material_id)
+                if override in {"skin", "eyes", "hair", "clothes", "accessory", "unknown"}:
+                    material["category"] = override
+
+        emit_log(
+            "info",
+            "shader",
+            "Shader material inventory scanned.",
+            {"avatarPath": avatar_path, "materialCount": len(materials), "jsonPath": inventory.get("jsonPath")},
+        )
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "inventory": inventory,
+            "materials": materials,
+            "summary": inventory.get("summary") or {},
+            "jsonPath": inventory.get("jsonPath") or inventory.get("absoluteOutputPath"),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "shader", "Failed to scan shader materials.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -2412,6 +2456,26 @@ def apply_parameter_optimization_direct(
         )
     )
     return ensure_dict_payload(payload, "parameter optimization apply")
+
+
+def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
+    output_path = build_dashboard_artifact_path("shader_material_inventory", avatar_path, "json")
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_scan_avatar_materials",
+        {
+            "avatarPath": avatar_path or "",
+            "outputPath": str(output_path),
+            "refreshAssets": False,
+        },
+    )
+    if output_path.exists():
+        payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+        payload.setdefault("jsonPath", str(output_path))
+        return ensure_dict_payload(payload, "shader material scan")
+
+    payload = extract_tool_result_payload(result)
+    return ensure_dict_payload(payload, "shader material scan")
 
 
 def rollback_parameters_direct(
