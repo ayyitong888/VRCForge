@@ -188,3 +188,35 @@ Next:
 
 - Checkpoint 6 should add optional post-apply Vision review.
 - Vision review must compare screenshots and remain advisory only.
+
+## Checkpoint 6: Optional Vision review
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Added `create_shader_visual_review(...)` in the Python agent layer.
+- Reused the existing multimodal provider request path.
+- Added dashboard endpoint `POST /api/shader/vision-review`.
+- Added Capture Before, Capture After, and Run Vision Review buttons to the shader panel.
+- Review output is advisory JSON only.
+- The review does not generate second-round material changes.
+- The review does not auto-apply any change.
+
+Changed files:
+
+- `vrchat_blendshape_agent.py`
+- `dashboard_server.py`
+- `dashboard/index.html`
+- `dashboard/app.js`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
+- `node --check dashboard/app.js`
+- `git diff --check`
+
+Next:
+
+- Checkpoint 7 should update public documentation and add automated tests for plan validation, locks, preset replay, clamping, and arbitrary shader property rejection.

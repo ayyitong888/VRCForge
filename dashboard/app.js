@@ -96,6 +96,8 @@ const state = {
   shaderPresets: [],
   lockedShaderMaterials: [],
   lockedShaderProperties: [],
+  shaderReviewBeforePaths: [],
+  shaderReviewAfterPaths: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -273,6 +275,9 @@ function cacheRefs() {
     "save-shader-preset-btn",
     "open-shader-history-btn",
     "open-shader-presets-btn",
+    "capture-shader-before-btn",
+    "capture-shader-after-btn",
+    "review-shader-vision-btn",
     "shader-instruction-input",
     "shader-material-count-chip",
     "shader-materials-table",
@@ -349,6 +354,9 @@ function bindEvents() {
   refs["save-shader-preset-btn"].addEventListener("click", () => runButtonTask("save-shader-preset-btn", "Saving...", saveCurrentShaderPlanAsPreset));
   refs["open-shader-history-btn"].addEventListener("click", () => toggleShaderPanel("history"));
   refs["open-shader-presets-btn"].addEventListener("click", () => toggleShaderPanel("presets"));
+  refs["capture-shader-before-btn"].addEventListener("click", () => runButtonTask("capture-shader-before-btn", "Capturing...", () => captureShaderReviewImage("before")));
+  refs["capture-shader-after-btn"].addEventListener("click", () => runButtonTask("capture-shader-after-btn", "Capturing...", () => captureShaderReviewImage("after")));
+  refs["review-shader-vision-btn"].addEventListener("click", () => runButtonTask("review-shader-vision-btn", "Reviewing...", runShaderVisionReview));
   refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
@@ -2179,6 +2187,36 @@ async function restoreShaderPlan() {
     skipped: payload.skippedChanges || [],
     undoDepth: payload.undoDepth || 0,
   });
+}
+
+async function captureShaderReviewImage(kind) {
+  const payload = await postJson("/api/vision/capture", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    width: 960,
+    height: 960,
+  });
+  renderScreenshot(payload.imageUrl);
+  const path = payload.imagePath || urlToArtifactPath(payload.imageUrl || "");
+  if (kind === "before") {
+    state.shaderReviewBeforePaths = [path];
+  } else {
+    state.shaderReviewAfterPaths = [path];
+  }
+  refs["shader-output"].textContent = `${kind === "before" ? "Before" : "After"} shader review screenshot captured: ${path}`;
+}
+
+async function runShaderVisionReview() {
+  const goal = refs["shader-instruction-input"].value.trim() || refs["instruction-input"].value.trim();
+  const payload = await postJson("/api/shader/vision-review", {
+    ...buildDashboardRequest(),
+    avatar_path: state.selectedAvatarPath || null,
+    goal,
+    before_image_paths: state.shaderReviewBeforePaths || [],
+    after_image_paths: state.shaderReviewAfterPaths || [],
+  });
+  const review = payload.review || {};
+  refs["shader-output"].textContent = prettyJson(review);
 }
 
 function renderShaderPlanPreview(payload) {

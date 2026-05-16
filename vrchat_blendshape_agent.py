@@ -1105,6 +1105,70 @@ def build_material_tuning_prompt(
     )
 
 
+def create_shader_visual_review(
+    settings: Settings,
+    goal: str,
+    before_image_paths: Sequence[str | Path],
+    after_image_paths: Sequence[str | Path],
+) -> dict[str, Any]:
+    image_paths = [*normalize_reference_image_paths(reference_image_paths=before_image_paths), *normalize_reference_image_paths(reference_image_paths=after_image_paths)]
+    if not image_paths:
+        raise RuntimeError("Shader visual review requires at least one before or after screenshot.")
+
+    labels = [
+        *[f"Before screenshot {index + 1}" for index, _ in enumerate(before_image_paths or [])],
+        *[f"After screenshot {index + 1}" for index, _ in enumerate(after_image_paths or [])],
+    ]
+    prompt = build_shader_visual_review_prompt(goal, len(before_image_paths or []), len(after_image_paths or []), labels)
+    raw_response_text = request_llm_plan(settings, prompt, reference_image_paths=image_paths)
+    raw_json = extract_json_block(raw_response_text)
+    if not raw_json:
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned an empty response while reviewing shader tuning."
+        )
+
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned invalid shader review JSON:\n{raw_response_text}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Shader visual review response must be a JSON object.")
+
+    payload.setdefault("type", "shader_visual_review")
+    payload.setdefault("version", "0.2")
+    payload.setdefault("goal", goal)
+    payload.setdefault("improved", False)
+    payload.setdefault("remaining_issues", [])
+    payload.setdefault("suggested_next_steps", [])
+    return payload
+
+
+def build_shader_visual_review_prompt(goal: str, before_count: int, after_count: int, labels: Sequence[str]) -> str:
+    schema = {
+        "type": "shader_visual_review",
+        "version": "0.2",
+        "goal": goal,
+        "result_summary": "The skin appears softer and the eyes are slightly brighter.",
+        "improved": True,
+        "remaining_issues": ["eye highlight could still be stronger"],
+        "suggested_next_steps": ["increase eye highlight slightly if desired"],
+    }
+    label_text = "\n".join(f"- Image {index + 1}: {label}" for index, label in enumerate(labels))
+    return (
+        "You are reviewing a user-controlled VRChat avatar shader/material tuning result.\n"
+        "Compare the before screenshot(s) and after screenshot(s) against the user's goal.\n"
+        "Return advisory JSON only. Do not suggest automatic execution and do not output Markdown.\n"
+        "Focus on visible material appearance such as skin softness, shadows, shine, eye gloss, hair highlights, and outfit material feel.\n"
+        f"Before image count: {before_count}. After image count: {after_count}.\n"
+        f"{label_text}\n\n"
+        f"Output JSON shape example: {json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"User goal: {goal}"
+    )
+
+
 def filter_plan_by_instruction_relevance(plan: BlendshapePlan, instruction: str) -> BlendshapePlan:
     allowed_categories = infer_instruction_categories(instruction)
     if not allowed_categories:

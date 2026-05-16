@@ -33,6 +33,7 @@ from vrchat_blendshape_agent import (
     build_planning_payload,
     create_blendshape_plan,
     create_material_tuning_plan,
+    create_shader_visual_review,
     execute_csharp,
     export_blendshapes,
     filter_planning_payload_to_face_blendshapes,
@@ -256,6 +257,13 @@ class ShaderTuningLocksUpdateRequest(BaseModel):
     avatar_path: str | None = None
     locked_materials: list[str] = Field(default_factory=list)
     locked_properties: list[str] = Field(default_factory=list)
+
+
+class ShaderVisionReviewRequest(DashboardRequest):
+    avatar_path: str | None = None
+    goal: str | None = None
+    before_image_paths: list[str] = Field(default_factory=list)
+    after_image_paths: list[str] = Field(default_factory=list)
 
 
 class ClothingToggleRequest(ConnectionRequest):
@@ -891,6 +899,11 @@ def read_shader_tuning_locks(avatar_path: str | None = None) -> dict[str, Any]:
 @app.post("/api/shader/locks")
 async def update_shader_tuning_locks(request: ShaderTuningLocksUpdateRequest) -> dict[str, Any]:
     return await asyncio.to_thread(update_shader_tuning_locks_sync, request)
+
+
+@app.post("/api/shader/vision-review")
+async def review_shader_material_vision(request: ShaderVisionReviewRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(review_shader_material_vision_sync, request)
 
 
 @app.post("/api/vision/capture")
@@ -2161,6 +2174,51 @@ def mark_shader_tuning_preset_applied(preset_id: str) -> None:
             break
     store["presets"] = presets
     save_tuning_store(SHADER_TUNING_PRESETS_PATH, store)
+
+
+def review_shader_material_vision_sync(request: ShaderVisionReviewRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        goal = (request.goal or request.instruction or "").strip()
+        if not goal:
+            raise RuntimeError("Shader vision review goal is empty.")
+
+        before_paths = [str(resolve_reference_image_path_value(path)) for path in request.before_image_paths if path]
+        after_paths = [str(resolve_reference_image_path_value(path)) for path in request.after_image_paths if path]
+        if not before_paths and not after_paths:
+            raise RuntimeError("Shader vision review needs at least one before or after screenshot.")
+
+        review = create_shader_visual_review(
+            settings=settings,
+            goal=goal,
+            before_image_paths=before_paths,
+            after_image_paths=after_paths,
+        )
+        save_vision_audit_artifact(
+            "shader_visual_review.json",
+            {
+                "goal": goal,
+                "beforeImagePaths": before_paths,
+                "afterImagePaths": after_paths,
+                "review": review,
+            },
+        )
+        emit_log(
+            "success",
+            "shader",
+            "Shader vision review completed.",
+            {"beforeCount": len(before_paths), "afterCount": len(after_paths), "improved": review.get("improved")},
+        )
+        return {
+            "ok": True,
+            "goal": goal,
+            "beforeImagePaths": before_paths,
+            "afterImagePaths": after_paths,
+            "review": review,
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "shader", "Failed to run shader vision review.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
 
 
 def apply_shader_category_overrides(inventory: dict[str, Any], overrides: dict[str, str] | None) -> dict[str, Any]:
