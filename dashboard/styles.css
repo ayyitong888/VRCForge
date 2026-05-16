@@ -396,6 +396,11 @@ textarea {
   align-items: center;
 }
 
+.button-row.compact-row {
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+
 .button {
   appearance: none;
   min-height: 2.75rem;
@@ -445,6 +450,11 @@ textarea {
   background: var(--state-hover);
   color: var(--md-primary);
   box-shadow: none;
+}
+
+.danger-button {
+  color: var(--md-error);
+  border-color: rgba(186, 26, 26, 0.35);
 }
 
 .button-accent {
@@ -698,6 +708,15 @@ textarea {
   gap: 0.7rem;
 }
 
+.tuning-list {
+  display: grid;
+  gap: 0.7rem;
+  max-height: min(22rem, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.2rem;
+}
+
 #llm-change-list,
 #clothes-list,
 #param-suggestions,
@@ -741,6 +760,19 @@ textarea {
   padding: 0.85rem 0.95rem;
   background: var(--md-tertiary-container);
   border-color: rgba(0, 107, 95, 0.28);
+}
+
+.tuning-card {
+  border-radius: var(--radius-md);
+  padding: 0.85rem 0.95rem;
+  background: var(--md-surface-container-lowest);
+  border: 1px solid var(--md-outline-variant);
+  box-shadow: var(--shadow-1);
+}
+
+.tuning-card p {
+  margin: 0.55rem 0;
+  color: var(--md-on-surface-variant);
 }
 
 .change-row.change-verified {
@@ -855,6 +887,11 @@ textarea {
   box-shadow: 0 0 0 1px rgba(0, 107, 95, 0.08), var(--shadow-2);
 }
 
+.blendshape-row.locked {
+  border-style: dashed;
+  background: var(--md-surface-container-low);
+}
+
 .blendshape-head {
   display: flex;
   justify-content: space-between;
@@ -898,6 +935,25 @@ textarea {
 .weight-live {
   background: var(--md-primary-container);
   color: var(--md-on-primary-container);
+}
+
+.lock-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-low);
+  color: var(--md-on-surface-variant);
+  padding: 0.22rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.lock-toggle input {
+  width: 0.9rem;
+  height: 0.9rem;
+  accent-color: var(--md-tertiary);
 }
 
 .slider-row {

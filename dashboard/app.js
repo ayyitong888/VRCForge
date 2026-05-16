@@ -82,6 +82,10 @@ const state = {
   targetReferenceImages: [],
   lastAiChanges: [],
   lastAiProof: null,
+  currentHistoryRecord: null,
+  tuningHistory: [],
+  tuningPresets: [],
+  lockedBlendshapes: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -206,13 +210,25 @@ function cacheRefs() {
     "target-reference-status",
     "reference-image-status",
     "ai-run-btn",
+    "ai-apply-plan-btn",
+    "save-preset-btn",
     "manual-apply-btn",
     "manual-undo-btn",
+    "open-history-btn",
+    "open-presets-btn",
+    "lock-visible-btn",
+    "unlock-visible-btn",
     "blendshape-count-chip",
     "pending-count",
     "llm-change-panel",
     "llm-change-count",
     "llm-change-list",
+    "tuning-history-panel",
+    "tuning-history-count",
+    "tuning-history-list",
+    "tuning-preset-panel",
+    "tuning-preset-count",
+    "tuning-preset-list",
     "blendshape-search",
     "avatar-path-display",
     "blendshape-list",
@@ -282,9 +298,15 @@ function bindEvents() {
   refs["reset-provider-btn"].addEventListener("click", resetProviderDefaults);
   bindReferenceGroupEvents("source");
   bindReferenceGroupEvents("target");
-  refs["ai-run-btn"].addEventListener("click", () => runButtonTask("ai-run-btn", "执行中...", runAiPipeline));
+  refs["ai-run-btn"].addEventListener("click", () => runButtonTask("ai-run-btn", "生成中...", runAiPipeline));
+  refs["ai-apply-plan-btn"].addEventListener("click", () => runButtonTask("ai-apply-plan-btn", "应用中...", applyCurrentAiPlan));
+  refs["save-preset-btn"].addEventListener("click", () => runButtonTask("save-preset-btn", "保存中...", saveCurrentPlanAsPreset));
   refs["manual-apply-btn"].addEventListener("click", () => runButtonTask("manual-apply-btn", "应用中...", applyManualBlendshapes));
   refs["manual-undo-btn"].addEventListener("click", () => runButtonTask("manual-undo-btn", "撤销中...", undoManualBlendshapes));
+  refs["open-history-btn"].addEventListener("click", () => toggleTuningPanel("history"));
+  refs["open-presets-btn"].addEventListener("click", () => toggleTuningPanel("presets"));
+  refs["lock-visible-btn"].addEventListener("click", () => runButtonTask("lock-visible-btn", "锁定中...", () => setVisibleBlendshapeLocks(true)));
+  refs["unlock-visible-btn"].addEventListener("click", () => runButtonTask("unlock-visible-btn", "解锁中...", () => setVisibleBlendshapeLocks(false)));
   refs["scan-clothes-btn"].addEventListener("click", () => runButtonTask("scan-clothes-btn", "扫描中...", scanClothes));
   refs["generate-fx-btn"].addEventListener("click", () => runButtonTask("generate-fx-btn", "生成中...", generateFxBlueprint));
   refs["apply-fx-btn"].addEventListener("click", () => runButtonTask("apply-fx-btn", "写入中...", applyClothesFx));
@@ -381,6 +403,9 @@ function applyBootstrap(payload) {
 
   updateModeVisibility();
   syncMockModeText();
+  loadTuningData().catch((error) => {
+    refs["summary-output"].textContent = `历史/预设读取失败：${error.message}`;
+  });
 }
 
 function applyDashboardState(payload) {
@@ -951,6 +976,16 @@ async function postJson(path, payload = {}) {
   return data;
 }
 
+async function getJson(path) {
+  const response = await fetch(path);
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    throw new Error(data.detail || `Request failed: ${response.status}`);
+  }
+  return data;
+}
+
 async function refreshProjects() {
   const payload = await postJson("/api/projects/refresh");
   renderProjects(payload);
@@ -1046,10 +1081,10 @@ async function loadBlendshapes() {
   refs["summary-output"].textContent = `已加载 ${state.blendshapes.length} 个脸部 Blendshape`;
 }
 
-function renderBlendshapeList() {
+function getFilteredBlendshapes() {
   const keyword = refs["blendshape-search"].value.trim();
   const searchTokens = tokenizeBlendshapeSearch(keyword);
-  const filtered = state.blendshapes.filter((item) => {
+  return state.blendshapes.filter((item) => {
     if (!searchTokens.length) {
       return true;
     }
@@ -1057,6 +1092,11 @@ function renderBlendshapeList() {
     const compactHaystack = compactSearchText(haystack);
     return searchTokens.every((token) => haystack.includes(token) || compactHaystack.includes(compactSearchText(token)));
   });
+}
+
+function renderBlendshapeList() {
+  const keyword = refs["blendshape-search"].value.trim();
+  const filtered = getFilteredBlendshapes();
 
   refs["blendshape-count-chip"].textContent = `${filtered.length} 个 Blendshape`;
   refs["pending-count"].textContent = `${collectPendingAdjustments().length} 项`;
@@ -1076,22 +1116,27 @@ function renderBlendshapeList() {
     const baseline = Number(state.blendshapeBaseline[key] ?? item.currentWeight ?? 0);
     const current = Number(state.blendshapeWorking[key] ?? baseline);
     const changed = Math.abs(current - baseline) > 0.001 ? "changed" : "";
+    const locked = isBlendshapeLocked(item.rendererPath, item.blendshapeName);
     return `
-      <article class="blendshape-row ${changed}">
+      <article class="blendshape-row ${changed} ${locked ? "locked" : ""}">
         <div class="blendshape-head">
           <div>
             <strong>${escapeHtml(item.blendshapeName)}</strong>
             <span>${escapeHtml(item.rendererName)} / ${escapeHtml(item.meshName)}</span>
           </div>
           <div class="weight-badges">
+            <label class="lock-toggle">
+              <input data-renderer-path="${escapeHtml(item.rendererPath)}" data-blendshape-name="${escapeHtml(item.blendshapeName)}" class="blendshape-lock-toggle" type="checkbox" ${locked ? "checked" : ""}>
+              <span>${locked ? "已锁定" : "可调整"}</span>
+            </label>
             <span class="weight-tag js-base">当前 ${baseline.toFixed(1)}</span>
             <span class="weight-tag weight-live js-live">${current.toFixed(1)}</span>
           </div>
         </div>
         <div class="blendshape-subline">${escapeHtml(item.rendererPath)}</div>
         <div class="slider-row">
-          <input data-renderer-path="${escapeHtml(item.rendererPath)}" data-blendshape-name="${escapeHtml(item.blendshapeName)}" class="blendshape-slider" type="range" min="0" max="100" step="0.1" value="${current.toFixed(1)}">
-          <input data-renderer-path="${escapeHtml(item.rendererPath)}" data-blendshape-name="${escapeHtml(item.blendshapeName)}" class="blendshape-number" type="number" min="0" max="100" step="0.1" value="${current.toFixed(1)}">
+          <input data-renderer-path="${escapeHtml(item.rendererPath)}" data-blendshape-name="${escapeHtml(item.blendshapeName)}" class="blendshape-slider" type="range" min="0" max="100" step="0.1" value="${current.toFixed(1)}" ${locked ? "disabled" : ""}>
+          <input data-renderer-path="${escapeHtml(item.rendererPath)}" data-blendshape-name="${escapeHtml(item.blendshapeName)}" class="blendshape-number" type="number" min="0" max="100" step="0.1" value="${current.toFixed(1)}" ${locked ? "disabled" : ""}>
         </div>
       </article>
     `;
@@ -1102,6 +1147,9 @@ function renderBlendshapeList() {
   });
   refs["blendshape-list"].querySelectorAll(".blendshape-number").forEach((input) => {
     input.addEventListener("input", () => updateBlendshapeValue(input.dataset.rendererPath, input.dataset.blendshapeName, Number(input.value), input));
+  });
+  refs["blendshape-list"].querySelectorAll(".blendshape-lock-toggle").forEach((input) => {
+    input.addEventListener("change", () => setBlendshapeLock(input.dataset.rendererPath, input.dataset.blendshapeName, input.checked));
   });
 }
 
@@ -1213,12 +1261,15 @@ async function applyManualBlendshapes() {
     adjustments,
   });
 
-  for (const item of adjustments) {
-    const key = blendshapeKey(item.renderer_path, item.blendshape_name);
-    state.blendshapeBaseline[key] = item.target_weight;
+  for (const item of payload.appliedAdjustments || []) {
+    const key = blendshapeKey(item.rendererPath, item.blendshapeName);
+    state.blendshapeBaseline[key] = Number(item.targetWeight);
+    state.blendshapeWorking[key] = Number(item.targetWeight);
   }
   state.undoDepth = payload.undoDepth || 0;
-  refs["summary-output"].textContent = `已应用 ${adjustments.length} 项滑块改动`;
+  const appliedCount = (payload.appliedAdjustments || []).length;
+  const skippedCount = (payload.skippedAdjustments || []).length;
+  refs["summary-output"].textContent = `已应用 ${appliedCount} 项滑块改动${skippedCount ? `，跳过 ${skippedCount} 项锁定或无效目标` : ""}`;
   refs["pending-count"].textContent = "0 项";
   renderBlendshapeList();
 }
@@ -1240,23 +1291,42 @@ async function undoManualBlendshapes() {
 
 async function runAiPipeline() {
   await ensureApiConfigSaved();
-  const payload = await postJson("/api/pipeline/run", buildDashboardRequest());
+  const payload = await postJson("/api/pipeline/plan", buildDashboardRequest());
   if (payload.selectedAvatar) {
     setActiveAvatar(payload.selectedAvatar.avatarName, payload.selectedAvatar.avatarPath);
   }
-  applyPlanToBlendshapeState(payload.plan);
-  state.undoDepth = payload.undoDepth || state.undoDepth;
+  state.currentHistoryRecord = payload.historyRecord || null;
   state.lastAiChanges = payload.changePreview || [];
   state.lastAiProof = payload.visualProof || null;
   renderAiChangePreview(state.lastAiChanges, payload.referenceImage, payload.verifiedChanges, state.lastAiProof);
-  refs["summary-output"].textContent = payload.summary || payload.preview || "AI 执行完成";
+  await loadTuningData();
+  refs["summary-output"].textContent = state.currentHistoryRecord
+    ? "AI 已生成可审阅 Plan。满意后点“应用 Plan”，喜欢结果再保存为预设。"
+    : "AI 已生成可审阅 Plan。";
 }
 
-function applyPlanToBlendshapeState(plan) {
-  for (const adjustment of plan?.adjustments || []) {
-    const key = blendshapeKey(adjustment.renderer_path, adjustment.blendshape_name);
-    state.blendshapeBaseline[key] = Number(adjustment.target_weight);
-    state.blendshapeWorking[key] = Number(adjustment.target_weight);
+async function applyCurrentAiPlan() {
+  const historyId = state.currentHistoryRecord?.id;
+  if (!historyId) {
+    refs["summary-output"].textContent = "还没有可应用的 AI Plan，先生成一轮。";
+    return;
+  }
+
+  const payload = await reapplyHistoryRecord(historyId);
+  const appliedCount = (payload.appliedAdjustments || []).length;
+  const skippedCount = (payload.skippedAdjustments || []).length;
+  refs["summary-output"].textContent = `已应用当前 Plan：${appliedCount} 项${skippedCount ? `，跳过 ${skippedCount} 项锁定或无效目标` : ""}`;
+}
+
+function applyDirectAdjustmentsToBlendshapeState(adjustments) {
+  for (const adjustment of adjustments || []) {
+    const key = blendshapeKey(
+      adjustment.rendererPath || adjustment.renderer_path || "",
+      adjustment.blendshapeName || adjustment.blendshape_name || "",
+    );
+    const target = Number(adjustment.targetWeight ?? adjustment.target_weight ?? 0);
+    state.blendshapeBaseline[key] = target;
+    state.blendshapeWorking[key] = target;
   }
   renderBlendshapeList();
 }
@@ -1306,6 +1376,339 @@ function renderAiChangePreview(changes, referenceImage, verifiedChanges = [], vi
       </article>
     `;
   }).join("")}`;
+}
+
+async function loadTuningData() {
+  const query = state.selectedAvatarPath ? `?avatar_path=${encodeURIComponent(state.selectedAvatarPath)}` : "";
+  const [historyPayload, presetPayload, lockPayload] = await Promise.all([
+    getJson(`/api/tuning/history${query}`),
+    getJson(`/api/tuning/presets${query}`),
+    getJson(`/api/tuning/locks${query}`),
+  ]);
+  state.tuningHistory = historyPayload.records || [];
+  state.tuningPresets = presetPayload.presets || [];
+  state.lockedBlendshapes = lockPayload.lockedBlendshapes || [];
+  renderTuningHistory();
+  renderTuningPresets();
+  if (state.blendshapes.length) {
+    renderBlendshapeList();
+  }
+}
+
+function toggleTuningPanel(kind) {
+  const panelId = kind === "history" ? "tuning-history-panel" : "tuning-preset-panel";
+  refs[panelId].classList.toggle("hidden");
+  loadTuningData().catch((error) => {
+    refs["summary-output"].textContent = `历史/预设读取失败：${error.message}`;
+  });
+}
+
+function renderTuningHistory() {
+  const records = [...(state.tuningHistory || [])].reverse();
+  refs["tuning-history-count"].textContent = `${records.length} 条`;
+  if (!records.length) {
+    refs["tuning-history-list"].innerHTML = '<div class="empty-state">还没有 AI 捏脸历史。生成 Plan 后会自动保存。</div>';
+    return;
+  }
+
+  refs["tuning-history-list"].innerHTML = records.map((record) => {
+    const changes = Array.isArray(record.changes) ? record.changes : [];
+    const locked = Array.isArray(record.locked_blendshapes) ? record.locked_blendshapes.length : 0;
+    const prompt = record.user_prompt || "无文字指令";
+    return `
+      <article class="tuning-card">
+        <div class="change-head">
+          <strong>${escapeHtml(formatTimestamp(record.created_at) || record.id)}</strong>
+          <span>${changes.length} 项 / ${record.applied ? "已应用" : "未应用"}</span>
+        </div>
+        <p>${escapeHtml(prompt)}</p>
+        <div class="change-meta">
+          <span class="meta-chip">${escapeHtml(record.provider || "")}</span>
+          <span class="meta-chip">${escapeHtml(record.model || "")}</span>
+          <span class="meta-chip">参考图 ${Number(record.reference_image_count || 0)}</span>
+          ${locked ? `<span class="meta-chip">锁定 ${locked}</span>` : ""}
+        </div>
+        <div class="button-row compact-row">
+          <button class="button button-ghost" data-history-action="reapply" data-history-id="${escapeHtml(record.id)}">重放</button>
+          <button class="button button-ghost" data-history-action="preset" data-history-id="${escapeHtml(record.id)}">保存预设</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  refs["tuning-history-list"].querySelectorAll("[data-history-action]").forEach((button) => {
+    button.addEventListener("click", () => runInlineButtonTask(button, "处理中...", () => handleHistoryAction(button)));
+  });
+}
+
+function renderTuningPresets() {
+  const presets = [...(state.tuningPresets || [])].reverse();
+  refs["tuning-preset-count"].textContent = `${presets.length} 个`;
+  if (!presets.length) {
+    refs["tuning-preset-list"].innerHTML = '<div class="empty-state">还没有保存的预设。应用满意的 Plan 后可以保存。</div>';
+    return;
+  }
+
+  refs["tuning-preset-list"].innerHTML = presets.map((preset) => {
+    const changes = Array.isArray(preset.changes) ? preset.changes : [];
+    const tags = Array.isArray(preset.tags) ? preset.tags : [];
+    return `
+      <article class="tuning-card">
+        <div class="change-head">
+          <strong>${escapeHtml(preset.name || preset.id)}</strong>
+          <span>${changes.length} 项</span>
+        </div>
+        <p>${escapeHtml(preset.description || preset.user_prompt || "保存的 Blendshape after 值预设")}</p>
+        <div class="change-meta">
+          <span class="meta-chip">after values</span>
+          ${tags.map((tag) => `<span class="meta-chip">${escapeHtml(tag)}</span>`).join("")}
+          ${preset.last_applied_at ? `<span class="meta-chip">最近应用 ${escapeHtml(formatTimestamp(preset.last_applied_at))}</span>` : ""}
+        </div>
+        <div class="button-row compact-row">
+          <button class="button button-accent" data-preset-action="apply" data-preset-id="${escapeHtml(preset.id)}">应用</button>
+          <button class="button button-ghost" data-preset-action="rename" data-preset-id="${escapeHtml(preset.id)}">重命名</button>
+          <button class="button button-ghost" data-preset-action="duplicate" data-preset-id="${escapeHtml(preset.id)}">复制</button>
+          <button class="button button-ghost danger-button" data-preset-action="delete" data-preset-id="${escapeHtml(preset.id)}">删除</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  refs["tuning-preset-list"].querySelectorAll("[data-preset-action]").forEach((button) => {
+    button.addEventListener("click", () => runInlineButtonTask(button, "处理中...", () => handlePresetAction(button)));
+  });
+}
+
+async function runInlineButtonTask(button, loadingText, task) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = loadingText;
+  try {
+    await task();
+  } catch (error) {
+    refs["summary-output"].textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function handleHistoryAction(button) {
+  const id = button.dataset.historyId;
+  if (button.dataset.historyAction === "reapply") {
+    const payload = await reapplyHistoryRecord(id);
+    const appliedCount = (payload.appliedAdjustments || []).length;
+    const skippedCount = (payload.skippedAdjustments || []).length;
+    refs["summary-output"].textContent = `已重放历史：${appliedCount} 项${skippedCount ? `，跳过 ${skippedCount} 项` : ""}`;
+    return;
+  }
+  if (button.dataset.historyAction === "preset") {
+    await saveHistoryAsPreset(id);
+  }
+}
+
+async function handlePresetAction(button) {
+  const id = button.dataset.presetId;
+  const action = button.dataset.presetAction;
+  if (action === "apply") {
+    const payload = await applyPreset(id);
+    const appliedCount = (payload.appliedAdjustments || []).length;
+    const skippedCount = (payload.skippedAdjustments || []).length;
+    refs["summary-output"].textContent = `已应用预设：${appliedCount} 项${skippedCount ? `，跳过 ${skippedCount} 项` : ""}`;
+  } else if (action === "rename") {
+    await renamePreset(id);
+  } else if (action === "duplicate") {
+    await duplicatePreset(id);
+  } else if (action === "delete") {
+    await deletePreset(id);
+  }
+}
+
+async function reapplyHistoryRecord(historyId) {
+  const payload = await postJson(`/api/tuning/history/${encodeURIComponent(historyId)}/reapply`, buildDashboardRequest());
+  state.currentHistoryRecord = payload.historyRecord || state.currentHistoryRecord;
+  state.undoDepth = payload.undoDepth || state.undoDepth;
+  state.lastAiChanges = payload.changePreview || state.lastAiChanges;
+  applyDirectAdjustmentsToBlendshapeState(payload.appliedAdjustments || []);
+  renderAiChangePreview(payload.changePreview || [], payload.referenceImage || null, payload.verifiedChanges || [], payload.visualProof || null);
+  await loadTuningData();
+  return payload;
+}
+
+async function applyPreset(presetId) {
+  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/apply`, buildDashboardRequest());
+  state.undoDepth = payload.undoDepth || state.undoDepth;
+  state.lastAiChanges = payload.changePreview || state.lastAiChanges;
+  applyDirectAdjustmentsToBlendshapeState(payload.appliedAdjustments || []);
+  renderAiChangePreview(payload.changePreview || [], payload.referenceImage || null, payload.verifiedChanges || [], payload.visualProof || null);
+  await loadTuningData();
+  return payload;
+}
+
+async function saveCurrentPlanAsPreset() {
+  const historyId = state.currentHistoryRecord?.id;
+  if (!historyId) {
+    refs["summary-output"].textContent = "还没有可保存的 AI Plan，先生成一轮。";
+    return;
+  }
+  await saveHistoryAsPreset(historyId);
+}
+
+async function saveHistoryAsPreset(historyId) {
+  const defaultName = suggestPresetName();
+  const name = window.prompt("预设名称", defaultName);
+  if (!name || !name.trim()) {
+    return;
+  }
+  const tagsText = window.prompt("标签（可选，用逗号分隔）", "");
+  const description = window.prompt("描述（可选）", "");
+  const payload = await postJson("/api/tuning/presets", {
+    history_id: historyId,
+    name: name.trim(),
+    tags: splitTags(tagsText),
+    description: description || "",
+  });
+  state.tuningPresets = payload.presets || state.tuningPresets;
+  refs["tuning-preset-panel"].classList.remove("hidden");
+  renderTuningPresets();
+  refs["summary-output"].textContent = `已保存预设：${payload.preset?.name || name.trim()}`;
+}
+
+async function renamePreset(presetId) {
+  const preset = (state.tuningPresets || []).find((item) => item.id === presetId);
+  const name = window.prompt("新的预设名称", preset?.name || "");
+  if (!name || !name.trim()) {
+    return;
+  }
+  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/rename`, { name: name.trim() });
+  state.tuningPresets = payload.presets || state.tuningPresets;
+  renderTuningPresets();
+  refs["summary-output"].textContent = `已重命名预设：${payload.preset?.name || name.trim()}`;
+}
+
+async function duplicatePreset(presetId) {
+  const preset = (state.tuningPresets || []).find((item) => item.id === presetId);
+  const name = window.prompt("复制后的预设名称", `${preset?.name || "preset"}_copy`);
+  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/duplicate`, { name: name || null });
+  state.tuningPresets = payload.presets || state.tuningPresets;
+  renderTuningPresets();
+  refs["summary-output"].textContent = `已复制预设：${payload.preset?.name || ""}`;
+}
+
+async function deletePreset(presetId) {
+  const preset = (state.tuningPresets || []).find((item) => item.id === presetId);
+  if (!window.confirm(`删除预设“${preset?.name || presetId}”？`)) {
+    return;
+  }
+  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/delete`);
+  state.tuningPresets = payload.presets || [];
+  renderTuningPresets();
+  refs["summary-output"].textContent = "预设已删除";
+}
+
+function suggestPresetName() {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
+  return `face_tuning_${stamp}`;
+}
+
+function splitTags(value) {
+  return String(value || "")
+    .split(/[,\s，、]+/)
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+function lockedBlendshapeKey(rendererPath, blendshapeName) {
+  return `${rendererPath || ""}::${blendshapeName || ""}`;
+}
+
+function normalizeLockedBlendshape(item) {
+  const rendererPath = String(item?.rendererPath || item?.renderer_path || "");
+  const blendshapeName = String(item?.blendshapeName || item?.blendshape_name || item?.blendshape || "");
+  if (!blendshapeName) {
+    return null;
+  }
+  return { rendererPath, blendshapeName };
+}
+
+function isBlendshapeLocked(rendererPath, blendshapeName) {
+  return (state.lockedBlendshapes || []).some((item) => {
+    const normalized = normalizeLockedBlendshape(item);
+    if (!normalized) {
+      return false;
+    }
+    return (normalized.rendererPath === rendererPath || !normalized.rendererPath) && normalized.blendshapeName === blendshapeName;
+  });
+}
+
+async function setBlendshapeLock(rendererPath, blendshapeName, locked) {
+  const map = new Map();
+  for (const item of state.lockedBlendshapes || []) {
+    const normalized = normalizeLockedBlendshape(item);
+    if (normalized) {
+      map.set(lockedBlendshapeKey(normalized.rendererPath, normalized.blendshapeName), normalized);
+    }
+  }
+  const key = lockedBlendshapeKey(rendererPath, blendshapeName);
+  if (locked) {
+    map.set(key, { rendererPath, blendshapeName });
+    const valueKey = blendshapeKey(rendererPath, blendshapeName);
+    state.blendshapeWorking[valueKey] = Number(state.blendshapeBaseline[valueKey] ?? state.blendshapeWorking[valueKey] ?? 0);
+  } else {
+    map.delete(key);
+  }
+  await saveLockedBlendshapes(Array.from(map.values()));
+  refs["summary-output"].textContent = locked ? `已锁定：${blendshapeName}` : `已解锁：${blendshapeName}`;
+}
+
+async function setVisibleBlendshapeLocks(locked) {
+  const visible = getFilteredBlendshapes();
+  if (!visible.length) {
+    refs["summary-output"].textContent = "当前列表没有可锁定的 Blendshape。";
+    return;
+  }
+
+  const map = new Map();
+  for (const item of state.lockedBlendshapes || []) {
+    const normalized = normalizeLockedBlendshape(item);
+    if (normalized) {
+      map.set(lockedBlendshapeKey(normalized.rendererPath, normalized.blendshapeName), normalized);
+    }
+  }
+
+  for (const item of visible) {
+    const key = lockedBlendshapeKey(item.rendererPath, item.blendshapeName);
+    if (locked) {
+      map.set(key, { rendererPath: item.rendererPath, blendshapeName: item.blendshapeName });
+      const valueKey = blendshapeKey(item.rendererPath, item.blendshapeName);
+      state.blendshapeWorking[valueKey] = Number(state.blendshapeBaseline[valueKey] ?? state.blendshapeWorking[valueKey] ?? 0);
+    } else {
+      map.delete(key);
+    }
+  }
+
+  await saveLockedBlendshapes(Array.from(map.values()));
+  refs["summary-output"].textContent = `${locked ? "已锁定" : "已解锁"}当前列表 ${visible.length} 项。重新生成 Plan 时会重抽未锁定的部分。`;
+}
+
+async function saveLockedBlendshapes(lockedBlendshapes) {
+  if (!state.selectedAvatarPath) {
+    refs["summary-output"].textContent = "请先选择 Avatar。";
+    return;
+  }
+  const payload = await postJson("/api/tuning/locks", {
+    avatar_path: state.selectedAvatarPath,
+    locked_blendshapes: lockedBlendshapes,
+  });
+  state.lockedBlendshapes = payload.lockedBlendshapes || [];
+  renderBlendshapeList();
 }
 
 function renderReferenceContextSummary(referenceImage) {
@@ -1875,12 +2278,22 @@ function selectProjectOption(projectPath) {
 }
 
 function setActiveAvatar(avatarName, avatarPath) {
+  const avatarChanged = avatarPath && avatarPath !== state.selectedAvatarPath;
   state.selectedAvatarName = avatarName || "";
   state.selectedAvatarPath = avatarPath || "";
+  if (avatarChanged) {
+    state.currentHistoryRecord = null;
+    state.lastAiChanges = [];
+  }
   refs["status-avatar"].textContent = avatarName || "未加载";
   refs["avatar-path-display"].textContent = avatarPath || "未选择";
   if (refs["scene-avatar-select"] && avatarPath) {
     refs["scene-avatar-select"].value = avatarPath;
+  }
+  if (avatarPath) {
+    loadTuningData().catch((error) => {
+      refs["summary-output"].textContent = `历史/预设读取失败：${error.message}`;
+    });
   }
 }
 

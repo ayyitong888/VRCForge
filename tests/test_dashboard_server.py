@@ -16,6 +16,18 @@ from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan
 class DashboardServerTests(unittest.TestCase):
     def setUp(self) -> None:
         dashboard_server.DASHBOARD_RUNTIME.manual_undo_stack.clear()
+        dashboard_server.DASHBOARD_RUNTIME.current_avatar_path = ""
+        dashboard_server.DASHBOARD_RUNTIME.current_avatar_name = ""
+        self.tuning_store_dir = tempfile.TemporaryDirectory()
+        self.original_tuning_paths = (
+            dashboard_server.TUNING_HISTORY_PATH,
+            dashboard_server.TUNING_PRESETS_PATH,
+            dashboard_server.TUNING_LOCKS_PATH,
+        )
+        tuning_root = Path(self.tuning_store_dir.name)
+        dashboard_server.TUNING_HISTORY_PATH = tuning_root / "tuning_history.json"
+        dashboard_server.TUNING_PRESETS_PATH = tuning_root / "tuning_presets.json"
+        dashboard_server.TUNING_LOCKS_PATH = tuning_root / "tuning_locks.json"
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -33,6 +45,12 @@ class DashboardServerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.status_snapshot_patcher.stop()
+        (
+            dashboard_server.TUNING_HISTORY_PATH,
+            dashboard_server.TUNING_PRESETS_PATH,
+            dashboard_server.TUNING_LOCKS_PATH,
+        ) = self.original_tuning_paths
+        self.tuning_store_dir.cleanup()
 
     def test_websocket_sends_bootstrap_payload(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -46,7 +64,7 @@ class DashboardServerTests(unittest.TestCase):
         with TestClient(dashboard_server.app) as client:
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
-            self.assertIn("VRCFaceForge 控制台", response.text)
+            self.assertIn("VRCForge 控制台", response.text)
             self.assertIn("识图分析", response.text)
             self.assertIn("原图 / 当前脸", response.text)
             self.assertIn("目标参考图", response.text)
@@ -498,6 +516,269 @@ class DashboardServerTests(unittest.TestCase):
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_apply_blendshapes")
         self.assertEqual(params["adjustments"][0]["blendshapeName"], "Smile")
+
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.load_dashboard_export_payload")
+    @patch("dashboard_server.create_blendshape_plan")
+    def test_pipeline_plan_saves_history_and_excludes_locked_blendshapes(
+        self,
+        mock_create_blendshape_plan,
+        mock_load_dashboard_export_payload,
+        mock_load_settings,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="gemini",
+            llm_model="gemini-test",
+            min_confidence=0.65,
+        )
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "AvatarScene",
+                        "renderers": [
+                            {
+                                "rendererPath": "Scene/HeroAvatar/Face",
+                                "blendshapes": [
+                                    {"name": "Smile", "currentWeight": 10.0},
+                                    {"name": "eye_morph_narrow", "currentWeight": 5.0},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            True,
+        )
+        dashboard_server.save_tuning_store(
+            dashboard_server.TUNING_LOCKS_PATH,
+            {
+                "type": "blendshape_tuning_locks",
+                "version": "0.1",
+                "avatars": {
+                    "Scene/HeroAvatar": [
+                        {"rendererPath": "Scene/HeroAvatar/Face", "blendshapeName": "Smile"}
+                    ]
+                },
+            },
+        )
+
+        def create_plan_side_effect(_settings, planning_payload, *_args, **_kwargs):
+            blendshape_names = [
+                blendshape["name"]
+                for avatar in planning_payload["avatars"]
+                for renderer in avatar["renderers"]
+                for blendshape in renderer["blendshapes"]
+            ]
+            self.assertEqual(blendshape_names, ["eye_morph_narrow"])
+            return BlendshapePlan(
+                summary="Reroll unlocked eye shape.",
+                adjustments=[
+                    BlendshapeAdjustment(
+                        avatar_path="Scene/HeroAvatar",
+                        renderer_path="Scene/HeroAvatar/Face",
+                        blendshape_name="eye_morph_narrow",
+                        target_weight=30.0,
+                        reason="Only unlocked Blendshape is available.",
+                        confidence=0.95,
+                    )
+                ],
+            )
+
+        mock_create_blendshape_plan.side_effect = create_plan_side_effect
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/pipeline/plan",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": True,
+                    "avatar": "Scene/HeroAvatar",
+                    "instruction": "保留嘴巴，只重抽眼睛",
+                    "allow_low_confidence": True,
+                    "save_artifacts": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["changePreview"][0]["blendshapeName"], "eye_morph_narrow")
+        self.assertEqual(payload["lockedBlendshapes"][0]["blendshapeName"], "Smile")
+        self.assertFalse(payload["historyRecord"]["applied"])
+        self.assertEqual(payload["historyRecord"]["changes"][0]["blendshape"], "eye_morph_narrow")
+
+        history = dashboard_server.load_tuning_history_store()
+        self.assertEqual(len(history["records"]), 1)
+        self.assertEqual(history["records"][0]["locked_blendshapes"][0]["blendshapeName"], "Smile")
+
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.load_dashboard_export_payload")
+    def test_preset_apply_uses_saved_after_values_without_delta_stacking(
+        self,
+        mock_load_dashboard_export_payload,
+        mock_load_settings,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "AvatarScene",
+                        "renderers": [
+                            {
+                                "rendererPath": "Scene/HeroAvatar/Face",
+                                "blendshapes": [{"name": "Smile", "currentWeight": 30.0}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            True,
+        )
+        dashboard_server.save_tuning_store(
+            dashboard_server.TUNING_HISTORY_PATH,
+            {
+                "type": "blendshape_tuning_history",
+                "version": "0.1",
+                "records": [
+                    {
+                        "id": "hist_test",
+                        "created_at": "2026-05-16T00:00:00+00:00",
+                        "avatar_name": "HeroAvatar",
+                        "avatar_path": "Scene/HeroAvatar",
+                        "user_prompt": "make a soft smile",
+                        "provider": "Gemini",
+                        "model": "gemini-test",
+                        "reference_image_count": 1,
+                        "applied": False,
+                        "changes": [
+                            {
+                                "renderer_path": "Scene/HeroAvatar/Face",
+                                "blendshape": "Smile",
+                                "before": 10.0,
+                                "after": 55.0,
+                                "delta": 45.0,
+                                "confidence": 0.95,
+                            }
+                        ],
+                        "locked_blendshapes": [],
+                    }
+                ],
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            create_response = client.post(
+                "/api/tuning/presets",
+                json={"history_id": "hist_test", "name": "soft_smile_face", "tags": ["mouth"]},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            preset_id = create_response.json()["preset"]["id"]
+            apply_response = client.post(
+                f"/api/tuning/presets/{preset_id}/apply",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": True,
+                    "avatar": "Scene/HeroAvatar",
+                },
+            )
+
+        self.assertEqual(apply_response.status_code, 200)
+        payload = apply_response.json()
+        self.assertEqual(payload["appliedAdjustments"][0]["targetWeight"], 55.0)
+        self.assertEqual(payload["changePreview"][0]["previousWeight"], 30.0)
+        self.assertEqual(payload["changePreview"][0]["delta"], 25.0)
+        self.assertEqual(payload["undoDepth"], 1)
+
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.load_dashboard_export_payload")
+    def test_preset_apply_skips_locked_and_missing_blendshapes_without_crash(
+        self,
+        mock_load_dashboard_export_payload,
+        mock_load_settings,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_load_dashboard_export_payload.return_value = (
+            {
+                "avatars": [
+                    {
+                        "avatarName": "HeroAvatar",
+                        "avatarPath": "Scene/HeroAvatar",
+                        "sceneName": "AvatarScene",
+                        "renderers": [
+                            {
+                                "rendererPath": "Scene/HeroAvatar/Face",
+                                "blendshapes": [{"name": "Smile", "currentWeight": 30.0}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "test-export",
+            True,
+        )
+        dashboard_server.save_tuning_store(
+            dashboard_server.TUNING_PRESETS_PATH,
+            {
+                "type": "blendshape_tuning_presets",
+                "version": "0.1",
+                "presets": [
+                    {
+                        "id": "preset_test",
+                        "name": "mixed_targets",
+                        "avatar_name": "HeroAvatar",
+                        "avatar_path": "Scene/HeroAvatar",
+                        "apply_mode": "after_values",
+                        "changes": [
+                            {
+                                "renderer_path": "Scene/HeroAvatar/Face",
+                                "blendshape": "Smile",
+                                "after": 55.0,
+                            },
+                            {
+                                "renderer_path": "Scene/HeroAvatar/Face",
+                                "blendshape": "Missing",
+                                "after": 80.0,
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        dashboard_server.save_tuning_store(
+            dashboard_server.TUNING_LOCKS_PATH,
+            {
+                "type": "blendshape_tuning_locks",
+                "version": "0.1",
+                "avatars": {
+                    "Scene/HeroAvatar": [
+                        {"rendererPath": "Scene/HeroAvatar/Face", "blendshapeName": "Smile"}
+                    ]
+                },
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/tuning/presets/preset_test/apply",
+                json={
+                    "source_mode": "unity_live_export",
+                    "mock_execute": True,
+                    "avatar": "Scene/HeroAvatar",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["appliedAdjustments"], [])
+        self.assertEqual({item["reason"] for item in payload["skippedAdjustments"]}, {"locked", "missing_blendshape"})
+        self.assertEqual(payload["undoDepth"], 0)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")

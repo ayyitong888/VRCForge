@@ -62,6 +62,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
 DASHBOARD_ARTIFACTS_DIR = ROOT_DIR / "artifacts" / "dashboard"
 PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
+TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_history.json"
+TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_presets.json"
+TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_locks.json"
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
@@ -151,6 +154,26 @@ class ManualBlendshapeApplyRequest(DashboardRequest):
 
 class UndoBlendshapeRequest(ConnectionRequest):
     avatar_path: str
+
+
+class TuningPresetCreateRequest(BaseModel):
+    history_id: str
+    name: str
+    tags: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class TuningPresetRenameRequest(BaseModel):
+    name: str
+
+
+class TuningPresetDuplicateRequest(BaseModel):
+    name: str | None = None
+
+
+class TuningLocksUpdateRequest(BaseModel):
+    avatar_path: str | None = None
+    locked_blendshapes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AvatarScopedConnectionRequest(ConnectionRequest):
@@ -271,13 +294,14 @@ class DashboardEventBus:
         asyncio.run_coroutine_threadsafe(self.broadcast(event_type, payload), self._loop)
 
 
-app = FastAPI(title="VRCAutoRig Dashboard", version="0.3.0-alpha")
+app = FastAPI(title="VRCForge Dashboard", version="0.1.0-alpha")
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
 EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
 LOCAL_LOG_LOCK = Lock()
+TUNING_STORE_LOCK = Lock()
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
@@ -598,6 +622,72 @@ async def undo_manual_blendshapes(request: UndoBlendshapeRequest) -> dict[str, A
     return await asyncio.to_thread(undo_manual_blendshapes_sync, request)
 
 
+@app.get("/api/tuning/history")
+def read_tuning_history(avatar_path: str | None = None) -> dict[str, Any]:
+    store = load_tuning_history_store()
+    records = list(store.get("records") or [])
+    if avatar_path:
+        records = [
+            record for record in records
+            if record.get("avatar_path") == avatar_path or record.get("avatar_name") == avatar_path
+        ]
+    return {"ok": True, "records": records, "count": len(records)}
+
+
+@app.post("/api/tuning/history/{history_id}/reapply")
+async def reapply_tuning_history(history_id: str, request: DashboardRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_saved_tuning_history_sync, history_id, request)
+
+
+@app.get("/api/tuning/presets")
+def read_tuning_presets(avatar_path: str | None = None) -> dict[str, Any]:
+    store = load_tuning_preset_store()
+    presets = list(store.get("presets") or [])
+    if avatar_path:
+        presets = [
+            preset for preset in presets
+            if preset.get("avatar_path") == avatar_path or preset.get("avatar_name") == avatar_path
+        ]
+    return {"ok": True, "presets": presets, "count": len(presets)}
+
+
+@app.post("/api/tuning/presets")
+async def create_tuning_preset(request: TuningPresetCreateRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(create_tuning_preset_sync, request)
+
+
+@app.post("/api/tuning/presets/{preset_id}/apply")
+async def apply_tuning_preset(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_saved_tuning_preset_sync, preset_id, request)
+
+
+@app.post("/api/tuning/presets/{preset_id}/rename")
+async def rename_tuning_preset(preset_id: str, request: TuningPresetRenameRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(rename_tuning_preset_sync, preset_id, request)
+
+
+@app.post("/api/tuning/presets/{preset_id}/duplicate")
+async def duplicate_tuning_preset(preset_id: str, request: TuningPresetDuplicateRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(duplicate_tuning_preset_sync, preset_id, request)
+
+
+@app.post("/api/tuning/presets/{preset_id}/delete")
+async def delete_tuning_preset(preset_id: str) -> dict[str, Any]:
+    return await asyncio.to_thread(delete_tuning_preset_sync, preset_id)
+
+
+@app.get("/api/tuning/locks")
+def read_tuning_locks(avatar_path: str | None = None) -> dict[str, Any]:
+    resolved_avatar = avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+    locked = load_locked_blendshapes(resolved_avatar)
+    return {"ok": True, "avatarPath": resolved_avatar, "lockedBlendshapes": locked, "count": len(locked)}
+
+
+@app.post("/api/tuning/locks")
+async def update_tuning_locks(request: TuningLocksUpdateRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(update_tuning_locks_sync, request)
+
+
 @app.post("/api/clothes/scan")
 async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
     return await asyncio.to_thread(scan_clothes_sync, request)
@@ -742,14 +832,30 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
         remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
 
         validated_adjustments = []
+        skipped_adjustments: list[dict[str, Any]] = []
         undo_items: list[dict[str, Any]] = []
         allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+        locked_targets = build_locked_blendshape_set(load_locked_blendshapes(selected_avatar.avatar_path))
         for item in request.adjustments:
             key = (item.renderer_path, item.blendshape_name)
             if key not in allowed_targets:
-                raise RuntimeError(
-                    f"Blendshape target does not exist on selected avatar: {item.renderer_path} :: {item.blendshape_name}"
+                skipped_adjustments.append(
+                    {
+                        "rendererPath": item.renderer_path,
+                        "blendshapeName": item.blendshape_name,
+                        "reason": "missing_blendshape",
+                    }
                 )
+                continue
+            if is_blendshape_locked(item.renderer_path, item.blendshape_name, locked_targets):
+                skipped_adjustments.append(
+                    {
+                        "rendererPath": item.renderer_path,
+                        "blendshapeName": item.blendshape_name,
+                        "reason": "locked",
+                    }
+                )
+                continue
 
             current_weight = allowed_targets[key]["currentWeight"]
             previous_weight = current_weight if item.previous_weight is None else item.previous_weight
@@ -757,7 +863,7 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
                 {
                     "rendererPath": item.renderer_path,
                     "blendshapeName": item.blendshape_name,
-                    "targetWeight": item.target_weight,
+                    "targetWeight": clamp_blendshape_weight(item.target_weight),
                 }
             )
             undo_items.append(
@@ -767,6 +873,23 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
                     "targetWeight": previous_weight,
                 }
             )
+
+        if not validated_adjustments:
+            emit_log(
+                "warning",
+                "blendshape",
+                "No manual blendshape adjustments were applied after lock/missing-target filtering.",
+                {"avatarPath": selected_avatar.avatar_path, "skippedCount": len(skipped_adjustments)},
+            )
+            return {
+                "ok": True,
+                "selectedAvatar": serialize_selected_avatar(selected_avatar),
+                "executionMode": "mock" if using_mock_execute else "live-unity",
+                "result": None,
+                "appliedAdjustments": [],
+                "skippedAdjustments": skipped_adjustments,
+                "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+            }
 
         if using_mock_execute:
             code = render_manual_blendshape_csharp(selected_avatar.avatar_path, validated_adjustments)
@@ -787,6 +910,7 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "result": serialize_result(result),
             "appliedAdjustments": validated_adjustments,
+            "skippedAdjustments": skipped_adjustments,
             "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
         }
     except (RuntimeError, UnityMcpError) as exc:
@@ -818,6 +942,511 @@ def undo_manual_blendshapes_sync(request: UndoBlendshapeRequest) -> dict[str, An
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "blendshape", "Failed to undo manual blendshape adjustments.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def load_tuning_history_store() -> dict[str, Any]:
+    return load_tuning_store(
+        TUNING_HISTORY_PATH,
+        {
+            "type": "blendshape_tuning_history",
+            "version": "0.1",
+            "records": [],
+        },
+    )
+
+
+def load_tuning_preset_store() -> dict[str, Any]:
+    return load_tuning_store(
+        TUNING_PRESETS_PATH,
+        {
+            "type": "blendshape_tuning_presets",
+            "version": "0.1",
+            "presets": [],
+        },
+    )
+
+
+def load_tuning_locks_store() -> dict[str, Any]:
+    return load_tuning_store(
+        TUNING_LOCKS_PATH,
+        {
+            "type": "blendshape_tuning_locks",
+            "version": "0.1",
+            "avatars": {},
+        },
+    )
+
+
+def load_tuning_store(path: Path, default_payload: dict[str, Any]) -> dict[str, Any]:
+    if not path.exists():
+        return json.loads(json.dumps(default_payload))
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Tuning store is not valid JSON: {path}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Tuning store must be a JSON object: {path}")
+
+    merged = json.loads(json.dumps(default_payload))
+    merged.update(payload)
+    return merged
+
+
+def save_tuning_store(path: Path, payload: dict[str, Any]) -> None:
+    with TUNING_STORE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+
+
+def tuning_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def make_tuning_id(prefix: str) -> str:
+    return f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+
+
+def normalize_locked_blendshape_item(item: Any) -> dict[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+
+    renderer_path = str(item.get("rendererPath") or item.get("renderer_path") or "").strip()
+    blendshape_name = str(item.get("blendshapeName") or item.get("blendshape_name") or item.get("blendshape") or "").strip()
+    if not blendshape_name:
+        return None
+
+    return {
+        "rendererPath": renderer_path,
+        "blendshapeName": blendshape_name,
+    }
+
+
+def normalize_locked_blendshape_list(items: list[dict[str, Any]] | list[Any]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items or []:
+        normalized_item = normalize_locked_blendshape_item(item)
+        if normalized_item is None:
+            continue
+        key = (normalized_item["rendererPath"], normalized_item["blendshapeName"])
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(normalized_item)
+    return normalized
+
+
+def load_locked_blendshapes(avatar_path: str | None) -> list[dict[str, str]]:
+    if not avatar_path:
+        return []
+    store = load_tuning_locks_store()
+    avatars = store.get("avatars") if isinstance(store.get("avatars"), dict) else {}
+    return normalize_locked_blendshape_list(avatars.get(avatar_path) or [])
+
+
+def update_tuning_locks_sync(request: TuningLocksUpdateRequest) -> dict[str, Any]:
+    avatar_path = (request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path or "").strip()
+    if not avatar_path:
+        raise to_http_exception(RuntimeError("avatar_path is required before updating locked Blendshapes."))
+
+    locked = normalize_locked_blendshape_list(request.locked_blendshapes)
+    store = load_tuning_locks_store()
+    avatars = store.get("avatars") if isinstance(store.get("avatars"), dict) else {}
+    avatars[avatar_path] = locked
+    store["avatars"] = avatars
+    save_tuning_store(TUNING_LOCKS_PATH, store)
+    emit_log("info", "blendshape", "Locked Blendshape list updated.", {"avatarPath": avatar_path, "count": len(locked)})
+    return {"ok": True, "avatarPath": avatar_path, "lockedBlendshapes": locked, "count": len(locked)}
+
+
+def build_locked_blendshape_set(locked_blendshapes: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    return {
+        (
+            str(item.get("rendererPath") or item.get("renderer_path") or ""),
+            str(item.get("blendshapeName") or item.get("blendshape_name") or item.get("blendshape") or ""),
+        )
+        for item in normalize_locked_blendshape_list(locked_blendshapes)
+    }
+
+
+def is_blendshape_locked(renderer_path: str, blendshape_name: str, locked_targets: set[tuple[str, str]]) -> bool:
+    return (renderer_path, blendshape_name) in locked_targets or ("", blendshape_name) in locked_targets
+
+
+def filter_plan_locked_blendshapes(plan: Any, locked_blendshapes: list[dict[str, Any]]) -> Any:
+    locked_targets = build_locked_blendshape_set(locked_blendshapes)
+    if not locked_targets:
+        return plan
+
+    kept = []
+    dropped = []
+    for adjustment in plan.adjustments:
+        if is_blendshape_locked(adjustment.renderer_path, adjustment.blendshape_name, locked_targets):
+            dropped.append(adjustment)
+            continue
+        kept.append(adjustment)
+
+    if not dropped:
+        return plan
+
+    warnings = list(getattr(plan, "warnings", []) or [])
+    warnings.append(
+        "Skipped locked Blendshape adjustments: "
+        + ", ".join(f"{item.renderer_path}::{item.blendshape_name}" for item in dropped[:8])
+    )
+    return plan.__class__(summary=plan.summary, warnings=warnings, adjustments=kept)
+
+
+def filter_planning_payload_locked_blendshapes(payload: dict[str, Any], locked_blendshapes: list[dict[str, Any]]) -> dict[str, Any]:
+    locked_targets = build_locked_blendshape_set(locked_blendshapes)
+    if not locked_targets:
+        return payload
+
+    filtered_payload = json.loads(json.dumps(payload))
+    renderer_count = 0
+    blendshape_count = 0
+    filtered_avatars: list[dict[str, Any]] = []
+
+    for avatar in filtered_payload.get("avatars") or []:
+        filtered_renderers: list[dict[str, Any]] = []
+        for renderer in avatar.get("renderers") or []:
+            renderer_path = str(renderer.get("rendererPath") or renderer.get("path") or "")
+            kept_blendshapes = []
+            for blendshape in renderer.get("blendshapes") or []:
+                blendshape_name = str(blendshape.get("name") or blendshape.get("blendshapeName") or "")
+                if is_blendshape_locked(renderer_path, blendshape_name, locked_targets):
+                    continue
+                kept_blendshapes.append(blendshape)
+            if not kept_blendshapes:
+                continue
+            renderer["blendshapes"] = kept_blendshapes
+            renderer["blendshapeCount"] = len(kept_blendshapes)
+            filtered_renderers.append(renderer)
+            blendshape_count += len(kept_blendshapes)
+
+        if filtered_renderers:
+            avatar["renderers"] = filtered_renderers
+            filtered_avatars.append(avatar)
+            renderer_count += len(filtered_renderers)
+
+    filtered_payload["avatars"] = filtered_avatars
+    summary = dict(filtered_payload.get("summary") or {})
+    summary["avatarCount"] = len(filtered_avatars)
+    summary["rendererCount"] = renderer_count
+    summary["blendshapeCount"] = blendshape_count
+    filtered_payload["summary"] = summary
+    filtered_payload["lockedBlendshapeFilter"] = {
+        "scope": "unlocked_blendshapes_only",
+        "lockedCount": len(locked_targets),
+        "note": "Locked Blendshapes are hidden from planning and also blocked during apply.",
+    }
+    return filtered_payload
+
+
+def build_tuning_history_record(
+    *,
+    request: DashboardRequest,
+    settings: Settings,
+    selected_avatar: SelectedAvatar,
+    plan: Any,
+    change_preview: list[dict[str, Any]],
+    reference_context: dict[str, Any] | None,
+    locked_blendshapes: list[dict[str, Any]],
+    applied: bool,
+    visual_proof: dict[str, Any] | None,
+    artifacts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "id": make_tuning_id("hist"),
+        "created_at": tuning_timestamp(),
+        "avatar_name": selected_avatar.avatar_name,
+        "avatar_path": selected_avatar.avatar_path,
+        "user_prompt": request.instruction or "",
+        "provider": provider_display_name(settings.llm_provider),
+        "provider_id": settings.llm_provider,
+        "model": settings.llm_model,
+        "reference_image_count": int((reference_context or {}).get("count") or 0),
+        "applied": bool(applied),
+        "changes": tuning_changes_from_preview(change_preview),
+        "locked_blendshapes": normalize_locked_blendshape_list(locked_blendshapes),
+        "notes": "",
+        "label": "",
+        "thumbnail_paths": extract_tuning_thumbnail_paths(visual_proof),
+        "artifacts": artifacts or {},
+        "summary": getattr(plan, "summary", "") or "",
+        "warnings": list(getattr(plan, "warnings", []) or []),
+    }
+
+
+def tuning_changes_from_preview(change_preview: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for item in change_preview or []:
+        before = clamp_blendshape_weight(item.get("previousWeight", 0.0))
+        after = clamp_blendshape_weight(item.get("targetWeight", before))
+        changes.append(
+            {
+                "avatar_path": str(item.get("avatarPath") or ""),
+                "renderer_path": str(item.get("rendererPath") or ""),
+                "blendshape": str(item.get("blendshapeName") or ""),
+                "before": before,
+                "after": after,
+                "delta": after - before,
+                "reason": str(item.get("reason") or ""),
+                "confidence": clamp01(item.get("confidence", 0.0)),
+            }
+        )
+    return changes
+
+
+def extract_tuning_thumbnail_paths(visual_proof: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(visual_proof, dict):
+        return {}
+    thumbnails: dict[str, str] = {}
+    for key in ("before", "after"):
+        image_path = (visual_proof.get(key) or {}).get("imagePath") if isinstance(visual_proof.get(key), dict) else None
+        if image_path:
+            thumbnails[key] = str(image_path)
+    return thumbnails
+
+
+def save_tuning_history_record(record: dict[str, Any]) -> dict[str, Any]:
+    store = load_tuning_history_store()
+    records = list(store.get("records") or [])
+    records.append(record)
+    store["records"] = records[-200:]
+    save_tuning_store(TUNING_HISTORY_PATH, store)
+    return record
+
+
+def find_tuning_history_record(history_id: str) -> dict[str, Any]:
+    for record in load_tuning_history_store().get("records") or []:
+        if record.get("id") == history_id:
+            return record
+    raise RuntimeError(f"Tuning history record was not found: {history_id}")
+
+
+def find_tuning_preset(preset_id: str) -> dict[str, Any]:
+    for preset in load_tuning_preset_store().get("presets") or []:
+        if preset.get("id") == preset_id:
+            return preset
+    raise RuntimeError(f"Tuning preset was not found: {preset_id}")
+
+
+def create_tuning_preset_sync(request: TuningPresetCreateRequest) -> dict[str, Any]:
+    try:
+        history = find_tuning_history_record(request.history_id)
+        name = request.name.strip()
+        if not name:
+            raise RuntimeError("Preset name is required.")
+
+        preset = {
+            "id": make_tuning_id("preset"),
+            "name": name,
+            "created_at": tuning_timestamp(),
+            "avatar_name": history.get("avatar_name", ""),
+            "avatar_path": history.get("avatar_path", ""),
+            "source_history_id": history.get("id", ""),
+            "user_prompt": history.get("user_prompt", ""),
+            "provider": history.get("provider", ""),
+            "provider_id": history.get("provider_id", ""),
+            "model": history.get("model", ""),
+            "tags": [str(tag).strip() for tag in request.tags if str(tag).strip()],
+            "description": request.description.strip(),
+            "apply_mode": "after_values",
+            "changes": list(history.get("changes") or []),
+        }
+        store = load_tuning_preset_store()
+        presets = list(store.get("presets") or [])
+        presets.append(preset)
+        store["presets"] = presets
+        save_tuning_store(TUNING_PRESETS_PATH, store)
+        emit_log("success", "preset", "Tuning preset saved.", {"presetId": preset["id"], "name": preset["name"]})
+        return {"ok": True, "preset": preset, "presets": presets}
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
+
+
+def rename_tuning_preset_sync(preset_id: str, request: TuningPresetRenameRequest) -> dict[str, Any]:
+    try:
+        name = request.name.strip()
+        if not name:
+            raise RuntimeError("Preset name is required.")
+        store = load_tuning_preset_store()
+        presets = list(store.get("presets") or [])
+        for preset in presets:
+            if preset.get("id") == preset_id:
+                preset["name"] = name
+                preset["updated_at"] = tuning_timestamp()
+                save_tuning_store(TUNING_PRESETS_PATH, {**store, "presets": presets})
+                return {"ok": True, "preset": preset, "presets": presets}
+        raise RuntimeError(f"Tuning preset was not found: {preset_id}")
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
+
+
+def duplicate_tuning_preset_sync(preset_id: str, request: TuningPresetDuplicateRequest) -> dict[str, Any]:
+    try:
+        source = find_tuning_preset(preset_id)
+        duplicate = json.loads(json.dumps(source))
+        duplicate["id"] = make_tuning_id("preset")
+        duplicate["name"] = (request.name or f"{source.get('name', 'preset')}_copy").strip()
+        duplicate["created_at"] = tuning_timestamp()
+        duplicate["source_preset_id"] = source.get("id", "")
+        store = load_tuning_preset_store()
+        presets = list(store.get("presets") or [])
+        presets.append(duplicate)
+        store["presets"] = presets
+        save_tuning_store(TUNING_PRESETS_PATH, store)
+        return {"ok": True, "preset": duplicate, "presets": presets}
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
+
+
+def delete_tuning_preset_sync(preset_id: str) -> dict[str, Any]:
+    store = load_tuning_preset_store()
+    presets = list(store.get("presets") or [])
+    remaining = [preset for preset in presets if preset.get("id") != preset_id]
+    if len(remaining) == len(presets):
+        raise to_http_exception(RuntimeError(f"Tuning preset was not found: {preset_id}"))
+    store["presets"] = remaining
+    save_tuning_store(TUNING_PRESETS_PATH, store)
+    return {"ok": True, "deletedPresetId": preset_id, "presets": remaining}
+
+
+def apply_saved_tuning_history_sync(history_id: str, request: DashboardRequest) -> dict[str, Any]:
+    try:
+        record = find_tuning_history_record(history_id)
+        payload = apply_saved_tuning_payload(record, request, source_type="history")
+        mark_tuning_history_applied(history_id)
+        payload["historyRecord"] = find_tuning_history_record(history_id)
+        return payload
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "preset", "Failed to reapply tuning history.", {"historyId": history_id, "error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_saved_tuning_preset_sync(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
+    try:
+        preset = find_tuning_preset(preset_id)
+        payload = apply_saved_tuning_payload(preset, request, source_type="preset")
+        mark_tuning_preset_applied(preset_id)
+        payload["preset"] = find_tuning_preset(preset_id)
+        return payload
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "preset", "Failed to apply tuning preset.", {"presetId": preset_id, "error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: DashboardRequest, source_type: str) -> dict[str, Any]:
+    settings = load_dashboard_settings(request)
+    export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
+    avatar_hint = request.avatar or saved_payload.get("avatar_path") or saved_payload.get("avatar_name")
+    selected_avatar = resolve_avatar_selection(export_payload, avatar_hint)
+    remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
+
+    allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+    locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
+    locked_targets = build_locked_blendshape_set(locked_blendshapes)
+    direct_adjustments: list[dict[str, Any]] = []
+    undo_items: list[dict[str, Any]] = []
+    change_preview: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for change in saved_payload.get("changes") or []:
+        renderer_path = str(change.get("renderer_path") or change.get("rendererPath") or "")
+        blendshape_name = str(change.get("blendshape") or change.get("blendshapeName") or change.get("blendshape_name") or "")
+        key = (renderer_path, blendshape_name)
+        if key not in allowed_targets:
+            skipped.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "reason": "missing_blendshape"})
+            continue
+        if is_blendshape_locked(renderer_path, blendshape_name, locked_targets):
+            skipped.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "reason": "locked"})
+            continue
+
+        current_weight = clamp_blendshape_weight(allowed_targets[key].get("currentWeight", 0.0))
+        target_weight = clamp_blendshape_weight(change.get("after", change.get("targetWeight", current_weight)))
+        direct_adjustments.append(
+            {
+                "rendererPath": renderer_path,
+                "blendshapeName": blendshape_name,
+                "targetWeight": target_weight,
+            }
+        )
+        undo_items.append(
+            {
+                "rendererPath": renderer_path,
+                "blendshapeName": blendshape_name,
+                "targetWeight": current_weight,
+            }
+        )
+        change_preview.append(
+            {
+                "avatarPath": selected_avatar.avatar_path,
+                "rendererPath": renderer_path,
+                "blendshapeName": blendshape_name,
+                "previousWeight": current_weight,
+                "targetWeight": target_weight,
+                "delta": target_weight - current_weight,
+                "reason": str(change.get("reason") or f"Reapply saved {source_type} after value."),
+                "confidence": clamp01(change.get("confidence", 1.0)),
+            }
+        )
+
+    result: McpResult | None = None
+    if direct_adjustments:
+        if using_mock_execute:
+            code = render_manual_blendshape_csharp(selected_avatar.avatar_path, direct_adjustments)
+            result = mock_execute_csharp(code, selected_avatar, export_source)
+        else:
+            result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
+        push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+
+    emit_log(
+        "success" if direct_adjustments else "warning",
+        "preset",
+        f"Applied saved tuning {source_type}." if direct_adjustments else f"No saved tuning {source_type} changes were applied.",
+        {"avatarPath": selected_avatar.avatar_path, "appliedCount": len(direct_adjustments), "skippedCount": len(skipped)},
+    )
+    return {
+        "ok": True,
+        "sourceType": source_type,
+        "selectedAvatar": serialize_selected_avatar(selected_avatar),
+        "executionMode": "mock" if using_mock_execute else "live-unity",
+        "result": serialize_result(result),
+        "appliedAdjustments": direct_adjustments,
+        "skippedAdjustments": skipped,
+        "changePreview": change_preview,
+        "lockedBlendshapes": locked_blendshapes,
+        "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+    }
+
+
+def mark_tuning_history_applied(history_id: str) -> None:
+    store = load_tuning_history_store()
+    records = list(store.get("records") or [])
+    for record in records:
+        if record.get("id") == history_id:
+            record["applied"] = True
+            record["last_applied_at"] = tuning_timestamp()
+            break
+    store["records"] = records
+    save_tuning_store(TUNING_HISTORY_PATH, store)
+
+
+def mark_tuning_preset_applied(preset_id: str) -> None:
+    store = load_tuning_preset_store()
+    presets = list(store.get("presets") or [])
+    for preset in presets:
+        if preset.get("id") == preset_id:
+            preset["last_applied_at"] = tuning_timestamp()
+            preset["apply_count"] = int(preset.get("apply_count") or 0) + 1
+            break
+    store["presets"] = presets
+    save_tuning_store(TUNING_PRESETS_PATH, store)
 
 
 def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
@@ -1135,11 +1764,15 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
         selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
         remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
+        locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
         planning_payload = filter_planning_payload_to_face_blendshapes(
             build_planning_payload(export_payload, selected_avatar)
         )
+        planning_payload = filter_planning_payload_locked_blendshapes(planning_payload, locked_blendshapes)
         face_blendshape_count = int((planning_payload.get("summary") or {}).get("blendshapeCount", 0) or 0)
         if face_blendshape_count == 0:
+            if locked_blendshapes:
+                raise RuntimeError("All available face-related Blendshapes are currently locked. Unlock at least one Blendshape before rerolling.")
             raise RuntimeError(
                 "No face-related blendshapes were found for the selected avatar. "
                 "The natural-language face editor only exposes eye, brow, mouth, jaw/face, nose, tongue, teeth, ear, and VRC viseme blendshapes."
@@ -1155,6 +1788,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                 "executionMode": "mock" if using_mock_execute else "live-unity",
                 "source": export_source,
                 "faceBlendshapeCount": face_blendshape_count,
+                "lockedBlendshapeCount": len(locked_blendshapes),
             },
         )
 
@@ -1193,6 +1827,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             min_confidence=min_confidence,
             allow_low_confidence=request.allow_low_confidence,
         )
+        plan = filter_plan_locked_blendshapes(plan, locked_blendshapes)
 
         for adjustment in plan.adjustments:
             emit_log(
@@ -1262,6 +1897,21 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             artifacts = save_dashboard_artifacts(plan, csharp_code, preview, result, summary)
             emit_log("info", "artifact", "Dashboard artifacts saved.", {"runDirectory": artifacts["runDirectory"]})
 
+        history_record = save_tuning_history_record(
+            build_tuning_history_record(
+                request=request,
+                settings=settings,
+                selected_avatar=selected_avatar,
+                plan=plan,
+                change_preview=change_preview,
+                reference_context=reference_context,
+                locked_blendshapes=locked_blendshapes,
+                applied=execute,
+                visual_proof=visual_proof,
+                artifacts=artifacts,
+            )
+        )
+
         return {
             "exportSource": export_source,
             "executionMode": "mock" if using_mock_execute else "live-unity",
@@ -1277,6 +1927,8 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             "result": serialize_result(result),
             "summary": summary,
             "artifacts": artifacts,
+            "historyRecord": history_record,
+            "lockedBlendshapes": locked_blendshapes,
             "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
         }
     except (RuntimeError, UnityMcpError) as exc:
@@ -2831,6 +3483,16 @@ def clamp01(value: Any) -> float:
     if not math.isfinite(number):
         return 0.0
     return min(1.0, max(0.0, number))
+
+
+def clamp_blendshape_weight(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    return min(100.0, max(0.0, number))
 
 
 def normalize_vision_box(raw_box: Any) -> dict[str, float] | None:

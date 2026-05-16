@@ -13,12 +13,15 @@ This manual explains the public workflow and feature status without project-spec
 | Avatar and facial Blendshape loading | 读取 Avatar 与脸部 Blendshape | 已可用 / Available |
 | Manual slider editing and undo | 手动滑块调整与撤销 | 已可用 / Available |
 | Natural-language Blendshape planning | 自然语言生成 Blendshape 调整 | 已可用 / Available |
-| Reference-image assisted face editing | 参考图辅助捏脸 | 可测试 / Beta |
+| Reference-image assisted face editing | 参考图辅助捏脸 | 已可用 / Available |
+| AI face tuning history | AI 捏脸历史 | 已可用 / Available |
+| Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
+| Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
 | Before/after screenshot comparison | 执行前后截图对比 | 开发中 / In development |
 | Wardrobe FX scanning and generation | 衣柜 FX 扫描与生成 | 开发中 / In development |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 开发中 / In development |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 开发中 / In development |
-| Presets and batch workflows | 预设系统与批量工作流 | 计划中 / Planned |
+| Batch workflows | 批量工作流 | 计划中 / Planned |
 
 ## Requirements / 运行环境
 
@@ -60,8 +63,12 @@ This manual explains the public workflow and feature status without project-spec
 4. Load facial Blendshapes.
 5. Make a small manual slider change and verify that undo works.
 6. Enter a conservative natural-language instruction.
-7. Review the generated change list before judging the result.
-8. Use screenshots to compare before and after changes.
+7. Generate a reviewable AI Blendshape plan.
+8. Review Blendshape name, before value, after value, and delta.
+9. Apply the plan only after reviewing it.
+10. Restore if the result is not useful.
+11. Save useful results as presets and reapply them later.
+12. Lock Blendshapes you want to keep before generating another candidate.
 
 1. 打开 Unity 工程并等待编译完成。
 2. 确认 dashboard 显示 Unity 已连接。
@@ -69,8 +76,22 @@ This manual explains the public workflow and feature status without project-spec
 4. 加载脸部 Blendshape。
 5. 先做一次小幅手动滑块调整，并确认撤销可用。
 6. 输入保守的自然语言指令。
-7. 查看生成的改动列表，再判断结果。
-8. 使用截图对比调整前后的效果。
+7. 生成可审阅的 AI Blendshape 调整方案。
+8. 检查 Blendshape 名称、调整前数值、调整后数值和变化量。
+9. 审阅后再应用方案。
+10. 结果不合适时使用恢复。
+11. 满意的结果保存为预设，之后可以重新应用。
+12. 重新生成候选结果前，可以锁定想保留的 Blendshape。
+
+## AI Face Tuning History and Presets / AI 捏脸历史与预设
+
+Every generated AI Blendshape plan is saved to history. History records can be reviewed, reapplied, or saved as named presets. Presets store the saved after values, so applying a preset later sets the Blendshapes back to the recorded result instead of repeatedly stacking deltas.
+
+每次 AI 生成的 Blendshape 方案都会进入历史记录。历史记录可以查看、重放，也可以保存为命名预设。预设保存的是调整后的目标值，因此之后应用预设时会回到记录的结果，而不是反复叠加变化量。
+
+Use locks when you want to keep part of a good result. Locked Blendshapes are hidden from new AI planning and blocked during apply, so later generations only affect unlocked Blendshapes.
+
+如果想保留某一部分满意结果，可以使用锁定。锁定后的 Blendshape 会从新一轮 AI 规划中排除，并在应用时被拦截，因此后续候选结果只会影响未锁定项目。
 
 ## Dashboard Areas / Dashboard 区域
 
