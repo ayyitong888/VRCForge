@@ -220,3 +220,38 @@ Validation:
 Next:
 
 - Checkpoint 7 should update public documentation and add automated tests for plan validation, locks, preset replay, clamping, and arbitrary shader property rejection.
+
+## Checkpoint 7: Documentation and tests
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Updated README with `AI Shader / Material Tuning MVP`.
+- Added README feature-list entry for shader/material tuning.
+- Linked `SHADER_TUNING_PLAN.md` and this checkpoint handoff document from README.
+- Added backend tests for:
+  - arbitrary real shader property rejection
+  - numeric clamping
+  - unsupported shader skip
+  - unknown material id skip
+  - locked material/property skip
+  - shader preset replay using saved after values
+
+Changed files:
+
+- `README.md`
+- `tests/test_dashboard_server.py`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
+- `node --check dashboard/app.js`
+- `git diff --check`
+- `python -m pytest -q tests/test_dashboard_server.py -q`
+
+Next:
+
+- Run full repository validation.
+- Merge the feature branch back into `main` only after the checkpoint validation passes.
