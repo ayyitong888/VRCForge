@@ -13,6 +13,45 @@ import dashboard_server
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan
 
 
+def make_shader_inventory() -> dict:
+    return {
+        "type": "material_inventory_snapshot",
+        "version": "0.2",
+        "materials": [
+            {
+                "material_id": "mat_skin",
+                "avatar_name": "HeroAvatar",
+                "avatar_path": "Scene/HeroAvatar",
+                "item_path": "Scene/HeroAvatar/Body",
+                "renderer_id": "renderer_body",
+                "renderer_name": "Body",
+                "renderer_path": "Scene/HeroAvatar/Body",
+                "mesh_name": "BodyMesh",
+                "slot_index": 0,
+                "material_name": "Face_Skin",
+                "shader_name": "lilToon",
+                "shader_family": "lilToon",
+                "category": "skin",
+                "supported_properties": {
+                    "base_color": {"type": "color", "value": "#FFD6C8FF", "writable": True},
+                    "smoothness": {"type": "float", "value": 0.2, "writable": True},
+                    "outline_width": {"type": "float", "value": 0.01, "writable": True},
+                },
+            },
+            {
+                "material_id": "mat_unsupported",
+                "avatar_name": "HeroAvatar",
+                "avatar_path": "Scene/HeroAvatar",
+                "material_name": "Legacy",
+                "shader_family": "Unsupported",
+                "category": "unknown",
+                "supported_properties": {},
+            },
+        ],
+        "summary": {"materialCount": 2},
+    }
+
+
 class DashboardServerTests(unittest.TestCase):
     def setUp(self) -> None:
         dashboard_server.DASHBOARD_RUNTIME.manual_undo_stack.clear()
@@ -23,11 +62,17 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.TUNING_HISTORY_PATH,
             dashboard_server.TUNING_PRESETS_PATH,
             dashboard_server.TUNING_LOCKS_PATH,
+            dashboard_server.SHADER_TUNING_HISTORY_PATH,
+            dashboard_server.SHADER_TUNING_PRESETS_PATH,
+            dashboard_server.SHADER_TUNING_LOCKS_PATH,
         )
         tuning_root = Path(self.tuning_store_dir.name)
         dashboard_server.TUNING_HISTORY_PATH = tuning_root / "tuning_history.json"
         dashboard_server.TUNING_PRESETS_PATH = tuning_root / "tuning_presets.json"
         dashboard_server.TUNING_LOCKS_PATH = tuning_root / "tuning_locks.json"
+        dashboard_server.SHADER_TUNING_HISTORY_PATH = tuning_root / "shader_tuning_history.json"
+        dashboard_server.SHADER_TUNING_PRESETS_PATH = tuning_root / "shader_tuning_presets.json"
+        dashboard_server.SHADER_TUNING_LOCKS_PATH = tuning_root / "shader_tuning_locks.json"
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -49,6 +94,9 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.TUNING_HISTORY_PATH,
             dashboard_server.TUNING_PRESETS_PATH,
             dashboard_server.TUNING_LOCKS_PATH,
+            dashboard_server.SHADER_TUNING_HISTORY_PATH,
+            dashboard_server.SHADER_TUNING_PRESETS_PATH,
+            dashboard_server.SHADER_TUNING_LOCKS_PATH,
         ) = self.original_tuning_paths
         self.tuning_store_dir.cleanup()
 
@@ -779,6 +827,127 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["appliedAdjustments"], [])
         self.assertEqual({item["reason"] for item in payload["skippedAdjustments"]}, {"locked", "missing_blendshape"})
         self.assertEqual(payload["undoDepth"], 0)
+
+    def test_shader_plan_validation_rejects_arbitrary_shader_property_names(self) -> None:
+        validation = dashboard_server.validate_shader_material_tuning_plan(
+            plan={
+                "type": "material_tuning_plan",
+                "version": "0.2",
+                "changes": [
+                    {
+                        "material_id": "mat_skin",
+                        "shader_property": "_Color",
+                        "semantic_property": "_Color",
+                        "after": "#FFFFFF",
+                    }
+                ],
+            },
+            inventory=make_shader_inventory(),
+        )
+
+        self.assertEqual(validation["validatedChanges"], [])
+        self.assertEqual(validation["skippedChanges"][0]["validation_status"], "skipped")
+        self.assertIn("Real shader property names", validation["skippedChanges"][0]["warning"])
+
+    def test_shader_plan_validation_clamps_and_skips_unsupported_targets(self) -> None:
+        validation = dashboard_server.validate_shader_material_tuning_plan(
+            plan={
+                "type": "material_tuning_plan",
+                "version": "0.2",
+                "changes": [
+                    {"material_id": "mat_skin", "semantic_property": "outline_width", "after": 9.0},
+                    {"material_id": "mat_unsupported", "semantic_property": "smoothness", "after": 0.5},
+                    {"material_id": "missing", "semantic_property": "smoothness", "after": 0.5},
+                ],
+            },
+            inventory=make_shader_inventory(),
+        )
+
+        self.assertEqual(validation["validatedChanges"][0]["after"], 0.25)
+        self.assertEqual(len(validation["skippedChanges"]), 2)
+        self.assertTrue(any("Unsupported shader family" in item["warning"] for item in validation["skippedChanges"]))
+        self.assertTrue(any("Unknown material_id" in item["warning"] for item in validation["skippedChanges"]))
+
+    def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
+        validation = dashboard_server.validate_shader_material_tuning_plan(
+            plan={
+                "type": "material_tuning_plan",
+                "version": "0.2",
+                "changes": [
+                    {"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.6},
+                    {"material_id": "mat_skin", "semantic_property": "base_color", "after": "#FFFFFF"},
+                ],
+            },
+            inventory=make_shader_inventory(),
+            locked_materials=set(),
+            locked_properties={"mat_skin::smoothness"},
+        )
+
+        self.assertEqual([item["semantic_property"] for item in validation["validatedChanges"]], ["base_color"])
+        self.assertEqual(validation["skippedChanges"][0]["warning"], "Semantic property is locked: smoothness")
+
+    @patch("dashboard_server.apply_shader_material_tuning_direct")
+    @patch("dashboard_server.scan_shader_materials_direct")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_shader_preset_apply_uses_saved_after_values(
+        self,
+        mock_load_settings,
+        mock_scan_shader_materials_direct,
+        mock_apply_shader_material_tuning_direct,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_scan_shader_materials_direct.return_value = make_shader_inventory()
+
+        def apply_side_effect(_settings, _avatar_path, changes):
+            self.assertEqual(changes[0]["after"], 0.8)
+            return {
+                "applied": [
+                    {
+                        "material_id": "mat_skin",
+                        "semantic_property": "smoothness",
+                        "before": 0.2,
+                        "after": 0.8,
+                    }
+                ],
+                "skipped": [],
+            }
+
+        mock_apply_shader_material_tuning_direct.side_effect = apply_side_effect
+        dashboard_server.save_tuning_store(
+            dashboard_server.SHADER_TUNING_PRESETS_PATH,
+            {
+                "type": "shader_tuning_presets",
+                "version": "0.2",
+                "presets": [
+                    {
+                        "id": "shader_preset_test",
+                        "name": "soft_skin",
+                        "avatar_path": "Scene/HeroAvatar",
+                        "apply_mode": "after_values",
+                        "changes": [
+                            {
+                                "material_id": "mat_skin",
+                                "material_name": "Face_Skin",
+                                "shader_family": "lilToon",
+                                "category": "skin",
+                                "semantic_property": "smoothness",
+                                "before": 0.2,
+                                "after": 0.8,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/shader/presets/shader_preset_test/apply",
+                json={"avatar": "Scene/HeroAvatar", "source_mode": "unity_live_export"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["appliedChanges"][0]["after"], 0.8)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")

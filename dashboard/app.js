@@ -86,6 +86,18 @@ const state = {
   tuningHistory: [],
   tuningPresets: [],
   lockedBlendshapes: [],
+  shaderInventory: null,
+  shaderMaterials: [],
+  shaderCategoryOverrides: {},
+  shaderPlan: null,
+  shaderPlanChanges: [],
+  shaderHistoryRecord: null,
+  shaderHistory: [],
+  shaderPresets: [],
+  lockedShaderMaterials: [],
+  lockedShaderProperties: [],
+  shaderReviewBeforePaths: [],
+  shaderReviewAfterPaths: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -256,6 +268,27 @@ function cacheRefs() {
     "float-count",
     "param-suggestions",
     "param-output",
+    "scan-shader-materials-btn",
+    "generate-shader-plan-btn",
+    "apply-shader-plan-btn",
+    "restore-shader-plan-btn",
+    "save-shader-preset-btn",
+    "open-shader-history-btn",
+    "open-shader-presets-btn",
+    "capture-shader-before-btn",
+    "capture-shader-after-btn",
+    "review-shader-vision-btn",
+    "shader-instruction-input",
+    "shader-material-count-chip",
+    "shader-materials-table",
+    "shader-plan-list",
+    "shader-history-panel",
+    "shader-history-count",
+    "shader-history-list",
+    "shader-preset-panel",
+    "shader-preset-count",
+    "shader-preset-list",
+    "shader-output",
     "vision-angle-tabs",
     "vision-multi-thumbs",
     "capture-screenshot-btn",
@@ -314,6 +347,17 @@ function bindEvents() {
   refs["optimize-params-btn"].addEventListener("click", () => runButtonTask("optimize-params-btn", "分析中...", optimizeParameters));
   refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
+  refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "Scanning...", scanShaderMaterials));
+  refs["generate-shader-plan-btn"].addEventListener("click", () => runButtonTask("generate-shader-plan-btn", "Generating...", generateShaderPlan));
+  refs["apply-shader-plan-btn"].addEventListener("click", () => runButtonTask("apply-shader-plan-btn", "Applying...", applyShaderPlan));
+  refs["restore-shader-plan-btn"].addEventListener("click", () => runButtonTask("restore-shader-plan-btn", "Restoring...", restoreShaderPlan));
+  refs["save-shader-preset-btn"].addEventListener("click", () => runButtonTask("save-shader-preset-btn", "Saving...", saveCurrentShaderPlanAsPreset));
+  refs["open-shader-history-btn"].addEventListener("click", () => toggleShaderPanel("history"));
+  refs["open-shader-presets-btn"].addEventListener("click", () => toggleShaderPanel("presets"));
+  refs["capture-shader-before-btn"].addEventListener("click", () => runButtonTask("capture-shader-before-btn", "Capturing...", () => captureShaderReviewImage("before")));
+  refs["capture-shader-after-btn"].addEventListener("click", () => runButtonTask("capture-shader-after-btn", "Capturing...", () => captureShaderReviewImage("after")));
+  refs["review-shader-vision-btn"].addEventListener("click", () => runButtonTask("review-shader-vision-btn", "Reviewing...", runShaderVisionReview));
+  refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
   refs["audit-vision-btn"].addEventListener("click", () => runButtonTask("audit-vision-btn", "分析中...", auditVision));
@@ -403,6 +447,9 @@ function applyBootstrap(payload) {
 
   updateModeVisibility();
   syncMockModeText();
+  loadShaderTuningData().catch((error) => {
+    refs["shader-output"].textContent = `Shader data load failed: ${error.message}`;
+  });
   loadTuningData().catch((error) => {
     refs["summary-output"].textContent = `历史/预设读取失败：${error.message}`;
   });
@@ -1945,6 +1992,440 @@ async function rollbackParameterOptimization() {
 
   state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
   refs["param-output"].textContent = prettyJson(payload.result || payload);
+}
+
+async function scanShaderMaterials() {
+  const payload = await postJson("/api/shader/materials/scan", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    category_overrides: state.shaderCategoryOverrides || {},
+  });
+  state.shaderInventory = payload.inventory || null;
+  state.shaderMaterials = payload.materials || [];
+  renderShaderMaterialInventory(payload.summary || {});
+  refs["shader-output"].textContent = prettyJson({
+    summary: payload.summary || {},
+    jsonPath: payload.jsonPath || "",
+  });
+}
+
+function renderShaderMaterialInventory(summary = {}) {
+  const materials = state.shaderMaterials || [];
+  refs["shader-material-count-chip"].textContent = `${materials.length} materials`;
+  if (!materials.length) {
+    refs["shader-materials-table"].innerHTML = '<div class="empty-state">No material inventory yet. Click Scan Materials.</div>';
+    return;
+  }
+
+  const rows = materials.map((item) => {
+    const id = item.material_id || "";
+    const category = state.shaderCategoryOverrides[id] || item.category || "unknown";
+    const locked = (state.lockedShaderMaterials || []).includes(id);
+    return `
+      <tr>
+        <td><code>${escapeHtml(item.item_path || item.renderer_path || "")}</code></td>
+        <td>${escapeHtml(item.renderer_name || "")}</td>
+        <td>${escapeHtml(item.mesh_name || "")}</td>
+        <td>${Number(item.slot_index ?? 0)}</td>
+        <td>${escapeHtml(item.material_name || "")}</td>
+        <td>${escapeHtml(item.shader_family || "Unsupported")}</td>
+        <td>
+          <select class="shader-category-select" data-material-id="${escapeHtml(id)}">
+            ${["skin", "eyes", "hair", "clothes", "accessory", "unknown"].map((option) => (
+              `<option value="${option}" ${option === category ? "selected" : ""}>${option}</option>`
+            )).join("")}
+          </select>
+        </td>
+        <td>
+          <label class="lock-toggle">
+            <input class="shader-material-lock-toggle" data-material-id="${escapeHtml(id)}" type="checkbox" ${locked ? "checked" : ""}>
+            <span>${locked ? "locked" : "open"}</span>
+          </label>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  refs["shader-materials-table"].innerHTML = `
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Object path</th>
+            <th>Renderer</th>
+            <th>Mesh</th>
+            <th>Slot</th>
+            <th>Material</th>
+            <th>Shader</th>
+            <th>Category</th>
+            <th>Lock</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="field-note">lilToon: ${Number(summary.lilToonCount || 0)}, Poiyomi: ${Number(summary.poiyomiCount || 0)}, Unsupported: ${Number(summary.unsupportedCount || 0)}</div>
+  `;
+}
+
+function onShaderMaterialCategoryChanged(event) {
+  const lockToggle = event.target.closest(".shader-material-lock-toggle");
+  if (lockToggle) {
+    setShaderMaterialLock(lockToggle.dataset.materialId || "", lockToggle.checked).catch((error) => {
+      refs["shader-output"].textContent = `Shader lock update failed: ${error.message}`;
+    });
+    return;
+  }
+
+  const select = event.target.closest(".shader-category-select");
+  if (!select) {
+    return;
+  }
+  const materialId = select.dataset.materialId || "";
+  if (!materialId) {
+    return;
+  }
+  state.shaderCategoryOverrides[materialId] = select.value;
+  const material = (state.shaderMaterials || []).find((item) => item.material_id === materialId);
+  if (material) {
+    material.category = select.value;
+  }
+}
+
+async function setShaderMaterialLock(materialId, locked) {
+  if (!materialId) {
+    return;
+  }
+  const set = new Set(state.lockedShaderMaterials || []);
+  if (locked) {
+    set.add(materialId);
+  } else {
+    set.delete(materialId);
+  }
+  const payload = await postJson("/api/shader/locks", {
+    avatar_path: state.selectedAvatarPath || "",
+    locked_materials: Array.from(set),
+    locked_properties: state.lockedShaderProperties || [],
+  });
+  state.lockedShaderMaterials = payload.lockedMaterials || [];
+  state.lockedShaderProperties = payload.lockedProperties || [];
+  renderShaderMaterialInventory(state.shaderInventory?.summary || {});
+}
+
+function buildShaderTuningRequest() {
+  flushReferencePathInputs();
+  const referencePayload = buildReferenceImagePayload();
+  return {
+    ...buildConnectionPayload(),
+    avatar: state.selectedAvatarPath || null,
+    avatar_path: state.selectedAvatarPath || null,
+    instruction: refs["shader-instruction-input"].value.trim() || refs["instruction-input"].value.trim() || null,
+    model: readSelectedModel() || null,
+    inventory: state.shaderInventory,
+    category_overrides: state.shaderCategoryOverrides || {},
+    locked_materials: state.lockedShaderMaterials || [],
+    locked_properties: state.lockedShaderProperties || [],
+    source_reference_image_paths: referencePayload.source.paths,
+    source_reference_image_data_urls: referencePayload.source.dataUrls,
+    target_reference_image_paths: referencePayload.target.paths,
+    target_reference_image_data_urls: referencePayload.target.dataUrls,
+    source_mode: refs["source-mode"].value,
+    export_json: refs["export-json"].value.trim() || null,
+    plan_json: refs["plan-json"].value.trim() || null,
+    mock_execute: refs["mock-execute"].checked,
+    save_artifacts: refs["save-artifacts"].checked,
+  };
+}
+
+async function generateShaderPlan() {
+  await ensureApiConfigSaved();
+  if (!state.shaderInventory) {
+    await scanShaderMaterials();
+  }
+  const payload = await postJson("/api/shader/plan", buildShaderTuningRequest());
+  state.shaderInventory = payload.inventory || state.shaderInventory;
+  state.shaderPlan = payload.plan || null;
+  state.shaderPlanChanges = payload.changePreview || [];
+  state.shaderHistoryRecord = payload.historyRecord || null;
+  state.lockedShaderMaterials = payload.lockedMaterials || state.lockedShaderMaterials || [];
+  state.lockedShaderProperties = payload.lockedProperties || state.lockedShaderProperties || [];
+  renderShaderPlanPreview(payload);
+  await loadShaderTuningData();
+  refs["shader-output"].textContent = prettyJson({
+    warnings: payload.warnings || [],
+    skipped: payload.skippedChanges || [],
+  });
+}
+
+async function applyShaderPlan() {
+  const changes = state.shaderPlanChanges || state.shaderPlan?.changes || [];
+  if (!changes.length) {
+    refs["shader-output"].textContent = "No valid shader plan changes to apply.";
+    return;
+  }
+
+  const payload = await postJson("/api/shader/apply", {
+    ...buildShaderTuningRequest(),
+    changes,
+    history_id: state.shaderHistoryRecord?.id || null,
+  });
+  refs["shader-output"].textContent = prettyJson({
+    applied: payload.appliedChanges || [],
+    skipped: payload.skippedChanges || [],
+    undoDepth: payload.undoDepth || 0,
+  });
+  await loadShaderTuningData();
+}
+
+async function restoreShaderPlan() {
+  const payload = await postJson("/api/shader/restore", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+  });
+  refs["shader-output"].textContent = prettyJson({
+    restored: payload.restoredChanges || [],
+    skipped: payload.skippedChanges || [],
+    undoDepth: payload.undoDepth || 0,
+  });
+}
+
+async function captureShaderReviewImage(kind) {
+  const payload = await postJson("/api/vision/capture", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+    width: 960,
+    height: 960,
+  });
+  renderScreenshot(payload.imageUrl);
+  const path = payload.imagePath || urlToArtifactPath(payload.imageUrl || "");
+  if (kind === "before") {
+    state.shaderReviewBeforePaths = [path];
+  } else {
+    state.shaderReviewAfterPaths = [path];
+  }
+  refs["shader-output"].textContent = `${kind === "before" ? "Before" : "After"} shader review screenshot captured: ${path}`;
+}
+
+async function runShaderVisionReview() {
+  const goal = refs["shader-instruction-input"].value.trim() || refs["instruction-input"].value.trim();
+  const payload = await postJson("/api/shader/vision-review", {
+    ...buildDashboardRequest(),
+    avatar_path: state.selectedAvatarPath || null,
+    goal,
+    before_image_paths: state.shaderReviewBeforePaths || [],
+    after_image_paths: state.shaderReviewAfterPaths || [],
+  });
+  const review = payload.review || {};
+  refs["shader-output"].textContent = prettyJson(review);
+}
+
+function renderShaderPlanPreview(payload) {
+  const changes = payload.changePreview || [];
+  const skipped = payload.skippedChanges || [];
+  if (!changes.length && !skipped.length) {
+    refs["shader-plan-list"].classList.add("empty-state");
+    refs["shader-plan-list"].innerHTML = "No valid shader material changes were generated.";
+    return;
+  }
+
+  refs["shader-plan-list"].classList.remove("empty-state");
+  refs["shader-plan-list"].innerHTML = `
+    ${changes.map((item) => `
+      <article class="change-row change-verified">
+        <div class="change-head">
+          <strong>${escapeHtml(item.material_name || item.material_id || "")}</strong>
+          <span>${escapeHtml(item.semantic_property || "")}</span>
+        </div>
+        <div class="blendshape-subline">${escapeHtml(item.category || "unknown")} / ${escapeHtml(item.shader_family || "")}</div>
+        <p>${escapeHtml(String(item.before ?? ""))} -> ${escapeHtml(String(item.after ?? ""))}</p>
+        <p>${escapeHtml(item.reason || "")}</p>
+        <div class="change-meta">
+          <span class="meta-chip">valid</span>
+          <span class="meta-chip">confidence ${Number(item.confidence ?? 0).toFixed(2)}</span>
+        </div>
+      </article>
+    `).join("")}
+    ${skipped.map((item) => `
+      <article class="change-row change-unverified">
+        <div class="change-head">
+          <strong>${escapeHtml(item.material_name || item.material_id || "Skipped")}</strong>
+          <span>${escapeHtml(item.semantic_property || "")}</span>
+        </div>
+        <p>${escapeHtml(item.warning || "Skipped by validation")}</p>
+      </article>
+    `).join("")}
+  `;
+}
+
+async function loadShaderTuningData() {
+  const query = state.selectedAvatarPath ? `?avatar_path=${encodeURIComponent(state.selectedAvatarPath)}` : "";
+  const [historyPayload, presetPayload, lockPayload] = await Promise.all([
+    getJson(`/api/shader/history${query}`),
+    getJson(`/api/shader/presets${query}`),
+    getJson(`/api/shader/locks${query}`),
+  ]);
+  state.shaderHistory = historyPayload.records || [];
+  state.shaderPresets = presetPayload.presets || [];
+  state.lockedShaderMaterials = lockPayload.lockedMaterials || [];
+  state.lockedShaderProperties = lockPayload.lockedProperties || [];
+  renderShaderHistory();
+  renderShaderPresets();
+}
+
+function toggleShaderPanel(kind) {
+  const panelId = kind === "history" ? "shader-history-panel" : "shader-preset-panel";
+  refs[panelId].classList.toggle("hidden");
+  loadShaderTuningData().catch((error) => {
+    refs["shader-output"].textContent = `Shader history/preset load failed: ${error.message}`;
+  });
+}
+
+function renderShaderHistory() {
+  const records = [...(state.shaderHistory || [])].reverse();
+  refs["shader-history-count"].textContent = `${records.length}`;
+  if (!records.length) {
+    refs["shader-history-list"].innerHTML = '<div class="empty-state">No shader tuning history yet.</div>';
+    return;
+  }
+
+  refs["shader-history-list"].innerHTML = records.map((record) => {
+    const changes = Array.isArray(record.changes) ? record.changes : [];
+    return `
+      <article class="tuning-card">
+        <div class="change-head">
+          <strong>${escapeHtml(formatTimestamp(record.created_at) || record.id)}</strong>
+          <span>${changes.length} changes / ${record.applied ? "applied" : "review"}</span>
+        </div>
+        <p>${escapeHtml(record.user_instruction || "")}</p>
+        <div class="change-meta">
+          <span class="meta-chip">${escapeHtml(record.provider || "")}</span>
+          <span class="meta-chip">${escapeHtml(record.model || "")}</span>
+        </div>
+        <div class="button-row compact-row">
+          <button class="button button-ghost" data-shader-history-action="reapply" data-history-id="${escapeHtml(record.id)}">Reapply</button>
+          <button class="button button-ghost" data-shader-history-action="preset" data-history-id="${escapeHtml(record.id)}">Save preset</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  refs["shader-history-list"].querySelectorAll("[data-shader-history-action]").forEach((button) => {
+    button.addEventListener("click", () => runInlineButtonTask(button, "Working...", () => handleShaderHistoryAction(button)));
+  });
+}
+
+function renderShaderPresets() {
+  const presets = [...(state.shaderPresets || [])].reverse();
+  refs["shader-preset-count"].textContent = `${presets.length}`;
+  if (!presets.length) {
+    refs["shader-preset-list"].innerHTML = '<div class="empty-state">No shader presets saved yet.</div>';
+    return;
+  }
+
+  refs["shader-preset-list"].innerHTML = presets.map((preset) => {
+    const changes = Array.isArray(preset.changes) ? preset.changes : [];
+    return `
+      <article class="tuning-card">
+        <div class="change-head">
+          <strong>${escapeHtml(preset.name || preset.id)}</strong>
+          <span>${changes.length} changes</span>
+        </div>
+        <p>${escapeHtml(preset.description || preset.user_instruction || "Saved shader material after-values")}</p>
+        <div class="button-row compact-row">
+          <button class="button button-accent" data-shader-preset-action="apply" data-preset-id="${escapeHtml(preset.id)}">Apply</button>
+          <button class="button button-ghost" data-shader-preset-action="rename" data-preset-id="${escapeHtml(preset.id)}">Rename</button>
+          <button class="button button-ghost" data-shader-preset-action="duplicate" data-preset-id="${escapeHtml(preset.id)}">Duplicate</button>
+          <button class="button button-ghost danger-button" data-shader-preset-action="delete" data-preset-id="${escapeHtml(preset.id)}">Delete</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  refs["shader-preset-list"].querySelectorAll("[data-shader-preset-action]").forEach((button) => {
+    button.addEventListener("click", () => runInlineButtonTask(button, "Working...", () => handleShaderPresetAction(button)));
+  });
+}
+
+async function handleShaderHistoryAction(button) {
+  const id = button.dataset.historyId;
+  if (button.dataset.shaderHistoryAction === "reapply") {
+    const payload = await postJson(`/api/shader/history/${encodeURIComponent(id)}/reapply`, buildShaderTuningRequest());
+    refs["shader-output"].textContent = prettyJson({
+      applied: payload.appliedChanges || [],
+      skipped: payload.skippedChanges || [],
+    });
+    await loadShaderTuningData();
+    return;
+  }
+  if (button.dataset.shaderHistoryAction === "preset") {
+    await saveShaderHistoryAsPreset(id);
+  }
+}
+
+async function handleShaderPresetAction(button) {
+  const id = button.dataset.presetId;
+  const action = button.dataset.shaderPresetAction;
+  if (action === "apply") {
+    const payload = await postJson(`/api/shader/presets/${encodeURIComponent(id)}/apply`, buildShaderTuningRequest());
+    refs["shader-output"].textContent = prettyJson({
+      applied: payload.appliedChanges || [],
+      skipped: payload.skippedChanges || [],
+    });
+  } else if (action === "rename") {
+    const preset = (state.shaderPresets || []).find((item) => item.id === id);
+    const name = window.prompt("Shader preset name", preset?.name || "");
+    if (name && name.trim()) {
+      await postJson(`/api/shader/presets/${encodeURIComponent(id)}/rename`, { name: name.trim() });
+    }
+  } else if (action === "duplicate") {
+    const preset = (state.shaderPresets || []).find((item) => item.id === id);
+    const name = window.prompt("Duplicated shader preset name", `${preset?.name || "shader_preset"}_copy`);
+    await postJson(`/api/shader/presets/${encodeURIComponent(id)}/duplicate`, { name: name || null });
+  } else if (action === "delete") {
+    if (window.confirm("Delete this shader preset?")) {
+      await postJson(`/api/shader/presets/${encodeURIComponent(id)}/delete`);
+    }
+  }
+  await loadShaderTuningData();
+}
+
+async function saveCurrentShaderPlanAsPreset() {
+  const historyId = state.shaderHistoryRecord?.id;
+  if (!historyId) {
+    refs["shader-output"].textContent = "No shader history record is available yet. Generate a shader plan first.";
+    return;
+  }
+  await saveShaderHistoryAsPreset(historyId);
+}
+
+async function saveShaderHistoryAsPreset(historyId) {
+  const name = window.prompt("Shader preset name", suggestShaderPresetName());
+  if (!name || !name.trim()) {
+    return;
+  }
+  const description = window.prompt("Description (optional)", "");
+  const payload = await postJson("/api/shader/presets", {
+    history_id: historyId,
+    name: name.trim(),
+    tags: [],
+    description: description || "",
+  });
+  state.shaderPresets = payload.presets || state.shaderPresets;
+  refs["shader-preset-panel"].classList.remove("hidden");
+  renderShaderPresets();
+  refs["shader-output"].textContent = `Saved shader preset: ${payload.preset?.name || name.trim()}`;
+}
+
+function suggestShaderPresetName() {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
+  return `shader_tuning_${stamp}`;
 }
 
 async function captureScreenshot() {
