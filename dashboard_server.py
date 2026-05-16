@@ -228,6 +228,14 @@ class ShaderMaterialPlanRequest(DashboardRequest):
     locked_properties: list[str] = Field(default_factory=list)
 
 
+class ShaderMaterialApplyRequest(ShaderMaterialPlanRequest):
+    changes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ShaderMaterialRestoreRequest(AvatarScopedConnectionRequest):
+    pass
+
+
 class ClothingToggleRequest(ConnectionRequest):
     object_path: str
     active: bool
@@ -297,6 +305,7 @@ class DashboardRuntimeState:
     current_avatar_path: str = ""
     scene_avatars: list[dict[str, Any]] = field(default_factory=list)
     manual_undo_stack: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
+    shader_undo_stack: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
     latest_parameter_snapshot_path: str = ""
     latest_screenshot_path: str = ""
     latest_screenshot_url: str = ""
@@ -784,6 +793,16 @@ async def scan_shader_materials(request: ShaderMaterialScanRequest) -> dict[str,
 @app.post("/api/shader/plan")
 async def generate_shader_material_plan(request: ShaderMaterialPlanRequest) -> dict[str, Any]:
     return await asyncio.to_thread(generate_shader_material_plan_sync, request)
+
+
+@app.post("/api/shader/apply")
+async def apply_shader_material_plan(request: ShaderMaterialApplyRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(apply_shader_material_plan_sync, request)
+
+
+@app.post("/api/shader/restore")
+async def restore_shader_material_plan(request: ShaderMaterialRestoreRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(restore_shader_material_plan_sync, request)
 
 
 @app.post("/api/vision/capture")
@@ -1670,6 +1689,105 @@ def generate_shader_material_plan_sync(request: ShaderMaterialPlanRequest) -> di
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "shader", "Failed to generate shader tuning plan.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def apply_shader_material_plan_sync(request: ShaderMaterialApplyRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or request.avatar or DASHBOARD_RUNTIME.current_avatar_path
+        if not request.changes:
+            raise RuntimeError("No shader material changes were provided.")
+
+        inventory = copy.deepcopy(request.inventory) if request.inventory else scan_shader_materials_direct(settings, avatar_path)
+        inventory = apply_shader_category_overrides(inventory, request.category_overrides)
+        validation = validate_shader_material_tuning_plan(
+            plan={"type": "material_tuning_plan", "version": "0.2", "changes": request.changes, "warnings": []},
+            inventory=inventory,
+            locked_materials=set(request.locked_materials or []),
+            locked_properties=set(request.locked_properties or []),
+        )
+        changes = validation["validatedChanges"]
+        if not changes:
+            raise RuntimeError("No valid shader material changes remained after validation.")
+
+        result = apply_shader_material_tuning_direct(settings, avatar_path, changes)
+        applied = list(result.get("applied") or [])
+        skipped = [*validation["skippedChanges"], *list(result.get("skipped") or [])]
+        backup_changes = build_shader_restore_changes(applied)
+        if backup_changes:
+            undo_stack = DASHBOARD_RUNTIME.shader_undo_stack.setdefault(avatar_path or "", [])
+            undo_stack.append(backup_changes)
+
+        emit_log(
+            "success",
+            "shader",
+            "Shader material tuning applied.",
+            {"avatarPath": avatar_path, "appliedCount": len(applied), "skippedCount": len(skipped)},
+        )
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "result": result,
+            "appliedChanges": applied,
+            "skippedChanges": skipped,
+            "warnings": validation["warnings"],
+            "undoDepth": len(DASHBOARD_RUNTIME.shader_undo_stack.get(avatar_path or "", [])),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "shader", "Failed to apply shader material tuning.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def restore_shader_material_plan_sync(request: ShaderMaterialRestoreRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        undo_stack = DASHBOARD_RUNTIME.shader_undo_stack.setdefault(avatar_path or "", [])
+        if not undo_stack:
+            raise RuntimeError("No shader material restore point is available.")
+
+        restore_changes = undo_stack.pop()
+        result = apply_shader_material_tuning_direct(settings, avatar_path, restore_changes)
+        applied = list(result.get("applied") or [])
+        skipped = list(result.get("skipped") or [])
+        emit_log(
+            "success",
+            "shader",
+            "Shader material tuning restored.",
+            {"avatarPath": avatar_path, "restoredCount": len(applied), "skippedCount": len(skipped)},
+        )
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "result": result,
+            "restoredChanges": applied,
+            "skippedChanges": skipped,
+            "undoDepth": len(undo_stack),
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "shader", "Failed to restore shader material tuning.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def build_shader_restore_changes(applied_changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    restore: list[dict[str, Any]] = []
+    for change in applied_changes:
+        if not isinstance(change, dict):
+            continue
+        material_id = str(change.get("material_id") or "")
+        semantic = str(change.get("semantic_property") or "")
+        if not material_id or not semantic or "before" not in change:
+            continue
+        restore.append(
+            {
+                "material_id": material_id,
+                "material_name": change.get("material_name") or "",
+                "semantic_property": semantic,
+                "after": change.get("before"),
+                "reason": "Restore previous material value.",
+            }
+        )
+    return restore
 
 
 def apply_shader_category_overrides(inventory: dict[str, Any], overrides: dict[str, str] | None) -> dict[str, Any]:
@@ -2717,6 +2835,25 @@ def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) ->
 
     payload = extract_tool_result_payload(result)
     return ensure_dict_payload(payload, "shader material scan")
+
+
+def apply_shader_material_tuning_direct(
+    settings: Settings,
+    avatar_path: str | None,
+    changes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = extract_tool_result_payload(
+        invoke_unity_mcp(
+            settings,
+            "vrc_apply_material_tuning",
+            {
+                "avatarPath": avatar_path or "",
+                "changes": changes,
+                "saveAssets": True,
+            },
+        )
+    )
+    return ensure_dict_payload(payload, "shader material apply")
 
 
 def rollback_parameters_direct(

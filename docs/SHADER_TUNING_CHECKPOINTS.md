@@ -108,3 +108,47 @@ Next:
 
 - Checkpoint 4 should add safe material apply and restore using adapter validation.
 - Apply must save pre-apply values and must not touch shader source, textures, render queue, stencil, culling, blend mode, mesh data, or shader assignment.
+
+## Checkpoint 4: Apply, restore, and backup
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Added Unity MCP tool `vrc_apply_material_tuning`.
+- The tool resolves current scene materials by stable material id before each write.
+- The tool applies only adapter-validated semantic material properties.
+- Missing material ids, unsupported shader families, missing properties, and invalid values are skipped with warnings.
+- The backend revalidates requested changes before calling Unity.
+- The backend stores pre-apply values in an in-memory undo stack.
+- Added `POST /api/shader/apply`.
+- Added `POST /api/shader/restore`.
+- Restore calls the same Unity apply tool with saved previous values.
+- Dashboard now has Apply Shader Plan and Restore Shader buttons.
+
+Safety boundary:
+
+- No shader source editing.
+- No texture editing.
+- No mesh editing.
+- No shader replacement.
+- No render queue, stencil, culling, or blend mode changes.
+
+Changed files:
+
+- `Assets/VRCAutoRig/Editor/MaterialTuningApplier.cs`
+- `dashboard_server.py`
+- `dashboard/index.html`
+- `dashboard/app.js`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
+- `node --check dashboard/app.js`
+- `git diff --check`
+
+Next:
+
+- Checkpoint 5 should persist shader history, presets, and locks.
+- Preset replay must apply saved after values, not deltas.

@@ -263,6 +263,8 @@ function cacheRefs() {
     "param-output",
     "scan-shader-materials-btn",
     "generate-shader-plan-btn",
+    "apply-shader-plan-btn",
+    "restore-shader-plan-btn",
     "shader-instruction-input",
     "shader-material-count-chip",
     "shader-materials-table",
@@ -328,6 +330,8 @@ function bindEvents() {
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
   refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "Scanning...", scanShaderMaterials));
   refs["generate-shader-plan-btn"].addEventListener("click", () => runButtonTask("generate-shader-plan-btn", "Generating...", generateShaderPlan));
+  refs["apply-shader-plan-btn"].addEventListener("click", () => runButtonTask("apply-shader-plan-btn", "Applying...", applyShaderPlan));
+  refs["restore-shader-plan-btn"].addEventListener("click", () => runButtonTask("restore-shader-plan-btn", "Restoring...", restoreShaderPlan));
   refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
@@ -2080,6 +2084,36 @@ async function generateShaderPlan() {
   refs["shader-output"].textContent = prettyJson({
     warnings: payload.warnings || [],
     skipped: payload.skippedChanges || [],
+  });
+}
+
+async function applyShaderPlan() {
+  const changes = state.shaderPlanChanges || state.shaderPlan?.changes || [];
+  if (!changes.length) {
+    refs["shader-output"].textContent = "No valid shader plan changes to apply.";
+    return;
+  }
+
+  const payload = await postJson("/api/shader/apply", {
+    ...buildShaderTuningRequest(),
+    changes,
+  });
+  refs["shader-output"].textContent = prettyJson({
+    applied: payload.appliedChanges || [],
+    skipped: payload.skippedChanges || [],
+    undoDepth: payload.undoDepth || 0,
+  });
+}
+
+async function restoreShaderPlan() {
+  const payload = await postJson("/api/shader/restore", {
+    ...buildConnectionPayload(),
+    avatar_path: state.selectedAvatarPath || null,
+  });
+  refs["shader-output"].textContent = prettyJson({
+    restored: payload.restoredChanges || [],
+    skipped: payload.skippedChanges || [],
+    undoDepth: payload.undoDepth || 0,
   });
 }
 
