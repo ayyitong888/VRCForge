@@ -37,3 +37,32 @@ Next:
 
 - Checkpoint 2 should add `ShaderAdapterRegistry`, `LilToonShaderAdapter`, and `PoiyomiShaderAdapter`.
 - Scanner should then populate `supported_properties` by reading adapter-supported semantic properties.
+
+## Checkpoint 2: Shader adapter system
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Added `ShaderAdapterRegistry` and `IShaderMaterialAdapter`.
+- Added `LilToonShaderAdapter` and `PoiyomiShaderAdapter`.
+- Adapters expose only semantic properties and keep real shader property aliases internal.
+- Adapter reads always call `Material.HasProperty` before reading a real material property.
+- Adapter write helpers validate semantic property support, value type, and clamp ranges, but are not wired to any write endpoint yet.
+- Updated `vrc_scan_avatar_materials` so each supported lilToon/Poiyomi material includes `supported_properties`.
+- Unsupported shaders remain visible with an empty `supported_properties` object.
+
+Changed files:
+
+- `Assets/VRCAutoRig/Editor/ShaderMaterialAdapters.cs`
+- `Assets/VRCAutoRig/Editor/ShaderMaterialScanner.cs`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `git diff --check`
+
+Next:
+
+- Checkpoint 3 should add backend AI material plan generation and validation.
+- The validation layer should reject arbitrary shader property names and only accept adapter semantic properties.

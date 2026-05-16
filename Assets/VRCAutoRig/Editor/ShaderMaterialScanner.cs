@@ -100,7 +100,8 @@ namespace VRCAutoRig.Editor
 
                         var shaderName = material.shader != null ? material.shader.name : "";
                         var materialName = material.name ?? "";
-                        var shaderFamily = DetectShaderFamily(shaderName);
+                        var adapter = ShaderAdapterRegistry.GetAdapter(material);
+                        var shaderFamily = adapter != null ? adapter.ShaderFamily : "Unsupported";
                         var category = DetectMaterialCategory(rendererPath, renderer.name, meshName, materialName);
                         var materialId = StableId(
                             "mat",
@@ -122,7 +123,9 @@ namespace VRCAutoRig.Editor
                             shader_family = shaderFamily,
                             category = category,
                             shared_material_key = $"{materialName}|{shaderName}",
-                            supported_properties = new Dictionary<string, MaterialPropertyValue>()
+                            supported_properties = adapter != null
+                                ? adapter.ReadSupportedProperties(material)
+                                : new Dictionary<string, MaterialPropertyValue>()
                         });
                     }
                 }
@@ -263,22 +266,6 @@ namespace VRCAutoRig.Editor
 
             var filter = renderer.GetComponent<MeshFilter>();
             return filter != null && filter.sharedMesh != null ? filter.sharedMesh.name : "";
-        }
-
-        private static string DetectShaderFamily(string shaderName)
-        {
-            var lowered = (shaderName ?? "").ToLowerInvariant();
-            if (lowered.Contains("liltoon") || lowered.Contains("lil/toon"))
-            {
-                return "lilToon";
-            }
-
-            if (lowered.Contains("poiyomi"))
-            {
-                return "Poiyomi";
-            }
-
-            return "Unsupported";
         }
 
         private static string DetectMaterialCategory(params string[] values)
