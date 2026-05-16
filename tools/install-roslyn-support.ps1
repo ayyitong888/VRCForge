@@ -103,4 +103,5 @@ if ($missing.Count -gt 0) {
 }
 
 Write-Host "Installed Roslyn fallback DLLs into: $targetFolder"
-Write-Host "No global USE_ROSLYN define is required; VRCAutoRig loads these DLLs at runtime."
+Write-Host "Enable Unity scripting define symbol VRCFORGE_ENABLE_ROSLYN to compile and register the legacy vrc_execute_roslyn tool."
+Write-Host "No global USE_ROSLYN define is used; VRCForge only enables this fallback through VRCFORGE_ENABLE_ROSLYN."

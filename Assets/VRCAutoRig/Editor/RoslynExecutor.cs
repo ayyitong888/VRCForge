@@ -1,3 +1,4 @@
+#if VRCFORGE_ENABLE_ROSLYN
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -619,3 +620,4 @@ namespace VRCAutoRig.Editor
         }
     }
 }
+#endif
