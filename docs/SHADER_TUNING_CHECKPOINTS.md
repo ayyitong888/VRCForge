@@ -152,3 +152,39 @@ Next:
 
 - Checkpoint 5 should persist shader history, presets, and locks.
 - Preset replay must apply saved after values, not deltas.
+
+## Checkpoint 5: Shader history, presets, and locks
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Added ignored runtime stores:
+  - `artifacts/dashboard/shader_tuning_history.json`
+  - `artifacts/dashboard/shader_tuning_presets.json`
+  - `artifacts/dashboard/shader_tuning_locks.json`
+- Shader plan generation now saves a history record automatically.
+- History records include instruction, provider/model, reference image count, changes, warnings, visual analysis, apply status, and lock context.
+- Added shader history reapply endpoint.
+- Added shader preset create, apply, rename, duplicate, and delete endpoints.
+- Preset/history replay applies saved `after` values, not repeated deltas.
+- Added shader lock store and lock endpoint.
+- Dashboard can open shader history, open shader presets, save the current shader plan as a preset, reapply history, apply presets, and lock materials from the inventory table.
+
+Changed files:
+
+- `dashboard_server.py`
+- `dashboard/index.html`
+- `dashboard/app.js`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
+- `node --check dashboard/app.js`
+- `git diff --check`
+
+Next:
+
+- Checkpoint 6 should add optional post-apply Vision review.
+- Vision review must compare screenshots and remain advisory only.

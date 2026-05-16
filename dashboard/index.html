@@ -446,10 +446,27 @@
             <button id="generate-shader-plan-btn" class="button button-ghost">Generate Shader Plan</button>
             <button id="apply-shader-plan-btn" class="button button-accent">Apply Shader Plan</button>
             <button id="restore-shader-plan-btn" class="button button-ghost">Restore Shader</button>
+            <button id="save-shader-preset-btn" class="button button-ghost">Save Shader Preset</button>
+            <button id="open-shader-history-btn" class="button button-ghost">Open Shader History</button>
+            <button id="open-shader-presets-btn" class="button button-ghost">Open Shader Presets</button>
           </div>
 
           <div id="shader-materials-table" class="stack-list empty-state">No material inventory yet. Click Scan Materials.</div>
           <div id="shader-plan-list" class="change-list empty-state">No shader tuning plan yet.</div>
+          <div id="shader-history-panel" class="change-panel tuning-panel hidden">
+            <div class="inline-status spread">
+              <span class="inline-label">Shader History</span>
+              <strong id="shader-history-count">0</strong>
+            </div>
+            <div id="shader-history-list" class="tuning-list"></div>
+          </div>
+          <div id="shader-preset-panel" class="change-panel tuning-panel hidden">
+            <div class="inline-status spread">
+              <span class="inline-label">Shader Presets</span>
+              <strong id="shader-preset-count">0</strong>
+            </div>
+            <div id="shader-preset-list" class="tuning-list"></div>
+          </div>
           <pre id="shader-output" class="console compact"></pre>
         </section>
 
