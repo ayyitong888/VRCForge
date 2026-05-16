@@ -994,6 +994,117 @@ def create_blendshape_plan(
         ) from exc
 
 
+def create_material_tuning_plan(
+    settings: Settings,
+    material_inventory: dict[str, Any],
+    instruction: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+    reference_image_labels: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
+        provider_name = provider_display_name(settings.llm_provider)
+        raise RuntimeError(
+            f"{provider_name} API key is empty. Save a provider config before generating a shader tuning plan."
+        )
+
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
+    prompt = build_material_tuning_prompt(
+        material_inventory=material_inventory,
+        instruction=instruction,
+        has_reference_image=bool(image_paths),
+        reference_image_count=len(image_paths),
+        reference_image_labels=reference_image_labels,
+    )
+    raw_response_text = request_llm_plan(settings, prompt, reference_image_paths=image_paths)
+    raw_json = extract_json_block(raw_response_text)
+    if not raw_json:
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned an empty response while generating the material tuning plan."
+        )
+
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"{provider_display_name(settings.llm_provider)} returned invalid material tuning JSON:\n{raw_response_text}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Material tuning response must be a JSON object.")
+
+    payload.setdefault("type", "vision_assisted_material_tuning_plan" if image_paths else "material_tuning_plan")
+    payload.setdefault("version", "0.2")
+    payload.setdefault("summary", "")
+    payload.setdefault("warnings", [])
+    payload.setdefault("changes", [])
+    return payload
+
+
+def build_material_tuning_prompt(
+    material_inventory: dict[str, Any],
+    instruction: str,
+    has_reference_image: bool = False,
+    reference_image_count: int = 0,
+    reference_image_labels: Sequence[str] | None = None,
+) -> str:
+    schema = {
+        "type": "material_tuning_plan",
+        "version": "0.2",
+        "summary": "Make skin softer and eyes glossier.",
+        "visual_analysis": {
+            "summary": "Only include in Vision-assisted mode.",
+            "detected_issues": ["skin shadow is too harsh"],
+        },
+        "changes": [
+            {
+                "material_id": "mat_001",
+                "material_name": "Face_Skin",
+                "shader_family": "lilToon",
+                "category": "skin",
+                "semantic_property": "shade_color",
+                "before": "#D18A7AFF",
+                "after": "#E2A295FF",
+                "reason": "Soften skin shadow.",
+                "confidence": 0.9,
+            }
+        ],
+        "warnings": ["Only whitelisted semantic material properties will be applied."],
+    }
+
+    image_note = ""
+    if has_reference_image:
+        labels = [str(label) for label in (reference_image_labels or []) if str(label).strip()]
+        label_text = "\n".join(f"- Image {index + 1}: {label}" for index, label in enumerate(labels))
+        if not label_text:
+            label_text = f"- {reference_image_count or 1} reference image(s) attached."
+        image_note = (
+            f"{reference_image_count or 1} image(s) are attached in this same request.\n"
+            f"{label_text}\n"
+            "Use source/current images as the current look and target/reference images as the desired style. "
+            "Only translate visible material style cues into editable semantic material parameters.\n\n"
+        )
+
+    return (
+        "You are a VRChat avatar material tuning assistant.\n"
+        "Task: use the safe material inventory snapshot and the user's instruction to return a JSON-only material tuning plan.\n"
+        "Rules:\n"
+        "1. Output JSON only. Do not output Markdown.\n"
+        "2. Only target material_id values that exist in the inventory.\n"
+        "3. Only target shader_family values lilToon or Poiyomi. Unsupported shaders must not be edited.\n"
+        "4. Only use semantic_property values listed inside each material's supported_properties object.\n"
+        "5. Do not invent real shader property names such as _Color or _Smoothness. Use semantic properties only.\n"
+        "6. Do not propose texture edits, shader replacement, render queue changes, stencil changes, culling changes, blend mode changes, or mesh edits.\n"
+        "7. Prefer small conservative changes. Usually 2 to 10 edits is enough.\n"
+        "8. For color values, use #RRGGBB or #RRGGBBAA strings. For numeric values, use floats in the supported semantic range.\n"
+        "9. If no safe edit is available, return an empty changes array and explain why in warnings.\n\n"
+        f"{image_note}"
+        f"Output JSON shape example: {json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"User instruction, authoritative: {instruction}\n\n"
+        f"Safe material inventory snapshot:\n{json.dumps(material_inventory, ensure_ascii=False, indent=2)}"
+    )
+
+
 def filter_plan_by_instruction_relevance(plan: BlendshapePlan, instruction: str) -> BlendshapePlan:
     allowed_categories = infer_instruction_categories(instruction)
     if not allowed_categories:

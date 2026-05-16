@@ -66,3 +66,45 @@ Next:
 
 - Checkpoint 3 should add backend AI material plan generation and validation.
 - The validation layer should reject arbitrary shader property names and only accept adapter semantic properties.
+
+## Checkpoint 3: AI shader plan generation and validation
+
+Status: completed locally on `feature/shader-material-tuning-mvp`.
+
+Implemented:
+
+- Added `create_material_tuning_plan(...)` in the Python agent layer.
+- Reused the existing provider/model request path for Google AI Studio, OpenAI-compatible providers, Anthropic, Ollama-compatible endpoints, and Google Vertex AI.
+- Reused the existing source/target reference image pipeline for Vision-assisted material planning.
+- Added material tuning prompt rules requiring JSON-only output and semantic properties only.
+- Added dashboard endpoint `POST /api/shader/plan`.
+- Added backend validation for:
+  - known `material_id`
+  - supported shader family
+  - semantic property whitelist
+  - real property availability through `supported_properties`
+  - locked material/property placeholders
+  - color and numeric value type validation
+  - safe numeric clamping
+  - rejection of arbitrary real shader property names
+- Added dashboard shader instruction input, Generate Shader Plan button, and reviewable plan preview.
+- This checkpoint still performs no material writes.
+
+Changed files:
+
+- `vrchat_blendshape_agent.py`
+- `dashboard_server.py`
+- `dashboard/index.html`
+- `dashboard/app.js`
+- `docs/SHADER_TUNING_CHECKPOINTS.md`
+
+Validation:
+
+- `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
+- `node --check dashboard/app.js`
+- `git diff --check`
+
+Next:
+
+- Checkpoint 4 should add safe material apply and restore using adapter validation.
+- Apply must save pre-apply values and must not touch shader source, textures, render queue, stencil, culling, blend mode, mesh data, or shader assignment.

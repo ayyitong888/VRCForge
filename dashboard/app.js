@@ -89,6 +89,8 @@ const state = {
   shaderInventory: null,
   shaderMaterials: [],
   shaderCategoryOverrides: {},
+  shaderPlan: null,
+  shaderPlanChanges: [],
   latestParameterSnapshotPath: "",
   latestScreenshotUrl: "",
   multiScreenshots: [],
@@ -260,8 +262,11 @@ function cacheRefs() {
     "param-suggestions",
     "param-output",
     "scan-shader-materials-btn",
+    "generate-shader-plan-btn",
+    "shader-instruction-input",
     "shader-material-count-chip",
     "shader-materials-table",
+    "shader-plan-list",
     "shader-output",
     "vision-angle-tabs",
     "vision-multi-thumbs",
@@ -322,6 +327,7 @@ function bindEvents() {
   refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
   refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "Scanning...", scanShaderMaterials));
+  refs["generate-shader-plan-btn"].addEventListener("click", () => runButtonTask("generate-shader-plan-btn", "Generating...", generateShaderPlan));
   refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
@@ -2036,6 +2042,83 @@ function onShaderMaterialCategoryChanged(event) {
   if (material) {
     material.category = select.value;
   }
+}
+
+function buildShaderTuningRequest() {
+  flushReferencePathInputs();
+  const referencePayload = buildReferenceImagePayload();
+  return {
+    ...buildConnectionPayload(),
+    avatar: state.selectedAvatarPath || null,
+    avatar_path: state.selectedAvatarPath || null,
+    instruction: refs["shader-instruction-input"].value.trim() || refs["instruction-input"].value.trim() || null,
+    model: readSelectedModel() || null,
+    inventory: state.shaderInventory,
+    category_overrides: state.shaderCategoryOverrides || {},
+    source_reference_image_paths: referencePayload.source.paths,
+    source_reference_image_data_urls: referencePayload.source.dataUrls,
+    target_reference_image_paths: referencePayload.target.paths,
+    target_reference_image_data_urls: referencePayload.target.dataUrls,
+    source_mode: refs["source-mode"].value,
+    export_json: refs["export-json"].value.trim() || null,
+    plan_json: refs["plan-json"].value.trim() || null,
+    mock_execute: refs["mock-execute"].checked,
+    save_artifacts: refs["save-artifacts"].checked,
+  };
+}
+
+async function generateShaderPlan() {
+  await ensureApiConfigSaved();
+  if (!state.shaderInventory) {
+    await scanShaderMaterials();
+  }
+  const payload = await postJson("/api/shader/plan", buildShaderTuningRequest());
+  state.shaderInventory = payload.inventory || state.shaderInventory;
+  state.shaderPlan = payload.plan || null;
+  state.shaderPlanChanges = payload.changePreview || [];
+  renderShaderPlanPreview(payload);
+  refs["shader-output"].textContent = prettyJson({
+    warnings: payload.warnings || [],
+    skipped: payload.skippedChanges || [],
+  });
+}
+
+function renderShaderPlanPreview(payload) {
+  const changes = payload.changePreview || [];
+  const skipped = payload.skippedChanges || [];
+  if (!changes.length && !skipped.length) {
+    refs["shader-plan-list"].classList.add("empty-state");
+    refs["shader-plan-list"].innerHTML = "No valid shader material changes were generated.";
+    return;
+  }
+
+  refs["shader-plan-list"].classList.remove("empty-state");
+  refs["shader-plan-list"].innerHTML = `
+    ${changes.map((item) => `
+      <article class="change-row change-verified">
+        <div class="change-head">
+          <strong>${escapeHtml(item.material_name || item.material_id || "")}</strong>
+          <span>${escapeHtml(item.semantic_property || "")}</span>
+        </div>
+        <div class="blendshape-subline">${escapeHtml(item.category || "unknown")} / ${escapeHtml(item.shader_family || "")}</div>
+        <p>${escapeHtml(String(item.before ?? ""))} -> ${escapeHtml(String(item.after ?? ""))}</p>
+        <p>${escapeHtml(item.reason || "")}</p>
+        <div class="change-meta">
+          <span class="meta-chip">valid</span>
+          <span class="meta-chip">confidence ${Number(item.confidence ?? 0).toFixed(2)}</span>
+        </div>
+      </article>
+    `).join("")}
+    ${skipped.map((item) => `
+      <article class="change-row change-unverified">
+        <div class="change-head">
+          <strong>${escapeHtml(item.material_name || item.material_id || "Skipped")}</strong>
+          <span>${escapeHtml(item.semantic_property || "")}</span>
+        </div>
+        <p>${escapeHtml(item.warning || "Skipped by validation")}</p>
+      </article>
+    `).join("")}
+  `;
 }
 
 async function captureScreenshot() {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import copy
 import json
 import math
 import mimetypes
@@ -31,6 +32,7 @@ from vrchat_blendshape_agent import (
     UnityMcpError,
     build_planning_payload,
     create_blendshape_plan,
+    create_material_tuning_plan,
     execute_csharp,
     export_blendshapes,
     filter_planning_payload_to_face_blendshapes,
@@ -65,6 +67,9 @@ PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
 TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_history.json"
 TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_presets.json"
 TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_locks.json"
+SHADER_TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_history.json"
+SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.json"
+SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
@@ -73,6 +78,37 @@ LOCAL_LOG_PATH = DASHBOARD_ARTIFACTS_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+MATERIAL_SEMANTIC_PROPERTIES = {
+    "base_color",
+    "shade_color",
+    "shadow_strength",
+    "shadow_softness",
+    "smoothness",
+    "specular_strength",
+    "rim_color",
+    "rim_strength",
+    "emission_color",
+    "emission_strength",
+    "matcap_strength",
+    "outline_color",
+    "outline_width",
+    "normal_strength",
+}
+
+MATERIAL_COLOR_PROPERTIES = {
+    "base_color",
+    "shade_color",
+    "rim_color",
+    "emission_color",
+    "outline_color",
+}
+
+MATERIAL_NUMERIC_RANGES = {
+    "outline_width": (0.0, 0.25),
+    "normal_strength": (0.0, 2.0),
+    "emission_strength": (0.0, 2.0),
+}
 
 
 class DashboardRequest(BaseModel):
@@ -182,6 +218,14 @@ class AvatarScopedConnectionRequest(ConnectionRequest):
 
 class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
     category_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+class ShaderMaterialPlanRequest(DashboardRequest):
+    avatar_path: str | None = None
+    inventory: dict[str, Any] | None = None
+    category_overrides: dict[str, str] = Field(default_factory=dict)
+    locked_materials: list[str] = Field(default_factory=list)
+    locked_properties: list[str] = Field(default_factory=list)
 
 
 class ClothingToggleRequest(ConnectionRequest):
@@ -735,6 +779,11 @@ async def rollback_parameter_optimization(request: ParameterRollbackRequest) -> 
 @app.post("/api/shader/materials/scan")
 async def scan_shader_materials(request: ShaderMaterialScanRequest) -> dict[str, Any]:
     return await asyncio.to_thread(scan_shader_materials_sync, request)
+
+
+@app.post("/api/shader/plan")
+async def generate_shader_material_plan(request: ShaderMaterialPlanRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(generate_shader_material_plan_sync, request)
 
 
 @app.post("/api/vision/capture")
@@ -1569,6 +1618,198 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "shader", "Failed to scan shader materials.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def generate_shader_material_plan_sync(request: ShaderMaterialPlanRequest) -> dict[str, Any]:
+    try:
+        if not (request.instruction or "").strip():
+            raise RuntimeError("Shader tuning instruction is empty.")
+
+        settings = load_dashboard_settings(request)
+        avatar_path = request.avatar_path or request.avatar or DASHBOARD_RUNTIME.current_avatar_path
+        inventory = copy.deepcopy(request.inventory) if request.inventory else scan_shader_materials_direct(settings, avatar_path)
+        inventory = apply_shader_category_overrides(inventory, request.category_overrides)
+        reference_context = build_reference_image_context(request)
+        reference_image_paths = [image["imagePath"] for image in (reference_context or {}).get("images", [])]
+        reference_image_labels = [image["label"] for image in (reference_context or {}).get("images", [])]
+
+        plan = create_material_tuning_plan(
+            settings=settings,
+            material_inventory=inventory,
+            instruction=request.instruction or "",
+            reference_image_paths=reference_image_paths,
+            reference_image_labels=reference_image_labels,
+        )
+        validation = validate_shader_material_tuning_plan(
+            plan=plan,
+            inventory=inventory,
+            locked_materials=set(request.locked_materials or []),
+            locked_properties=set(request.locked_properties or []),
+        )
+        emit_log(
+            "success",
+            "shader",
+            "Shader material tuning plan generated.",
+            {
+                "avatarPath": avatar_path,
+                "validChangeCount": len(validation["validatedChanges"]),
+                "skippedChangeCount": len(validation["skippedChanges"]),
+            },
+        )
+        return {
+            "ok": True,
+            "avatarPath": avatar_path,
+            "inventory": inventory,
+            "plan": validation["plan"],
+            "changePreview": validation["validatedChanges"],
+            "validatedChanges": validation["validatedChanges"],
+            "skippedChanges": validation["skippedChanges"],
+            "warnings": validation["warnings"],
+            "referenceImage": reference_context,
+        }
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "shader", "Failed to generate shader tuning plan.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def apply_shader_category_overrides(inventory: dict[str, Any], overrides: dict[str, str] | None) -> dict[str, Any]:
+    valid_categories = {"skin", "eyes", "hair", "clothes", "accessory", "unknown"}
+    for material in inventory.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        material_id = str(material.get("material_id") or "")
+        override = (overrides or {}).get(material_id)
+        if override in valid_categories:
+            material["category"] = override
+    return inventory
+
+
+def build_shader_material_index(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for material in inventory.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        material_id = str(material.get("material_id") or "")
+        if material_id:
+            index[material_id] = material
+    return index
+
+
+def validate_shader_material_tuning_plan(
+    plan: dict[str, Any],
+    inventory: dict[str, Any],
+    locked_materials: set[str] | None = None,
+    locked_properties: set[str] | None = None,
+) -> dict[str, Any]:
+    material_index = build_shader_material_index(inventory)
+    locked_materials = locked_materials or set()
+    locked_properties = locked_properties or set()
+    warnings = list(plan.get("warnings") or [])
+    validated: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for raw_change in plan.get("changes") or []:
+        if not isinstance(raw_change, dict):
+            skipped.append({"validation_status": "skipped", "warning": "Change is not a JSON object.", "change": raw_change})
+            continue
+
+        change = dict(raw_change)
+        material_id = str(change.get("material_id") or "")
+        semantic = str(change.get("semantic_property") or "").strip()
+        skip_reason = ""
+
+        if any(key in change for key in ("shader_property", "property_name", "real_property")):
+            skip_reason = "Real shader property names are not accepted; use semantic_property only."
+        elif not material_id or material_id not in material_index:
+            skip_reason = f"Unknown material_id: {material_id}"
+        elif material_id in locked_materials:
+            skip_reason = f"Material is locked: {material_id}"
+        elif semantic in locked_properties or f"{material_id}::{semantic}" in locked_properties:
+            skip_reason = f"Semantic property is locked: {semantic}"
+        elif semantic not in MATERIAL_SEMANTIC_PROPERTIES:
+            skip_reason = f"Unsupported semantic_property: {semantic}"
+
+        material = material_index.get(material_id) or {}
+        if not skip_reason:
+            shader_family = str(material.get("shader_family") or "")
+            if shader_family not in {"lilToon", "Poiyomi"}:
+                skip_reason = f"Unsupported shader family: {shader_family or 'Unknown'}"
+
+        supported_properties = material.get("supported_properties") or {}
+        if not skip_reason and semantic not in supported_properties:
+            skip_reason = f"Material does not expose semantic_property: {semantic}"
+
+        normalized_after: Any = None
+        if not skip_reason:
+            normalized_after, normalized_warning = normalize_shader_material_value(semantic, change.get("after"))
+            if normalized_warning:
+                skip_reason = normalized_warning
+
+        if skip_reason:
+            change["validation_status"] = "skipped"
+            change["warning"] = skip_reason
+            skipped.append(change)
+            warnings.append(skip_reason)
+            continue
+
+        current_value = supported_properties.get(semantic, {}).get("value")
+        change["material_name"] = change.get("material_name") or material.get("material_name") or ""
+        change["shader_family"] = material.get("shader_family") or change.get("shader_family") or ""
+        change["category"] = material.get("category") or change.get("category") or "unknown"
+        change["before"] = current_value if current_value is not None else change.get("before")
+        change["after"] = normalized_after
+        change["validation_status"] = "valid"
+        validated.append(change)
+
+    normalized_plan = dict(plan)
+    normalized_plan["warnings"] = dedupe_strings(warnings)
+    normalized_plan["changes"] = validated
+    normalized_plan["skipped_changes"] = skipped
+    return {
+        "plan": normalized_plan,
+        "validatedChanges": validated,
+        "skippedChanges": skipped,
+        "warnings": normalized_plan["warnings"],
+    }
+
+
+def normalize_shader_material_value(semantic: str, value: Any) -> tuple[Any, str]:
+    if semantic in MATERIAL_COLOR_PROPERTIES:
+        text = str(value or "").strip()
+        if not text:
+            return None, f"Missing color value for {semantic}"
+        if not text.startswith("#"):
+            text = "#" + text
+        digits = text[1:]
+        if len(digits) not in {6, 8} or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+            return None, f"Invalid color value for {semantic}: {value}"
+        if len(digits) == 6:
+            text = "#" + digits.upper() + "FF"
+        else:
+            text = "#" + digits.upper()
+        return text, ""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, f"Invalid numeric value for {semantic}: {value}"
+    if not math.isfinite(number):
+        return None, f"Invalid numeric value for {semantic}: {value}"
+
+    min_value, max_value = MATERIAL_NUMERIC_RANGES.get(semantic, (0.0, 1.0))
+    return min(max(number, min_value), max_value), ""
+
+
+def dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
 
 
 def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, Any]:

@@ -436,11 +436,18 @@
 
           <p class="field-note">Scan avatar renderers and material slots. This checkpoint is read-only and does not modify Unity materials.</p>
 
+          <label class="field">
+            <span>Material instruction</span>
+            <textarea id="shader-instruction-input" rows="3" placeholder="make skin softer and eyes glossier"></textarea>
+          </label>
+
           <div class="button-row">
             <button id="scan-shader-materials-btn" class="button">Scan Materials</button>
+            <button id="generate-shader-plan-btn" class="button button-ghost">Generate Shader Plan</button>
           </div>
 
           <div id="shader-materials-table" class="stack-list empty-state">No material inventory yet. Click Scan Materials.</div>
+          <div id="shader-plan-list" class="change-list empty-state">No shader tuning plan yet.</div>
           <pre id="shader-output" class="console compact"></pre>
         </section>
 
