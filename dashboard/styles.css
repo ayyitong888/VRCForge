@@ -345,6 +345,15 @@ textarea {
   line-height: 1.55;
 }
 
+.field.inline-field {
+  min-width: 8rem;
+  margin: 0;
+}
+
+.field.grow-field {
+  flex: 1 1 18rem;
+}
+
 .field input::placeholder,
 .field textarea::placeholder {
   color: #7c8390;

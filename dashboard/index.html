@@ -310,8 +310,24 @@
           <div class="button-row">
             <button id="open-history-btn" class="button button-ghost">打开历史</button>
             <button id="open-presets-btn" class="button button-ghost">打开预设</button>
-            <button id="lock-visible-btn" class="button button-ghost">锁定当前列表</button>
-            <button id="unlock-visible-btn" class="button button-ghost">解锁当前列表</button>
+            <button id="lock-visible-btn" class="button button-ghost">手动锁定当前列表</button>
+            <button id="unlock-visible-btn" class="button button-ghost">手动解锁当前列表</button>
+          </div>
+
+          <div class="inline-status spread">
+            <label class="field inline-field">
+              <span>预设上限</span>
+              <input id="preset-limit-input" type="number" min="1" max="100" step="1" value="10">
+            </label>
+            <label class="field inline-field grow-field">
+              <span>AI 锁定/解锁部位</span>
+              <input id="ai-lock-instruction-input" type="text" placeholder="例如：眼睛、嘴角、眉毛，或保持现在好看的部分">
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="ai-lock-btn" class="button button-ghost">AI 判断并锁定</button>
+            <button id="ai-unlock-btn" class="button button-ghost">AI 判断并解锁</button>
           </div>
 
           <div id="tuning-history-panel" class="change-panel tuning-panel hidden">
@@ -428,44 +444,44 @@
         <section class="panel span-8">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Shader MVP</p>
-              <h2>Shader / Material Tuning</h2>
+              <p class="panel-kicker">材质调校 MVP</p>
+              <h2>材质调校</h2>
             </div>
-            <span id="shader-material-count-chip" class="panel-chip">0 materials</span>
+            <span id="shader-material-count-chip" class="panel-chip">0 个材质</span>
           </div>
 
-          <p class="field-note">Scan avatar renderers and material slots. This checkpoint is read-only and does not modify Unity materials.</p>
+          <p class="field-note">扫描 Avatar 的 Renderer 与材质槽。扫描本身只读，不会修改 Unity 材质；只有点击应用计划后才会写入白名单材质参数。</p>
 
           <label class="field">
-            <span>Material instruction</span>
-            <textarea id="shader-instruction-input" rows="3" placeholder="make skin softer and eyes glossier"></textarea>
+            <span>材质调校要求</span>
+            <textarea id="shader-instruction-input" rows="3" placeholder="例如：皮肤更柔和，眼睛更通透，头发高光不要太强"></textarea>
           </label>
 
           <div class="button-row">
-            <button id="scan-shader-materials-btn" class="button">Scan Materials</button>
-            <button id="generate-shader-plan-btn" class="button button-ghost">Generate Shader Plan</button>
-            <button id="apply-shader-plan-btn" class="button button-accent">Apply Shader Plan</button>
-            <button id="restore-shader-plan-btn" class="button button-ghost">Restore Shader</button>
-            <button id="save-shader-preset-btn" class="button button-ghost">Save Shader Preset</button>
-            <button id="open-shader-history-btn" class="button button-ghost">Open Shader History</button>
-            <button id="open-shader-presets-btn" class="button button-ghost">Open Shader Presets</button>
-            <button id="capture-shader-before-btn" class="button button-ghost">Capture Before</button>
-            <button id="capture-shader-after-btn" class="button button-ghost">Capture After</button>
-            <button id="review-shader-vision-btn" class="button button-ghost">Run Vision Review</button>
+            <button id="scan-shader-materials-btn" class="button">扫描材质</button>
+            <button id="generate-shader-plan-btn" class="button button-ghost">生成材质计划</button>
+            <button id="apply-shader-plan-btn" class="button button-accent">应用材质计划</button>
+            <button id="restore-shader-plan-btn" class="button button-ghost">恢复材质</button>
+            <button id="save-shader-preset-btn" class="button button-ghost">保存材质预设</button>
+            <button id="open-shader-history-btn" class="button button-ghost">打开材质历史</button>
+            <button id="open-shader-presets-btn" class="button button-ghost">打开材质预设</button>
+            <button id="capture-shader-before-btn" class="button button-ghost">截图：调整前</button>
+            <button id="capture-shader-after-btn" class="button button-ghost">截图：调整后</button>
+            <button id="review-shader-vision-btn" class="button button-ghost">识图复核</button>
           </div>
 
-          <div id="shader-materials-table" class="stack-list empty-state">No material inventory yet. Click Scan Materials.</div>
-          <div id="shader-plan-list" class="change-list empty-state">No shader tuning plan yet.</div>
+          <div id="shader-materials-table" class="stack-list empty-state">还没有材质清单。点击“扫描材质”。</div>
+          <div id="shader-plan-list" class="change-list empty-state">还没有材质调校计划。</div>
           <div id="shader-history-panel" class="change-panel tuning-panel hidden">
             <div class="inline-status spread">
-              <span class="inline-label">Shader History</span>
+              <span class="inline-label">材质历史</span>
               <strong id="shader-history-count">0</strong>
             </div>
             <div id="shader-history-list" class="tuning-list"></div>
           </div>
           <div id="shader-preset-panel" class="change-panel tuning-panel hidden">
             <div class="inline-status spread">
-              <span class="inline-label">Shader Presets</span>
+              <span class="inline-label">材质预设</span>
               <strong id="shader-preset-count">0</strong>
             </div>
             <div id="shader-preset-list" class="tuning-list"></div>
@@ -528,6 +544,6 @@
       <div id="reference-lightbox-title" class="reference-lightbox-title"></div>
     </div>
 
-    <script src="/dashboard/app.js?v=20260516-tuning-history"></script>
+    <script src="/dashboard/app.js?v=20260518-shader-cn"></script>
   </body>
 </html>

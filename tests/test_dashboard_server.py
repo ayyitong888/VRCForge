@@ -850,6 +850,79 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual({item["reason"] for item in payload["skippedAdjustments"]}, {"locked", "missing_blendshape"})
         self.assertEqual(payload["undoDepth"], 0)
 
+    def test_preset_limit_trims_latest_presets_per_avatar(self) -> None:
+        presets = [
+            {"id": "a_old", "avatar_path": "AvatarA"},
+            {"id": "a_mid", "avatar_path": "AvatarA"},
+            {"id": "b_keep", "avatar_path": "AvatarB"},
+            {"id": "a_new", "avatar_path": "AvatarA"},
+        ]
+
+        trimmed = dashboard_server.trim_presets_for_avatar(presets, 2)
+
+        self.assertEqual([item["id"] for item in trimmed], ["a_mid", "a_new", "b_keep"])
+
+    def test_ai_lock_selection_only_accepts_candidate_pairs(self) -> None:
+        candidates = [
+            {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"},
+            {"rendererPath": "Avatar/Face", "blendshapeName": "MouthSmile"},
+        ]
+
+        selected = dashboard_server.validate_ai_lock_selection(
+            {
+                "selected": [
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"},
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"},
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "Hair_Fluffy"},
+                ]
+            },
+            candidates,
+        )
+
+        self.assertEqual(selected, [{"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"}])
+
+    @patch("dashboard_server.request_llm_plan")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_ai_lock_selection_endpoint_returns_model_selected_blendshapes(
+        self,
+        mock_load_settings,
+        mock_request_llm_plan,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(llm_provider="ollama", llm_api_key="")
+        mock_request_llm_plan.return_value = json.dumps(
+            {
+                "summary": "eye area",
+                "selected": [
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"},
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "MouthSmile"},
+                    {"rendererPath": "Avatar/Face", "blendshapeName": "NotACandidate"},
+                ],
+            }
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/tuning/locks/ai-select",
+                json={
+                    "source_mode": "mvp_sample",
+                    "avatar_path": "Avatar",
+                    "action": "unlock",
+                    "selection_instruction": "解锁眼睛相关形态键",
+                    "candidate_blendshapes": [
+                        {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"},
+                        {"rendererPath": "Avatar/Face", "blendshapeName": "MouthSmile"},
+                    ],
+                    "current_locked_blendshapes": [
+                        {"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"}
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["selectedBlendshapes"], [{"rendererPath": "Avatar/Face", "blendshapeName": "EyeSmile_L"}])
+        self.assertIn("解锁眼睛", mock_request_llm_plan.call_args.args[1])
+
     def test_shader_plan_validation_rejects_arbitrary_shader_property_names(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(
             plan={

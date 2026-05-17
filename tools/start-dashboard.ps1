@@ -1,6 +1,7 @@
 param(
     [string]$BindHost = "127.0.0.1",
     [int]$BindPort = 8757,
+    [string]$ProxyUrl,
     [switch]$Detached = $true,
     [switch]$OpenBrowser = $true,
     [switch]$CheckOnly
@@ -12,6 +13,82 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $dashboardScript = Join-Path $repoRoot "dashboard_server.py"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
+$settingsPath = Join-Path $repoRoot ".gemini\settings.json"
+
+function Write-Utf8NoBomFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Ensure-DefaultSettings {
+    $settingsDir = Split-Path -Parent $settingsPath
+    if (-not (Test-Path -LiteralPath $settingsDir)) {
+        New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+    }
+
+    if (Test-Path -LiteralPath $settingsPath) {
+        return
+    }
+
+    $settingsJson = @'
+{
+  "gemini": {
+    "api_key_env": "GEMINI_API_KEY",
+    "model": "gemini-2.5-flash",
+    "thinking_level": ""
+  },
+  "unity_mcp": {
+    "command": [
+      "powershell",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "tools/unity-mcp-cli.ps1"
+    ],
+    "host": "127.0.0.1",
+    "port": 8080,
+    "instance": "",
+    "retries": 3,
+    "retry_backoff_seconds": 2.0,
+    "timeout_seconds": 30,
+    "export_tool_name": "vrc_export_blendshapes",
+    "execute_tool_name": "vrc_execute_roslyn"
+  },
+  "paths": {
+    "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
+  },
+  "planning": {
+    "min_confidence": 0.65
+  },
+  "dashboard": {
+    "project_roots": [],
+    "unity_editor_path": "",
+    "status_push_interval_seconds": 2.5
+  }
+}
+'@
+
+    Write-Utf8NoBomFile -Path $settingsPath -Content $settingsJson
+    Write-Host "Created default settings file: $settingsPath"
+    Write-Host "Set GEMINI_API_KEY or save provider settings in the dashboard before using AI features."
+}
+
+function Configure-Proxy {
+    if ([string]::IsNullOrWhiteSpace($ProxyUrl)) {
+        return
+    }
+
+    $env:HTTP_PROXY = $ProxyUrl
+    $env:HTTPS_PROXY = $ProxyUrl
+    $env:ALL_PROXY = $ProxyUrl
+    $env:NO_PROXY = "127.0.0.1,localhost"
+    Write-Host "Using outbound proxy for provider requests: $ProxyUrl"
+}
 
 function Get-PythonExecutable {
     $candidates = @(
@@ -65,6 +142,9 @@ function Wait-ForDashboard {
     }
 }
 
+Ensure-DefaultSettings
+Configure-Proxy
+
 $pythonExe = Get-PythonExecutable
 Ensure-DashboardDependencies -PythonExe $pythonExe
 
@@ -75,6 +155,7 @@ if ($CheckOnly) {
     Write-Host "Repo root: $repoRoot"
     Write-Host "Python: $pythonExe"
     Write-Host "Dashboard script: $dashboardScript"
+    Write-Host "Settings file: $settingsPath"
     Write-Host "Dashboard URL: $dashboardUrl"
     exit 0
 }

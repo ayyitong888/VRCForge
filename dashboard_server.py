@@ -48,6 +48,7 @@ from vrchat_blendshape_agent import (
     provider_display_name,
     provider_requires_api_key,
     read_plan_json,
+    request_llm_plan,
     render_csharp,
     render_preview,
     render_summary,
@@ -55,6 +56,7 @@ from vrchat_blendshape_agent import (
     save_plan,
     save_result,
     save_text,
+    extract_json_block,
     try_parse_json,
     validate_plan,
     resolve_avatar_selection,
@@ -198,6 +200,7 @@ class TuningPresetCreateRequest(BaseModel):
     name: str
     tags: list[str] = Field(default_factory=list)
     description: str = ""
+    max_presets: int = Field(default=10, ge=1, le=100)
 
 
 class TuningPresetRenameRequest(BaseModel):
@@ -206,11 +209,20 @@ class TuningPresetRenameRequest(BaseModel):
 
 class TuningPresetDuplicateRequest(BaseModel):
     name: str | None = None
+    max_presets: int = Field(default=10, ge=1, le=100)
 
 
 class TuningLocksUpdateRequest(BaseModel):
     avatar_path: str | None = None
     locked_blendshapes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TuningLocksAiSelectRequest(DashboardRequest):
+    avatar_path: str | None = None
+    action: Literal["lock", "unlock"] = "lock"
+    selection_instruction: str = ""
+    candidate_blendshapes: list[dict[str, Any]] = Field(default_factory=list)
+    current_locked_blendshapes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AvatarScopedConnectionRequest(ConnectionRequest):
@@ -243,6 +255,7 @@ class ShaderTuningPresetCreateRequest(BaseModel):
     name: str
     tags: list[str] = Field(default_factory=list)
     description: str = ""
+    max_presets: int = Field(default=10, ge=1, le=100)
 
 
 class ShaderTuningPresetRenameRequest(BaseModel):
@@ -251,6 +264,7 @@ class ShaderTuningPresetRenameRequest(BaseModel):
 
 class ShaderTuningPresetDuplicateRequest(BaseModel):
     name: str | None = None
+    max_presets: int = Field(default=10, ge=1, le=100)
 
 
 class ShaderTuningLocksUpdateRequest(BaseModel):
@@ -775,6 +789,11 @@ async def update_tuning_locks(request: TuningLocksUpdateRequest) -> dict[str, An
     return await asyncio.to_thread(update_tuning_locks_sync, request)
 
 
+@app.post("/api/tuning/locks/ai-select")
+async def ai_select_tuning_locks(request: TuningLocksAiSelectRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(ai_select_tuning_locks_sync, request)
+
+
 @app.post("/api/clothes/scan")
 async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
     return await asyncio.to_thread(scan_clothes_sync, request)
@@ -1274,6 +1293,142 @@ def update_tuning_locks_sync(request: TuningLocksUpdateRequest) -> dict[str, Any
     return {"ok": True, "avatarPath": avatar_path, "lockedBlendshapes": locked, "count": len(locked)}
 
 
+def ai_select_tuning_locks_sync(request: TuningLocksAiSelectRequest) -> dict[str, Any]:
+    instruction = request.selection_instruction.strip()
+    if not instruction:
+        raise to_http_exception(RuntimeError("selection_instruction is required for AI lock selection."))
+
+    settings = load_dashboard_settings(request)
+    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
+        raise to_http_exception(RuntimeError(f"{provider_display_name(settings.llm_provider)} API key is empty."))
+
+    candidates = normalize_ai_lock_candidates(request.candidate_blendshapes)
+    if not candidates:
+        raise to_http_exception(RuntimeError("No candidate Blendshapes were provided for AI lock selection."))
+
+    current_locked = normalize_locked_blendshape_list(request.current_locked_blendshapes)
+    prompt = build_ai_lock_selection_prompt(
+        action=request.action,
+        instruction=instruction,
+        candidates=candidates,
+        current_locked=current_locked,
+    )
+    try:
+        raw_response = request_llm_plan(settings, prompt)
+        raw_json = extract_json_block(raw_response)
+        payload = json.loads(raw_json) if raw_json else {}
+    except Exception as exc:  # noqa: BLE001
+        raise to_http_exception(RuntimeError(f"AI lock selection failed: {exc}")) from exc
+
+    selected = validate_ai_lock_selection(payload, candidates)
+    if request.action == "unlock":
+        locked_keys = {
+            (item["rendererPath"], item["blendshapeName"])
+            for item in current_locked
+        }
+        selected = [
+            item
+            for item in selected
+            if (item["rendererPath"], item["blendshapeName"]) in locked_keys
+        ]
+    emit_log(
+        "info",
+        "blendshape",
+        "AI lock selection completed.",
+        {"action": request.action, "instruction": instruction, "selectedCount": len(selected)},
+    )
+    return {
+        "ok": True,
+        "action": request.action,
+        "instruction": instruction,
+        "selectedBlendshapes": selected,
+        "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
+        "rawSummary": str(payload.get("summary") or ""),
+    }
+
+
+def normalize_ai_lock_candidates(items: list[dict[str, Any]] | list[Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        renderer_path = str(item.get("rendererPath") or item.get("renderer_path") or "").strip()
+        blendshape_name = str(item.get("blendshapeName") or item.get("blendshape_name") or item.get("blendshape") or "").strip()
+        if not blendshape_name:
+            continue
+        key = (renderer_path, blendshape_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "rendererPath": renderer_path,
+                "blendshapeName": blendshape_name,
+                "currentWeight": item.get("currentWeight", item.get("current_weight", 0)),
+                "rendererName": item.get("rendererName", item.get("renderer_name", "")),
+            }
+        )
+    return candidates[:400]
+
+
+def build_ai_lock_selection_prompt(
+    action: str,
+    instruction: str,
+    candidates: list[dict[str, Any]],
+    current_locked: list[dict[str, str]],
+) -> str:
+    schema = {
+        "summary": "Selected eye and mouth-corner blendshapes.",
+        "selected": [
+            {
+                "rendererPath": "Avatar/Body",
+                "blendshapeName": "eye_smile_L",
+                "reason": "Matches the requested eye area.",
+            }
+        ],
+        "warnings": [],
+    }
+    return (
+        "You are helping a VRChat avatar editor choose which face Blendshapes should be locked or unlocked.\n"
+        "Return JSON only. Do not output Markdown.\n"
+        "Only select exact rendererPath and blendshapeName pairs from the candidate list.\n"
+        "If the action is unlock, only select candidates that are already listed in Current locked Blendshapes.\n"
+        "Prefer conservative, semantically relevant selections. If the user asks for eyes, choose eye/eyelid/pupil-related names; "
+        "if mouth or smile, choose mouth/lip/corner/smile-related names; if brows, choose brow/eyebrow-related names.\n"
+        "Do not select unrelated body, clothing, hair, or accessory blendshapes.\n"
+        f"Requested action: {action}.\n"
+        f"User selection instruction: {instruction}\n"
+        f"Current locked Blendshapes: {json.dumps(current_locked, ensure_ascii=False)}\n"
+        f"Output JSON shape example: {json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"Candidate Blendshapes:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}"
+    )
+
+
+def validate_ai_lock_selection(payload: Any, candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    allowed = {
+        (str(item.get("rendererPath") or ""), str(item.get("blendshapeName") or ""))
+        for item in candidates
+    }
+    selected = payload.get("selected") or payload.get("selectedBlendshapes") or payload.get("blendshapes") or []
+    if not isinstance(selected, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in selected:
+        candidate = normalize_locked_blendshape_item(item)
+        if candidate is None:
+            continue
+        key = (candidate["rendererPath"], candidate["blendshapeName"])
+        if key not in allowed or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(candidate)
+    return normalized
+
+
 def load_shader_tuning_locks(avatar_path: str | None) -> dict[str, Any]:
     if not avatar_path:
         return {"lockedMaterials": [], "lockedProperties": []}
@@ -1500,6 +1655,26 @@ def find_tuning_preset(preset_id: str) -> dict[str, Any]:
     raise RuntimeError(f"Tuning preset was not found: {preset_id}")
 
 
+def trim_presets_for_avatar(presets: list[dict[str, Any]], max_presets: int) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(max_presets or 10), 100))
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ordered_keys: list[str] = []
+    for preset in presets:
+        avatar_key = str(preset.get("avatar_path") or preset.get("avatar_name") or "__global__")
+        if avatar_key not in grouped:
+            grouped[avatar_key] = []
+            ordered_keys.append(avatar_key)
+        grouped[avatar_key].append(preset)
+
+    trimmed: list[dict[str, Any]] = []
+    for avatar_key in ordered_keys:
+        avatar_presets = grouped[avatar_key]
+        if len(avatar_presets) > safe_limit:
+            avatar_presets = avatar_presets[-safe_limit:]
+        trimmed.extend(avatar_presets)
+    return trimmed
+
+
 def create_tuning_preset_sync(request: TuningPresetCreateRequest) -> dict[str, Any]:
     try:
         history = find_tuning_history_record(request.history_id)
@@ -1526,6 +1701,7 @@ def create_tuning_preset_sync(request: TuningPresetCreateRequest) -> dict[str, A
         store = load_tuning_preset_store()
         presets = list(store.get("presets") or [])
         presets.append(preset)
+        presets = trim_presets_for_avatar(presets, request.max_presets)
         store["presets"] = presets
         save_tuning_store(TUNING_PRESETS_PATH, store)
         emit_log("success", "preset", "Tuning preset saved.", {"presetId": preset["id"], "name": preset["name"]})
@@ -1563,6 +1739,7 @@ def duplicate_tuning_preset_sync(preset_id: str, request: TuningPresetDuplicateR
         store = load_tuning_preset_store()
         presets = list(store.get("presets") or [])
         presets.append(duplicate)
+        presets = trim_presets_for_avatar(presets, request.max_presets)
         store["presets"] = presets
         save_tuning_store(TUNING_PRESETS_PATH, store)
         return {"ok": True, "preset": duplicate, "presets": presets}
@@ -2116,6 +2293,7 @@ def create_shader_tuning_preset_sync(request: ShaderTuningPresetCreateRequest) -
     store = load_shader_tuning_preset_store()
     presets = list(store.get("presets") or [])
     presets.append(preset)
+    presets = trim_presets_for_avatar(presets, request.max_presets)
     store["presets"] = presets
     save_tuning_store(SHADER_TUNING_PRESETS_PATH, store)
     return {"ok": True, "preset": preset, "presets": presets}
@@ -2151,6 +2329,7 @@ def duplicate_shader_tuning_preset_sync(preset_id: str, request: ShaderTuningPre
     duplicate.pop("last_applied_at", None)
     duplicate["apply_count"] = 0
     presets.append(duplicate)
+    presets = trim_presets_for_avatar(presets, request.max_presets)
     store["presets"] = presets
     save_tuning_store(SHADER_TUNING_PRESETS_PATH, store)
     return {"ok": True, "preset": duplicate, "presets": presets}

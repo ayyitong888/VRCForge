@@ -59,6 +59,28 @@ const PROVIDER_PRESETS = {
 
 const MANUAL_MODEL_VALUE = "__manual_model__";
 
+const SHADER_CATEGORY_LABELS = {
+  skin: "皮肤",
+  eyes: "眼睛",
+  hair: "头发",
+  clothes: "服装",
+  accessory: "配饰",
+  unknown: "未分类",
+};
+
+const SHADER_SEMANTIC_LABELS = {
+  base_color: "基础色",
+  shade_color: "阴影色",
+  emission_color: "自发光颜色",
+  emission_strength: "自发光强度",
+  smoothness: "光滑度",
+  metallic: "金属度",
+  rim_strength: "边缘光强度",
+  outline_width: "描边宽度",
+  outline_color: "描边颜色",
+  alpha: "透明度",
+};
+
 const state = {
   socket: null,
   projects: [],
@@ -86,6 +108,7 @@ const state = {
   tuningHistory: [],
   tuningPresets: [],
   lockedBlendshapes: [],
+  presetLimit: 10,
   shaderInventory: null,
   shaderMaterials: [],
   shaderCategoryOverrides: {},
@@ -142,6 +165,7 @@ const REFERENCE_GROUP_CONFIG = {
 document.addEventListener("DOMContentLoaded", () => {
   cacheRefs();
   bindEvents();
+  loadPresetLimit();
   connectSocket();
   updateModeVisibility();
   syncMockModeText();
@@ -230,6 +254,10 @@ function cacheRefs() {
     "open-presets-btn",
     "lock-visible-btn",
     "unlock-visible-btn",
+    "preset-limit-input",
+    "ai-lock-instruction-input",
+    "ai-lock-btn",
+    "ai-unlock-btn",
     "blendshape-count-chip",
     "pending-count",
     "llm-change-panel",
@@ -340,6 +368,9 @@ function bindEvents() {
   refs["open-presets-btn"].addEventListener("click", () => toggleTuningPanel("presets"));
   refs["lock-visible-btn"].addEventListener("click", () => runButtonTask("lock-visible-btn", "锁定中...", () => setVisibleBlendshapeLocks(true)));
   refs["unlock-visible-btn"].addEventListener("click", () => runButtonTask("unlock-visible-btn", "解锁中...", () => setVisibleBlendshapeLocks(false)));
+  refs["ai-lock-btn"].addEventListener("click", () => runButtonTask("ai-lock-btn", "AI 判断中...", () => setAiSelectedBlendshapeLocks(true)));
+  refs["ai-unlock-btn"].addEventListener("click", () => runButtonTask("ai-unlock-btn", "AI 判断中...", () => setAiSelectedBlendshapeLocks(false)));
+  refs["preset-limit-input"].addEventListener("change", persistPresetLimit);
   refs["scan-clothes-btn"].addEventListener("click", () => runButtonTask("scan-clothes-btn", "扫描中...", scanClothes));
   refs["generate-fx-btn"].addEventListener("click", () => runButtonTask("generate-fx-btn", "生成中...", generateFxBlueprint));
   refs["apply-fx-btn"].addEventListener("click", () => runButtonTask("apply-fx-btn", "写入中...", applyClothesFx));
@@ -347,16 +378,16 @@ function bindEvents() {
   refs["optimize-params-btn"].addEventListener("click", () => runButtonTask("optimize-params-btn", "分析中...", optimizeParameters));
   refs["apply-params-btn"].addEventListener("click", () => runButtonTask("apply-params-btn", "应用中...", applyParameterOptimization));
   refs["rollback-params-btn"].addEventListener("click", () => runButtonTask("rollback-params-btn", "回滚中...", rollbackParameterOptimization));
-  refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "Scanning...", scanShaderMaterials));
-  refs["generate-shader-plan-btn"].addEventListener("click", () => runButtonTask("generate-shader-plan-btn", "Generating...", generateShaderPlan));
-  refs["apply-shader-plan-btn"].addEventListener("click", () => runButtonTask("apply-shader-plan-btn", "Applying...", applyShaderPlan));
-  refs["restore-shader-plan-btn"].addEventListener("click", () => runButtonTask("restore-shader-plan-btn", "Restoring...", restoreShaderPlan));
-  refs["save-shader-preset-btn"].addEventListener("click", () => runButtonTask("save-shader-preset-btn", "Saving...", saveCurrentShaderPlanAsPreset));
+  refs["scan-shader-materials-btn"].addEventListener("click", () => runButtonTask("scan-shader-materials-btn", "扫描中...", scanShaderMaterials));
+  refs["generate-shader-plan-btn"].addEventListener("click", () => runButtonTask("generate-shader-plan-btn", "生成中...", generateShaderPlan));
+  refs["apply-shader-plan-btn"].addEventListener("click", () => runButtonTask("apply-shader-plan-btn", "应用中...", applyShaderPlan));
+  refs["restore-shader-plan-btn"].addEventListener("click", () => runButtonTask("restore-shader-plan-btn", "恢复中...", restoreShaderPlan));
+  refs["save-shader-preset-btn"].addEventListener("click", () => runButtonTask("save-shader-preset-btn", "保存中...", saveCurrentShaderPlanAsPreset));
   refs["open-shader-history-btn"].addEventListener("click", () => toggleShaderPanel("history"));
   refs["open-shader-presets-btn"].addEventListener("click", () => toggleShaderPanel("presets"));
-  refs["capture-shader-before-btn"].addEventListener("click", () => runButtonTask("capture-shader-before-btn", "Capturing...", () => captureShaderReviewImage("before")));
-  refs["capture-shader-after-btn"].addEventListener("click", () => runButtonTask("capture-shader-after-btn", "Capturing...", () => captureShaderReviewImage("after")));
-  refs["review-shader-vision-btn"].addEventListener("click", () => runButtonTask("review-shader-vision-btn", "Reviewing...", runShaderVisionReview));
+  refs["capture-shader-before-btn"].addEventListener("click", () => runButtonTask("capture-shader-before-btn", "截图中...", () => captureShaderReviewImage("before")));
+  refs["capture-shader-after-btn"].addEventListener("click", () => runButtonTask("capture-shader-after-btn", "截图中...", () => captureShaderReviewImage("after")));
+  refs["review-shader-vision-btn"].addEventListener("click", () => runButtonTask("review-shader-vision-btn", "复核中...", runShaderVisionReview));
   refs["shader-materials-table"].addEventListener("change", onShaderMaterialCategoryChanged);
   refs["capture-screenshot-btn"].addEventListener("click", () => runButtonTask("capture-screenshot-btn", "截图中...", captureScreenshot));
   refs["capture-multi-btn"].addEventListener("click", () => runButtonTask("capture-multi-btn", "多视角截图中...", captureMultiScreenshot));
@@ -448,7 +479,7 @@ function applyBootstrap(payload) {
   updateModeVisibility();
   syncMockModeText();
   loadShaderTuningData().catch((error) => {
-    refs["shader-output"].textContent = `Shader data load failed: ${error.message}`;
+    refs["shader-output"].textContent = `材质数据加载失败：${error.message}`;
   });
   loadTuningData().catch((error) => {
     refs["summary-output"].textContent = `历史/预设读取失败：${error.message}`;
@@ -1614,6 +1645,7 @@ async function saveHistoryAsPreset(historyId) {
     name: name.trim(),
     tags: splitTags(tagsText),
     description: description || "",
+    max_presets: readPresetLimit(),
   });
   state.tuningPresets = payload.presets || state.tuningPresets;
   refs["tuning-preset-panel"].classList.remove("hidden");
@@ -1636,7 +1668,10 @@ async function renamePreset(presetId) {
 async function duplicatePreset(presetId) {
   const preset = (state.tuningPresets || []).find((item) => item.id === presetId);
   const name = window.prompt("复制后的预设名称", `${preset?.name || "preset"}_copy`);
-  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/duplicate`, { name: name || null });
+  const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/duplicate`, {
+    name: name || null,
+    max_presets: readPresetLimit(),
+  });
   state.tuningPresets = payload.presets || state.tuningPresets;
   renderTuningPresets();
   refs["summary-output"].textContent = `已复制预设：${payload.preset?.name || ""}`;
@@ -1670,6 +1705,30 @@ function splitTags(value) {
     .split(/[,\s，、]+/)
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function loadPresetLimit() {
+  const stored = Number(window.localStorage.getItem("vrcforgePresetLimit") || 10);
+  state.presetLimit = Number.isFinite(stored) ? Math.min(Math.max(Math.round(stored), 1), 100) : 10;
+  if (refs["preset-limit-input"]) {
+    refs["preset-limit-input"].value = String(state.presetLimit);
+  }
+}
+
+function readPresetLimit() {
+  const value = Number(refs["preset-limit-input"]?.value || state.presetLimit || 10);
+  const limit = Number.isFinite(value) ? Math.min(Math.max(Math.round(value), 1), 100) : 10;
+  state.presetLimit = limit;
+  if (refs["preset-limit-input"]) {
+    refs["preset-limit-input"].value = String(limit);
+  }
+  window.localStorage.setItem("vrcforgePresetLimit", String(limit));
+  return limit;
+}
+
+function persistPresetLimit() {
+  const limit = readPresetLimit();
+  refs["summary-output"].textContent = `预设上限已设置为 ${limit} 组。新保存或复制预设时会自动保留最新 ${limit} 组。`;
 }
 
 function lockedBlendshapeKey(rendererPath, blendshapeName) {
@@ -1743,6 +1802,62 @@ async function setVisibleBlendshapeLocks(locked) {
 
   await saveLockedBlendshapes(Array.from(map.values()));
   refs["summary-output"].textContent = `${locked ? "已锁定" : "已解锁"}当前列表 ${visible.length} 项。重新生成 Plan 时会重抽未锁定的部分。`;
+}
+
+async function setAiSelectedBlendshapeLocks(locked) {
+  await ensureApiConfigSaved();
+  if (!state.selectedAvatarPath) {
+    refs["summary-output"].textContent = "请先选择 Avatar。";
+    return;
+  }
+  if (!state.blendshapes.length) {
+    await loadBlendshapes();
+  }
+  const instruction = refs["ai-lock-instruction-input"].value.trim()
+    || refs["blendshape-search"].value.trim()
+    || refs["instruction-input"].value.trim();
+  if (!instruction) {
+    refs["summary-output"].textContent = "请先描述要让 AI 判断的部位，例如“眼睛”“嘴角”“眉毛”。";
+    return;
+  }
+
+  const payload = await postJson("/api/tuning/locks/ai-select", {
+    ...buildDashboardRequest(),
+    avatar_path: state.selectedAvatarPath,
+    action: locked ? "lock" : "unlock",
+    selection_instruction: instruction,
+    candidate_blendshapes: state.blendshapes,
+    current_locked_blendshapes: state.lockedBlendshapes || [],
+  });
+  const selected = (payload.selectedBlendshapes || [])
+    .map((item) => normalizeLockedBlendshape(item))
+    .filter(Boolean);
+  if (!selected.length) {
+    refs["summary-output"].textContent = `AI 没有找到适合${locked ? "锁定" : "解锁"}的 Blendshape。`;
+    return;
+  }
+
+  const map = new Map();
+  for (const item of state.lockedBlendshapes || []) {
+    const normalized = normalizeLockedBlendshape(item);
+    if (normalized) {
+      map.set(lockedBlendshapeKey(normalized.rendererPath, normalized.blendshapeName), normalized);
+    }
+  }
+
+  for (const item of selected) {
+    const key = lockedBlendshapeKey(item.rendererPath, item.blendshapeName);
+    if (locked) {
+      map.set(key, item);
+      const valueKey = blendshapeKey(item.rendererPath, item.blendshapeName);
+      state.blendshapeWorking[valueKey] = Number(state.blendshapeBaseline[valueKey] ?? state.blendshapeWorking[valueKey] ?? 0);
+    } else {
+      map.delete(key);
+    }
+  }
+
+  await saveLockedBlendshapes(Array.from(map.values()));
+  refs["summary-output"].textContent = `AI 已根据“${instruction}”${locked ? "锁定" : "解锁"} ${selected.length} 个 Blendshape。`;
 }
 
 async function saveLockedBlendshapes(lockedBlendshapes) {
@@ -2011,9 +2126,9 @@ async function scanShaderMaterials() {
 
 function renderShaderMaterialInventory(summary = {}) {
   const materials = state.shaderMaterials || [];
-  refs["shader-material-count-chip"].textContent = `${materials.length} materials`;
+  refs["shader-material-count-chip"].textContent = `${materials.length} 个材质`;
   if (!materials.length) {
-    refs["shader-materials-table"].innerHTML = '<div class="empty-state">No material inventory yet. Click Scan Materials.</div>';
+    refs["shader-materials-table"].innerHTML = '<div class="empty-state">还没有材质清单。点击“扫描材质”。</div>';
     return;
   }
 
@@ -2028,18 +2143,18 @@ function renderShaderMaterialInventory(summary = {}) {
         <td>${escapeHtml(item.mesh_name || "")}</td>
         <td>${Number(item.slot_index ?? 0)}</td>
         <td>${escapeHtml(item.material_name || "")}</td>
-        <td>${escapeHtml(item.shader_family || "Unsupported")}</td>
+        <td>${escapeHtml(item.shader_family || "不支持")}</td>
         <td>
           <select class="shader-category-select" data-material-id="${escapeHtml(id)}">
             ${["skin", "eyes", "hair", "clothes", "accessory", "unknown"].map((option) => (
-              `<option value="${option}" ${option === category ? "selected" : ""}>${option}</option>`
+              `<option value="${option}" ${option === category ? "selected" : ""}>${SHADER_CATEGORY_LABELS[option] || option}</option>`
             )).join("")}
           </select>
         </td>
         <td>
           <label class="lock-toggle">
             <input class="shader-material-lock-toggle" data-material-id="${escapeHtml(id)}" type="checkbox" ${locked ? "checked" : ""}>
-            <span>${locked ? "locked" : "open"}</span>
+            <span>${locked ? "已锁定" : "可调整"}</span>
           </label>
         </td>
       </tr>
@@ -2051,20 +2166,20 @@ function renderShaderMaterialInventory(summary = {}) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>Object path</th>
-            <th>Renderer</th>
-            <th>Mesh</th>
-            <th>Slot</th>
-            <th>Material</th>
-            <th>Shader</th>
-            <th>Category</th>
-            <th>Lock</th>
+            <th>对象路径</th>
+            <th>渲染器</th>
+            <th>网格</th>
+            <th>槽位</th>
+            <th>材质</th>
+            <th>Shader 类型</th>
+            <th>分类</th>
+            <th>锁定</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
-    <div class="field-note">lilToon: ${Number(summary.lilToonCount || 0)}, Poiyomi: ${Number(summary.poiyomiCount || 0)}, Unsupported: ${Number(summary.unsupportedCount || 0)}</div>
+    <div class="field-note">lilToon：${Number(summary.lilToonCount || 0)}，Poiyomi：${Number(summary.poiyomiCount || 0)}，不支持：${Number(summary.unsupportedCount || 0)}</div>
   `;
 }
 
@@ -2072,7 +2187,7 @@ function onShaderMaterialCategoryChanged(event) {
   const lockToggle = event.target.closest(".shader-material-lock-toggle");
   if (lockToggle) {
     setShaderMaterialLock(lockToggle.dataset.materialId || "", lockToggle.checked).catch((error) => {
-      refs["shader-output"].textContent = `Shader lock update failed: ${error.message}`;
+      refs["shader-output"].textContent = `材质锁定状态更新失败：${error.message}`;
     });
     return;
   }
@@ -2160,7 +2275,7 @@ async function generateShaderPlan() {
 async function applyShaderPlan() {
   const changes = state.shaderPlanChanges || state.shaderPlan?.changes || [];
   if (!changes.length) {
-    refs["shader-output"].textContent = "No valid shader plan changes to apply.";
+    refs["shader-output"].textContent = "没有可应用的有效材质计划。";
     return;
   }
 
@@ -2203,7 +2318,7 @@ async function captureShaderReviewImage(kind) {
   } else {
     state.shaderReviewAfterPaths = [path];
   }
-  refs["shader-output"].textContent = `${kind === "before" ? "Before" : "After"} shader review screenshot captured: ${path}`;
+  refs["shader-output"].textContent = `${kind === "before" ? "调整前" : "调整后"}材质复核截图已保存：${path}`;
 }
 
 async function runShaderVisionReview() {
@@ -2224,7 +2339,7 @@ function renderShaderPlanPreview(payload) {
   const skipped = payload.skippedChanges || [];
   if (!changes.length && !skipped.length) {
     refs["shader-plan-list"].classList.add("empty-state");
-    refs["shader-plan-list"].innerHTML = "No valid shader material changes were generated.";
+    refs["shader-plan-list"].innerHTML = "没有生成有效的材质改动。";
     return;
   }
 
@@ -2234,24 +2349,24 @@ function renderShaderPlanPreview(payload) {
       <article class="change-row change-verified">
         <div class="change-head">
           <strong>${escapeHtml(item.material_name || item.material_id || "")}</strong>
-          <span>${escapeHtml(item.semantic_property || "")}</span>
+          <span>${escapeHtml(SHADER_SEMANTIC_LABELS[item.semantic_property] || item.semantic_property || "")}</span>
         </div>
-        <div class="blendshape-subline">${escapeHtml(item.category || "unknown")} / ${escapeHtml(item.shader_family || "")}</div>
+        <div class="blendshape-subline">${escapeHtml(SHADER_CATEGORY_LABELS[item.category] || item.category || "未分类")} / ${escapeHtml(item.shader_family || "")}</div>
         <p>${escapeHtml(String(item.before ?? ""))} -> ${escapeHtml(String(item.after ?? ""))}</p>
         <p>${escapeHtml(item.reason || "")}</p>
         <div class="change-meta">
-          <span class="meta-chip">valid</span>
-          <span class="meta-chip">confidence ${Number(item.confidence ?? 0).toFixed(2)}</span>
+          <span class="meta-chip">有效</span>
+          <span class="meta-chip">置信度 ${Number(item.confidence ?? 0).toFixed(2)}</span>
         </div>
       </article>
     `).join("")}
     ${skipped.map((item) => `
       <article class="change-row change-unverified">
         <div class="change-head">
-          <strong>${escapeHtml(item.material_name || item.material_id || "Skipped")}</strong>
-          <span>${escapeHtml(item.semantic_property || "")}</span>
+          <strong>${escapeHtml(item.material_name || item.material_id || "已跳过")}</strong>
+          <span>${escapeHtml(SHADER_SEMANTIC_LABELS[item.semantic_property] || item.semantic_property || "")}</span>
         </div>
-        <p>${escapeHtml(item.warning || "Skipped by validation")}</p>
+        <p>${escapeHtml(item.warning || "校验已跳过")}</p>
       </article>
     `).join("")}
   `;
@@ -2276,7 +2391,7 @@ function toggleShaderPanel(kind) {
   const panelId = kind === "history" ? "shader-history-panel" : "shader-preset-panel";
   refs[panelId].classList.toggle("hidden");
   loadShaderTuningData().catch((error) => {
-    refs["shader-output"].textContent = `Shader history/preset load failed: ${error.message}`;
+    refs["shader-output"].textContent = `材质历史/预设加载失败：${error.message}`;
   });
 }
 
@@ -2284,7 +2399,7 @@ function renderShaderHistory() {
   const records = [...(state.shaderHistory || [])].reverse();
   refs["shader-history-count"].textContent = `${records.length}`;
   if (!records.length) {
-    refs["shader-history-list"].innerHTML = '<div class="empty-state">No shader tuning history yet.</div>';
+    refs["shader-history-list"].innerHTML = '<div class="empty-state">还没有材质调校历史。</div>';
     return;
   }
 
@@ -2294,7 +2409,7 @@ function renderShaderHistory() {
       <article class="tuning-card">
         <div class="change-head">
           <strong>${escapeHtml(formatTimestamp(record.created_at) || record.id)}</strong>
-          <span>${changes.length} changes / ${record.applied ? "applied" : "review"}</span>
+          <span>${changes.length} 项 / ${record.applied ? "已应用" : "待复核"}</span>
         </div>
         <p>${escapeHtml(record.user_instruction || "")}</p>
         <div class="change-meta">
@@ -2302,15 +2417,15 @@ function renderShaderHistory() {
           <span class="meta-chip">${escapeHtml(record.model || "")}</span>
         </div>
         <div class="button-row compact-row">
-          <button class="button button-ghost" data-shader-history-action="reapply" data-history-id="${escapeHtml(record.id)}">Reapply</button>
-          <button class="button button-ghost" data-shader-history-action="preset" data-history-id="${escapeHtml(record.id)}">Save preset</button>
+          <button class="button button-ghost" data-shader-history-action="reapply" data-history-id="${escapeHtml(record.id)}">重放</button>
+          <button class="button button-ghost" data-shader-history-action="preset" data-history-id="${escapeHtml(record.id)}">保存预设</button>
         </div>
       </article>
     `;
   }).join("");
 
   refs["shader-history-list"].querySelectorAll("[data-shader-history-action]").forEach((button) => {
-    button.addEventListener("click", () => runInlineButtonTask(button, "Working...", () => handleShaderHistoryAction(button)));
+    button.addEventListener("click", () => runInlineButtonTask(button, "处理中...", () => handleShaderHistoryAction(button)));
   });
 }
 
@@ -2318,7 +2433,7 @@ function renderShaderPresets() {
   const presets = [...(state.shaderPresets || [])].reverse();
   refs["shader-preset-count"].textContent = `${presets.length}`;
   if (!presets.length) {
-    refs["shader-preset-list"].innerHTML = '<div class="empty-state">No shader presets saved yet.</div>';
+    refs["shader-preset-list"].innerHTML = '<div class="empty-state">还没有保存的材质预设。</div>';
     return;
   }
 
@@ -2328,21 +2443,21 @@ function renderShaderPresets() {
       <article class="tuning-card">
         <div class="change-head">
           <strong>${escapeHtml(preset.name || preset.id)}</strong>
-          <span>${changes.length} changes</span>
+          <span>${changes.length} 项</span>
         </div>
-        <p>${escapeHtml(preset.description || preset.user_instruction || "Saved shader material after-values")}</p>
+        <p>${escapeHtml(preset.description || preset.user_instruction || "保存的材质 after 值预设")}</p>
         <div class="button-row compact-row">
-          <button class="button button-accent" data-shader-preset-action="apply" data-preset-id="${escapeHtml(preset.id)}">Apply</button>
-          <button class="button button-ghost" data-shader-preset-action="rename" data-preset-id="${escapeHtml(preset.id)}">Rename</button>
-          <button class="button button-ghost" data-shader-preset-action="duplicate" data-preset-id="${escapeHtml(preset.id)}">Duplicate</button>
-          <button class="button button-ghost danger-button" data-shader-preset-action="delete" data-preset-id="${escapeHtml(preset.id)}">Delete</button>
+          <button class="button button-accent" data-shader-preset-action="apply" data-preset-id="${escapeHtml(preset.id)}">应用</button>
+          <button class="button button-ghost" data-shader-preset-action="rename" data-preset-id="${escapeHtml(preset.id)}">重命名</button>
+          <button class="button button-ghost" data-shader-preset-action="duplicate" data-preset-id="${escapeHtml(preset.id)}">复制</button>
+          <button class="button button-ghost danger-button" data-shader-preset-action="delete" data-preset-id="${escapeHtml(preset.id)}">删除</button>
         </div>
       </article>
     `;
   }).join("");
 
   refs["shader-preset-list"].querySelectorAll("[data-shader-preset-action]").forEach((button) => {
-    button.addEventListener("click", () => runInlineButtonTask(button, "Working...", () => handleShaderPresetAction(button)));
+    button.addEventListener("click", () => runInlineButtonTask(button, "处理中...", () => handleShaderPresetAction(button)));
   });
 }
 
@@ -2373,16 +2488,19 @@ async function handleShaderPresetAction(button) {
     });
   } else if (action === "rename") {
     const preset = (state.shaderPresets || []).find((item) => item.id === id);
-    const name = window.prompt("Shader preset name", preset?.name || "");
+    const name = window.prompt("材质预设名称", preset?.name || "");
     if (name && name.trim()) {
       await postJson(`/api/shader/presets/${encodeURIComponent(id)}/rename`, { name: name.trim() });
     }
   } else if (action === "duplicate") {
     const preset = (state.shaderPresets || []).find((item) => item.id === id);
-    const name = window.prompt("Duplicated shader preset name", `${preset?.name || "shader_preset"}_copy`);
-    await postJson(`/api/shader/presets/${encodeURIComponent(id)}/duplicate`, { name: name || null });
+    const name = window.prompt("复制后的材质预设名称", `${preset?.name || "shader_preset"}_copy`);
+    await postJson(`/api/shader/presets/${encodeURIComponent(id)}/duplicate`, {
+      name: name || null,
+      max_presets: readPresetLimit(),
+    });
   } else if (action === "delete") {
-    if (window.confirm("Delete this shader preset?")) {
+    if (window.confirm("删除这个材质预设？")) {
       await postJson(`/api/shader/presets/${encodeURIComponent(id)}/delete`);
     }
   }
@@ -2392,28 +2510,29 @@ async function handleShaderPresetAction(button) {
 async function saveCurrentShaderPlanAsPreset() {
   const historyId = state.shaderHistoryRecord?.id;
   if (!historyId) {
-    refs["shader-output"].textContent = "No shader history record is available yet. Generate a shader plan first.";
+    refs["shader-output"].textContent = "还没有可保存的材质历史。请先生成材质计划。";
     return;
   }
   await saveShaderHistoryAsPreset(historyId);
 }
 
 async function saveShaderHistoryAsPreset(historyId) {
-  const name = window.prompt("Shader preset name", suggestShaderPresetName());
+  const name = window.prompt("材质预设名称", suggestShaderPresetName());
   if (!name || !name.trim()) {
     return;
   }
-  const description = window.prompt("Description (optional)", "");
+  const description = window.prompt("描述（可选）", "");
   const payload = await postJson("/api/shader/presets", {
     history_id: historyId,
     name: name.trim(),
     tags: [],
     description: description || "",
+    max_presets: readPresetLimit(),
   });
   state.shaderPresets = payload.presets || state.shaderPresets;
   refs["shader-preset-panel"].classList.remove("hidden");
   renderShaderPresets();
-  refs["shader-output"].textContent = `Saved shader preset: ${payload.preset?.name || name.trim()}`;
+  refs["shader-output"].textContent = `已保存材质预设：${payload.preset?.name || name.trim()}`;
 }
 
 function suggestShaderPresetName() {

@@ -3,6 +3,7 @@ param(
     [string]$UnityEditorPath,
     [string]$BindHost = "127.0.0.1",
     [int]$BindPort = 8757,
+    [string]$ProxyUrl,
     [switch]$SkipUnityInstall,
     [switch]$LaunchUnity,
     [switch]$NoDashboard,
@@ -19,6 +20,7 @@ $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $dashboardScript = Join-Path $repoRoot "dashboard_server.py"
 $installUnityScript = Join-Path $repoRoot "tools\install-unity-project.ps1"
 $startDashboardScript = Join-Path $repoRoot "tools\start-dashboard.ps1"
+$settingsPath = Join-Path $repoRoot ".gemini\settings.json"
 
 function Write-Step {
     param([string]$Message)
@@ -34,6 +36,81 @@ function Write-Ok {
 function Write-Warn {
     param([string]$Message)
     Write-Warning $Message
+}
+
+function Write-Utf8NoBomFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Ensure-DefaultSettings {
+    $settingsDir = Split-Path -Parent $settingsPath
+    if (-not (Test-Path -LiteralPath $settingsDir)) {
+        New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+    }
+
+    if (Test-Path -LiteralPath $settingsPath) {
+        Write-Ok "Settings file found: $settingsPath"
+        return
+    }
+
+    $settingsJson = @'
+{
+  "gemini": {
+    "api_key_env": "GEMINI_API_KEY",
+    "model": "gemini-2.5-flash",
+    "thinking_level": ""
+  },
+  "unity_mcp": {
+    "command": [
+      "powershell",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "tools/unity-mcp-cli.ps1"
+    ],
+    "host": "127.0.0.1",
+    "port": 8080,
+    "instance": "",
+    "retries": 3,
+    "retry_backoff_seconds": 2.0,
+    "timeout_seconds": 30,
+    "export_tool_name": "vrc_export_blendshapes",
+    "execute_tool_name": "vrc_execute_roslyn"
+  },
+  "paths": {
+    "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
+  },
+  "planning": {
+    "min_confidence": 0.65
+  },
+  "dashboard": {
+    "project_roots": [],
+    "unity_editor_path": "",
+    "status_push_interval_seconds": 2.5
+  }
+}
+'@
+
+    Write-Utf8NoBomFile -Path $settingsPath -Content $settingsJson
+    Write-Ok "Created default settings file without UTF-8 BOM: $settingsPath"
+}
+
+function Configure-Proxy {
+    if ([string]::IsNullOrWhiteSpace($ProxyUrl)) {
+        return
+    }
+
+    $env:HTTP_PROXY = $ProxyUrl
+    $env:HTTPS_PROXY = $ProxyUrl
+    $env:ALL_PROXY = $ProxyUrl
+    $env:NO_PROXY = "127.0.0.1,localhost"
+    Write-Ok "Provider requests will use proxy: $ProxyUrl"
 }
 
 function Resolve-RequiredPath {
@@ -242,6 +319,9 @@ function Start-Dashboard {
     )
 
     $args = @("-ExecutionPolicy", "Bypass", "-File", $startDashboardScript, "-BindHost", $HostName, "-BindPort", $Port)
+    if (-not [string]::IsNullOrWhiteSpace($ProxyUrl)) {
+        $args += @("-ProxyUrl", $ProxyUrl)
+    }
     if (-not $OpenBrowser) {
         $args += "-OpenBrowser:`$false"
     }
@@ -287,6 +367,10 @@ Write-Ok "Python $pythonVersion at $pythonExe"
 Ensure-Pip -PythonExe $pythonExe
 Write-Ok "pip is available."
 Ensure-PythonDependencies -PythonExe $pythonExe
+
+Write-Step "Checking first-run settings"
+Ensure-DefaultSettings
+Configure-Proxy
 
 Write-Step "Checking dashboard port"
 if (-not (Test-PortAvailable -HostName $BindHost -Port $BindPort)) {

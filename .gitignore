@@ -4,11 +4,13 @@ pycache/
 *.pyc
 *.pyo
 *.pyd
+*.zip
 .pytest_cache/
 .mypy_cache/
 .gemini/
 artifacts/
 config.json
+docs/
 
 AGENTS.md
 PROJECT_STATUS.md
