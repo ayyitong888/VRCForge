@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>VRCForge 控制台</title>
-    <link rel="stylesheet" href="/dashboard/styles.css?v=20260509-provider-sceneview">
+    <link rel="stylesheet" href="/dashboard/styles.css?v=20260518-vision-gm">
   </head>
   <body>
     <div class="background-grid"></div>
@@ -498,6 +498,12 @@
             <span id="vision-status-chip" class="panel-chip">未分析</span>
           </div>
 
+          <div class="workflow-warning vision-warning" role="note">
+            <strong>⚠️ 建议使用 Gesture Manager Play Mode 截图，Scene 视图与游戏内效果存在差异</strong>
+            <span>Use Gesture Manager Play Mode screenshots for accurate results. Unity Scene view does not match VRChat in-game rendering.</span>
+            <span>进入 Play Mode 后先在 Gesture Manager 或 Game View 中调整好正脸角度，再点击“捕获截图”。未进入 Play Mode 时仍会保留原 Scene View 截图流程并弹窗提醒。</span>
+          </div>
+
           <!-- 视角 Tab 栏 -->
           <div class="tab-row" id="vision-angle-tabs">
             <button class="tab-btn tab-active" data-angle="">单视角</button>
@@ -544,6 +550,6 @@
       <div id="reference-lightbox-title" class="reference-lightbox-title"></div>
     </div>
 
-    <script src="/dashboard/app.js?v=20260518-shader-cn"></script>
+    <script src="/dashboard/app.js?v=20260518-vision-gm"></script>
   </body>
 </html>

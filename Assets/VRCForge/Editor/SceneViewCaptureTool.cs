@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
@@ -10,16 +11,22 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_capture_scene_view",
-        Description = "Capture the active Unity SceneView camera to a PNG without requiring Roslyn."
+        Description = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG without requiring Roslyn."
     )]
     public static class SceneViewCaptureTool
     {
+        private const string PlayModeRecommendedMessage = "建议进入 Play Mode 并启动 Gesture Manager 后再截图；当前将使用 Scene View 截图 / Play Mode with Gesture Manager is recommended; current capture will use Scene View.";
+        private const string PlayModeRequiredMessage = "请进入 Play Mode 并启动 Gesture Manager 后再截图 / Please enter Play Mode with Gesture Manager before capturing";
+        private const string GestureManagerRecommendedMessage = "建议安装 Gesture Manager 以获得准确效果 / Gesture Manager recommended for accurate preview";
+
         public static object HandleCommand(JObject @params)
         {
             try
             {
+                var statusOnly = @params?["statusOnly"]?.Value<bool?>() ?? false;
+                var requirePlayMode = @params?["requirePlayMode"]?.Value<bool?>() ?? false;
                 var outputPath = (@params?["outputPath"]?.ToString() ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(outputPath))
+                if (!statusOnly && string.IsNullOrWhiteSpace(outputPath))
                 {
                     return new ErrorResponse("Missing required parameter: outputPath");
                 }
@@ -34,6 +41,87 @@ namespace VRCForge.Editor
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var captureScope = (@params?["captureScope"]?.ToString() ?? "avatar").Trim().ToLowerInvariant();
 
+                var isPlayMode = EditorApplication.isPlaying;
+                var captureMode = isPlayMode ? "game_view" : "scene_view";
+                var warnings = new List<string>();
+                var gestureManagerDetected = isPlayMode && IsGestureManagerRunning();
+                var gameViewCaptureMethod = string.Empty;
+
+                if (!isPlayMode)
+                {
+                    warnings.Add(PlayModeRecommendedMessage);
+                }
+                else if (!gestureManagerDetected)
+                {
+                    warnings.Add(GestureManagerRecommendedMessage);
+                    Debug.LogWarning($"[VRCForge Capture] {GestureManagerRecommendedMessage}");
+                }
+
+                if (statusOnly)
+                {
+                    return new SuccessResponse(
+                        "Capture status checked.",
+                        new
+                        {
+                            isPlayMode,
+                            captureMode,
+                            requirePlayMode,
+                            canCapture = !requirePlayMode || isPlayMode,
+                            gestureManagerDetected,
+                            warnings = warnings.ToArray(),
+                            error = requirePlayMode && !isPlayMode ? PlayModeRequiredMessage : string.Empty
+                        });
+                }
+
+                if (requirePlayMode && !isPlayMode)
+                {
+                    return new ErrorResponse(PlayModeRequiredMessage);
+                }
+
+                var absolutePath = ResolveToAbsolutePath(outputPath);
+                var directory = Path.GetDirectoryName(absolutePath);
+                if (string.IsNullOrEmpty(directory))
+                {
+                    return new ErrorResponse($"Cannot resolve parent folder for screenshot path: {outputPath}");
+                }
+
+                Directory.CreateDirectory(directory);
+
+                if (isPlayMode)
+                {
+                    if (setRotation)
+                    {
+                        warnings.Add("Play Mode capture uses the current Game View camera. Scene View rotation parameters are ignored; adjust the Game View/Gesture Manager view before capture.");
+                    }
+
+                    TryShowGameView();
+                    gameViewCaptureMethod = CaptureGameViewToPng(absolutePath, width, height, warnings);
+                    return new SuccessResponse(
+                        $"Captured Game View screenshot: {absolutePath}",
+                        new
+                        {
+                            imagePath = absolutePath.Replace("\\", "/"),
+                            width,
+                            height,
+                            pitch,
+                            yaw,
+                            roll,
+                            captureScope,
+                            setRotation,
+                            avatarPath,
+                            resolvedAvatarPath = string.Empty,
+                            usedOrbitCamera = false,
+                            captureMode,
+                            isPlayMode,
+                            gestureManagerDetected,
+                            gameViewCaptureMethod,
+                            warnings = warnings.ToArray(),
+                            targetCenter = new { x = 0f, y = 0f, z = 0f },
+                            cameraPosition = new { x = 0f, y = 0f, z = 0f },
+                            orthographicSize = 0f
+                        });
+                }
+
                 var sceneView = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
                 if (sceneView == null)
                 {
@@ -46,14 +134,6 @@ namespace VRCForge.Editor
                     return new ErrorResponse("SceneView camera is not available for screenshot capture.");
                 }
 
-                var absolutePath = ResolveToAbsolutePath(outputPath);
-                var directory = Path.GetDirectoryName(absolutePath);
-                if (string.IsNullOrEmpty(directory))
-                {
-                    return new ErrorResponse($"Cannot resolve parent folder for screenshot path: {outputPath}");
-                }
-
-                Directory.CreateDirectory(directory);
                 sceneView.Show();
 
                 var usedOrbitCamera = false;
@@ -117,6 +197,10 @@ namespace VRCForge.Editor
                         avatarPath,
                         resolvedAvatarPath,
                         usedOrbitCamera,
+                        captureMode,
+                        isPlayMode,
+                        gestureManagerDetected,
+                        warnings = warnings.ToArray(),
                         targetCenter = new { x = targetCenter.x, y = targetCenter.y, z = targetCenter.z },
                         cameraPosition = new { x = cameraPosition.x, y = cameraPosition.y, z = cameraPosition.z },
                         orthographicSize
@@ -126,6 +210,201 @@ namespace VRCForge.Editor
             {
                 return new ErrorResponse($"SceneView capture failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static string CaptureGameViewToPng(string absolutePath, int width, int height, List<string> warnings)
+        {
+            EditorApplication.QueuePlayerLoopUpdate();
+            var source = ScreenCapture.CaptureScreenshotAsTexture();
+            if (source != null)
+            {
+                try
+                {
+                    var finalTexture = CenterCropAndResizeTexture(source, width, height);
+                    try
+                    {
+                        File.WriteAllBytes(absolutePath, finalTexture.EncodeToPNG());
+                    }
+                    finally
+                    {
+                        UnityEngine.Object.DestroyImmediate(finalTexture);
+                    }
+                    return "screen_capture";
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(source);
+                }
+            }
+
+            warnings.Add("Game View screen capture texture was not available; falling back to the active Game camera render.");
+            var camera = ResolveActiveGameCamera();
+            if (camera == null)
+            {
+                throw new InvalidOperationException("Game View screenshot texture was not available, and no active Game camera was found.");
+            }
+
+            CaptureCameraToPng(camera, absolutePath, width, height);
+            return "active_game_camera_fallback";
+        }
+
+        private static Texture2D CenterCropAndResizeTexture(Texture2D source, int width, int height)
+        {
+            var targetAspect = width / (float)height;
+            var sourceAspect = source.width / (float)source.height;
+            var cropWidth = source.width;
+            var cropHeight = source.height;
+
+            if (sourceAspect > targetAspect)
+            {
+                cropWidth = Mathf.Max(1, Mathf.RoundToInt(source.height * targetAspect));
+            }
+            else if (sourceAspect < targetAspect)
+            {
+                cropHeight = Mathf.Max(1, Mathf.RoundToInt(source.width / targetAspect));
+            }
+
+            var cropX = Mathf.Max(0, (source.width - cropWidth) / 2);
+            var cropY = Mathf.Max(0, (source.height - cropHeight) / 2);
+            var cropped = new Texture2D(cropWidth, cropHeight, TextureFormat.RGB24, false);
+            Texture2D result = null;
+
+            try
+            {
+                cropped.SetPixels(source.GetPixels(cropX, cropY, cropWidth, cropHeight));
+                cropped.Apply();
+
+                if (cropWidth == width && cropHeight == height)
+                {
+                    result = cropped;
+                    cropped = null;
+                    return result;
+                }
+
+                result = ResizeTexture(cropped, width, height);
+                return result;
+            }
+            finally
+            {
+                if (cropped != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(cropped);
+                }
+            }
+        }
+
+        private static Texture2D ResizeTexture(Texture2D source, int width, int height)
+        {
+            var renderTexture = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            var previousActive = RenderTexture.active;
+            try
+            {
+                Graphics.Blit(source, renderTexture);
+                RenderTexture.active = renderTexture;
+                var result = new Texture2D(width, height, TextureFormat.RGB24, false);
+                result.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                result.Apply();
+                return result;
+            }
+            finally
+            {
+                RenderTexture.active = previousActive;
+                RenderTexture.ReleaseTemporary(renderTexture);
+            }
+        }
+
+        private static Camera ResolveActiveGameCamera()
+        {
+            if (Camera.main != null && Camera.main.isActiveAndEnabled)
+            {
+                return Camera.main;
+            }
+
+            Camera bestCamera = null;
+            foreach (var camera in Camera.allCameras)
+            {
+                if (camera == null || !camera.isActiveAndEnabled || !camera.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                if (bestCamera == null || camera.depth >= bestCamera.depth)
+                {
+                    bestCamera = camera;
+                }
+            }
+
+            return bestCamera;
+        }
+
+        private static void TryShowGameView()
+        {
+            try
+            {
+                var gameViewType = Type.GetType("UnityEditor.GameView,UnityEditor");
+                if (gameViewType == null)
+                {
+                    return;
+                }
+
+                var gameView = EditorWindow.GetWindow(gameViewType);
+                gameView?.Show();
+                gameView?.Repaint();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[VRCForge Capture] Could not focus Game View before capture: {ex.Message}");
+            }
+        }
+
+        private static bool IsGestureManagerRunning()
+        {
+            foreach (var behaviour in Resources.FindObjectsOfTypeAll<MonoBehaviour>())
+            {
+                if (behaviour == null || behaviour.gameObject == null || !IsSceneObject(behaviour.gameObject))
+                {
+                    continue;
+                }
+
+                if (!behaviour.isActiveAndEnabled)
+                {
+                    continue;
+                }
+
+                var type = behaviour.GetType();
+                var text = $"{type.FullName} {type.Name} {behaviour.gameObject.name}";
+                if (ContainsIgnoreCase(text, "GestureManager") || ContainsIgnoreCase(text, "Gesture Manager"))
+                {
+                    return true;
+                }
+            }
+
+            foreach (var transform in Resources.FindObjectsOfTypeAll<Transform>())
+            {
+                if (transform == null || transform.gameObject == null || !IsSceneObject(transform.gameObject))
+                {
+                    continue;
+                }
+
+                if (transform.gameObject.activeInHierarchy && ContainsIgnoreCase(transform.name, "GestureManager"))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsSceneObject(GameObject gameObject)
+        {
+            return gameObject.scene.IsValid() && !EditorUtility.IsPersistent(gameObject);
+        }
+
+        private static bool ContainsIgnoreCase(string text, string term)
+        {
+            return !string.IsNullOrEmpty(text)
+                && !string.IsNullOrEmpty(term)
+                && text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static void CaptureOrbitCamera(

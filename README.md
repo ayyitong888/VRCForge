@@ -66,6 +66,30 @@ The MVP does not edit shader code, texture files, mesh data, render queue, stenc
 
 MVP 不会编辑 shader 代码、贴图文件、Mesh 数据、渲染队列、模板、剔除、混合模式或 shader 指派。使用任何写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
+## Vision Review Workflow / 识图复核工作流
+
+For accurate visual review, prefer Gesture Manager Play Mode screenshots. Unity Scene view can differ from VRChat because lighting, camera perspective, and shader execution are not the same. When Unity is in Play Mode, VRCForge captures the current Game View, so adjust the Gesture Manager / Game View camera to the desired front-face angle before clicking Capture.
+
+为了让识图复核更接近 VRChat 游戏内效果，建议使用 Gesture Manager 的 Play Mode 截图。Unity Scene 视图会受到光照、相机焦距和 shader 运行状态差异影响。Unity 进入 Play Mode 后，VRCForge 会截取当前 Game View；请先在 Gesture Manager / Game View 中把 Avatar 正脸角度调好，再点击“捕获截图”。
+
+Recommended workflow:
+1. Apply blendshape or shader/material changes.
+2. Enter Play Mode with Gesture Manager active.
+3. Adjust Gesture Manager / Game View to the desired front-face preview.
+4. Capture Before / After screenshots from the Vision Review panel.
+5. Run Vision Review and use the result as an advisory check.
+
+推荐流程：
+1. 先应用 Blendshape 或 shader/material 改动。
+2. 进入 Play Mode，并启动 Gesture Manager。
+3. 在 Gesture Manager / Game View 中调整到需要的正脸预览角度。
+4. 在 Vision Review 面板捕获调整前 / 调整后截图。
+5. 运行识图复核，把结果作为审查建议。
+
+If the dashboard detects that Unity is not in Gesture Manager Play Mode, it will show a reminder but will not block capture. Outside Play Mode, the Vision Review panel keeps the original Scene View screenshot behavior; in Play Mode it uses Game View capture.
+
+如果 dashboard 检测到当前不是 Gesture Manager Play Mode，会弹窗提醒但不会强制阻止截图。未进入 Play Mode 时，Vision Review 面板保留原来的 Scene View 截图行为；进入 Play Mode 后会使用 Game View 截图。
+
 ## Quick Start / 快速开始
 
 1. Prepare Windows, Unity 2022.3 LTS, a VRChat SDK3 Avatar project, and Python.

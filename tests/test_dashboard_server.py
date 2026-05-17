@@ -114,6 +114,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("VRCForge 控制台", response.text)
             self.assertIn("识图分析", response.text)
+            self.assertIn("Gesture Manager Play Mode screenshots", response.text)
             self.assertIn("原图 / 当前脸", response.text)
             self.assertIn("目标参考图", response.text)
             self.assertIn("粘贴图片", response.text)
@@ -151,6 +152,20 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(f'MenuItem("{old_brand}', combined)
         self.assertNotIn(f"[{old_brand}", combined)
         self.assertNotIn(f"Assets/{old_brand}", combined)
+
+    def test_scene_capture_tool_supports_play_mode_game_view_status(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "SceneViewCaptureTool.cs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("EditorApplication.isPlaying", source)
+        self.assertIn("statusOnly", source)
+        self.assertIn("requirePlayMode", source)
+        self.assertIn('captureMode = isPlayMode ? "game_view" : "scene_view"', source)
+        self.assertIn("ScreenCapture.CaptureScreenshotAsTexture", source)
+        self.assertIn("IsGestureManagerRunning", source)
+        self.assertIn("Gesture Manager recommended for accurate preview", source)
+        self.assertIn("Play Mode with Gesture Manager is recommended", source)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1142,6 +1157,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(tool_name, "vrc_capture_scene_view")
         self.assertFalse(params["setRotation"])
         self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+        self.assertFalse(params["requirePlayMode"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_vision_capture_status_uses_scene_capture_status_mode(
+        self,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "isPlayMode": False,
+                    "captureMode": "scene_view",
+                    "gestureManagerDetected": False,
+                    "warnings": ["Play Mode with Gesture Manager is recommended"],
+                }
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/vision/capture-status", json={"require_play_mode": False})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["isPlayMode"])
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_capture_scene_view")
+        self.assertTrue(params["statusOnly"])
+        self.assertFalse(params["requirePlayMode"])
 
     @patch("dashboard_server.load_dashboard_export_payload")
     @patch("dashboard_server.load_dashboard_settings")

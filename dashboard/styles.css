@@ -376,6 +376,31 @@ textarea {
   line-height: 1.55;
 }
 
+.workflow-warning {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(114, 90, 0, 0.32);
+  border-radius: var(--radius-md);
+  background: var(--md-warning-container);
+  color: var(--md-on-surface);
+  line-height: 1.5;
+}
+
+.workflow-warning strong {
+  color: var(--md-warning);
+  font-size: 0.92rem;
+}
+
+.workflow-warning span {
+  color: var(--md-on-surface-variant);
+  font-size: 0.84rem;
+}
+
+.vision-warning {
+  margin: 0 0 0.9rem;
+}
+
 .toggle-row {
   flex-wrap: wrap;
   align-items: center;
@@ -1172,6 +1197,11 @@ textarea {
 .result-fail {
   border-color: rgba(186, 26, 26, 0.38);
   background: var(--md-error-container);
+}
+
+.result-warn {
+  border-color: rgba(114, 90, 0, 0.38);
+  background: var(--md-warning-container);
 }
 
 .log-stream,

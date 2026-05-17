@@ -27,19 +27,27 @@ Working and covered by automated tests:
   - `vrc_scan_animation_bindings`
   - `vrc_create_safe_backup`
   - `vrc_restore_safe_backup`
+- Unity screenshot capture:
+  - `vrc_capture_scene_view` keeps the original static Scene View capture outside Play Mode.
+  - When Unity is in Play Mode, the same tool captures the current Game View for more accurate shader, lighting, and Gesture Manager preview.
+  - The Vision Review dashboard panel now checks Play Mode / Gesture Manager state before capture and shows a reminder without blocking capture.
+- Unity-side public branding has been renamed from the old `Assets/VRCAutoRig` path to `Assets/VRCForge`; install scripts migrate the legacy folder when found.
+- Local planning/research materials from `D:\Codex\新建文件夹` were moved into ignored local folder `docs/research/` for safekeeping. They are not part of the pushed GitHub source tree unless explicitly force-added later.
 
 Latest known automated validation:
 
 - `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
 - `node --check dashboard/app.js`
-- `python -m pytest -q` passed with 77 tests and 4 existing FastAPI deprecation warnings.
+- `python -m pytest -q` passed with 80 tests and 4 existing FastAPI deprecation warnings.
 - `git diff --check`
 
 Known live-validation status:
 
 - Face tuning has been exercised through the dashboard and Unity workflow, but final quality still depends on real avatar content and selected model output.
 - Shader / Material Tuning MVP has automated coverage for backend validation and dashboard syntax, but still needs a real Unity project pass for C# clean compile, material scan, apply, restore, preset replay, and Vision review.
+- Gesture Manager / Play Mode screenshot routing has automated source and dashboard coverage, but still needs a real Unity play session pass to confirm Game View capture framing on a live avatar.
 - Phase 2 tool source registration is covered by pytest. A direct `unity-mcp tool list` probe from this shell returned HTTP 503, so live Unity MCP list verification and Unity C# compile still need the open Unity project to be reachable.
+- The ignored local research folder `docs/research/` should stay as background planning context only; do not treat those early Roslyn / external MCP research files as the default implementation route.
 
 ## 2. Known TODO Items
 
@@ -54,6 +62,7 @@ Priority P0:
   - `vrc_restore_safe_backup`
 - Confirm `vrc_scan_avatar_materials` appears in MCP for Unity and returns renderer, mesh, slot, material, shader family, category, and supported semantic properties.
 - Confirm `vrc_apply_material_tuning` safely applies and restores lilToon and Poiyomi material values without touching forbidden shader, texture, mesh, render queue, stencil, culling, blend mode, or shader assignment data.
+- Enter Play Mode with Gesture Manager active, adjust Game View to the avatar front face, and confirm Vision Review captures Game View rather than Scene View.
 - Keep `VRCFORGE_ENABLE_ROSLYN` disabled by default and confirm Unity compile does not require Roslyn DLLs.
 
 Priority P1:

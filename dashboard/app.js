@@ -58,6 +58,8 @@ const PROVIDER_PRESETS = {
 };
 
 const MANUAL_MODEL_VALUE = "__manual_model__";
+const VISION_PLAY_MODE_GUIDANCE = "建议进入 Play Mode 并启动 Gesture Manager 后再截图；当前将使用 Scene View 截图 / Play Mode with Gesture Manager is recommended; current capture will use Scene View.";
+const VISION_GESTURE_GUIDANCE = "建议安装 Gesture Manager 以获得准确效果 / Gesture Manager recommended for accurate preview";
 
 const SHADER_CATEGORY_LABELS = {
   skin: "皮肤",
@@ -2321,6 +2323,60 @@ async function captureShaderReviewImage(kind) {
   refs["shader-output"].textContent = `${kind === "before" ? "调整前" : "调整后"}材质复核截图已保存：${path}`;
 }
 
+async function checkVisionCaptureEnvironment() {
+  const status = await postJson("/api/vision/capture-status", {
+    ...buildConnectionPayload(),
+    require_play_mode: false,
+  });
+  const notices = [];
+  if (!status.isPlayMode) {
+    notices.push(VISION_PLAY_MODE_GUIDANCE);
+  } else if (!status.gestureManagerDetected) {
+    notices.push(VISION_GESTURE_GUIDANCE);
+  }
+  const toolWarnings = Array.isArray(status.warnings) ? status.warnings.filter(Boolean) : [];
+  for (const warning of toolWarnings) {
+    if (!notices.includes(warning)) {
+      notices.push(warning);
+    }
+  }
+  if (notices.length) {
+    const message = notices.join("\n");
+    window.alert(message);
+    refs["vision-result"].innerHTML = renderVisionNoticeHtml("截图环境提醒", notices);
+    refs["vision-status-chip"].textContent = "建议检查";
+  }
+  return status;
+}
+
+function collectCaptureWarnings(capture) {
+  const warnings = Array.isArray(capture?.warnings) ? capture.warnings.filter(Boolean) : [];
+  return [...new Set(warnings)];
+}
+
+function renderVisionNoticeHtml(title, notices) {
+  const items = Array.isArray(notices) ? notices.filter(Boolean) : [];
+  return `
+    <div class="info-card result-warn">
+      <strong>${escapeHtml(title)}</strong>
+      ${items.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+    </div>
+  `;
+}
+
+function renderVisionCaptureResult(title, imagePath, capture) {
+  const warnings = collectCaptureWarnings(capture);
+  const modeLabel = capture?.captureMode === "game_view" ? "Play Mode / Game View" : "Static / Scene View";
+  refs["vision-result"].innerHTML = `
+    <div class="info-card ${warnings.length ? "result-warn" : ""}">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(imagePath || "")}</span>
+      <p>${escapeHtml(modeLabel)}</p>
+      ${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+    </div>
+  `;
+}
+
 async function runShaderVisionReview() {
   const goal = refs["shader-instruction-input"].value.trim() || refs["instruction-input"].value.trim();
   const payload = await postJson("/api/shader/vision-review", {
@@ -2548,6 +2604,7 @@ function suggestShaderPresetName() {
 }
 
 async function captureScreenshot() {
+  await checkVisionCaptureEnvironment();
   const payload = await postJson("/api/vision/capture", {
     ...buildConnectionPayload(),
     avatar_path: state.selectedAvatarPath || null,
@@ -2555,7 +2612,7 @@ async function captureScreenshot() {
     height: 960,
   });
   renderScreenshot(payload.imageUrl);
-  refs["vision-result"].innerHTML = `<div class="info-card"><strong>截图已更新</strong><span>${escapeHtml(payload.imagePath)}</span></div>`;
+  renderVisionCaptureResult("截图已更新", payload.imagePath, payload.capture);
   refs["vision-status-chip"].textContent = "待分析";
 }
 
@@ -2633,6 +2690,7 @@ async function auditVision() {
 }
 
 async function captureMultiScreenshot() {
+  await checkVisionCaptureEnvironment();
   const payload = await postJson("/api/vision/capture-multi", {
     ...buildConnectionPayload(),
     avatar_path: state.selectedAvatarPath || null,
@@ -2645,7 +2703,12 @@ async function captureMultiScreenshot() {
   if (state.multiScreenshots.length > 0) {
     renderScreenshot(state.multiScreenshots[0].imageUrl);
     renderMultiThumbs();
-    refs["vision-result"].innerHTML = `<div class="info-card"><strong>已捕获多视角截图</strong><span>共 ${state.multiScreenshots.length} 张</span></div>`;
+    const warnings = state.multiScreenshots.flatMap((item) => collectCaptureWarnings(item.capture));
+    renderVisionCaptureResult(
+      "已捕获多视角截图",
+      `共 ${state.multiScreenshots.length} 张`,
+      { captureMode: state.multiScreenshots[0]?.capture?.captureMode, warnings }
+    );
   refs["vision-status-chip"].textContent = "待分析";
   }
 }

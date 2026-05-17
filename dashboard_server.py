@@ -289,6 +289,11 @@ class VisionCaptureRequest(ConnectionRequest):
     avatar_path: str | None = None
     width: int = 960
     height: int = 960
+    require_play_mode: bool = False
+
+
+class VisionCaptureStatusRequest(ConnectionRequest):
+    require_play_mode: bool = False
 
 
 class VisionAuditRequest(ConnectionRequest):
@@ -317,6 +322,7 @@ class VisionCaptureMultiRequest(ConnectionRequest):
     angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back"])
     width: int = 960
     height: int = 960
+    require_play_mode: bool = False
 
 
 class VisionAuditMultiRequest(ConnectionRequest):
@@ -928,6 +934,11 @@ async def review_shader_material_vision(request: ShaderVisionReviewRequest) -> d
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
     return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
+
+
+@app.post("/api/vision/capture-status")
+async def read_vision_capture_status(request: VisionCaptureStatusRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(read_vision_capture_status_sync, request)
 
 
 @app.post("/api/vision/capture-multi")
@@ -2551,6 +2562,7 @@ def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, A
             height=request.height,
             avatar_path=request.avatar_path,
             set_rotation=False,
+            require_play_mode=request.require_play_mode,
         )
         image_path = payload.get("imagePath") or str(output_path)
         image_url = to_artifact_url(image_path)
@@ -2560,6 +2572,16 @@ def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, A
         return {"ok": True, "imagePath": image_path, "imageUrl": image_url, "capture": payload}
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "vision", "Failed to capture screenshot.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def read_vision_capture_status_sync(request: VisionCaptureStatusRequest) -> dict[str, Any]:
+    try:
+        settings = load_dashboard_settings(request)
+        payload = capture_scene_view_status_direct(settings=settings, require_play_mode=request.require_play_mode)
+        return {"ok": True, **payload}
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "vision", "Failed to read capture status.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -2719,6 +2741,7 @@ def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> 
                 set_rotation=True,
                 avatar_path=request.avatar_path,
                 capture_scope="face",
+                require_play_mode=request.require_play_mode,
             )
             image_path = payload.get("imagePath") or str(out_path)
             image_url = to_artifact_url(image_path)
@@ -3321,6 +3344,7 @@ def capture_scene_view_direct(
     roll: float = 0.0,
     set_rotation: bool = False,
     capture_scope: str = "avatar",
+    require_play_mode: bool = False,
 ) -> dict[str, Any]:
     result = invoke_unity_mcp(
         settings,
@@ -3336,6 +3360,7 @@ def capture_scene_view_direct(
             "restoreView": True,
             "avatarPath": avatar_path or "",
             "captureScope": capture_scope,
+            "requirePlayMode": require_play_mode,
         },
     )
     payload = extract_tool_result_payload(result)
@@ -3353,9 +3378,23 @@ def capture_scene_view_direct(
             "setRotation": set_rotation,
             "avatarPath": avatar_path or "",
             "captureScope": capture_scope,
+            "requirePlayMode": require_play_mode,
         }
 
     return ensure_dict_payload(payload, "vision capture")
+
+
+def capture_scene_view_status_direct(settings: Settings, require_play_mode: bool = False) -> dict[str, Any]:
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_capture_scene_view",
+        {
+            "statusOnly": True,
+            "requirePlayMode": require_play_mode,
+        },
+    )
+    payload = extract_tool_result_payload(result)
+    return ensure_dict_payload(payload, "vision capture status")
 
 
 def build_clothing_fx_blueprint_from_controls(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
