@@ -17,4 +17,5 @@ NON_TECHNICAL_TEST_GUIDE.md
 *.private.md
 
 Assets/VRCAutoRig/blendshapes_export.json
+Assets/VRCAutoRig/*_inventory.json
 Assets/VRCAutoRig/*.log

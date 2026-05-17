@@ -2,7 +2,7 @@
 
 ## 1. Current Project State
 
-VRCForge is currently at a local MVP stage with the dashboard, FastAPI backend, Unity MCP tools, face tuning loop, and Shader / Material Tuning MVP implemented.
+VRCForge is currently at a local MVP stage with the dashboard, FastAPI backend, Unity MCP tools, face tuning loop, Shader / Material Tuning MVP, and Phase 2 Unity tool layer expansion implemented.
 
 Working and covered by automated tests:
 
@@ -21,24 +21,37 @@ Working and covered by automated tests:
   - shader preset replay with saved after values
   - rejection of arbitrary real shader property names
 - Roslyn fallback is optional and isolated behind `VRCFORGE_ENABLE_ROSLYN`; core workflows use dedicated Unity MCP tools.
+- Phase 2 predefined Unity Editor tools:
+  - `vrc_scan_avatar_items`
+  - `vrc_scan_fx_animator`
+  - `vrc_scan_animation_bindings`
+  - `vrc_create_safe_backup`
+  - `vrc_restore_safe_backup`
 
 Latest known automated validation:
 
 - `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
 - `node --check dashboard/app.js`
-- `python -m pytest -q`
+- `python -m pytest -q` passed with 73 tests and 4 existing FastAPI deprecation warnings.
 - `git diff --check`
 
 Known live-validation status:
 
 - Face tuning has been exercised through the dashboard and Unity workflow, but final quality still depends on real avatar content and selected model output.
 - Shader / Material Tuning MVP has automated coverage for backend validation and dashboard syntax, but still needs a real Unity project pass for C# clean compile, material scan, apply, restore, preset replay, and Vision review.
+- Phase 2 tool source registration is covered by pytest. A direct `unity-mcp tool list` probe from this shell returned HTTP 503, so live Unity MCP list verification and Unity C# compile still need the open Unity project to be reachable.
 
 ## 2. Known TODO Items
 
 Priority P0:
 
-- Run Unity clean compile in a real VRChat Avatar project after the latest local changes.
+- Run Unity clean compile in a real VRChat Avatar project after the Phase 2 tool layer expansion.
+- Confirm these five tools appear in the Unity MCP tool list:
+  - `vrc_scan_avatar_items`
+  - `vrc_scan_fx_animator`
+  - `vrc_scan_animation_bindings`
+  - `vrc_create_safe_backup`
+  - `vrc_restore_safe_backup`
 - Confirm `vrc_scan_avatar_materials` appears in MCP for Unity and returns renderer, mesh, slot, material, shader family, category, and supported semantic properties.
 - Confirm `vrc_apply_material_tuning` safely applies and restores lilToon and Poiyomi material values without touching forbidden shader, texture, mesh, render queue, stencil, culling, blend mode, or shader assignment data.
 - Keep `VRCFORGE_ENABLE_ROSLYN` disabled by default and confirm Unity compile does not require Roslyn DLLs.
@@ -84,31 +97,38 @@ Unity MCP and adapters:
 - Shader adapters expose semantic material properties only. lilToon and Poiyomi map semantic properties to real material aliases internally and always check `Material.HasProperty`.
 - Unsupported shaders remain visible in inventory but are skipped during writes.
 
-## 4. Next Session Goal: Phase 2 Tool Expansion
+## 4. Phase 2 Tool Expansion Status
 
-Phase 2 should add five focused Unity Editor tools without redesigning the current MVP.
+Phase 2 added five focused Unity Editor tools without redesigning the current MVP.
 
 1. `vrc_scan_avatar_items`
    - Read-only avatar hierarchy and item inventory.
    - Return object path, active state, renderer count, mesh/material summary, likely category, and whether the item appears wardrobe-related.
+   - Implemented in `Assets/VRCAutoRig/Editor/GameObjectTools.cs`.
 
 2. `vrc_scan_fx_animator`
    - Read-only FX controller inventory.
    - Return layers, states, transitions, parameters used, animation clips referenced, and likely toggle groups.
+   - Implemented in `Assets/VRCAutoRig/Editor/ComponentTools.cs`.
 
 3. `vrc_scan_animation_bindings`
    - Read-only animation clip binding scan.
    - Return animated paths/properties, material/property bindings, object active toggles, Blendshape bindings, and unsafe/unsupported binding warnings.
+   - Implemented in `Assets/VRCAutoRig/Editor/AssetTools.cs`.
 
 4. `vrc_create_safe_backup`
    - Write a local Unity-side backup snapshot before asset-writing actions.
    - Include selected assets, generated metadata, timestamp, and restore hints. Do not replace version control.
+   - Implemented in `Assets/VRCAutoRig/Editor/ConsoleTools.cs`.
+   - Defaults to `Library/VRCForge/Backups` so snapshots stay local to the Unity project.
 
 5. `vrc_restore_safe_backup`
    - Restore from a VRCForge-created backup snapshot.
    - Validate target project identity and show warnings before restoring. It must not silently overwrite unrelated assets.
+   - Implemented in `Assets/VRCAutoRig/Editor/PrefabTools.cs`.
+   - Defaults to preview mode until `confirmRestore=true` is supplied.
 
-The goal is to support safer wardrobe, FX, and asset-writing workflows after face and material tuning are stable.
+The goal is to support safer wardrobe, FX, and asset-writing workflows after face and material tuning are stable. The source-level work is complete; live Unity compile and MCP list verification are still pending because the local MCP probe returned HTTP 503.
 
 ## 5. Constraints For The Next Session
 

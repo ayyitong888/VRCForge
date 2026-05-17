@@ -119,6 +119,28 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("粘贴图片", response.text)
             self.assertIn("选择本地图片", response.text)
 
+    def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCAutoRig" / "Editor"
+        expected_tools = {
+            "GameObjectTools.cs": "vrc_scan_avatar_items",
+            "ComponentTools.cs": "vrc_scan_fx_animator",
+            "AssetTools.cs": "vrc_scan_animation_bindings",
+            "ConsoleTools.cs": "vrc_create_safe_backup",
+            "PrefabTools.cs": "vrc_restore_safe_backup",
+        }
+        phase2_text = []
+
+        for filename, tool_name in expected_tools.items():
+            source = (editor_dir / filename).read_text(encoding="utf-8")
+            phase2_text.append(source)
+            self.assertIn("[McpForUnityTool(", source)
+            self.assertIn(f'name: "{tool_name}"', source)
+            self.assertIn("public static object HandleCommand(JObject @params)", source)
+
+        combined = "\n".join(phase2_text)
+        self.assertNotIn("vrc_execute_roslyn", combined)
+        self.assertNotIn("CSharpScript", combined)
+
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.get("/api/health")
