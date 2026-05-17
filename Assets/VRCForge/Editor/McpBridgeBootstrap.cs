@@ -4,12 +4,12 @@ using MCPForUnity.Editor.Services;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [InitializeOnLoad]
     public static class McpBridgeBootstrap
     {
-        private const string AutoConnectKey = "VRCAutoRig.McpBridgeBootstrap.AutoConnect";
+        private const string AutoConnectKey = "VRCForge.McpBridgeBootstrap.AutoConnect";
         private const string HttpBaseUrl = "http://127.0.0.1:8080";
 
         private static bool startInProgress;
@@ -29,25 +29,25 @@ namespace VRCAutoRig.Editor
             }
         }
 
-        [MenuItem("VRCAutoRig/MCP/Start Bridge Now")]
+        [MenuItem("VRCForge/MCP/Start Bridge Now")]
         public static void StartBridgeNow()
         {
             _ = StartBridgeWithRetryAsync("menu");
         }
 
-        [MenuItem("VRCAutoRig/MCP/Auto Connect Enabled")]
+        [MenuItem("VRCForge/MCP/Auto Connect Enabled")]
         public static void ToggleAutoConnect()
         {
             var enabled = !EditorPrefs.GetBool(AutoConnectKey, true);
             EditorPrefs.SetBool(AutoConnectKey, enabled);
-            Menu.SetChecked("VRCAutoRig/MCP/Auto Connect Enabled", enabled);
-            Debug.Log($"[VRCAutoRig MCP] Auto connect {(enabled ? "enabled" : "disabled")}.");
+            Menu.SetChecked("VRCForge/MCP/Auto Connect Enabled", enabled);
+            Debug.Log($"[VRCForge MCP] Auto connect {(enabled ? "enabled" : "disabled")}.");
         }
 
-        [MenuItem("VRCAutoRig/MCP/Auto Connect Enabled", true)]
+        [MenuItem("VRCForge/MCP/Auto Connect Enabled", true)]
         public static bool ToggleAutoConnectValidate()
         {
-            Menu.SetChecked("VRCAutoRig/MCP/Auto Connect Enabled", EditorPrefs.GetBool(AutoConnectKey, true));
+            Menu.SetChecked("VRCForge/MCP/Auto Connect Enabled", EditorPrefs.GetBool(AutoConnectKey, true));
             return true;
         }
 
@@ -88,7 +88,7 @@ namespace VRCAutoRig.Editor
                     var started = await MCPServiceLocator.Bridge.StartAsync();
                     if (!started)
                     {
-                        Debug.LogWarning($"[VRCAutoRig MCP] Bridge start attempt {attempt} from {source} did not connect yet.");
+                        Debug.LogWarning($"[VRCForge MCP] Bridge start attempt {attempt} from {source} did not connect yet.");
                         return false;
                     }
                 }
@@ -96,16 +96,16 @@ namespace VRCAutoRig.Editor
                 var verification = await MCPServiceLocator.Bridge.VerifyAsync();
                 if (!verification.Success)
                 {
-                    Debug.LogWarning($"[VRCAutoRig MCP] Bridge verification attempt {attempt} failed: {verification.Message}");
+                    Debug.LogWarning($"[VRCForge MCP] Bridge verification attempt {attempt} failed: {verification.Message}");
                     return false;
                 }
 
-                Debug.Log($"[VRCAutoRig MCP] Bridge connected to {HttpBaseUrl} from {source}.");
+                Debug.Log($"[VRCForge MCP] Bridge connected to {HttpBaseUrl} from {source}.");
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[VRCAutoRig MCP] Bridge start attempt {attempt} failed: {ex.Message}");
+                Debug.LogWarning($"[VRCForge MCP] Bridge start attempt {attempt} failed: {ex.Message}");
                 return false;
             }
         }
@@ -124,7 +124,7 @@ namespace VRCAutoRig.Editor
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[VRCAutoRig MCP] Could not refresh MCP preference cache: {ex.Message}");
+                Debug.LogWarning($"[VRCForge MCP] Could not refresh MCP preference cache: {ex.Message}");
             }
         }
     }

@@ -49,7 +49,7 @@ Copy or install this repository folder into the Unity project:
 将本仓库中的以下目录复制或安装到 Unity 工程：
 
 ```text
-Assets/VRCAutoRig/
+Assets/VRCForge/
 ```
 
 The helper script can copy it and add MCP for Unity:

@@ -10,7 +10,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_restore_safe_backup",

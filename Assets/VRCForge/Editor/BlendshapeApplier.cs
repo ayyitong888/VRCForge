@@ -8,7 +8,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_apply_blendshapes",

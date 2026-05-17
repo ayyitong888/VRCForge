@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $resolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $targetFolder = Join-Path $resolvedProjectPath "Assets\Plugins\Roslyn"
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcautorig-roslyn-" + [System.Guid]::NewGuid().ToString("N"))
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge-roslyn-" + [System.Guid]::NewGuid().ToString("N"))
 
 $requiredDlls = @(
     "Microsoft.CodeAnalysis.dll",

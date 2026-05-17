@@ -515,7 +515,7 @@ function renderProjects(payload) {
   refs["project-count"].textContent = `${state.projects.length} 个工程`;
   refs["project-select"].innerHTML = state.projects.map((project) => {
     const badges = [];
-    if (project.hasVrcAutoRig) badges.push("VRCAutoRig");
+    if (project.hasVrcForge) badges.push("VRCForge");
     if (project.hasUnityMcpPackage) badges.push("Unity MCP");
     const suffix = badges.length ? ` / ${badges.join(" / ")}` : "";
     return `<option value="${escapeHtml(project.path)}">${escapeHtml(project.name)} (${escapeHtml(project.editorVersion)})${escapeHtml(suffix)}</option>`;

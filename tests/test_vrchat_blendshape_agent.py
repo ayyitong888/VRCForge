@@ -130,7 +130,7 @@ class PlanningValidationTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
             execute_tool_name="vrc_execute_roslyn",
-            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
         raw_plan = {
@@ -177,7 +177,7 @@ class PlanningValidationTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
             execute_tool_name="vrc_execute_roslyn",
-            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
         raw_plan = {"summary": "Noop", "warnings": [], "adjustments": []}
@@ -415,7 +415,7 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
             execute_tool_name="vrc_execute_roslyn",
-            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
 
@@ -453,7 +453,7 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
             execute_tool_name="vrc_execute_roslyn",
-            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
 
@@ -544,7 +544,7 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
             execute_tool_name="vrc_execute_roslyn",
-            export_path=Path("Assets/VRCAutoRig/blendshapes_export.json"),
+            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
 

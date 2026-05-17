@@ -11,7 +11,7 @@ using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_apply_clothing_fx",
@@ -19,7 +19,7 @@ namespace VRCAutoRig.Editor
     )]
     public static class ClothingFxAuthor
     {
-        private const string AssetDir = "Assets/VRCAutoRig/Generated/FX";
+        private const string AssetDir = "Assets/VRCForge/Generated/FX";
 
         public static object HandleCommand(JObject @params)
         {

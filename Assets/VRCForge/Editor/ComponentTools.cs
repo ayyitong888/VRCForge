@@ -13,7 +13,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_fx_animator",
@@ -22,7 +22,7 @@ namespace VRCAutoRig.Editor
     public static class ComponentTools
     {
         public const string ScanFxAnimatorToolName = "vrc_scan_fx_animator";
-        public const string DefaultOutputPath = "Assets/VRCAutoRig/fx_animator_inventory.json";
+        public const string DefaultOutputPath = "Assets/VRCForge/fx_animator_inventory.json";
 
         public class ScanFxAnimatorParameters
         {
@@ -39,7 +39,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = true;
         }
 
-        [MenuItem("VRCAutoRig/Scan FX Animator")]
+        [MenuItem("VRCForge/Scan FX Animator")]
         public static void ScanFxAnimatorFromMenu()
         {
             var payload = BuildFxAnimatorPayload("", "");

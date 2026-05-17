@@ -12,7 +12,7 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_create_safe_backup",
@@ -41,7 +41,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = false;
         }
 
-        [MenuItem("VRCAutoRig/Create Safe Backup From Selection")]
+        [MenuItem("VRCForge/Create Safe Backup From Selection")]
         public static void CreateSafeBackupFromMenu()
         {
             var payload = CreateBackup(new CreateSafeBackupParameters());

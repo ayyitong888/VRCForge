@@ -626,7 +626,7 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
     if request.launch_unity and DASHBOARD_STATE.unity_editor_path:
         command.extend(["-UnityEditorPath", DASHBOARD_STATE.unity_editor_path, "-LaunchUnity"])
 
-    await emit_log_async("info", "project", "Installing VRCAutoRig into Unity project.", {"projectPath": project_path})
+    await emit_log_async("info", "project", "Installing VRCForge into Unity project.", {"projectPath": project_path})
     completed = await asyncio.to_thread(
         subprocess.run,
         command,
@@ -650,7 +650,7 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
         "output": output,
     }
     await EVENT_BUS.broadcast("projects", await asyncio.to_thread(project_snapshot_payload))
-    await emit_log_async("success", "project", "VRCAutoRig installed into Unity project.", {"projectPath": project_path})
+    await emit_log_async("success", "project", "VRCForge installed into Unity project.", {"projectPath": project_path})
     return payload
 
 
@@ -4033,7 +4033,7 @@ var itemsJson = {json.dumps(items_json, ensure_ascii=False)};
 var itemList = Newtonsoft.Json.JsonConvert.DeserializeObject<System.Collections.Generic.List<Newtonsoft.Json.Linq.JObject>>(itemsJson);
 string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
 string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-string assetDir = "Assets/VRCAutoRig/Generated/FX";
+string assetDir = "Assets/VRCForge/Generated/FX";
 if (!System.IO.Directory.Exists(assetDir)) System.IO.Directory.CreateDirectory(assetDir);
 
 var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
@@ -4945,7 +4945,7 @@ def discover_projects(project_roots: list[Path]) -> list[dict[str, Any]]:
             seen.add(normalized_path)
 
             version = parse_editor_version(version_file)
-            has_vrc_auto_rig = (child / "Assets" / "VRCAutoRig" / "Editor" / "BlendshapeExporter.cs").exists()
+            has_vrcforge = (child / "Assets" / "VRCForge" / "Editor" / "BlendshapeExporter.cs").exists()
             has_unity_mcp = has_unity_mcp_dependency(child / "Packages" / "manifest.json")
 
             projects.append(
@@ -4953,7 +4953,7 @@ def discover_projects(project_roots: list[Path]) -> list[dict[str, Any]]:
                     "name": child.name,
                     "path": normalized_path,
                     "editorVersion": version,
-                    "hasVrcAutoRig": has_vrc_auto_rig,
+                    "hasVrcForge": has_vrcforge,
                     "hasUnityMcpPackage": has_unity_mcp,
                     "selected": normalized_path == normalize_path_string(DASHBOARD_STATE.selected_project_path),
                 }

@@ -13,7 +13,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_animation_bindings",
@@ -22,7 +22,7 @@ namespace VRCAutoRig.Editor
     public static class AssetTools
     {
         public const string ScanAnimationBindingsToolName = "vrc_scan_animation_bindings";
-        public const string DefaultOutputPath = "Assets/VRCAutoRig/animation_bindings_inventory.json";
+        public const string DefaultOutputPath = "Assets/VRCForge/animation_bindings_inventory.json";
 
         public class ScanAnimationBindingsParameters
         {
@@ -48,7 +48,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = true;
         }
 
-        [MenuItem("VRCAutoRig/Scan Animation Bindings")]
+        [MenuItem("VRCForge/Scan Animation Bindings")]
         public static void ScanAnimationBindingsFromMenu()
         {
             var payload = BuildAnimationBindingsPayload("", "", new List<string>(), false, 300);

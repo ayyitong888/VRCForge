@@ -11,7 +11,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_avatar_items",
@@ -20,7 +20,7 @@ namespace VRCAutoRig.Editor
     public static class GameObjectTools
     {
         public const string ScanAvatarItemsToolName = "vrc_scan_avatar_items";
-        public const string DefaultOutputPath = "Assets/VRCAutoRig/avatar_items_inventory.json";
+        public const string DefaultOutputPath = "Assets/VRCForge/avatar_items_inventory.json";
 
         private static readonly string[] WardrobeKeywords =
         {
@@ -44,7 +44,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = true;
         }
 
-        [MenuItem("VRCAutoRig/Scan Avatar Items")]
+        [MenuItem("VRCForge/Scan Avatar Items")]
         public static void ScanAvatarItemsFromMenu()
         {
             var payload = BuildAvatarItemsPayload("", 500);

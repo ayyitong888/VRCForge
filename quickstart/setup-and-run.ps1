@@ -84,7 +84,7 @@ function Ensure-DefaultSettings {
     "execute_tool_name": "vrc_execute_roslyn"
   },
   "paths": {
-    "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
+    "blendshape_export": "Assets/VRCForge/blendshapes_export.json"
   },
   "planning": {
     "min_confidence": 0.65
@@ -296,9 +296,9 @@ function Ensure-UnityInstall {
         throw "Unity-side install failed."
     }
 
-    $targetVrcAutoRig = Join-Path $ResolvedProjectPath "Assets\VRCAutoRig"
-    if (-not (Test-Path -LiteralPath $targetVrcAutoRig)) {
-        throw "Unity-side install did not create Assets/VRCAutoRig."
+    $targetVrcForge = Join-Path $ResolvedProjectPath "Assets\VRCForge"
+    if (-not (Test-Path -LiteralPath $targetVrcForge)) {
+        throw "Unity-side install did not create Assets/VRCForge."
     }
 
     $manifest = Read-JsonFile -Path (Join-Path $ResolvedProjectPath "Packages\manifest.json")
@@ -402,7 +402,7 @@ else {
 Write-Host ""
 Write-Host "Unity next steps:"
 Write-Host "1. Open the Unity Avatar project and wait for package resolution / C# compile."
-Write-Host "2. Start the MCP bridge from Unity: VRCAutoRig / MCP / Start Bridge Now."
+Write-Host "2. Start the MCP bridge from Unity: VRCForge / MCP / Start Bridge Now."
 Write-Host "3. Dashboard should connect to the MCP bridge at http://127.0.0.1:8080."
 
 if ($CheckOnly) {

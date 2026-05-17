@@ -10,7 +10,7 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_export_blendshapes",
@@ -19,7 +19,7 @@ namespace VRCAutoRig.Editor
     public static class BlendshapeExporter
     {
         public const string ToolName = "vrc_export_blendshapes";
-        public const string DefaultOutputPath = "Assets/VRCAutoRig/blendshapes_export.json";
+        public const string DefaultOutputPath = "Assets/VRCForge/blendshapes_export.json";
 
         public class Parameters
         {
@@ -30,7 +30,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = true;
         }
 
-        [MenuItem("VRCAutoRig/Export Blendshapes")]
+        [MenuItem("VRCForge/Export Blendshapes")]
         public static void ExportFromMenu()
         {
             ExportToDisk(DefaultOutputPath, true);

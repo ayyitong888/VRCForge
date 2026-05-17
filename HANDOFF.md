@@ -32,7 +32,7 @@ Latest known automated validation:
 
 - `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
 - `node --check dashboard/app.js`
-- `python -m pytest -q` passed with 73 tests and 4 existing FastAPI deprecation warnings.
+- `python -m pytest -q` passed with 77 tests and 4 existing FastAPI deprecation warnings.
 - `git diff --check`
 
 Known live-validation status:
@@ -92,7 +92,7 @@ Dashboard frontend:
 
 Unity MCP and adapters:
 
-- Unity Editor tools live under `Assets/VRCAutoRig/Editor/`.
+- Unity Editor tools live under `Assets/VRCForge/Editor/`.
 - Existing tools cover avatar scanning, Blendshape export/apply, screenshot capture, parameter/menu scans, material inventory, and material apply.
 - Shader adapters expose semantic material properties only. lilToon and Poiyomi map semantic properties to real material aliases internally and always check `Material.HasProperty`.
 - Unsupported shaders remain visible in inventory but are skipped during writes.
@@ -104,28 +104,28 @@ Phase 2 added five focused Unity Editor tools without redesigning the current MV
 1. `vrc_scan_avatar_items`
    - Read-only avatar hierarchy and item inventory.
    - Return object path, active state, renderer count, mesh/material summary, likely category, and whether the item appears wardrobe-related.
-   - Implemented in `Assets/VRCAutoRig/Editor/GameObjectTools.cs`.
+   - Implemented in `Assets/VRCForge/Editor/GameObjectTools.cs`.
 
 2. `vrc_scan_fx_animator`
    - Read-only FX controller inventory.
    - Return layers, states, transitions, parameters used, animation clips referenced, and likely toggle groups.
-   - Implemented in `Assets/VRCAutoRig/Editor/ComponentTools.cs`.
+   - Implemented in `Assets/VRCForge/Editor/ComponentTools.cs`.
 
 3. `vrc_scan_animation_bindings`
    - Read-only animation clip binding scan.
    - Return animated paths/properties, material/property bindings, object active toggles, Blendshape bindings, and unsafe/unsupported binding warnings.
-   - Implemented in `Assets/VRCAutoRig/Editor/AssetTools.cs`.
+   - Implemented in `Assets/VRCForge/Editor/AssetTools.cs`.
 
 4. `vrc_create_safe_backup`
    - Write a local Unity-side backup snapshot before asset-writing actions.
    - Include selected assets, generated metadata, timestamp, and restore hints. Do not replace version control.
-   - Implemented in `Assets/VRCAutoRig/Editor/ConsoleTools.cs`.
+   - Implemented in `Assets/VRCForge/Editor/ConsoleTools.cs`.
    - Defaults to `Library/VRCForge/Backups` so snapshots stay local to the Unity project.
 
 5. `vrc_restore_safe_backup`
    - Restore from a VRCForge-created backup snapshot.
    - Validate target project identity and show warnings before restoring. It must not silently overwrite unrelated assets.
-   - Implemented in `Assets/VRCAutoRig/Editor/PrefabTools.cs`.
+   - Implemented in `Assets/VRCForge/Editor/PrefabTools.cs`.
    - Defaults to preview mode until `confirmRestore=true` is supplied.
 
 The goal is to support safer wardrobe, FX, and asset-writing workflows after face and material tuning are stable. The source-level work is complete; live Unity compile and MCP list verification are still pending because the local MCP probe returned HTTP 503.

@@ -5,7 +5,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [InitializeOnLoad]
     internal static class RoslynSupportBootstrap
@@ -32,15 +32,15 @@ namespace VRCAutoRig.Editor
                 if (!RoslynDllsInstalled())
                 {
                     UnityEngine.Debug.LogWarning(
-                        "[VRCAutoRig] Roslyn fallback DLLs were not found. vrc_execute_roslyn will report an install hint if called.");
+                        "[VRCForge] Roslyn fallback DLLs were not found. vrc_execute_roslyn will report an install hint if called.");
                     return;
                 }
 
-                UnityEngine.Debug.Log("[VRCAutoRig] Roslyn fallback DLLs found. vrc_execute_roslyn will load them at runtime.");
+                UnityEngine.Debug.Log("[VRCForge] Roslyn fallback DLLs found. vrc_execute_roslyn will load them at runtime.");
             }
             catch (Exception ex)
             {
-                UnityEngine.Debug.LogWarning($"[VRCAutoRig] Could not inspect Roslyn fallback DLLs: {ex.Message}");
+                UnityEngine.Debug.LogWarning($"[VRCForge] Could not inspect Roslyn fallback DLLs: {ex.Message}");
             }
         }
 

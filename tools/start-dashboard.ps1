@@ -60,7 +60,7 @@ function Ensure-DefaultSettings {
     "execute_tool_name": "vrc_execute_roslyn"
   },
   "paths": {
-    "blendshape_export": "Assets/VRCAutoRig/blendshapes_export.json"
+    "blendshape_export": "Assets/VRCForge/blendshapes_export.json"
   },
   "planning": {
     "min_confidence": 0.65

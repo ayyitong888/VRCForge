@@ -295,7 +295,7 @@ def load_settings(
     if isinstance(command, str):
         command = [command]
 
-    export_path = Path(path_settings.get("blendshape_export", "Assets/VRCAutoRig/blendshapes_export.json"))
+    export_path = Path(path_settings.get("blendshape_export", "Assets/VRCForge/blendshapes_export.json"))
     llm_settings = build_llm_settings(raw_settings, gemini_model_override, llm_override)
 
     return Settings(

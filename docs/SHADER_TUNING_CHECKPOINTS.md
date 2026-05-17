@@ -20,7 +20,7 @@ Implemented:
 
 Changed files:
 
-- `Assets/VRCAutoRig/Editor/ShaderMaterialScanner.cs`
+- `Assets/VRCForge/Editor/ShaderMaterialScanner.cs`
 - `dashboard_server.py`
 - `dashboard/index.html`
 - `dashboard/app.js`
@@ -54,8 +54,8 @@ Implemented:
 
 Changed files:
 
-- `Assets/VRCAutoRig/Editor/ShaderMaterialAdapters.cs`
-- `Assets/VRCAutoRig/Editor/ShaderMaterialScanner.cs`
+- `Assets/VRCForge/Editor/ShaderMaterialAdapters.cs`
+- `Assets/VRCForge/Editor/ShaderMaterialScanner.cs`
 - `docs/SHADER_TUNING_CHECKPOINTS.md`
 
 Validation:
@@ -136,7 +136,7 @@ Safety boundary:
 
 Changed files:
 
-- `Assets/VRCAutoRig/Editor/MaterialTuningApplier.cs`
+- `Assets/VRCForge/Editor/MaterialTuningApplier.cs`
 - `dashboard_server.py`
 - `dashboard/index.html`
 - `dashboard/app.js`

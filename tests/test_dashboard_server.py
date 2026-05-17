@@ -120,7 +120,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("选择本地图片", response.text)
 
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
-        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCAutoRig" / "Editor"
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         expected_tools = {
             "GameObjectTools.cs": "vrc_scan_avatar_items",
             "ComponentTools.cs": "vrc_scan_fx_animator",
@@ -140,6 +140,17 @@ class DashboardServerTests(unittest.TestCase):
         combined = "\n".join(phase2_text)
         self.assertNotIn("vrc_execute_roslyn", combined)
         self.assertNotIn("CSharpScript", combined)
+
+    def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in editor_dir.glob("*.cs"))
+
+        self.assertIn('MenuItem("VRCForge/MCP/Start Bridge Now")', combined)
+        self.assertIn("Assets/VRCForge/blendshapes_export.json", combined)
+        old_brand = "VRC" + "AutoRig"
+        self.assertNotIn(f'MenuItem("{old_brand}', combined)
+        self.assertNotIn(f"[{old_brand}", combined)
+        self.assertNotIn(f"Assets/{old_brand}", combined)
 
     def test_health_returns_defaults_and_state(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -268,7 +279,7 @@ class DashboardServerTests(unittest.TestCase):
                 "active: False\n"
                 "createdCount: 1\n"
                 "skipped: [0 items]\n"
-                "assetDir: Assets/VRCAutoRig/Generated/FX\n"
+                "assetDir: Assets/VRCForge/Generated/FX\n"
                 "✅ Executed custom tool: vrc_toggle_scene_object"
             ),
             stderr="",
@@ -281,7 +292,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(payload["active"])
         self.assertEqual(payload["createdCount"], 1)
         self.assertEqual(payload["skipped"], [])
-        self.assertEqual(payload["assetDir"], "Assets/VRCAutoRig/Generated/FX")
+        self.assertEqual(payload["assetDir"], "Assets/VRCForge/Generated/FX")
 
     def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1186,7 +1197,7 @@ class DashboardServerTests(unittest.TestCase):
             project_dir = root / "Sample Avatar Project"
             (project_dir / "ProjectSettings").mkdir(parents=True)
             (project_dir / "Packages").mkdir(parents=True)
-            (project_dir / "Assets" / "VRCAutoRig" / "Editor").mkdir(parents=True)
+            (project_dir / "Assets" / "VRCForge" / "Editor").mkdir(parents=True)
 
             (project_dir / "ProjectSettings" / "ProjectVersion.txt").write_text(
                 "m_EditorVersion: 2022.3.22f1\n",
@@ -1202,7 +1213,7 @@ class DashboardServerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (project_dir / "Assets" / "VRCAutoRig" / "Editor" / "BlendshapeExporter.cs").write_text(
+            (project_dir / "Assets" / "VRCForge" / "Editor" / "BlendshapeExporter.cs").write_text(
                 "// test",
                 encoding="utf-8",
             )
@@ -1217,7 +1228,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0]["name"], "Sample Avatar Project")
             self.assertEqual(projects[0]["editorVersion"], "2022.3.22f1")
-            self.assertTrue(projects[0]["hasVrcAutoRig"])
+            self.assertTrue(projects[0]["hasVrcForge"])
             self.assertTrue(projects[0]["hasUnityMcpPackage"])
             self.assertTrue(projects[0]["selected"])
 

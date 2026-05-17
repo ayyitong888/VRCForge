@@ -9,12 +9,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$sourceAssets = Join-Path $repoRoot "Assets\VRCAutoRig"
+$sourceAssets = Join-Path $repoRoot "Assets\VRCForge"
 $resolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $targetAssetsRoot = Join-Path $resolvedProjectPath "Assets"
 $targetPackageManifest = Join-Path $resolvedProjectPath "Packages\manifest.json"
 $targetProjectSettings = Join-Path $resolvedProjectPath "ProjectSettings\ProjectVersion.txt"
-$targetVrcAutoRig = Join-Path $targetAssetsRoot "VRCAutoRig"
+$targetVrcForge = Join-Path $targetAssetsRoot "VRCForge"
+$legacyTargetToolFolder = Join-Path $targetAssetsRoot ("VRC" + "AutoRig")
 $mcpPackageName = "com.coplaydev.unity-mcp"
 $mcpPackageValue = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
 
@@ -34,8 +35,16 @@ if (-not (Test-Path -LiteralPath $targetProjectSettings)) {
     throw "Target Unity project is missing ProjectSettings/ProjectVersion.txt: $targetProjectSettings"
 }
 
-New-Item -ItemType Directory -Force -Path $targetVrcAutoRig | Out-Null
-Copy-Item -Path (Join-Path $sourceAssets "*") -Destination $targetVrcAutoRig -Recurse -Force
+if (Test-Path -LiteralPath $legacyTargetToolFolder) {
+    $legacyBackupRoot = Join-Path $resolvedProjectPath "Library\VRCForge\LegacyAssets"
+    New-Item -ItemType Directory -Force -Path $legacyBackupRoot | Out-Null
+    $legacyBackupPath = Join-Path $legacyBackupRoot ("LegacyUnityTools_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+    Move-Item -LiteralPath $legacyTargetToolFolder -Destination $legacyBackupPath -Force
+    Write-Host "Moved legacy Unity tool folder to: $legacyBackupPath"
+}
+
+New-Item -ItemType Directory -Force -Path $targetVrcForge | Out-Null
+Copy-Item -Path (Join-Path $sourceAssets "*") -Destination $targetVrcForge -Recurse -Force
 
 $manifest = Get-Content -LiteralPath $targetPackageManifest -Raw | ConvertFrom-Json
 if (-not $manifest.PSObject.Properties["dependencies"]) {
@@ -63,7 +72,7 @@ if ($manifestChanged) {
     Set-Content -LiteralPath $targetPackageManifest -Value $manifestJson -Encoding UTF8
 }
 
-Write-Host "Installed Assets/VRCAutoRig into: $resolvedProjectPath"
+Write-Host "Installed Assets/VRCForge into: $resolvedProjectPath"
 if ($manifestChanged) {
     Write-Host "Added Unity MCP package dependency to Packages/manifest.json"
 } else {

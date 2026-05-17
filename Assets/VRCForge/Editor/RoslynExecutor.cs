@@ -16,7 +16,7 @@ using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [InitializeOnLoad]
     internal static class RoslynMainThreadDispatcher
@@ -218,7 +218,7 @@ namespace VRCAutoRig.Editor
                 "UnityEngine",
                 "UnityEditor",
                 "UnityEditor.Animations",
-                "VRCAutoRig.Editor"
+                "VRCForge.Editor"
             };
 
             if (AppDomain.CurrentDomain.GetAssemblies().Any(assembly => assembly.GetName().Name.StartsWith("VRC", StringComparison.OrdinalIgnoreCase)))

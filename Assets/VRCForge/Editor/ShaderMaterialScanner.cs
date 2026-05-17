@@ -11,7 +11,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_avatar_materials",
@@ -20,7 +20,7 @@ namespace VRCAutoRig.Editor
     public static class ShaderMaterialScanner
     {
         public const string ToolName = "vrc_scan_avatar_materials";
-        public const string DefaultOutputPath = "Assets/VRCAutoRig/material_inventory.json";
+        public const string DefaultOutputPath = "Assets/VRCForge/material_inventory.json";
 
         public class Parameters
         {
@@ -34,7 +34,7 @@ namespace VRCAutoRig.Editor
             public bool? refreshAssets { get; set; } = true;
         }
 
-        [MenuItem("VRCAutoRig/Scan Shader Materials")]
+        [MenuItem("VRCForge/Scan Shader Materials")]
         public static void ScanFromMenu()
         {
             var payload = BuildPayload("");

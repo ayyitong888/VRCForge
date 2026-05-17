@@ -6,7 +6,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace VRCAutoRig.Editor
+namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_capture_scene_view",
@@ -152,7 +152,7 @@ namespace VRCAutoRig.Editor
             var distance = Mathf.Clamp(bounds.size.magnitude * 2.5f, 2.0f, 24.0f);
             cameraPosition = targetCenter - (rotation * Vector3.forward * distance);
 
-            var cameraObject = new GameObject("VRCAutoRig_OrbitCaptureCamera")
+            var cameraObject = new GameObject("VRCForge_OrbitCaptureCamera")
             {
                 hideFlags = HideFlags.HideAndDontSave
             };
