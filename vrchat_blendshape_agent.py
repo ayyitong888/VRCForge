@@ -287,7 +287,7 @@ def load_settings(
             "Create it from the provided template, configure your provider API key, and try again."
         )
 
-    raw_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    raw_settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
     mcp_settings = raw_settings.get("unity_mcp", {})
     path_settings = raw_settings.get("paths", {})
     planning_settings = raw_settings.get("planning", {})

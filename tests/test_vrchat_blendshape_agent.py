@@ -581,6 +581,23 @@ class MvpFlowTests(unittest.TestCase):
             self.assertEqual(settings.unity_mcp_port, 8080)
             self.assertEqual(settings.unity_mcp_instance, "Karin FT Rework@abc123")
 
+    def test_load_settings_accepts_utf8_bom(self) -> None:
+        settings_payload = {
+            "gemini": {
+                "api_key_env": "TEST_GEMINI_API_KEY",
+                "model": "gemini-2.5-flash",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(settings_payload, ensure_ascii=False), encoding="utf-8-sig")
+
+            settings = load_settings(settings_path)
+            self.assertEqual(settings.llm_provider, "gemini")
+            self.assertEqual(settings.llm_model, "gemini-2.5-flash")
+            self.assertEqual(settings.llm_api_key_env, "TEST_GEMINI_API_KEY")
+
     def test_load_settings_supports_ollama_and_vertex_ai_providers(self) -> None:
         settings_payload = {
             "llm": {

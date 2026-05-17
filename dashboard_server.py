@@ -5074,7 +5074,7 @@ def load_initial_dashboard_state() -> DashboardState:
         settings_path,
         llm_override=serialize_api_config(include_secret=True) if DASHBOARD_API_CONFIG is not None else None,
     )
-    raw = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    raw = json.loads(settings_path.read_text(encoding="utf-8-sig")) if settings_path.exists() else {}
     dashboard_settings = raw.get("dashboard") or {}
 
     project_roots = [Path(path) for path in dashboard_settings.get("project_roots", ["E:/unity/Projects"])]
