@@ -283,6 +283,10 @@ function Ensure-UnityInstall {
     )
 
     $args = @("-ExecutionPolicy", "Bypass", "-File", $installUnityScript, "-ProjectPath", $ResolvedProjectPath)
+    $sourceMcpPackage = Join-Path $repoRoot "third_party\com.coplaydev.unity-mcp"
+    if (Test-Path -LiteralPath $sourceMcpPackage) {
+        $args += @("-SourceMcpPackagePath", $sourceMcpPackage)
+    }
     if ($Launch) {
         if ([string]::IsNullOrWhiteSpace($EditorPath)) {
             throw "LaunchUnity was requested but UnityEditorPath is empty."
@@ -304,11 +308,13 @@ function Ensure-UnityInstall {
     $manifest = Read-JsonFile -Path (Join-Path $ResolvedProjectPath "Packages\manifest.json")
     $mcpDependency = $manifest.dependencies.PSObject.Properties["com.coplaydev.unity-mcp"]
     if ($null -eq $mcpDependency) {
-        throw "MCP for Unity dependency was not found after install."
+        Write-Warn "MCP for Unity dependency was not configured because no local CoplayDev package was bundled. Use the Windows installer release for the no-Git/no-manual-import path."
+    }
+    else {
+        Write-Ok "MCP for Unity dependency: $($mcpDependency.Value)"
     }
 
     Write-Ok "Unity-side VRCForge tools installed."
-    Write-Ok "MCP for Unity dependency: $($mcpDependency.Value)"
 }
 
 function Start-Dashboard {

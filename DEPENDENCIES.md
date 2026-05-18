@@ -40,8 +40,12 @@ MCP for Unity package URL used by the install script:
 安装脚本使用的 MCP for Unity 包地址：
 
 ```json
-"com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+"com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"
 ```
+
+Windows x64 installer builds bundle a pinned copy of CoplayDev MCP under
+`third_party/com.coplaydev.unity-mcp` after the license gate passes, then copy it
+into the release payload at `unity_plugin/Packages/com.coplaydev.unity-mcp`.
 
 ## VRCForge Unity Files / VRCForge Unity 文件
 

@@ -6,6 +6,31 @@ VRCForge is currently at a local MVP stage with the dashboard, FastAPI backend, 
 
 Working and covered by automated tests:
 
+- Windows x64 installer/launcher packaging path:
+  - `VRCForge.exe` WinForms/WebView2 launcher source.
+  - NSIS web/offline installer scripts.
+  - release build/publish scripts with git cleanliness, unpushed commit, version, and CoplayDev license gates.
+  - generated `VRCForge.unitypackage` fallback package.
+  - pinned CoplayDev Unity MCP package copied into release payload after MIT license gate.
+- Portable backend mode for installer payloads:
+  - `VRCFORGE_APP_DIR`
+  - `VRCFORGE_USER_DATA_DIR`
+  - `VRCFORGE_CONFIG_DIR`
+  - `VRCFORGE_LOG_DIR`
+  - `VRCFORGE_ARTIFACTS_DIR`
+  - `VRCFORGE_DASHBOARD_DIR`
+  - `VRCFORGE_SETTINGS_PATH`
+- Structured `/api/health` diagnostics for Launcher:
+  - backend
+  - dashboard files
+  - config read/write
+  - logs write
+  - artifacts write
+  - selected Unity project
+  - Unity plugin installed
+  - MCP package configured
+  - Unity MCP bridge reachable
+  - provider config present
 - FastAPI dashboard backend and static dashboard routes.
 - Provider/model configuration and model-list loading.
 - Avatar discovery, connection status, and Unity MCP request plumbing.
@@ -38,11 +63,17 @@ Latest known automated validation:
 
 - `python -m py_compile dashboard_server.py vrchat_blendshape_agent.py`
 - `node --check dashboard/app.js`
-- `python -m pytest -q` passed with 80 tests and 4 existing FastAPI deprecation warnings.
+- `python -m pytest -q` passed with 82 tests and 4 existing FastAPI deprecation warnings.
+- PowerShell parser check passed for updated install/packaging scripts.
+- `quickstart/setup-and-run.ps1 -SkipUnityInstall -CheckOnly -NoDashboard -NoBrowser -BindPort 8761` passed.
+- Temp Unity project install test passed for `.vrcforge/backups` legacy migration, local MCP copy, and manifest file dependency.
+- `dotnet build launcher/VRCForge.Launcher/VRCForge.Launcher.csproj -c Release -p:Platform=x64 --no-restore` passed with a WebView2 WindowsBase warning.
+- Dirty verification release build produced installer/payload artifacts and the packaged backend `/api/health` responded with `portableMode=true`.
 - `git diff --check`
 
 Known live-validation status:
 
+- Installer UI has not been manually clicked through after installation into `%ProgramFiles%`.
 - Face tuning has been exercised through the dashboard and Unity workflow, but final quality still depends on real avatar content and selected model output.
 - Shader / Material Tuning MVP has automated coverage for backend validation and dashboard syntax, but still needs a real Unity project pass for C# clean compile, material scan, apply, restore, preset replay, and Vision review.
 - Gesture Manager / Play Mode screenshot routing has automated source and dashboard coverage, but still needs a real Unity play session pass to confirm Game View capture framing on a live avatar.
@@ -53,6 +84,8 @@ Known live-validation status:
 
 Priority P0:
 
+- After this checkpoint is pushed, rebuild release artifacts without `-AllowDirty` / `-AllowUnpushed` and upload `VRCForge_Web_Installer_x64.exe`, `VRCForge_Offline_Installer_x64.exe`, and `VRCForge_Windows_x64_0.3.1-alpha.zip` to GitHub Release `v0.3.1-alpha`.
+- Manually smoke-test the installed Launcher wizard from `%ProgramFiles%\VRCForge` when a clean Windows VM is available.
 - Run Unity clean compile in a real VRChat Avatar project after the Phase 2 tool layer expansion.
 - Confirm these five tools appear in the Unity MCP tool list:
   - `vrc_scan_avatar_items`

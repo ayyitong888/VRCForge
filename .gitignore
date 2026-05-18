@@ -4,11 +4,14 @@ pycache/
 *.pyc
 *.pyo
 *.pyd
+*.spec
 *.zip
 .pytest_cache/
 .mypy_cache/
 .gemini/
 artifacts/
+build/
+dist/
 config.json
 docs/
 
@@ -21,3 +24,7 @@ NON_TECHNICAL_TEST_GUIDE.md
 Assets/VRCForge/blendshapes_export.json
 Assets/VRCForge/*_inventory.json
 Assets/VRCForge/*.log
+
+launcher/**/bin/
+launcher/**/obj/
+installer/out/

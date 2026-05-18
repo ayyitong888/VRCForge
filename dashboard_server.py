@@ -7,6 +7,7 @@ import copy
 import json
 import math
 import mimetypes
+import os
 import subprocess
 import time
 from collections import deque
@@ -63,9 +64,32 @@ from vrchat_blendshape_agent import (
 )
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-DASHBOARD_DIR = ROOT_DIR / "dashboard"
-DASHBOARD_ARTIFACTS_DIR = ROOT_DIR / "artifacts" / "dashboard"
+def resolve_runtime_path(env_name: str, default: Path) -> Path:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return default.resolve()
+    return Path(value).expanduser().resolve()
+
+
+ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", Path(__file__).resolve().parent)
+PORTABLE_MODE = any(
+    os.environ.get(name, "").strip()
+    for name in (
+        "VRCFORGE_APP_DIR",
+        "VRCFORGE_USER_DATA_DIR",
+        "VRCFORGE_CONFIG_DIR",
+        "VRCFORGE_LOG_DIR",
+        "VRCFORGE_ARTIFACTS_DIR",
+        "VRCFORGE_DASHBOARD_DIR",
+        "VRCFORGE_SETTINGS_PATH",
+    )
+)
+USER_DATA_DIR = resolve_runtime_path("VRCFORGE_USER_DATA_DIR", ROOT_DIR)
+DASHBOARD_DIR = resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", ROOT_DIR / "dashboard")
+CONFIG_DIR = resolve_runtime_path("VRCFORGE_CONFIG_DIR", USER_DATA_DIR / "config") if PORTABLE_MODE else ROOT_DIR
+LOG_DIR = resolve_runtime_path("VRCFORGE_LOG_DIR", USER_DATA_DIR / "logs") if PORTABLE_MODE else ROOT_DIR / "artifacts" / "dashboard"
+ARTIFACTS_DIR = resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", USER_DATA_DIR / "artifacts") if PORTABLE_MODE else ROOT_DIR / "artifacts"
+DASHBOARD_ARTIFACTS_DIR = ARTIFACTS_DIR / "dashboard"
 PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
 TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_history.json"
 TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_presets.json"
@@ -73,14 +97,20 @@ TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_locks.json"
 SHADER_TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_history.json"
 SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.json"
 SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
-ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
-CONFIG_PATH = ROOT_DIR / "config.json"
-LOCAL_LOG_PATH = DASHBOARD_ARTIFACTS_DIR / "dashboard.log"
+CONFIG_PATH = CONFIG_DIR / "config.json" if PORTABLE_MODE else ROOT_DIR / "config.json"
+RUNTIME_SETTINGS_PATH = resolve_runtime_path(
+    "VRCFORGE_SETTINGS_PATH",
+    CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
+)
+LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+DASHBOARD_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MATERIAL_SEMANTIC_PROPERTIES = {
     "base_color",
@@ -114,6 +144,10 @@ MATERIAL_NUMERIC_RANGES = {
 }
 
 
+def runtime_settings_path() -> str:
+    return str(RUNTIME_SETTINGS_PATH)
+
+
 class DashboardRequest(BaseModel):
     instruction: str | None = Field(default=None, description="Natural language instruction for LLM planning.")
     avatar: str | None = Field(default=None, description="Exact or partial avatar path/name.")
@@ -127,7 +161,7 @@ class DashboardRequest(BaseModel):
     source_mode: Literal["unity_live_export", "configured_export", "custom_export", "mvp_sample"] = "mvp_sample"
     export_json: str | None = Field(default=None, description="Optional local export JSON path.")
     plan_json: str | None = Field(default=None, description="Optional local plan JSON path.")
-    settings_path: str = str(DEFAULT_SETTINGS_PATH)
+    settings_path: str = Field(default_factory=runtime_settings_path)
     mock_execute: bool = True
     min_confidence: float | None = None
     allow_low_confidence: bool = False
@@ -138,14 +172,14 @@ class DashboardRequest(BaseModel):
 
 
 class ConnectionRequest(BaseModel):
-    settings_path: str = str(DEFAULT_SETTINGS_PATH)
+    settings_path: str = Field(default_factory=runtime_settings_path)
     unity_host: str | None = None
     unity_port: int | None = None
     unity_instance: str | None = None
 
 
 class DashboardStateRequest(BaseModel):
-    settings_path: str = str(DEFAULT_SETTINGS_PATH)
+    settings_path: str = Field(default_factory=runtime_settings_path)
     project_path: str | None = None
     unity_host: str | None = None
     unity_port: int | None = None
@@ -462,14 +496,26 @@ def read_dashboard() -> FileResponse:
 @app.get("/api/health")
 def read_health() -> dict[str, Any]:
     settings = load_settings(
-        resolve_local_path(DEFAULT_SETTINGS_PATH),
+        RUNTIME_SETTINGS_PATH,
         llm_override=serialize_api_config(include_secret=True),
     )
+    components = build_health_components(settings)
     return {
-        "ok": True,
+        "ok": not any(component["status"] == "error" for component in components.values()),
+        "version": app.version,
+        "portableMode": PORTABLE_MODE,
         "projectRoot": str(ROOT_DIR),
-        "settingsPath": str(resolve_local_path(DEFAULT_SETTINGS_PATH)),
+        "settingsPath": str(RUNTIME_SETTINGS_PATH),
         "configPath": str(CONFIG_PATH),
+        "paths": {
+            "programDir": str(ROOT_DIR),
+            "userDataDir": str(USER_DATA_DIR),
+            "configDir": str(CONFIG_DIR),
+            "logsDir": str(LOG_DIR),
+            "artifactsDir": str(ARTIFACTS_DIR),
+            "dashboardDir": str(DASHBOARD_DIR),
+        },
+        "components": components,
         "defaults": {
             "provider": settings.llm_provider,
             "model": settings.llm_model,
@@ -4918,6 +4964,131 @@ def build_unity_status_snapshot() -> dict[str, Any]:
         }
 
 
+def health_component(status: str, message: str, detail: Any = "") -> dict[str, Any]:
+    if status not in {"ok", "warning", "error", "unknown"}:
+        status = "unknown"
+    return {
+        "status": status,
+        "message": message,
+        "detail": detail,
+    }
+
+
+def probe_directory_write(directory: Path) -> tuple[bool, str]:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe_path = directory / ".vrcforge_write_probe"
+        probe_path.write_text("ok", encoding="utf-8")
+        probe_path.unlink(missing_ok=True)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def load_manifest_payload(manifest_path: Path) -> dict[str, Any] | None:
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
+    selected_project = Path(DASHBOARD_STATE.selected_project_path) if DASHBOARD_STATE.selected_project_path else None
+    manifest_path = selected_project / "Packages" / "manifest.json" if selected_project else None
+    manifest_payload = load_manifest_payload(manifest_path) if manifest_path else None
+    dependencies = manifest_payload.get("dependencies") if isinstance(manifest_payload, dict) else {}
+    dependencies = dependencies if isinstance(dependencies, dict) else {}
+
+    config_writable, config_error = probe_directory_write(CONFIG_DIR)
+    logs_writable, logs_error = probe_directory_write(LOG_DIR)
+    artifacts_writable, artifacts_error = probe_directory_write(ARTIFACTS_DIR)
+
+    dashboard_index = DASHBOARD_DIR / "index.html"
+    components: dict[str, dict[str, Any]] = {
+        "backend": health_component(
+            "ok",
+            "Backend process is responding.",
+            {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+        ),
+        "dashboardFiles": health_component(
+            "ok" if dashboard_index.exists() else "error",
+            "Dashboard files are present." if dashboard_index.exists() else "Dashboard index.html is missing.",
+            str(dashboard_index),
+        ),
+        "configReadWrite": health_component(
+            "ok" if config_writable and RUNTIME_SETTINGS_PATH.exists() else "warning" if config_writable else "error",
+            "Config directory is writable." if config_writable else "Config directory is not writable.",
+            {"directory": str(CONFIG_DIR), "settingsPath": str(RUNTIME_SETTINGS_PATH), "error": config_error},
+        ),
+        "logsWrite": health_component(
+            "ok" if logs_writable else "error",
+            "Logs directory is writable." if logs_writable else "Logs directory is not writable.",
+            {"directory": str(LOG_DIR), "error": logs_error},
+        ),
+        "artifactsWrite": health_component(
+            "ok" if artifacts_writable else "error",
+            "Artifacts directory is writable." if artifacts_writable else "Artifacts directory is not writable.",
+            {"directory": str(ARTIFACTS_DIR), "error": artifacts_error},
+        ),
+    }
+
+    if selected_project is None:
+        components["selectedUnityProject"] = health_component("warning", "No Unity project selected.", "")
+        components["unityPluginInstalled"] = health_component("unknown", "Unity plugin status is unknown until a project is selected.", "")
+        components["mcpPackageConfigured"] = health_component("unknown", "Unity MCP package status is unknown until a project is selected.", "")
+    else:
+        required_paths = {
+            "Assets": selected_project / "Assets",
+            "Packages/manifest.json": selected_project / "Packages" / "manifest.json",
+            "ProjectSettings/ProjectVersion.txt": selected_project / "ProjectSettings" / "ProjectVersion.txt",
+        }
+        missing = [label for label, path in required_paths.items() if not path.exists()]
+        components["selectedUnityProject"] = health_component(
+            "ok" if not missing else "error",
+            "Selected Unity project root is valid." if not missing else "Selected Unity project is missing required files.",
+            {"path": str(selected_project), "missing": missing},
+        )
+
+        plugin_path = selected_project / "Assets" / "VRCForge" / "Editor"
+        components["unityPluginInstalled"] = health_component(
+            "ok" if plugin_path.exists() else "error",
+            "VRCForge Unity plugin is installed." if plugin_path.exists() else "VRCForge Unity plugin is missing.",
+            str(plugin_path),
+        )
+
+        mcp_value = dependencies.get("com.coplaydev.unity-mcp")
+        components["mcpPackageConfigured"] = health_component(
+            "ok" if mcp_value else "error",
+            "Unity MCP package dependency is configured." if mcp_value else "Unity MCP package dependency is missing.",
+            {"manifestPath": str(manifest_path), "dependency": mcp_value or ""},
+        )
+
+    unity_status = CURRENT_UNITY_STATUS or {}
+    if unity_status.get("connected"):
+        components["unityMcpBridgeReachable"] = health_component("ok", "Unity MCP bridge is reachable.", unity_status)
+    elif CURRENT_UNITY_STATUS is None:
+        components["unityMcpBridgeReachable"] = health_component("unknown", "Unity MCP bridge has not been checked yet.", "")
+    else:
+        components["unityMcpBridgeReachable"] = health_component(
+            "warning",
+            "Unity MCP bridge is not reachable.",
+            unity_status.get("error") or unity_status,
+        )
+
+    components["providerConfigPresent"] = health_component(
+        "ok" if not provider_requires_api_key(settings.llm_provider) or bool(settings.llm_api_key) else "warning",
+        "Provider configuration is present."
+        if not provider_requires_api_key(settings.llm_provider) or bool(settings.llm_api_key)
+        else f"{provider_display_name(settings.llm_provider)} API key is not configured.",
+        {"provider": settings.llm_provider, "model": settings.llm_model},
+    )
+
+    return components
+
+
 def build_bootstrap_payload() -> dict[str, Any]:
     if CURRENT_UNITY_STATUS is None:
         status = build_unity_status_snapshot()
@@ -5047,7 +5218,7 @@ def normalize_path_string(value: str) -> str:
 
 
 def load_initial_dashboard_api_config() -> DashboardApiConfig:
-    settings_path = resolve_local_path(DEFAULT_SETTINGS_PATH)
+    settings_path = RUNTIME_SETTINGS_PATH
     settings = load_settings(settings_path)
     config_document = load_config_document()
     api_section = config_document.get("api") or {}
@@ -5158,7 +5329,7 @@ def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, str]]:
 
 def resolve_vertex_project_location(value: str) -> tuple[str, str]:
     settings = load_settings(
-        resolve_local_path(DEFAULT_SETTINGS_PATH),
+        RUNTIME_SETTINGS_PATH,
         llm_override={
             "provider": "vertexai",
             "api_key": "",
@@ -5287,7 +5458,7 @@ def mask_secret(value: str) -> str:
 
 
 def load_initial_dashboard_state() -> DashboardState:
-    settings_path = resolve_local_path(DEFAULT_SETTINGS_PATH)
+    settings_path = RUNTIME_SETTINGS_PATH
     settings = load_settings(
         settings_path,
         llm_override=serialize_api_config(include_secret=True) if DASHBOARD_API_CONFIG is not None else None,
