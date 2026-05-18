@@ -1,0 +1,18 @@
+{
+  "components": [
+    {
+      "name": "CoplayDev Unity MCP",
+      "path": "third_party/com.coplaydev.unity-mcp",
+      "license": "MIT",
+      "requiredLicenseFile": "LICENSE",
+      "requiredLicenseText": [
+        "MIT License",
+        "Copyright (c) 2025 CoplayDev",
+        "The above copyright notice and this permission notice shall be included in all"
+      ],
+      "requiredDistributionNotes": "VRCFORGE_DISTRIBUTION_NOTES.txt",
+      "releaseLicenseFile": "licenses/CoplayDev-Unity-MCP-LICENSE.txt",
+      "releaseDistributionNotes": "licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt"
+    }
+  ]
+}

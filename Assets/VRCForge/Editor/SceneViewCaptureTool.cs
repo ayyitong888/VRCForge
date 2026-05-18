@@ -11,7 +11,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_capture_scene_view",
-        Description = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG without requiring Roslyn."
+        Description = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG via a predefined VRCForge tool."
     )]
     public static class SceneViewCaptureTool
     {

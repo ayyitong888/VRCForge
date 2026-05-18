@@ -804,9 +804,9 @@ textarea {
   min-width: 8rem;
 }
 
-#fx-csharp-preview,
+#fx-payload-preview,
 #fx-output,
-#param-csharp-preview,
+#param-payload-preview,
 #param-output,
 #summary-output,
 #config-output,

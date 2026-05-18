@@ -19,7 +19,7 @@ from vrchat_blendshape_agent import (
     humanize_unity_mcp_error,
     load_settings,
     load_export_payload,
-    mock_execute_csharp,
+    mock_execute_payload,
     read_plan_json,
     read_export_json,
     resolve_export_result_path,
@@ -129,7 +129,7 @@ class PlanningValidationTests(unittest.TestCase):
             unity_mcp_retry_backoff_seconds=0.0,
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_execute_roslyn",
+            execute_tool_name="vrc_apply_blendshapes",
             export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
@@ -176,7 +176,7 @@ class PlanningValidationTests(unittest.TestCase):
             unity_mcp_retry_backoff_seconds=0.0,
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_execute_roslyn",
+            execute_tool_name="vrc_apply_blendshapes",
             export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
@@ -414,7 +414,7 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_retry_backoff_seconds=2.0,
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_execute_roslyn",
+            execute_tool_name="vrc_apply_blendshapes",
             export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
@@ -452,14 +452,14 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_retry_backoff_seconds=2.0,
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_execute_roslyn",
+            execute_tool_name="vrc_apply_blendshapes",
             export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
 
-        args = build_custom_tool_cli_args(settings, "vrc_execute_roslyn", {"code": 'return "ok";'})
+        args = build_custom_tool_cli_args(settings, "vrc_apply_blendshapes", {"avatarPath": "Avatar", "adjustments": []})
 
-        self.assertEqual(args[:3], ["editor", "custom-tool", "vrc_execute_roslyn"])
+        self.assertEqual(args[:3], ["editor", "custom-tool", "vrc_apply_blendshapes"])
         self.assertEqual(args[3], "--params-b64")
         self.assertNotIn("--params", args)
 
@@ -490,10 +490,10 @@ class MvpFlowTests(unittest.TestCase):
 
     def test_extract_unity_mcp_stdout_error_reads_cli_error_prefix(self) -> None:
         message = extract_unity_mcp_stdout_error(
-            "❌ Error: Roslyn runtime is disabled. Install the Roslyn DLLs.\n"
+            "❌ Error: Unity MCP server is not ready yet.\n"
         )
 
-        self.assertEqual(message, "Roslyn runtime is disabled. Install the Roslyn DLLs.")
+        self.assertEqual(message, "Unity MCP server is not ready yet.")
 
     def test_resolve_export_result_path_uses_absolute_stdout_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -514,7 +514,7 @@ class MvpFlowTests(unittest.TestCase):
                 unity_mcp_retry_backoff_seconds=2.0,
                 unity_mcp_timeout_seconds=30,
                 export_tool_name="vrc_export_blendshapes",
-                execute_tool_name="vrc_execute_roslyn",
+                execute_tool_name="vrc_apply_blendshapes",
                 export_path=Path("missing-local-export.json"),
                 min_confidence=0.65,
             )
@@ -543,7 +543,7 @@ class MvpFlowTests(unittest.TestCase):
             unity_mcp_retry_backoff_seconds=2.0,
             unity_mcp_timeout_seconds=30,
             export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_execute_roslyn",
+            execute_tool_name="vrc_apply_blendshapes",
             export_path=Path("Assets/VRCForge/blendshapes_export.json"),
             min_confidence=0.65,
         )
@@ -689,8 +689,8 @@ class MvpFlowTests(unittest.TestCase):
 
     def test_mock_execute_returns_success_payload(self) -> None:
         selected_avatar = resolve_avatar_selection(make_export_payload(), "Scene/HeroAvatar")
-        result = mock_execute_csharp(
-            code='RoslynExecutor.Log("Hello");',
+        result = mock_execute_payload(
+            apply_payload='{"tool":"vrc_apply_blendshapes"}',
             selected_avatar=selected_avatar,
             export_source="examples/mvp_blendshapes_export.json",
         )

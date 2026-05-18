@@ -84,6 +84,7 @@ try {
         throw "PayloadDownloadUrl is required for VRCForge_Web_Installer_x64.exe."
     }
 
+    & .\packaging\check_third_party_licenses.ps1
     & .\packaging\check_coplaydev_mcp_license.ps1 -PackagePath $CoplayDevPackagePath
 
     $payloadRoot = Join-Path $repoRoot "dist\VRCForge_Windows_x64"
@@ -126,11 +127,16 @@ try {
 
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "licenses") | Out-Null
     Copy-Item -LiteralPath .\LICENSE -Destination (Join-Path $payloadRoot "licenses\VRCForge-GPL-3.0.txt") -Force
+    Copy-Item -LiteralPath .\NOTICE -Destination (Join-Path $payloadRoot "licenses\VRCForge-NOTICE.txt") -Force
     $coplayLicense = Get-ChildItem -LiteralPath $CoplayDevPackagePath -File |
         Where-Object { $_.Name -match "^(LICENSE|COPYING)" } |
         Select-Object -First 1
     if ($coplayLicense) {
         Copy-Item -LiteralPath $coplayLicense.FullName -Destination (Join-Path $payloadRoot "licenses\CoplayDev-Unity-MCP-LICENSE.txt") -Force
+    }
+    $coplayDistributionNotes = Join-Path $CoplayDevPackagePath "VRCFORGE_DISTRIBUTION_NOTES.txt"
+    if (Test-Path -LiteralPath $coplayDistributionNotes) {
+        Copy-Item -LiteralPath $coplayDistributionNotes -Destination (Join-Path $payloadRoot "licenses\CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt") -Force
     }
 
     $payloadZip = Join-Path $releaseRoot "VRCForge_Windows_x64_$Version.zip"

@@ -80,7 +80,7 @@ internal sealed class LauncherPaths
     "retry_backoff_seconds": 2.0,
     "timeout_seconds": 30,
     "export_tool_name": "vrc_export_blendshapes",
-    "execute_tool_name": "vrc_execute_roslyn"
+    "execute_tool_name": "vrc_apply_blendshapes"
   },
   "paths": {
     "blendshape_export": "Assets/VRCForge/blendshapes_export.json"

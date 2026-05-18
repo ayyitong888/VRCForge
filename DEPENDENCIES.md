@@ -34,7 +34,6 @@ VRCForge 当前不依赖一个单独的 `.unitypackage` 文件。请使用普通
 | VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, and VRChat avatar APIs |
 | MCP for Unity (`com.coplaydev.unity-mcp`) | Add through Unity Package Manager, or let `tools/install-unity-project.ps1` add it to `Packages/manifest.json` | Yes | Lets the local dashboard call Unity Editor tools |
 | Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Usually pulled in by SDK/packages; add from Unity Package Manager if Unity reports missing `Newtonsoft.Json` | Yes if missing | JSON parsing inside Unity editor tools |
-| Roslyn fallback DLLs | Optional: define `VRCFORGE_ENABLE_ROSLYN`, then run `tools/install-roslyn-support.ps1` | Optional | Disabled-by-default legacy C# snippet execution fallback |
 
 MCP for Unity package URL used by the install script:
 安装脚本使用的 MCP for Unity 包地址：
@@ -46,6 +45,18 @@ MCP for Unity package URL used by the install script:
 Windows x64 installer builds bundle a pinned copy of CoplayDev MCP under
 `third_party/com.coplaydev.unity-mcp` after the license gate passes, then copy it
 into the release payload at `unity_plugin/Packages/com.coplaydev.unity-mcp`.
+
+The bundled CoplayDev Unity MCP package is MIT licensed. VRCForge must preserve
+the upstream `LICENSE` file in the package and copy it into the release payload
+as `licenses/CoplayDev-Unity-MCP-LICENSE.txt`. The build gate checks for the
+expected CoplayDev MIT copyright and permission notice text before packaging.
+Because VRCForge vendors a modified package copy, it also ships
+`VRCFORGE_DISTRIBUTION_NOTES.txt` in the package root and copies it into release
+payloads as `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt`.
+
+Before every release build, all bundled third-party components must pass
+`packaging/check_third_party_licenses.ps1`. Any new bundled dependency must be
+listed in `packaging/THIRD_PARTY_LICENSES.json` before it can be shipped.
 
 ## VRCForge Unity Files / VRCForge Unity 文件
 
@@ -63,29 +74,6 @@ The helper script can copy it and add MCP for Unity:
 powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
 ```
 
-## Optional Roslyn Fallback / 可选 Roslyn 回退
+## Execution Model / ????
 
-Current dashboard features use dedicated Unity tools and do not need Roslyn. The Roslyn fallback is disabled by default so missing Roslyn DLLs cannot affect a clean Unity compile.
-当前 dashboard 功能使用专用 Unity 工具，不需要 Roslyn。Roslyn 回退默认禁用，因此缺少 Roslyn DLL 不会影响 Unity clean compile。
-
-To enable the legacy `vrc_execute_roslyn` fallback, add `VRCFORGE_ENABLE_ROSLYN` to Unity scripting define symbols, then install the DLLs below.
-如需启用旧版 `vrc_execute_roslyn` 回退，请先在 Unity scripting define symbols 中加入 `VRCFORGE_ENABLE_ROSLYN`，再安装以下 DLL。
-
-If needed, install these DLLs into `Assets/Plugins/Roslyn/`:
-如需启用，请将以下 DLL 安装到 `Assets/Plugins/Roslyn/`：
-
-```text
-Microsoft.CodeAnalysis.dll
-Microsoft.CodeAnalysis.CSharp.dll
-Microsoft.CodeAnalysis.Scripting.dll
-Microsoft.CodeAnalysis.CSharp.Scripting.dll
-System.Collections.Immutable.dll
-System.Reflection.Metadata.dll
-```
-
-The included script downloads and installs them:
-仓库脚本可以自动下载并安装：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/install-roslyn-support.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
-```
+VRCForge ships predefined Unity tools for avatar reads and writes. It does not ship a VRCForge arbitrary C# execution fallback. Dry-run previews show the MCP tool payload that will be sent to Unity, not generated executable code.

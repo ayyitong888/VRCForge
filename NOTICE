@@ -14,3 +14,13 @@ Redistribution and modified versions must comply with GPL-3.0, including:
 * providing access to the corresponding source code when distributing binaries or modified builds.
 
 This software is provided without warranty. Users should back up their Unity / VRChat avatar projects before using asset-writing features.
+
+Bundled third-party component:
+
+* CoplayDev Unity MCP (`com.coplaydev.unity-mcp`)
+  * Upstream: https://github.com/CoplayDev/unity-mcp
+  * License: MIT License, copyright (c) 2025 CoplayDev
+  * The upstream MIT LICENSE is preserved in the vendored package and copied
+    into binary release payloads as `licenses/CoplayDev-Unity-MCP-LICENSE.txt`.
+  * VRCForge distribution notes are included as
+    `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt`.

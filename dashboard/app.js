@@ -280,7 +280,7 @@ function cacheRefs() {
     "fx-apply-panel",
     "fx-apply-count",
     "fx-dry-run",
-    "fx-csharp-preview",
+    "fx-payload-preview",
     "clothes-count-chip",
     "clothes-list",
     "fx-output",
@@ -292,7 +292,7 @@ function cacheRefs() {
     "param-diff-count",
     "param-dry-run",
     "param-diff-list",
-    "param-csharp-preview",
+    "param-payload-preview",
     "bool-count",
     "int-count",
     "float-count",
@@ -2022,7 +2022,7 @@ async function applyClothesFx() {
   
   refs["fx-apply-panel"].classList.remove("hidden");
   refs["fx-apply-count"].textContent = `${payload.result?.createdCount ?? payload.createdCount ?? state.clothes.length} 件`;
-  refs["fx-csharp-preview"].textContent = payload.generatedCsharp || "";
+  refs["fx-payload-preview"].textContent = payload.applyPayload || "";
   
   if (isDryRun) {
     refs["fx-output"].textContent = "(Dry run) 预览如上所示，不会对 Unity 写入任何资产。";
@@ -2090,10 +2090,10 @@ async function applyParameterOptimization() {
       <span>${escapeHtml(item.from)} -> ${escapeHtml(item.to)}</span>
     </article>
   `).join("");
-  refs["param-csharp-preview"].textContent = payload.generatedCsharp || "";
+  refs["param-payload-preview"].textContent = payload.applyPayload || "";
 
   if (isDryRun) {
-    refs["param-output"].textContent = "(Dry run) Diff 与代码预览如上，未执行实际回写。";
+    refs["param-output"].textContent = "(Dry run) Diff 与 payload 预览如上，未执行实际回写。";
   } else {
     state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
     refs["param-output"].textContent = prettyJson(payload.result || payload);

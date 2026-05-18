@@ -35,7 +35,6 @@ from vrchat_blendshape_agent import (
     create_blendshape_plan,
     create_material_tuning_plan,
     create_shader_visual_review,
-    execute_csharp,
     export_blendshapes,
     filter_planning_payload_to_face_blendshapes,
     is_face_related_blendshape,
@@ -43,14 +42,14 @@ from vrchat_blendshape_agent import (
     invoke_unity_mcp,
     load_export_payload,
     load_settings,
-    mock_execute_csharp,
+    mock_execute_payload,
     normalize_base_url,
     normalize_provider_name,
     provider_display_name,
     provider_requires_api_key,
     read_plan_json,
     request_llm_plan,
-    render_csharp,
+    render_apply_payload_json,
     render_preview,
     render_summary,
     run_unity_mcp_passthrough,
@@ -337,13 +336,13 @@ class VisionAuditRequest(ConnectionRequest):
 class ClothingApplyFxRequest(AvatarScopedConnectionRequest):
     """Trigger full FX asset authoring for detected clothing objects."""
     items: list[dict] = Field(default_factory=list, description="Clothing items from /api/clothes/scan or /api/clothes/generate-fx.")
-    dry_run: bool = Field(default=True, description="If true return generated C# only without executing in Unity.")
+    dry_run: bool = Field(default=True, description="If true return the MCP apply payload without executing in Unity.")
 
 
 class ParameterApplyOptimizationRequest(AvatarScopedConnectionRequest):
     """Apply selected Int->Bool parameter optimizations to VRCExpressionParameters."""
     suggestions: list[dict] = Field(default_factory=list, description="Suggestions from /api/parameters/optimize.")
-    dry_run: bool = Field(default=True, description="If true return generated C# only without executing in Unity.")
+    dry_run: bool = Field(default=True, description="If true return the MCP apply payload without executing in Unity.")
 
 
 class ParameterRollbackRequest(AvatarScopedConnectionRequest):
@@ -1146,8 +1145,8 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
             }
 
         if using_mock_execute:
-            code = render_manual_blendshape_csharp(selected_avatar.avatar_path, validated_adjustments)
-            result = mock_execute_csharp(code, selected_avatar, export_source)
+            apply_payload = render_manual_blendshape_payload_json(selected_avatar.avatar_path, validated_adjustments)
+            result = mock_execute_payload(apply_payload, selected_avatar, export_source)
         else:
             result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, validated_adjustments)
 
@@ -1897,8 +1896,8 @@ def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: Dashboard
     result: McpResult | None = None
     if direct_adjustments:
         if using_mock_execute:
-            code = render_manual_blendshape_csharp(selected_avatar.avatar_path, direct_adjustments)
-            result = mock_execute_csharp(code, selected_avatar, export_source)
+            apply_payload = render_manual_blendshape_payload_json(selected_avatar.avatar_path, direct_adjustments)
+            result = mock_execute_payload(apply_payload, selected_avatar, export_source)
         else:
             result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
         push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
@@ -2667,15 +2666,15 @@ def apply_clothing_fx_sync(request: ClothingApplyFxRequest) -> dict[str, Any]:
         if not items:
             raise RuntimeError("No clothing items provided. Run /api/clothes/scan or /api/clothes/generate-fx first.")
 
-        csharp_code = build_clothes_fx_apply_code(avatar_path, items)
+        apply_payload = build_clothes_fx_apply_preview(avatar_path, items)
 
         if request.dry_run:
-            emit_log("info", "fx", "Clothing FX apply-code generated (dry-run).", {"avatarPath": avatar_path, "itemCount": len(items)})
-            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "itemCount": len(items)}
+            emit_log("info", "fx", "Clothing FX apply payload generated (dry-run).", {"avatarPath": avatar_path, "itemCount": len(items)})
+            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "applyPayload": apply_payload, "itemCount": len(items)}
 
         payload = apply_clothing_fx_direct(settings, avatar_path, items)
         emit_log("success", "fx", "Clothing FX assets authored in Unity.", {"avatarPath": avatar_path, "itemCount": len(items)})
-        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "generatedCsharp": csharp_code, "result": payload, "itemCount": len(items)}
+        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "applyPayload": apply_payload, "result": payload, "itemCount": len(items)}
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "fx", "Failed to apply clothing FX.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
@@ -2689,15 +2688,15 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
         if not suggestions:
             raise RuntimeError("No optimization suggestions provided. Run /api/parameters/optimize first.")
 
-        csharp_code = build_parameter_apply_optimization_code(avatar_path, suggestions)
+        apply_payload = build_parameter_apply_optimization_preview(avatar_path, suggestions)
         diff = [
             {"name": s.get("name", ""), "from": s.get("currentType", "Int"), "to": s.get("suggestedType", "Bool")}
             for s in suggestions
         ]
 
         if request.dry_run:
-            emit_log("info", "parameter", "Parameter optimization code generated (dry-run).", {"avatarPath": avatar_path, "count": len(suggestions)})
-            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "generatedCsharp": csharp_code, "diff": diff, "appliedCount": len(suggestions)}
+            emit_log("info", "parameter", "Parameter optimization payload generated (dry-run).", {"avatarPath": avatar_path, "count": len(suggestions)})
+            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "applyPayload": apply_payload, "diff": diff, "appliedCount": len(suggestions)}
 
         snapshot_payload = scan_avatar_parameters_direct(settings, avatar_path)
         snapshot_info = save_parameter_snapshot_payload(snapshot_payload, avatar_path)
@@ -2714,7 +2713,7 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
             "ok": True,
             "avatarPath": avatar_path,
             "dryRun": False,
-            "generatedCsharp": csharp_code,
+            "applyPayload": apply_payload,
             "diff": diff,
             "appliedCount": len(suggestions),
             "snapshotPath": snapshot_info["snapshotPath"],
@@ -2735,7 +2734,7 @@ def rollback_parameter_optimization_sync(request: ParameterRollbackRequest) -> d
             raise RuntimeError(f"Parameter snapshot is not a JSON object: {snapshot_path}")
 
         avatar_path = request.avatar_path or snapshot_payload.get("avatarPath") or DASHBOARD_RUNTIME.current_avatar_path
-        csharp_code = build_parameter_rollback_code(avatar_path, snapshot_payload)
+        apply_payload = build_parameter_rollback_preview(avatar_path, snapshot_payload)
         payload = rollback_parameters_direct(settings, avatar_path, snapshot_payload)
         restored_count = payload.get("restoredCount", snapshot_payload.get("parameterCount", 0))
         emit_log(
@@ -2749,7 +2748,7 @@ def rollback_parameter_optimization_sync(request: ParameterRollbackRequest) -> d
             "avatarPath": avatar_path,
             "snapshotPath": str(snapshot_path),
             "snapshotUrl": to_artifact_url(str(snapshot_path)),
-            "generatedCsharp": csharp_code,
+            "applyPayload": apply_payload,
             "restoredCount": restored_count,
             "result": payload,
         }
@@ -2924,7 +2923,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             )
 
         preview = render_preview(selected_avatar, plan, export_source, using_mock_execute)
-        csharp_code = render_csharp(plan)
+        apply_payload_json = render_apply_payload_json(selected_avatar, plan)
         change_preview = build_plan_change_preview(plan, export_payload, selected_avatar)
         visual_proof: dict[str, Any] | None = None
         verified_changes: list[dict[str, Any]] = []
@@ -2936,7 +2935,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             if not plan.adjustments:
                 emit_log("info", "pipeline", "Plan contains no blendshape adjustments; execution skipped.", {})
             elif using_mock_execute:
-                result = mock_execute_csharp(csharp_code, selected_avatar, export_source)
+                result = mock_execute_payload(apply_payload_json, selected_avatar, export_source)
             else:
                 visual_proof = capture_blendshape_visual_proof(
                     settings=settings,
@@ -2976,7 +2975,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
 
         artifacts = None
         if request.save_artifacts:
-            artifacts = save_dashboard_artifacts(plan, csharp_code, preview, result, summary)
+            artifacts = save_dashboard_artifacts(plan, apply_payload_json, preview, result, summary)
             emit_log("info", "artifact", "Dashboard artifacts saved.", {"runDirectory": artifacts["runDirectory"]})
 
         history_record = save_tuning_history_record(
@@ -3005,7 +3004,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             "visualProof": visual_proof,
             "referenceImage": reference_context,
             "preview": preview,
-            "csharp": csharp_code,
+            "applyPayload": apply_payload_json,
             "result": serialize_result(result),
             "summary": summary,
             "artifacts": artifacts,
@@ -3064,26 +3063,6 @@ def load_dashboard_export_payload(
         mvp_mode=mvp_mode,
         mock_execute=request.mock_execute,
     )
-
-
-def execute_dashboard_code(
-    settings: Settings,
-    code: str,
-    target_avatar_paths: list[str] | None = None,
-) -> Any:
-    result = invoke_unity_mcp(
-        settings,
-        settings.execute_tool_name,
-        {
-            "code": code,
-            "enforceWriteDefaultsOn": False,
-            "targetAvatarPaths": target_avatar_paths or [],
-        },
-    )
-    payload = extract_tool_result_payload(result)
-    if payload is None:
-        raise RuntimeError("Unity MCP returned no structured result payload for the requested operation.")
-    return payload
 
 
 def extract_tool_result_payload(result: McpResult) -> Any:
@@ -3294,21 +3273,16 @@ def serialize_result(result: McpResult | None) -> dict[str, Any] | None:
     }
 
 
-def render_manual_blendshape_csharp(avatar_path: str, adjustments: list[dict[str, Any]]) -> str:
-    lines = [
-        "// Generated by dashboard manual blendshape apply",
-        f"RoslynExecutor.Log({json.dumps(f'Applying {len(adjustments)} manual blendshape adjustments for {avatar_path}', ensure_ascii=False)});",
-    ]
-    for item in adjustments:
-        lines.append(
-            "RoslynExecutor.SetBlendshapeWeight("
-            f"{json.dumps(avatar_path, ensure_ascii=False)}, "
-            f"{json.dumps(item['rendererPath'], ensure_ascii=False)}, "
-            f"{json.dumps(item['blendshapeName'], ensure_ascii=False)}, "
-            f"{float(item['targetWeight']):.2f}f);"
-        )
-    lines.append("RoslynExecutor.SaveProjectAssets();")
-    return "\n".join(lines)
+def render_manual_blendshape_payload_json(avatar_path: str, adjustments: list[dict[str, Any]]) -> str:
+    payload = {
+        "tool": "vrc_apply_blendshapes",
+        "params": {
+            "avatarPath": avatar_path,
+            "adjustments": adjustments,
+            "saveAssets": True,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def apply_blendshapes_direct(
@@ -3792,7 +3766,7 @@ def remember_loaded_avatar(avatar_name: str, avatar_path: str) -> None:
 
 def save_dashboard_artifacts(
     plan: Any,
-    csharp_code: str,
+    apply_payload_json: str,
     preview: str,
     result: McpResult | None,
     summary: str | None,
@@ -3805,21 +3779,21 @@ def save_dashboard_artifacts(
     latest_dir.mkdir(parents=True, exist_ok=True)
 
     run_plan_path = run_dir / "plan.json"
-    run_csharp_path = run_dir / "apply.cs"
+    run_apply_payload_path = run_dir / "apply_payload.json"
     run_preview_path = run_dir / "preview.txt"
     run_summary_path = run_dir / "summary.txt"
     run_result_path = run_dir / "result.json"
 
     latest_plan_path = latest_dir / "plan.json"
-    latest_csharp_path = latest_dir / "apply.cs"
+    latest_apply_payload_path = latest_dir / "apply_payload.json"
     latest_preview_path = latest_dir / "preview.txt"
     latest_summary_path = latest_dir / "summary.txt"
     latest_result_path = latest_dir / "result.json"
 
     save_plan(run_plan_path, plan)
     save_plan(latest_plan_path, plan)
-    save_text(run_csharp_path, csharp_code)
-    save_text(latest_csharp_path, csharp_code)
+    save_text(run_apply_payload_path, apply_payload_json)
+    save_text(latest_apply_payload_path, apply_payload_json)
     save_text(run_preview_path, preview)
     save_text(latest_preview_path, preview)
 
@@ -3836,7 +3810,7 @@ def save_dashboard_artifacts(
         "latestDirectory": str(latest_dir),
         "files": {
             "plan": str(run_plan_path),
-            "csharp": str(run_csharp_path),
+            "applyPayload": str(run_apply_payload_path),
             "preview": str(run_preview_path),
             "summary": str(run_summary_path) if summary else None,
             "result": str(run_result_path) if result else None,
@@ -3844,624 +3818,39 @@ def save_dashboard_artifacts(
     }
 
 
-def build_avatar_descriptor_scan_code() -> str:
-    return """
-var avatars = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(descriptor => descriptor != null
-        && descriptor.gameObject.scene.IsValid()
-        && descriptor.gameObject.scene.isLoaded
-        && !EditorUtility.IsPersistent(descriptor))
-    .OrderBy(descriptor => descriptor.name)
-    .Select(descriptor => new
-    {
-        avatarName = descriptor.name,
-        avatarPath = string.Join("/", descriptor.transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name)),
-        sceneName = descriptor.gameObject.scene.name
-    })
-    .ToList();
-return Newtonsoft.Json.JsonConvert.SerializeObject(avatars);
-""".strip()
+def build_tool_payload_preview(tool: str, params: dict[str, Any]) -> str:
+    return json.dumps({"tool": tool, "params": params}, ensure_ascii=False, indent=2)
 
 
-def build_clothes_scan_code(avatar_path: str | None) -> str:
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var keywords = new[] {{ "cloth", "outfit", "dress", "shirt", "skirt", "pants", "shoe", "jacket", "hood", "hat", "accessory", "wear", "top", "bottom", "衣", "服", "裙", "裤", "鞋", "帽" }};
-var root = Resources.FindObjectsOfTypeAll<Transform>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(avatarPath));
-if (root == null)
-{{
-    throw new InvalidOperationException($"Avatar root not found: {{avatarPath}}");
-}}
-var items = root
-    .GetComponentsInChildren<Transform>(true)
-    .Where(item => item != null && item != root)
-    .Where(item => item.GetComponent<Renderer>() != null || item.GetComponentInChildren<Renderer>(true) != null)
-    .Where(item => keywords.Any(keyword => item.name.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
-    .Select(item => new
-    {{
-        name = item.name,
-        objectPath = GetPath(item),
-        active = item.gameObject.activeSelf
-    }})
-    .Distinct()
-    .OrderBy(item => item.name)
-    .ToList();
-if (items.Count == 0)
-{{
-    items = root
-        .GetComponentsInChildren<Transform>(true)
-        .Where(item => item.parent == root)
-        .Where(item => item != null && (item.GetComponent<Renderer>() != null || item.GetComponentInChildren<Renderer>(true) != null))
-        .Select(item => new
-        {{
-            name = item.name,
-            objectPath = GetPath(item),
-            active = item.gameObject.activeSelf
-        }})
-        .OrderBy(item => item.name)
-        .ToList();
-}}
-return Newtonsoft.Json.JsonConvert.SerializeObject(items);
-""".strip()
-
-
-def build_clothing_toggle_code(object_path: str, active: bool) -> str:
-    object_path_literal = json.dumps(object_path, ensure_ascii=False)
-    active_literal = "true" if active else "false"
-    return f"""
-string targetPath = {object_path_literal};
-bool targetActive = {active_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var target = Resources.FindObjectsOfTypeAll<Transform>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(targetPath));
-if (target == null)
-{{
-    throw new InvalidOperationException($"Clothing object not found: {{targetPath}}");
-}}
-target.gameObject.SetActive(targetActive);
-EditorUtility.SetDirty(target.gameObject);
-EditorSceneManager.MarkSceneDirty(target.gameObject.scene);
-RoslynExecutor.SaveProjectAssets();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    objectPath = targetPath,
-    active = target.gameObject.activeSelf
-}});
-""".strip()
-
-
-def build_clothes_fx_blueprint_code(avatar_path: str | None) -> str:
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var root = Resources.FindObjectsOfTypeAll<Transform>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => Normalize(GetPath(item)) == Normalize(avatarPath));
-if (root == null)
-{{
-    throw new InvalidOperationException($"Avatar root not found: {{avatarPath}}");
-}}
-var clothes = root
-    .GetComponentsInChildren<Transform>(true)
-    .Where(item => item != null && item.GetComponent<Renderer>() != null)
-    .GroupBy(item => item.name)
-    .Select(group => new
-    {{
-        displayName = group.Key,
-        parameterName = $"Cloth_{{group.Key.Replace(" ", string.Empty)}}",
-        animationClipName = $"FX_{{group.Key.Replace(" ", string.Empty)}}_Toggle",
-        bindingCount = group.Count(),
-        sampleObjectPath = GetPath(group.First())
-    }})
-    .OrderBy(item => item.displayName)
-    .ToList();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    mode = "blueprint",
-    note = "MVP currently generates an FX blueprint and parameter naming suggestion. It does not yet author AnimatorController assets automatically.",
-    items = clothes
-}});
-""".strip()
-
-
-def build_parameter_scan_code(avatar_path: str | None) -> str:
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null)
-{{
-    throw new InvalidOperationException("Could not locate a VRCAvatarDescriptor for parameter scan.");
-}}
-var parametersAsset = descriptor.expressionParameters;
-var parameters = parametersAsset != null && parametersAsset.parameters != null
-    ? parametersAsset.parameters.Where(parameter => parameter != null).ToArray()
-    : Array.Empty<VRCExpressionParameters.Parameter>();
-var boolCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Bool);
-var intCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Int);
-var floatCount = parameters.Count(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Float);
-var totalCost = parameters.Sum(parameter =>
-    parameter.valueType == VRCExpressionParameters.ValueType.Bool ? 1 :
-    parameter.valueType == VRCExpressionParameters.ValueType.Int ? 8 : 8);
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    boolCount,
-    intCount,
-    floatCount,
-    totalParameters = parameters.Length,
-    totalEstimatedCost = totalCost,
-    parameterNames = parameters.Select(parameter => new
-    {{
-        name = parameter.name,
-        valueType = parameter.valueType.ToString(),
-        saved = parameter.saved,
-        networkSynced = parameter.networkSynced,
-        defaultValue = parameter.defaultValue
-    }})
-}});
-""".strip()
-
-
-def build_parameter_optimization_code(avatar_path: str | None) -> str:
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null)
-{{
-    throw new InvalidOperationException("Could not locate a VRCAvatarDescriptor for parameter optimization.");
-}}
-var parametersAsset = descriptor.expressionParameters;
-var parameters = parametersAsset != null && parametersAsset.parameters != null
-    ? parametersAsset.parameters.Where(parameter => parameter != null).ToArray()
-    : Array.Empty<VRCExpressionParameters.Parameter>();
-var suggestions = parameters
-    .Where(parameter => parameter.valueType == VRCExpressionParameters.ValueType.Int)
-    .Where(parameter =>
-        Math.Abs(parameter.defaultValue) <= 1.0f
-        || parameter.name.IndexOf("toggle", StringComparison.OrdinalIgnoreCase) >= 0
-        || parameter.name.IndexOf("enable", StringComparison.OrdinalIgnoreCase) >= 0
-        || parameter.name.IndexOf("show", StringComparison.OrdinalIgnoreCase) >= 0
-        || parameter.name.IndexOf("hide", StringComparison.OrdinalIgnoreCase) >= 0
-        || parameter.name.IndexOf("is", StringComparison.OrdinalIgnoreCase) == 0)
-    .Select(parameter => new
-    {{
-        name = parameter.name,
-        currentType = parameter.valueType.ToString(),
-        suggestedType = "Bool",
-        reason = "Heuristic match: this Int parameter looks binary and may be reducible to Bool."
-    }})
-    .ToList();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    suggestionCount = suggestions.Count,
-    suggestions,
-    note = "Suggestions are heuristic only. Review animator conditions and menu bindings before changing parameter types."
-}});
-""".strip()
-
-
-def build_screenshot_capture_code(output_path: Path, width: int, height: int) -> str:
-    output_path_literal = json.dumps(str(output_path), ensure_ascii=False)
-    safe_width = max(256, min(width, 2048))
-    safe_height = max(256, min(height, 2048))
-    return f"""
-string outputPath = {output_path_literal};
-int width = {safe_width};
-int height = {safe_height};
-var sceneView = SceneView.lastActiveSceneView;
-if (sceneView == null || sceneView.camera == null)
-{{
-    throw new InvalidOperationException("No active SceneView is available for screenshot capture.");
-}}
-Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
-var camera = sceneView.camera;
-var renderTexture = new RenderTexture(width, height, 24);
-var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
-var previousTarget = camera.targetTexture;
-var previousActive = RenderTexture.active;
-camera.targetTexture = renderTexture;
-RenderTexture.active = renderTexture;
-camera.Render();
-texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-texture.Apply();
-camera.targetTexture = previousTarget;
-RenderTexture.active = previousActive;
-var bytes = texture.EncodeToPNG();
-File.WriteAllBytes(outputPath, bytes);
-UnityEngine.Object.DestroyImmediate(renderTexture);
-UnityEngine.Object.DestroyImmediate(texture);
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    imagePath = outputPath,
-    width,
-    height
-}});
-""".strip()
-
-
-def build_clothes_fx_apply_code(avatar_path: str | None, items: list[dict]) -> str:
-    """Generate C# that authors AnimationClip + FX Layer + VRCExpressionParameters + Menu for each clothing item."""
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    items_json = json.dumps(
-        [
-            {
-                "displayName": it.get("displayName") or it.get("name") or "",
-                "parameterName": it.get("parameterName") or f"Cloth_{(it.get('displayName') or it.get('name') or '').replace(' ', '')}",
-                "sampleObjectPath": it.get("sampleObjectPath") or it.get("objectPath") or "",
-                "animationClipName": it.get("animationClipName") or f"FX_{(it.get('displayName') or it.get('name') or '').replace(' ', '')}_Toggle",
-            }
-            for it in items
-        ],
-        ensure_ascii=False,
+def build_clothes_fx_apply_preview(avatar_path: str | None, items: list[dict[str, Any]]) -> str:
+    normalized_items = [
+        {
+            "displayName": item.get("displayName") or item.get("name") or "",
+            "parameterName": item.get("parameterName") or f"Cloth_{(item.get('displayName') or item.get('name') or '').replace(' ', '')}",
+            "sampleObjectPath": item.get("sampleObjectPath") or item.get("objectPath") or "",
+            "animationClipName": item.get("animationClipName") or f"FX_{(item.get('displayName') or item.get('name') or '').replace(' ', '')}_Toggle",
+        }
+        for item in items
+    ]
+    return build_tool_payload_preview(
+        "vrc_apply_clothing_fx",
+        {"avatarPath": avatar_path or "", "items": normalized_items},
     )
-    return f"""
-string avatarPath = {avatar_path_literal};
-var itemsJson = {json.dumps(items_json, ensure_ascii=False)};
-var itemList = Newtonsoft.Json.JsonConvert.DeserializeObject<System.Collections.Generic.List<Newtonsoft.Json.Linq.JObject>>(itemsJson);
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-string assetDir = "Assets/VRCForge/Generated/FX";
-if (!System.IO.Directory.Exists(assetDir)) System.IO.Directory.CreateDirectory(assetDir);
-
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
-
-var fxController = descriptor.baseAnimationLayers
-    .FirstOrDefault(layer => layer.type == VRCAvatarDescriptor.AnimLayerType.FX).animatorController as UnityEditor.Animations.AnimatorController;
-if (fxController == null) throw new InvalidOperationException("No FX AnimatorController found on the avatar.");
-
-var parametersAsset = descriptor.expressionParameters;
-if (parametersAsset == null) throw new InvalidOperationException("No VRCExpressionParameters found on the avatar.");
-
-var menuAsset = descriptor.expressionsMenu;
-if (menuAsset == null) throw new InvalidOperationException("No VRCExpressionsMenu found on the avatar.");
-
-int createdCount = 0;
-foreach (var item in itemList)
-{{
-    string displayName = item["displayName"]?.ToString() ?? "";
-    string paramName   = item["parameterName"]?.ToString() ?? "";
-    string clipName    = item["animationClipName"]?.ToString() ?? "";
-    string objPath     = item["sampleObjectPath"]?.ToString() ?? "";
-
-    // --- AnimationClips ON / OFF ---
-    string clipOnPath  = $"{{assetDir}}/{{clipName}}_ON.anim";
-    string clipOffPath = $"{{assetDir}}/{{clipName}}_OFF.anim";
-
-    var clipOn  = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOnPath)  ?? new AnimationClip();
-    var clipOff = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOffPath) ?? new AnimationClip();
-    clipOn.name  = clipName + "_ON";
-    clipOff.name = clipName + "_OFF";
-
-    var bindingOn  = new EditorCurveBinding {{ path = objPath, type = typeof(GameObject), propertyName = "m_IsActive" }};
-    AnimationUtility.SetEditorCurve(clipOn,  bindingOn,  AnimationCurve.Constant(0f, 0f, 1f));
-    AnimationUtility.SetEditorCurve(clipOff, bindingOn, AnimationCurve.Constant(0f, 0f, 0f));
-
-    if (!AssetDatabase.Contains(clipOn))  AssetDatabase.CreateAsset(clipOn,  clipOnPath);
-    if (!AssetDatabase.Contains(clipOff)) AssetDatabase.CreateAsset(clipOff, clipOffPath);
-
-    // --- FX Layer ---
-    bool layerExists = fxController.layers.Any(l => l.name == paramName);
-    if (!layerExists)
-    {{
-        fxController.AddParameter(paramName, UnityEngine.AnimatorControllerParameterType.Bool);
-        fxController.AddLayer(paramName);
-        var layers = fxController.layers;
-        var layer  = layers[layers.Length - 1];
-        layer.defaultWeight = 1f;
-        var sm     = layer.stateMachine;
-        var stOn   = sm.AddState(displayName + "_ON");
-        var stOff  = sm.AddState(displayName + "_OFF");
-        stOn.motion  = clipOn;
-        stOff.motion = clipOff;
-        var tOn  = sm.AddAnyStateTransition(stOn);
-        tOn.hasExitTime  = false; tOn.duration = 0f;
-        tOn.AddCondition(UnityEditor.Animations.AnimatorConditionMode.If, 0, paramName);
-        var tOff = sm.AddAnyStateTransition(stOff);
-        tOff.hasExitTime = false; tOff.duration = 0f;
-        tOff.AddCondition(UnityEditor.Animations.AnimatorConditionMode.IfNot, 0, paramName);
-        fxController.layers = layers;
-    }}
-
-    // --- VRCExpressionParameters ---
-    bool paramExists = parametersAsset.parameters != null && parametersAsset.parameters.Any(p => p.name == paramName);
-    if (!paramExists)
-    {{
-        var newParam = new VRCExpressionParameters.Parameter
-        {{
-            name         = paramName,
-            valueType    = VRCExpressionParameters.ValueType.Bool,
-            defaultValue = 1f,
-            saved        = true,
-            networkSynced = true
-        }};
-        var list = parametersAsset.parameters?.ToList() ?? new System.Collections.Generic.List<VRCExpressionParameters.Parameter>();
-        list.Add(newParam);
-        parametersAsset.parameters = list.ToArray();
-        EditorUtility.SetDirty(parametersAsset);
-    }}
-
-    // --- VRCExpressionsMenu ---
-    bool menuExists = menuAsset.controls != null && menuAsset.controls.Any(c => c.parameter?.name == paramName);
-    if (!menuExists && menuAsset.controls != null && menuAsset.controls.Count < VRCExpressionsMenu.MAX_CONTROLS)
-    {{
-        var control = new VRCExpressionsMenu.Control
-        {{
-            name      = displayName,
-            type      = VRCExpressionsMenu.Control.ControlType.Toggle,
-            parameter = new VRCExpressionsMenu.Control.Parameter {{ name = paramName }},
-            value     = 1f
-        }};
-        menuAsset.controls.Add(control);
-        EditorUtility.SetDirty(menuAsset);
-    }}
-
-    createdCount++;
-}}
-
-EditorUtility.SetDirty(fxController);
-AssetDatabase.SaveAssets();
-AssetDatabase.Refresh();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ ok = true, createdCount, assetDir }});
-""".strip()
 
 
-def build_parameter_apply_optimization_code(avatar_path: str | None, suggestions: list[dict]) -> str:
-    """Generate C# that converts selected Int parameters to Bool in VRCExpressionParameters."""
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    names_json = json.dumps([s.get("name", "") for s in suggestions if s.get("name")], ensure_ascii=False)
-    target_names_json_literal = json.dumps(names_json, ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-var targetNamesArr = Newtonsoft.Json.JsonConvert.DeserializeObject<string[]>({target_names_json_literal});
-var targetNamesSet = new System.Collections.Generic.HashSet<string>(targetNamesArr);
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
-var parametersAsset = descriptor.expressionParameters;
-if (parametersAsset == null || parametersAsset.parameters == null)
-    throw new InvalidOperationException("No VRCExpressionParameters found.");
-int changedCount = 0;
-foreach (var param in parametersAsset.parameters)
-{{
-    if (param == null) continue;
-    if (!targetNamesSet.Contains(param.name)) continue;
-    if (param.valueType != VRCExpressionParameters.ValueType.Int) continue;
-    param.valueType = VRCExpressionParameters.ValueType.Bool;
-    if (param.defaultValue > 1f) param.defaultValue = 1f;
-    changedCount++;
-}}
-EditorUtility.SetDirty(parametersAsset);
-AssetDatabase.SaveAssets();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ ok = true, changedCount }});
-""".strip()
+def build_parameter_apply_optimization_preview(avatar_path: str | None, suggestions: list[dict[str, Any]]) -> str:
+    return build_tool_payload_preview(
+        "vrc_apply_parameter_optimization",
+        {"avatarPath": avatar_path or "", "suggestions": suggestions},
+    )
 
 
-def build_parameter_snapshot_code(avatar_path: str | None) -> str:
-    """Generate C# that serializes the current VRCExpressionParameters before a write."""
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    return f"""
-string avatarPath = {avatar_path_literal};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-bool ReadBoolMember(object target, string memberName, bool fallback)
-{{
-    if (target == null) return fallback;
-    var type = target.GetType();
-    var field = type.GetField(memberName);
-    if (field != null && field.FieldType == typeof(bool)) return (bool)field.GetValue(target);
-    var property = type.GetProperty(memberName);
-    if (property != null && property.PropertyType == typeof(bool)) return (bool)property.GetValue(target);
-    return fallback;
-}}
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
-var parametersAsset = descriptor.expressionParameters;
-if (parametersAsset == null || parametersAsset.parameters == null)
-    throw new InvalidOperationException("No VRCExpressionParameters found.");
-var snapshotParameters = parametersAsset.parameters
-    .Where(param => param != null)
-    .Select(param => new
-    {{
-        name = param.name,
-        valueType = param.valueType.ToString(),
-        defaultValue = param.defaultValue,
-        saved = ReadBoolMember(param, "saved", false),
-        networkSynced = ReadBoolMember(param, "networkSynced", true)
-    }})
-    .ToArray();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    ok = true,
-    avatarPath = Normalize(GetPath(descriptor.transform)),
-    requestedAvatarPath = avatarPath,
-    assetPath = AssetDatabase.GetAssetPath(parametersAsset),
-    capturedAtUtc = DateTime.UtcNow.ToString("o"),
-    parameterCount = snapshotParameters.Length,
-    parameters = snapshotParameters
-}});
-""".strip()
-
-
-def csharp_bool(value: Any) -> str:
-    return "true" if bool(value) else "false"
-
-
-def csharp_float(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = 0.0
-    if not math.isfinite(number):
-        number = 0.0
-    return f"{number:.8g}f"
-
-
-def build_parameter_rollback_code(avatar_path: str | None, snapshot_payload: dict[str, Any]) -> str:
-    """Generate C# that restores VRCExpressionParameters from a saved snapshot payload."""
-    avatar_path_literal = json.dumps(avatar_path or "", ensure_ascii=False)
-    raw_parameters = snapshot_payload.get("parameters") or snapshot_payload.get("parameterNames") or []
-    if not isinstance(raw_parameters, list) or not raw_parameters:
-        raise RuntimeError("Parameter snapshot does not contain any parameters to restore.")
-
-    item_lines: list[str] = []
-    for item in raw_parameters:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "")
-        if not name:
-            continue
-        value_type = str(item.get("valueType") or "Float")
-        default_value = csharp_float(item.get("defaultValue", 0.0))
-        saved = csharp_bool(item.get("saved", False))
-        network_synced = csharp_bool(item.get("networkSynced", True))
-        item_lines.append(
-            "    new ParameterSnapshotItem { "
-            f"name = {json.dumps(name, ensure_ascii=False)}, "
-            f"valueType = {json.dumps(value_type, ensure_ascii=False)}, "
-            f"defaultValue = {default_value}, "
-            f"saved = {saved}, "
-            f"networkSynced = {network_synced} "
-            "},"
-        )
-
-    if not item_lines:
-        raise RuntimeError("Parameter snapshot does not contain named parameters to restore.")
-
-    items_literal = "\n".join(item_lines)
-    return f"""
-public class ParameterSnapshotItem
-{{
-    public string name;
-    public string valueType;
-    public float defaultValue;
-    public bool saved;
-    public bool networkSynced;
-}}
-
-string avatarPath = {avatar_path_literal};
-var restoreItems = new System.Collections.Generic.List<ParameterSnapshotItem>
-{{
-{items_literal}
-}};
-string Normalize(string value) => (value ?? string.Empty).Replace("\\\\", "/");
-string GetPath(Transform transform) => string.Join("/", transform.GetComponentsInParent<Transform>(true).Reverse().Select(item => item.name));
-void SetBoolMember(object target, string memberName, bool value)
-{{
-    if (target == null) return;
-    var type = target.GetType();
-    var field = type.GetField(memberName);
-    if (field != null && field.FieldType == typeof(bool))
-    {{
-        field.SetValue(target, value);
-        return;
-    }}
-    var property = type.GetProperty(memberName);
-    if (property != null && property.PropertyType == typeof(bool) && property.CanWrite)
-    {{
-        property.SetValue(target, value);
-    }}
-}}
-var descriptor = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-    .FirstOrDefault(item => string.IsNullOrWhiteSpace(avatarPath) || Normalize(GetPath(item.transform)) == Normalize(avatarPath));
-if (descriptor == null) throw new InvalidOperationException("VRCAvatarDescriptor not found: " + avatarPath);
-var parametersAsset = descriptor.expressionParameters;
-if (parametersAsset == null)
-    throw new InvalidOperationException("No VRCExpressionParameters found.");
-parametersAsset.parameters = restoreItems.Select(item =>
-{{
-    VRCExpressionParameters.ValueType parsedType;
-    if (!Enum.TryParse(item.valueType, out parsedType))
-    {{
-        parsedType = VRCExpressionParameters.ValueType.Float;
-    }}
-    var restored = new VRCExpressionParameters.Parameter
-    {{
-        name = item.name,
-        valueType = parsedType,
-        defaultValue = item.defaultValue
-    }};
-    SetBoolMember(restored, "saved", item.saved);
-    SetBoolMember(restored, "networkSynced", item.networkSynced);
-    return restored;
-}}).ToArray();
-EditorUtility.SetDirty(parametersAsset);
-AssetDatabase.SaveAssets();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new
-{{
-    ok = true,
-    restoredCount = parametersAsset.parameters.Length,
-    assetPath = AssetDatabase.GetAssetPath(parametersAsset)
-}});
-""".strip()
-
-
-def build_screenshot_multi_capture_code(output_path: Path, pitch: float, yaw: float, roll: float, width: int, height: int) -> str:
-    """Generate C# that rotates the SceneView camera to a given Euler angle then captures a screenshot."""
-    output_path_literal = json.dumps(str(output_path), ensure_ascii=False)
-    safe_width = max(256, min(width, 2048))
-    safe_height = max(256, min(height, 2048))
-    return f"""
-string outputPath = {output_path_literal};
-int width = {safe_width};
-int height = {safe_height};
-float pitch = {pitch:.4f}f;
-float yaw   = {yaw:.4f}f;
-float roll  = {roll:.4f}f;
-var sceneView = SceneView.lastActiveSceneView;
-if (sceneView == null || sceneView.camera == null)
-    throw new InvalidOperationException("No active SceneView is available for screenshot capture.");
-var prevRotation = sceneView.rotation;
-var prevPivot    = sceneView.pivot;
-sceneView.rotation = Quaternion.Euler(pitch, yaw, roll);
-sceneView.Repaint();
-Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
-var camera = sceneView.camera;
-var renderTexture = new RenderTexture(width, height, 24);
-var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
-var previousTarget = camera.targetTexture;
-var previousActive = RenderTexture.active;
-camera.targetTexture = renderTexture;
-RenderTexture.active = renderTexture;
-camera.Render();
-texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-texture.Apply();
-camera.targetTexture = previousTarget;
-RenderTexture.active = previousActive;
-var bytes = texture.EncodeToPNG();
-File.WriteAllBytes(outputPath, bytes);
-UnityEngine.Object.DestroyImmediate(renderTexture);
-UnityEngine.Object.DestroyImmediate(texture);
-sceneView.rotation = prevRotation;
-sceneView.Repaint();
-return Newtonsoft.Json.JsonConvert.SerializeObject(new {{ imagePath = outputPath, width, height, pitch, yaw, roll }});
-""".strip()
+def build_parameter_rollback_preview(avatar_path: str | None, snapshot_payload: dict[str, Any]) -> str:
+    parameter_names = snapshot_payload.get("parameters") or snapshot_payload.get("parameterNames") or []
+    return build_tool_payload_preview(
+        "vrc_rollback_avatar_parameters",
+        {"avatarPath": avatar_path or "", "parameterNames": parameter_names},
+    )
 
 
 def to_artifact_url(path_value: str) -> str:

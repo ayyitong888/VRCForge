@@ -16,7 +16,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_avatar_parameters",
-        Description = "Read VRChat avatar expression parameters and build simple optimization suggestions without requiring Roslyn."
+        Description = "Read VRChat avatar expression parameters and build simple optimization suggestions via a predefined VRCForge tool."
     )]
     public static class AvatarParameterScanner
     {

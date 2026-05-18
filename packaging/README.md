@@ -37,6 +37,24 @@ and writes the Unity manifest dependency as:
 "com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"
 ```
 
+The pinned package is MIT licensed. The release build must preserve:
+
+- `unity_plugin/Packages/com.coplaydev.unity-mcp/LICENSE`
+- `unity_plugin/Packages/com.coplaydev.unity-mcp/VRCFORGE_DISTRIBUTION_NOTES.txt`
+- `licenses/VRCForge-NOTICE.txt`
+- `licenses/CoplayDev-Unity-MCP-LICENSE.txt`
+- `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt`
+
+Every release build runs `packaging/check_third_party_licenses.ps1` before
+packaging. The manifest is `packaging/THIRD_PARTY_LICENSES.json`; add any new
+bundled third-party component there before shipping it. A release must stop if a
+bundled component lacks a recognized redistributable license, required license
+text, or required notice/distribution notes.
+
+`packaging/check_coplaydev_mcp_license.ps1` also refuses to build if the pinned
+CoplayDev package is missing the expected CoplayDev MIT LICENSE text or VRCForge
+distribution notes.
+
 ## Commands
 
 ```powershell

@@ -12,7 +12,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_apply_blendshapes",
-        Description = "Apply explicit blendshape weights to scene avatar renderers without requiring Roslyn."
+        Description = "Apply explicit blendshape weights to scene avatar renderers via a predefined VRCForge tool."
     )]
     public static class BlendshapeApplier
     {

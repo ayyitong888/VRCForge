@@ -25,20 +25,26 @@ if (-not $licenseCandidates) {
 }
 
 $licenseText = ($licenseCandidates | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n"
-$allowed = $licenseText -match "MIT License" -or
-    $licenseText -match "Apache License" -or
-    $licenseText -match "BSD"
+$isCoplayDevMit = $licenseText -match "MIT License" -and
+    $licenseText -match "Copyright \(c\) 2025 CoplayDev" -and
+    $licenseText -match "The above copyright notice and this permission notice shall be included in all"
 
-if (-not $allowed) {
-    throw "CoplayDev Unity MCP license was not recognized as a redistributable license. Review manually before packaging."
+if (-not $isCoplayDevMit) {
+    throw "CoplayDev Unity MCP must include the expected CoplayDev MIT LICENSE text before packaging."
 }
 
 $noticeCandidates = @(@("NOTICE", "NOTICE.md", "NOTICE.txt") |
     ForEach-Object { Join-Path $resolvedPackagePath $_ } |
     Where-Object { Test-Path -LiteralPath $_ })
 
+$distributionNotes = Join-Path $resolvedPackagePath "VRCFORGE_DISTRIBUTION_NOTES.txt"
+if (-not (Test-Path -LiteralPath $distributionNotes)) {
+    throw "CoplayDev Unity MCP vendored package is missing VRCFORGE_DISTRIBUTION_NOTES.txt. Refuse to build installers because local distribution changes must be documented."
+}
+
 Write-Host "CoplayDev Unity MCP license gate passed."
 Write-Host "License file: $($licenseCandidates[0])"
+Write-Host "Distribution notes: $distributionNotes"
 if ($noticeCandidates) {
     Write-Host "Notice file: $($noticeCandidates[0])"
 } else {

@@ -139,8 +139,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("public static object HandleCommand(JObject @params)", source)
 
         combined = "\n".join(phase2_text)
-        self.assertNotIn("vrc_execute_roslyn", combined)
-        self.assertNotIn("CSharpScript", combined)
+        old_dynamic_tool = "vrc_" + "execute_" + "roslyn"
+        old_dynamic_type = "CSharp" + "Script"
+        self.assertNotIn(old_dynamic_tool, combined)
+        self.assertNotIn(old_dynamic_type, combined)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -207,7 +209,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("git status --short", build_script)
         self.assertIn("git log origin/main..HEAD --oneline", build_script)
         self.assertIn("git show origin/main:VERSION", build_script)
+        self.assertIn("check_third_party_licenses.ps1", build_script)
         self.assertIn("check_coplaydev_mcp_license.ps1", build_script)
+        self.assertIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
+        self.assertIn("VRCForge-NOTICE.txt", build_script)
         self.assertIn("build_unitypackage.ps1", build_script)
         self.assertIn("PayloadDownloadUrl is required", build_script)
         self.assertIn("win-x64", build_script)
@@ -227,6 +232,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("VRCForge_Web_Installer_x64.exe", web_nsis)
         self.assertIn("$PROGRAMFILES64\\VRCForge", offline_nsis)
         self.assertIn("$LOCALAPPDATA\\VRCForge\\config", web_nsis)
+
+    def test_coplaydev_mcp_distribution_notes_are_present(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        package_root = repo_root / "third_party" / "com.coplaydev.unity-mcp"
+        license_text = (package_root / "LICENSE").read_text(encoding="utf-8")
+        notes_text = (package_root / "VRCFORGE_DISTRIBUTION_NOTES.txt").read_text(encoding="utf-8")
+        manifest_text = (repo_root / "packaging" / "THIRD_PARTY_LICENSES.json").read_text(encoding="utf-8")
+        general_gate = (repo_root / "packaging" / "check_third_party_licenses.ps1").read_text(encoding="utf-8")
+        license_gate = (repo_root / "packaging" / "check_coplaydev_mcp_license.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("MIT License", license_text)
+        self.assertIn("Copyright (c) 2025 CoplayDev", license_text)
+        self.assertIn("https://github.com/CoplayDev/unity-mcp", notes_text)
+        self.assertIn("b98193db05e9a2906f491f244ccdd1766283cab3", notes_text)
+        self.assertIn("CoplayDev Unity MCP", manifest_text)
+        self.assertIn("requiredLicenseText", manifest_text)
+        self.assertIn("requiredDistributionNotes", manifest_text)
+        self.assertIn("Third-party license gate passed", general_gate)
+        self.assertIn("Copyright \\(c\\) 2025 CoplayDev", license_gate)
+        self.assertIn("VRCFORGE_DISTRIBUTION_NOTES.txt", license_gate)
 
     def test_unity_install_script_uses_project_backups_and_local_mcp(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "tools" / "install-unity-project.ps1").read_text(encoding="utf-8-sig")
@@ -1362,7 +1387,7 @@ class DashboardServerTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # /api/clothes/apply-fx (dry_run=True — no Unity needed)
     # ------------------------------------------------------------------
-    def test_apply_clothing_fx_dry_run_returns_generated_csharp(self) -> None:
+    def test_apply_clothing_fx_dry_run_returns_apply_payload(self) -> None:
         items = [
             {
                 "displayName": "Jacket",
@@ -1380,9 +1405,9 @@ class DashboardServerTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["dryRun"])
-        self.assertIn("generatedCsharp", payload)
-        self.assertIn("Cloth_Jacket", payload["generatedCsharp"])
-        self.assertIn("AnimationClip", payload["generatedCsharp"])
+        self.assertIn("applyPayload", payload)
+        self.assertIn("vrc_apply_clothing_fx", payload["applyPayload"])
+        self.assertIn("Cloth_Jacket", payload["applyPayload"])
 
     def test_apply_clothing_fx_dry_run_no_items_raises_400(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1395,7 +1420,7 @@ class DashboardServerTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # /api/parameters/apply-optimization (dry_run=True)
     # ------------------------------------------------------------------
-    def test_apply_parameter_optimization_dry_run_returns_diff_and_csharp(self) -> None:
+    def test_apply_parameter_optimization_dry_run_returns_diff_and_apply_payload(self) -> None:
         suggestions = [
             {"name": "IsWearing", "currentType": "Int", "suggestedType": "Bool", "reason": "heuristic"},
         ]
@@ -1412,7 +1437,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["diff"][0]["name"], "IsWearing")
         self.assertEqual(payload["diff"][0]["from"], "Int")
         self.assertEqual(payload["diff"][0]["to"], "Bool")
-        self.assertIn("IsWearing", payload["generatedCsharp"])
+        self.assertIn("vrc_apply_parameter_optimization", payload["applyPayload"])
+        self.assertIn("IsWearing", payload["applyPayload"])
 
     def test_apply_parameter_optimization_no_suggestions_raises_400(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1422,8 +1448,8 @@ class DashboardServerTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
 
-    def test_parameter_rollback_code_accepts_scanner_parameter_names(self) -> None:
-        code = dashboard_server.build_parameter_rollback_code(
+    def test_parameter_rollback_preview_accepts_scanner_parameter_names(self) -> None:
+        preview = dashboard_server.build_parameter_rollback_preview(
             "MyAvatar",
             {
                 "parameterNames": [
@@ -1438,9 +1464,9 @@ class DashboardServerTests(unittest.TestCase):
             },
         )
 
-        self.assertIn('name = "DPS"', code)
-        self.assertIn('valueType = "Int"', code)
-        self.assertIn("Enum.TryParse", code)
+        self.assertIn("vrc_rollback_avatar_parameters", preview)
+        self.assertIn("DPS", preview)
+        self.assertIn("Int", preview)
 
     def test_apply_parameter_optimization_non_dry_run_saves_snapshot_first(self) -> None:
         suggestions = [
@@ -1578,7 +1604,7 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_host="127.0.0.1",
             unity_mcp_port=8080,
             unity_mcp_instance="",
-            execute_tool_name="execute_csharp",
+            execute_tool_name="vrc_apply_blendshapes",
         )
         with TestClient(dashboard_server.app) as client:
             response = client.post(
@@ -1626,29 +1652,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertAlmostEqual(box["height"], 0.45)
 
     # ------------------------------------------------------------------
-    # Code generator unit tests (no server)
+    # Payload preview unit tests (no server)
     # ------------------------------------------------------------------
-    def test_build_clothes_fx_apply_code_contains_key_tokens(self) -> None:
+    def test_build_clothes_fx_apply_preview_contains_key_tokens(self) -> None:
         items = [{"displayName": "Hat", "parameterName": "Cloth_Hat", "sampleObjectPath": "Avatar/Hat", "animationClipName": "FX_Hat_Toggle"}]
-        code = dashboard_server.build_clothes_fx_apply_code("Avatar", items)
-        self.assertIn("AnimationClip", code)
-        self.assertIn("VRCExpressionParameters", code)
-        self.assertIn("VRCExpressionsMenu", code)
-        self.assertIn("Cloth_Hat", code)
+        preview = dashboard_server.build_clothes_fx_apply_preview("Avatar", items)
+        self.assertIn("vrc_apply_clothing_fx", preview)
+        self.assertIn("Cloth_Hat", preview)
+        self.assertIn("Avatar/Hat", preview)
 
-    def test_build_parameter_apply_optimization_code_contains_key_tokens(self) -> None:
+    def test_build_parameter_apply_optimization_preview_contains_key_tokens(self) -> None:
         suggestions = [{"name": "IsWearing"}]
-        code = dashboard_server.build_parameter_apply_optimization_code("Avatar", suggestions)
-        self.assertIn("IsWearing", code)
-        self.assertIn("VRCExpressionParameters.ValueType.Bool", code)
-        self.assertIn("changedCount", code)
+        preview = dashboard_server.build_parameter_apply_optimization_preview("Avatar", suggestions)
+        self.assertIn("vrc_apply_parameter_optimization", preview)
+        self.assertIn("IsWearing", preview)
 
-    def test_build_parameter_snapshot_and_rollback_code_contains_key_tokens(self) -> None:
-        snapshot_code = dashboard_server.build_parameter_snapshot_code("Avatar")
-        self.assertIn("capturedAtUtc", snapshot_code)
-        self.assertIn("parameterCount", snapshot_code)
-
-        rollback_code = dashboard_server.build_parameter_rollback_code(
+    def test_build_parameter_rollback_preview_contains_key_tokens(self) -> None:
+        rollback_preview = dashboard_server.build_parameter_rollback_preview(
             "Avatar",
             {
                 "parameters": [
@@ -1662,16 +1682,9 @@ class DashboardServerTests(unittest.TestCase):
                 ],
             },
         )
-        self.assertIn("ParameterSnapshotItem", rollback_code)
-        self.assertIn("VRCExpressionParameters.ValueType.Float", rollback_code)
-        self.assertIn("IsWearing", rollback_code)
-
-    def test_build_screenshot_multi_capture_code_contains_rotation(self) -> None:
-        from pathlib import Path
-        code = dashboard_server.build_screenshot_multi_capture_code(Path("out/front.png"), 15.0, 0.0, 0.0, 960, 960)
-        self.assertIn("Quaternion.Euler", code)
-        self.assertIn("15.0000f", code)
-        self.assertIn("front.png", code)
+        self.assertIn("vrc_rollback_avatar_parameters", rollback_preview)
+        self.assertIn("IsWearing", rollback_preview)
+        self.assertIn("networkSynced", rollback_preview)
 
     @patch("dashboard_server.export_blendshapes")
     def test_verify_live_blendshape_changes_reports_actual_weight(self, mock_export_blendshapes) -> None:

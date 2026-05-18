@@ -15,7 +15,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_apply_clothing_fx",
-        Description = "Author simple clothing toggle FX assets without requiring Roslyn."
+        Description = "Author simple clothing toggle FX assets via a predefined VRCForge tool."
     )]
     public static class ClothingFxAuthor
     {

@@ -1,0 +1,25 @@
+VRCForge distribution notes for com.coplaydev.unity-mcp
+
+Upstream project:
+https://github.com/CoplayDev/unity-mcp
+
+Pinned upstream commit:
+b98193db05e9a2906f491f244ccdd1766283cab3
+
+Upstream package:
+MCPForUnity / com.coplaydev.unity-mcp
+
+License:
+MIT License, copyright (c) 2025 CoplayDev.
+
+VRCForge distributes this package as a vendored Unity dependency for the
+Windows x64 installer and launcher flow. The upstream LICENSE file is kept in
+the package root and is also copied into the release payload licenses folder.
+
+VRCForge distribution changes:
+- Removed external client setup helpers that are not used by the VRCForge
+  launcher flow.
+- Kept the Unity MCP bridge package, package metadata, upstream LICENSE, and
+  runtime/editor tool sources required by the VRCForge Unity integration.
+
+These notes are provided for attribution and distribution transparency.

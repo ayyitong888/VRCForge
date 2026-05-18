@@ -17,7 +17,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_scan_avatar_controls",
-        Description = "Scan a VRChat avatar expression menu, expression parameters, and scene clothing-like objects without requiring Roslyn."
+        Description = "Scan a VRChat avatar expression menu, expression parameters, and scene clothing-like objects via a predefined VRCForge tool."
     )]
     public static class AvatarControlScanner
     {
@@ -478,7 +478,7 @@ namespace VRCForge.Editor
 
     [McpForUnityTool(
         name: "vrc_toggle_scene_object",
-        Description = "Toggle a scene GameObject active state by transform path without requiring Roslyn."
+        Description = "Toggle a scene GameObject active state by transform path via a predefined VRCForge tool."
     )]
     public static class SceneObjectToggler
     {

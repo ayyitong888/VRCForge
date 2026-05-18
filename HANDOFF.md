@@ -10,8 +10,14 @@ Working and covered by automated tests:
   - `VRCForge.exe` WinForms/WebView2 launcher source.
   - NSIS web/offline installer scripts.
   - release build/publish scripts with git cleanliness, unpushed commit, version, and CoplayDev license gates.
+  - all bundled third-party components must pass `packaging/check_third_party_licenses.ps1` before packaging.
   - generated `VRCForge.unitypackage` fallback package.
-  - pinned CoplayDev Unity MCP package copied into release payload after MIT license gate.
+  - pinned CoplayDev Unity MCP package copied into release payload after strict MIT license gate.
+  - release payload preserves CoplayDev MIT LICENSE and VRCForge distribution notes for the modified vendored package copy.
+- External similarity cleanup:
+  - checked AnkleBreaker-Studio `unity-mcp-server` and quazaai `UnityMCPIntegration` with exact-block and token-shingle scans.
+  - no copied/similar candidates were found in VRCForge core source or source including `third_party/`.
+  - VRCForge's own legacy arbitrary C# / Roslyn fallback was removed; dry-run previews now show predefined MCP tool payloads.
 - Portable backend mode for installer payloads:
   - `VRCFORGE_APP_DIR`
   - `VRCFORGE_USER_DATA_DIR`
@@ -45,7 +51,7 @@ Working and covered by automated tests:
   - clamping
   - shader preset replay with saved after values
   - rejection of arbitrary real shader property names
-- Roslyn fallback is optional and isolated behind `VRCFORGE_ENABLE_ROSLYN`; core workflows use dedicated Unity MCP tools.
+- VRCForge core workflows use dedicated Unity MCP tools and no longer ship a VRCForge arbitrary C# execution fallback.
 - Phase 2 predefined Unity Editor tools:
   - `vrc_scan_avatar_items`
   - `vrc_scan_fx_animator`
@@ -68,7 +74,8 @@ Latest known automated validation:
 - `quickstart/setup-and-run.ps1 -SkipUnityInstall -CheckOnly -NoDashboard -NoBrowser -BindPort 8761` passed.
 - Temp Unity project install test passed for `.vrcforge/backups` legacy migration, local MCP copy, and manifest file dependency.
 - `dotnet build launcher/VRCForge.Launcher/VRCForge.Launcher.csproj -c Release -p:Platform=x64 --no-restore` passed with a WebView2 WindowsBase warning.
-- Dirty verification release build produced installer/payload artifacts and the packaged backend `/api/health` responded with `portableMode=true`.
+- Clean gated release build produced installer/payload artifacts and the packaged backend `/api/health` responded with `portableMode=true`.
+- GitHub Release `v0.3.1-alpha` was uploaded with sanitized Windows x64 assets and points at commit `987f5a2`.
 - `git diff --check`
 
 Known live-validation status:
@@ -84,7 +91,9 @@ Known live-validation status:
 
 Priority P0:
 
-- After this checkpoint is pushed, rebuild release artifacts without `-AllowDirty` / `-AllowUnpushed` and upload `VRCForge_Web_Installer_x64.exe`, `VRCForge_Offline_Installer_x64.exe`, and `VRCForge_Windows_x64_0.3.1-alpha.zip` to GitHub Release `v0.3.1-alpha`.
+- Keep CoplayDev Unity MCP MIT compliance gates enabled: upstream LICENSE and `VRCFORGE_DISTRIBUTION_NOTES.txt` are required before installer packaging.
+- Add every new bundled third-party component to `packaging/THIRD_PARTY_LICENSES.json` before shipping it.
+- If release assets are rebuilt, confirm `licenses/CoplayDev-Unity-MCP-LICENSE.txt` and `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt` are present.
 - Manually smoke-test the installed Launcher wizard from `%ProgramFiles%\VRCForge` when a clean Windows VM is available.
 - Run Unity clean compile in a real VRChat Avatar project after the Phase 2 tool layer expansion.
 - Confirm these five tools appear in the Unity MCP tool list:
@@ -96,7 +105,7 @@ Priority P0:
 - Confirm `vrc_scan_avatar_materials` appears in MCP for Unity and returns renderer, mesh, slot, material, shader family, category, and supported semantic properties.
 - Confirm `vrc_apply_material_tuning` safely applies and restores lilToon and Poiyomi material values without touching forbidden shader, texture, mesh, render queue, stencil, culling, blend mode, or shader assignment data.
 - Enter Play Mode with Gesture Manager active, adjust Game View to the avatar front face, and confirm Vision Review captures Game View rather than Scene View.
-- Keep `VRCFORGE_ENABLE_ROSLYN` disabled by default and confirm Unity compile does not require Roslyn DLLs.
+- Keep writes on the predefined Unity tool path; do not reintroduce arbitrary C# execution as a default VRCForge capability.
 
 Priority P1:
 
@@ -176,7 +185,7 @@ The goal is to support safer wardrobe, FX, and asset-writing workflows after fac
 
 - Continue from the current MVP. Do not restart the project or redesign the architecture.
 - Keep face tuning behavior working while adding Phase 2 tools.
-- Keep Roslyn optional and isolated. New tools must not depend on Roslyn.
+- Do not reintroduce a VRCForge arbitrary C# execution fallback.
 - Prefer dedicated Unity MCP tools over dynamic code execution.
 - Do not let AI directly modify Unity objects. AI may produce structured plans only; Unity-side tools must validate and apply.
 - Keep write operations reviewable and restorable.

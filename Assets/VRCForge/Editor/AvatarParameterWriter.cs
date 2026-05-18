@@ -13,7 +13,7 @@ namespace VRCForge.Editor
 {
     [McpForUnityTool(
         name: "vrc_apply_parameter_optimization",
-        Description = "Apply selected VRCExpressionParameters type optimizations without requiring Roslyn."
+        Description = "Apply selected VRCExpressionParameters type optimizations via a predefined VRCForge tool."
     )]
     public static class AvatarParameterOptimizationApplier
     {
@@ -126,7 +126,7 @@ namespace VRCForge.Editor
 
     [McpForUnityTool(
         name: "vrc_rollback_avatar_parameters",
-        Description = "Restore VRCExpressionParameters from a dashboard snapshot without requiring Roslyn."
+        Description = "Restore VRCExpressionParameters from a dashboard snapshot via a predefined VRCForge tool."
     )]
     public static class AvatarParameterRollbackTool
     {
