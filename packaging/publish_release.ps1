@@ -56,8 +56,15 @@ try {
 
     $tag = "v$Version"
     $target = (git rev-parse origin/main).Trim()
-    $existingRelease = gh release view $tag --json tagName 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($existingRelease)) {
+    $releaseExists = $false
+    try {
+        $existingRelease = & gh release view $tag --json tagName 2>$null
+        $releaseExists = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingRelease)
+    } catch {
+        $releaseExists = $false
+    }
+
+    if (-not $releaseExists) {
         gh release create $tag $webInstaller $offlineInstaller $payloadZip `
             --target $target `
             --title "VRCForge $Version" `
