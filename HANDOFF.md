@@ -57,7 +57,7 @@ Working and covered by automated tests:
   - When Unity is in Play Mode, the same tool captures the current Game View for more accurate shader, lighting, and Gesture Manager preview.
   - The Vision Review dashboard panel now checks Play Mode / Gesture Manager state before capture and shows a reminder without blocking capture.
 - Unity-side public branding has been renamed from the old `Assets/VRCAutoRig` path to `Assets/VRCForge`; install scripts migrate the legacy folder when found.
-- Local planning/research materials from `D:\Codex\新建文件夹` were moved into ignored local folder `docs/research/` for safekeeping. They are not part of the pushed GitHub source tree unless explicitly force-added later.
+- Local planning/research materials from an external planning folder were moved into ignored local folder `docs/research/` for safekeeping. They are not part of the pushed GitHub source tree unless explicitly force-added later.
 
 Latest known automated validation:
 

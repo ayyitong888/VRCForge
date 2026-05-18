@@ -117,53 +117,6 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
-        /// Configures a Codex client with sophisticated TOML handling
-        /// </summary>
-        public static string ConfigureCodexClient(string configPath, McpClient mcpClient)
-        {
-            try
-            {
-                if (EditorPrefs.GetBool(LOCK_CONFIG_KEY, false))
-                    return "Skipped (locked)";
-            }
-            catch { }
-
-            string existingToml = string.Empty;
-            if (File.Exists(configPath))
-            {
-                try
-                {
-                    existingToml = File.ReadAllText(configPath);
-                }
-                catch (Exception e)
-                {
-                    McpLog.Warn($"UnityMCP: Failed to read Codex config '{configPath}': {e.Message}");
-                    existingToml = string.Empty;
-                }
-            }
-
-            string existingCommand = null;
-            string[] existingArgs = null;
-            if (!string.IsNullOrWhiteSpace(existingToml))
-            {
-                CodexConfigHelper.TryParseCodexServer(existingToml, out existingCommand, out existingArgs);
-            }
-
-            string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
-            if (uvxPath == null)
-            {
-                return "uv package manager not found. Please install uv first.";
-            }
-
-            string updatedToml = CodexConfigHelper.UpsertCodexServerBlock(existingToml, uvxPath);
-
-            EnsureConfigDirectoryExists(configPath);
-            WriteAtomicFile(configPath, updatedToml);
-
-            return "Configured successfully";
-        }
-
-        /// <summary>
         /// Gets the appropriate config file path for the given MCP client based on OS
         /// </summary>
         public static string GetClientConfigPath(McpClient mcpClient)

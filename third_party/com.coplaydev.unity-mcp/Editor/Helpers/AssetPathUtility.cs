@@ -521,7 +521,7 @@ namespace MCPForUnity.Editor.Helpers
 
         /// <summary>
         /// Returns the uvx dev-mode flags as a list of individual arguments.
-        /// Suitable for callers that build argument lists (ConfigJsonBuilder, CodexConfigHelper).
+        /// Suitable for callers that build argument lists.
         /// Must be called on the main thread (reads EditorPrefs).
         /// </summary>
         public static IReadOnlyList<string> GetUvxDevFlagsList()

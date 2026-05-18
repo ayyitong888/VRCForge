@@ -96,10 +96,13 @@ try {
         -r win-x64 `
         -p:Platform=x64 `
         -p:Version=$Version `
+        -p:DebugType=none `
+        -p:DebugSymbols=false `
         -o $payloadRoot
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet publish failed."
     }
+    Remove-Item -LiteralPath (Join-Path $payloadRoot "VRCForge.pdb") -Force -ErrorAction SilentlyContinue
 
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
 
