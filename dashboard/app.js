@@ -3044,6 +3044,81 @@ function prettyJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
+function applyUnityStatus(payload) {
+  state.unityStatus = payload;
+  const connected = Boolean(payload.connected);
+  const missingTools = payload.missingRequiredVrcForgeTools || payload.tools?.missingRequiredVrcForgeTools || [];
+  const hasInstances = Boolean(payload.unityInstanceRegistered || payload.activeInstanceCount);
+  refs["unity-status-label"].textContent = connected
+    ? (missingTools.length ? "已连接 / 工具缺失" : "已连接")
+    : "未连接";
+  refs["unity-status-light"].className = `light ${connected ? "light-on" : "light-off"}`;
+  if (!refs["unity-instance"].value && payload.activeInstance?.sessionId) {
+    refs["unity-instance"].value = payload.activeInstance.sessionId;
+  }
+  const lines = [
+    formatConnectionResult("Unity MCP", connected, getConnectionFailureReason(payload)),
+    `MCP Server: ${payload.mcpServerReachable ? "reachable" : "not reachable"}`,
+    `Unity Instance: ${hasInstances ? `${payload.activeInstance?.project || payload.activeInstance?.sessionId || "active"} (${payload.activeInstanceCount || 1})` : "none"}`,
+    `Tools: total ${payload.tools?.totalTools ?? 0}, VRCForge ${payload.tools?.vrcForgeToolsCount ?? 0}`,
+  ];
+  if (missingTools.length) {
+    lines.push(`Missing VRCForge tools: ${missingTools.join(", ")}`);
+  }
+  refs["unity-status-output"].textContent = lines.join("\n");
+  renderConnectionNotice("Unity MCP", connected, missingTools.length ? "VRCForge Unity tools missing or incomplete" : getConnectionFailureReason(payload));
+}
+
+function renderProjects(payload) {
+  state.projects = payload.projects || [];
+  state.selectedProjectPath = payload.selectedProjectPath || state.selectedProjectPath || "";
+  refs["project-count"].textContent = `${state.projects.length} 个工程`;
+  refs["project-select"].innerHTML = state.projects.map((project) => {
+    const badges = [];
+    if (project.activeMcp) badges.push("Active MCP");
+    if (project.hasVrcForge) badges.push("VRCForge");
+    if (project.hasUnityMcpPackage) badges.push("Unity MCP");
+    if (project.sources?.length) badges.push(project.sources.join("+"));
+    const suffix = badges.length ? ` / ${badges.join(" / ")}` : "";
+    const disabled = project.selectable === false ? "disabled" : "";
+    return `<option value="${escapeHtml(project.path || "")}" data-session-id="${escapeHtml(project.sessionId || "")}" data-project-name="${escapeHtml(project.name || "")}" data-active-mcp="${project.activeMcp ? "1" : "0"}" ${disabled}>${escapeHtml(project.name)} (${escapeHtml(project.editorVersion)})${escapeHtml(suffix)}</option>`;
+  }).join("");
+  selectProjectOption(state.selectedProjectPath);
+}
+
+async function onProjectSelected() {
+  const selectedProject = refs["project-select"].value;
+  const selectedOption = refs["project-select"].selectedOptions?.[0];
+  const sessionId = selectedOption?.dataset?.sessionId || "";
+  if (sessionId) {
+    refs["unity-instance"].value = sessionId;
+  } else if (selectedProject) {
+    refs["unity-instance"].value = selectedOption?.dataset?.projectName || projectNameFromPath(selectedProject);
+  }
+  await syncDashboardState();
+}
+
+async function loadUnityTools() {
+  const payload = await postJson("/api/unity/tools", buildConnectionPayload());
+  const connected = Boolean(payload.reachable || payload.connected || payload.ok);
+  const reason = getConnectionFailureReason(payload);
+  const lines = [
+    formatConnectionResult("Unity MCP tools", connected, reason),
+    `Total tools: ${payload.totalTools ?? 0}`,
+    `Default/CoplayDev tools: ${payload.defaultToolsCount ?? 0}`,
+    `VRCForge tools: ${payload.vrcForgeToolsCount ?? 0}`,
+    `Active instance: ${payload.instance || refs["unity-instance"].value || "(auto)"}`,
+  ];
+  if (payload.missingRequiredVrcForgeTools?.length) {
+    lines.push(`Missing required VRCForge tools: ${payload.missingRequiredVrcForgeTools.join(", ")}`);
+  }
+  if (payload.vrcForgeToolNames?.length) {
+    lines.push(`VRCForge tool names: ${payload.vrcForgeToolNames.join(", ")}`);
+  }
+  refs["unity-status-output"].textContent = lines.join("\n");
+  renderConnectionNotice("Unity MCP tools", connected && !payload.onlyDefaultTools, payload.onlyDefaultTools ? "Unity MCP connected, but VRCForge tools are missing" : reason);
+}
+
 function formatTimestamp(value) {
   if (!value) {
     return "";

@@ -10,6 +10,8 @@ import mimetypes
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -108,6 +110,18 @@ LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
+REQUIRED_VRCFORGE_UNITY_TOOLS = [
+    "vrc_export_blendshapes",
+    "vrc_apply_blendshapes",
+    "vrc_capture_scene_view",
+    "vrc_scan_avatar_materials",
+    "vrc_apply_material_tuning",
+    "vrc_scan_avatar_items",
+    "vrc_scan_fx_animator",
+    "vrc_scan_animation_bindings",
+    "vrc_create_safe_backup",
+    "vrc_restore_safe_backup",
+]
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 DASHBOARD_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -422,7 +436,13 @@ class DashboardEventBus:
         self._clients.discard(websocket)
 
     async def send_to_client(self, websocket: WebSocket, event_type: str, payload: Any) -> None:
-        await websocket.send_json(build_event_message(event_type, payload))
+        try:
+            await websocket.send_json(build_event_message(event_type, payload))
+        except (WebSocketDisconnect, RuntimeError):
+            await self.disconnect(websocket)
+        except Exception as exc:  # noqa: BLE001 - stale websocket clients should not spam full stack traces.
+            await self.disconnect(websocket)
+            emit_log("warn", "socket", "Dropped stale websocket client.", {"error": str(exc)})
 
     async def broadcast(self, event_type: str, payload: Any) -> None:
         if not self._clients:
@@ -433,7 +453,10 @@ class DashboardEventBus:
         for websocket in list(self._clients):
             try:
                 await websocket.send_json(message)
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError):
+                stale_clients.append(websocket)
+            except Exception as exc:  # noqa: BLE001
+                emit_log("warn", "socket", "Dropped stale websocket client during broadcast.", {"error": str(exc)})
                 stale_clients.append(websocket)
 
         for websocket in stale_clients:
@@ -459,7 +482,7 @@ class AgentMcpMount:
 
 
 app = FastAPI(title="VRCForge Dashboard", version="0.3.1-alpha")
-app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard")
+app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
 EVENT_BUS = DashboardEventBus()
@@ -544,6 +567,12 @@ async def on_shutdown() -> None:
 @app.get("/")
 def read_dashboard() -> FileResponse:
     return FileResponse(DASHBOARD_DIR / "index.html")
+
+
+@app.get("/dashboard")
+@app.get("/dashboard/")
+def read_dashboard_alias() -> FileResponse:
+    return read_dashboard()
 
 
 @app.get("/api/health")
@@ -664,8 +693,11 @@ async def dashboard_socket(websocket: WebSocket) -> None:
         await EVENT_BUS.send_to_client(websocket, "hello", await asyncio.to_thread(build_bootstrap_payload))
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         await EVENT_BUS.disconnect(websocket)
+    except Exception as exc:  # noqa: BLE001
+        await EVENT_BUS.disconnect(websocket)
+        emit_log("warn", "socket", "WebSocket client closed unexpectedly.", {"error": str(exc)})
 
 
 @app.get("/api/projects")
@@ -847,17 +879,17 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
 
 @app.post("/api/unity/status")
 async def read_unity_status(request: ConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(run_unity_cli_json, load_dashboard_settings(request), ["-f", "json", "status"])
+    return await asyncio.to_thread(build_unity_status_snapshot, load_dashboard_settings(request))
 
 
 @app.post("/api/unity/instances")
 async def read_unity_instances(request: ConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(run_unity_cli_json, load_dashboard_settings(request), ["-f", "json", "instances"])
+    return await asyncio.to_thread(build_unity_instances_diagnostics, load_dashboard_settings(request))
 
 
 @app.post("/api/unity/tools")
 async def read_unity_tools(request: ConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(run_unity_cli_json, load_dashboard_settings(request), ["-f", "json", "tool", "list"])
+    return await asyncio.to_thread(build_unity_tools_diagnostics, load_dashboard_settings(request))
 
 
 @app.post("/api/scene/avatars")
@@ -4444,34 +4476,238 @@ async def status_monitor_loop() -> None:
         await asyncio.sleep(DASHBOARD_STATE.status_push_interval_seconds)
 
 
-def build_unity_status_snapshot() -> dict[str, Any]:
-    settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
+def unity_http_base(settings: Settings) -> str:
+    host = settings.unity_mcp_host or "127.0.0.1"
+    port = int(settings.unity_mcp_port or 8080)
+    return f"http://{host}:{port}"
+
+
+def fetch_unity_http_json(settings: Settings, path: str) -> tuple[bool, Any, str, int | None]:
+    url = f"{unity_http_base(settings)}{path}"
+    timeout = max(1.0, min(float(settings.unity_mcp_timeout_seconds or 5), 10.0))
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - loopback diagnostic URL from local settings.
+            status_code = int(getattr(response, "status", 200))
+            raw = response.read().decode("utf-8", errors="replace")
+            parsed = try_parse_json(raw)
+            return 200 <= status_code < 300, parsed if parsed is not None else raw, "", status_code
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return False, try_parse_json(body) or body, f"HTTP {exc.code}", int(exc.code)
+    except Exception as exc:  # noqa: BLE001
+        return False, None, str(exc), None
+
+
+def normalize_unity_instance(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    session_id = str(raw.get("session_id") or raw.get("sessionId") or raw.get("id") or "").strip()
+    project = str(raw.get("project") or raw.get("project_name") or raw.get("projectName") or raw.get("name") or "").strip()
+    unity_version = str(raw.get("unity_version") or raw.get("unityVersion") or raw.get("version") or "").strip()
+    project_path = normalize_path_string(str(raw.get("project_path") or raw.get("projectPath") or raw.get("path") or "").strip())
+    return {
+        "sessionId": session_id,
+        "project": project,
+        "projectName": project,
+        "projectPath": project_path,
+        "hash": str(raw.get("hash") or "").strip(),
+        "unityVersion": unity_version,
+        "connectedAt": str(raw.get("connected_at") or raw.get("connectedAt") or "").strip(),
+        "raw": raw,
+    }
+
+
+def normalize_unity_instances_payload(payload: Any) -> list[dict[str, Any]]:
+    raw_instances: Any = []
+    if isinstance(payload, dict):
+        raw_instances = payload.get("instances") or payload.get("data") or payload.get("result") or []
+        if isinstance(raw_instances, dict):
+            raw_instances = raw_instances.get("instances") or raw_instances.get("items") or []
+    elif isinstance(payload, list):
+        raw_instances = payload
+
+    if not isinstance(raw_instances, list):
+        return []
+    return [instance for item in raw_instances if (instance := normalize_unity_instance(item))]
+
+
+def instance_matches_selector(instance: dict[str, Any], selector: str) -> bool:
+    normalized_selector = selector.strip().casefold()
+    if not normalized_selector:
+        return False
+    candidates = [
+        instance.get("sessionId"),
+        instance.get("project"),
+        instance.get("projectName"),
+        instance.get("hash"),
+        Path(str(instance.get("projectPath") or "")).name if instance.get("projectPath") else "",
+    ]
+    return any(str(candidate or "").strip().casefold() == normalized_selector for candidate in candidates)
+
+
+def choose_active_unity_instance(instances: list[dict[str, Any]], settings: Settings) -> tuple[dict[str, Any] | None, bool]:
+    selector = (settings.unity_mcp_instance or DASHBOARD_STATE.unity_instance or "").strip()
+    if selector:
+        for instance in instances:
+            if instance_matches_selector(instance, selector):
+                return instance, True
+    if len(instances) == 1:
+        return instances[0], not bool(selector)
+    return None, False
+
+
+def build_unity_instances_diagnostics(settings: Settings) -> dict[str, Any]:
+    ok, payload, error, status_code = fetch_unity_http_json(settings, "/api/instances")
+    instances = normalize_unity_instances_payload(payload) if ok else []
+    active_instance, selected_match = choose_active_unity_instance(instances, settings)
+    if active_instance and not DASHBOARD_STATE.unity_instance:
+        DASHBOARD_STATE.unity_instance = active_instance.get("sessionId") or active_instance.get("project") or ""
+    return {
+        "ok": ok,
+        "reachable": ok,
+        "statusCode": status_code,
+        "host": settings.unity_mcp_host,
+        "port": settings.unity_mcp_port,
+        "instance": settings.unity_mcp_instance,
+        "instances": instances,
+        "activeCount": len(instances),
+        "activeInstance": active_instance,
+        "selectedInstanceMatched": selected_match,
+        "raw": payload,
+        "error": error,
+    }
+
+
+def collect_tool_names_from_payload(payload: Any) -> list[str]:
+    names: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and all(ch.isalnum() or ch in "_-." for ch in stripped):
+                names.append(stripped)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+
+        for key in ("name", "toolName", "id"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                names.append(candidate.strip())
+        function_payload = value.get("function")
+        if isinstance(function_payload, dict):
+            candidate = function_payload.get("name")
+            if isinstance(candidate, str) and candidate.strip():
+                names.append(candidate.strip())
+        for key in ("tools", "items", "functions", "commands"):
+            if key in value:
+                visit(value[key])
+        for key in ("result", "data", "payload"):
+            nested = value.get(key)
+            if isinstance(nested, (dict, list)):
+                visit(nested)
+
+    visit(payload)
+    unique: dict[str, None] = {}
+    for name in names:
+        unique.setdefault(name, None)
+    return sorted(unique)
+
+
+def build_unity_tools_diagnostics(settings: Settings) -> dict[str, Any]:
+    output = ""
+    parsed: Any = None
+    error = ""
+    try:
+        cli_payload = run_unity_cli_json(settings, ["-f", "json", "tool", "list"])
+        output = str(cli_payload.get("output") or "")
+        parsed = cli_payload.get("parsed")
+        cli_ok = bool(cli_payload.get("ok"))
+    except Exception as exc:  # noqa: BLE001
+        cli_ok = False
+        error = str(exc)
+
+    names = collect_tool_names_from_payload(parsed)
+    if output:
+        import re
+
+        for name in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_]+)?\b", output):
+            if name.startswith("vrc_") or name.startswith("vrcforge_"):
+                names.append(name)
+        names = sorted(dict.fromkeys(names))
+
+    vrcforge_tools = sorted(name for name in names if name.startswith("vrc_") or name.startswith("vrcforge_"))
+    missing_required = [name for name in REQUIRED_VRCFORGE_UNITY_TOOLS if name not in set(names)]
+    return {
+        "ok": cli_ok and bool(names),
+        "reachable": cli_ok,
+        "connected": cli_ok,
+        "host": settings.unity_mcp_host,
+        "port": settings.unity_mcp_port,
+        "instance": settings.unity_mcp_instance,
+        "totalTools": len(names),
+        "defaultToolsCount": max(0, len(names) - len(vrcforge_tools)),
+        "vrcForgeToolsCount": len(vrcforge_tools),
+        "toolNames": names,
+        "vrcForgeToolNames": vrcforge_tools,
+        "missingRequiredVrcForgeTools": missing_required,
+        "onlyDefaultTools": cli_ok and bool(names) and not vrcforge_tools,
+        "output": output,
+        "parsed": parsed,
+        "error": error,
+    }
+
+
+def build_unity_status_snapshot(settings: Settings | None = None) -> dict[str, Any]:
+    settings = settings or load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
     settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
+    instances = build_unity_instances_diagnostics(settings)
+    tools = build_unity_tools_diagnostics(settings)
 
     try:
         output = run_unity_mcp_passthrough(settings, ["-f", "json", "status"])
         parsed = try_parse_json(output)
-        return {
-            "connected": True,
-            "host": settings.unity_mcp_host,
-            "port": settings.unity_mcp_port,
-            "instance": settings.unity_mcp_instance,
-            "projectPath": DASHBOARD_STATE.selected_project_path,
-            "output": output,
-            "parsed": parsed,
-            "error": "",
-        }
+        status_error = ""
+        status_reachable = True
     except Exception as exc:  # noqa: BLE001
-        return {
-            "connected": False,
-            "host": settings.unity_mcp_host,
-            "port": settings.unity_mcp_port,
-            "instance": settings.unity_mcp_instance,
-            "projectPath": DASHBOARD_STATE.selected_project_path,
-            "output": "",
-            "parsed": None,
-            "error": str(exc),
-        }
+        output = ""
+        parsed = None
+        status_error = str(exc)
+        status_reachable = False
+
+    connected = bool(
+        instances.get("reachable")
+        and (instances.get("activeCount") or tools.get("reachable") or status_reachable)
+    ) or bool(tools.get("reachable") and (tools.get("totalTools") or tools.get("vrcForgeToolsCount")))
+    errors = [item for item in [instances.get("error"), tools.get("error"), status_error] if item]
+    active_instance = instances.get("activeInstance")
+
+    return {
+        "connected": connected,
+        "mcpServerReachable": bool(instances.get("reachable") or tools.get("reachable") or status_reachable),
+        "unityInstanceRegistered": bool(instances.get("activeCount")),
+        "selectedInstanceMatched": bool(instances.get("selectedInstanceMatched")),
+        "host": settings.unity_mcp_host,
+        "port": settings.unity_mcp_port,
+        "instance": settings.unity_mcp_instance,
+        "projectPath": DASHBOARD_STATE.selected_project_path,
+        "activeInstance": active_instance,
+        "instances": instances.get("instances") or [],
+        "activeInstanceCount": instances.get("activeCount") or 0,
+        "tools": tools,
+        "vrcForgeToolsRegistered": bool(tools.get("vrcForgeToolsCount")),
+        "missingRequiredVrcForgeTools": tools.get("missingRequiredVrcForgeTools") or [],
+        "output": output,
+        "parsed": parsed,
+        "error": "\n".join(errors),
+    }
 
 
 def health_component(status: str, message: str, detail: Any = "") -> dict[str, Any]:
@@ -4517,6 +4753,7 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
     artifacts_writable, artifacts_error = probe_directory_write(ARTIFACTS_DIR)
 
     dashboard_index = DASHBOARD_DIR / "index.html"
+    dashboard_url = "http://127.0.0.1:8757/"
     components: dict[str, dict[str, Any]] = {
         "backend": health_component(
             "ok",
@@ -4526,7 +4763,7 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
         "dashboardFiles": health_component(
             "ok" if dashboard_index.exists() else "error",
             "Dashboard files are present." if dashboard_index.exists() else "Dashboard index.html is missing.",
-            str(dashboard_index),
+            {"index": str(dashboard_index), "dashboardUrl": dashboard_url},
         ),
         "configReadWrite": health_component(
             "ok" if config_writable and RUNTIME_SETTINGS_PATH.exists() else "warning" if config_writable else "error",
@@ -4576,17 +4813,37 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
             {"manifestPath": str(manifest_path), "dependency": mcp_value or ""},
         )
 
-    unity_status = CURRENT_UNITY_STATUS or {}
+    unity_status = CURRENT_UNITY_STATUS or build_unity_status_snapshot(settings)
     if unity_status.get("connected"):
         components["unityMcpBridgeReachable"] = health_component("ok", "Unity MCP bridge is reachable.", unity_status)
-    elif CURRENT_UNITY_STATUS is None:
-        components["unityMcpBridgeReachable"] = health_component("unknown", "Unity MCP bridge has not been checked yet.", "")
     else:
         components["unityMcpBridgeReachable"] = health_component(
             "warning",
             "Unity MCP bridge is not reachable.",
             unity_status.get("error") or unity_status,
         )
+    components["unityMcpInstance"] = health_component(
+        "ok" if unity_status.get("unityInstanceRegistered") else "warning",
+        "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "MCP server is reachable, but no Unity instance is registered.",
+        {
+            "activeInstance": unity_status.get("activeInstance"),
+            "activeInstanceCount": unity_status.get("activeInstanceCount"),
+            "selectedInstanceMatched": unity_status.get("selectedInstanceMatched"),
+        },
+    )
+    missing_tools = unity_status.get("missingRequiredVrcForgeTools") or []
+    vrcforge_tools_registered = bool(unity_status.get("vrcForgeToolsRegistered"))
+    components["vrcForgeUnityTools"] = health_component(
+        "ok" if vrcforge_tools_registered and not missing_tools else "warning",
+        "VRCForge Unity tools are registered."
+        if vrcforge_tools_registered and not missing_tools
+        else "Unity MCP is connected, but VRCForge Unity tools are missing or incomplete.",
+        {
+            "totalTools": (unity_status.get("tools") or {}).get("totalTools"),
+            "vrcForgeToolsCount": (unity_status.get("tools") or {}).get("vrcForgeToolsCount"),
+            "missingRequiredVrcForgeTools": missing_tools,
+        },
+    )
 
     components["providerConfigPresent"] = health_component(
         "ok" if not provider_requires_api_key(settings.llm_provider) or bool(settings.llm_api_key) else "warning",
@@ -4646,7 +4903,7 @@ def serialize_dashboard_state() -> dict[str, Any]:
 
 
 def project_snapshot_payload() -> dict[str, Any]:
-    projects = discover_projects(DASHBOARD_STATE.project_roots)
+    projects = discover_projects(DASHBOARD_STATE.project_roots, include_external=True)
     return {
         "selectedProjectPath": DASHBOARD_STATE.selected_project_path,
         "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
@@ -4654,9 +4911,63 @@ def project_snapshot_payload() -> dict[str, Any]:
     }
 
 
-def discover_projects(project_roots: list[Path]) -> list[dict[str, Any]]:
-    projects: list[dict[str, Any]] = []
-    seen: set[str] = set()
+def discover_projects(project_roots: list[Path], include_external: bool = False) -> list[dict[str, Any]]:
+    projects_by_key: dict[str, dict[str, Any]] = {}
+    name_index: dict[str, str] = {}
+
+    def project_key(path: str, name: str) -> str:
+        normalized_path = normalize_path_string(path)
+        if normalized_path:
+            return normalized_path.casefold()
+        return f"name:{name.casefold()}"
+
+    def upsert_project(
+        *,
+        name: str,
+        path: str = "",
+        editor_version: str = "Unknown",
+        source: str,
+        active_instance: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_path = normalize_path_string(path)
+        display_name = name or (Path(normalized_path).name if normalized_path else "Active Unity Instance")
+        key = project_key(normalized_path, display_name)
+        existing_key = name_index.get(display_name.casefold())
+        if not normalized_path and existing_key:
+            key = existing_key
+        project = projects_by_key.get(key)
+        if project is None:
+            project_path = Path(normalized_path) if normalized_path else None
+            version_file = project_path / "ProjectSettings" / "ProjectVersion.txt" if project_path else None
+            manifest_path = project_path / "Packages" / "manifest.json" if project_path else None
+            plugin_path = project_path / "Assets" / "VRCForge" / "Editor" if project_path else None
+            project = {
+                "name": display_name,
+                "path": normalized_path,
+                "editorVersion": parse_editor_version(version_file) if version_file and version_file.exists() else editor_version,
+                "hasVrcForge": bool(plugin_path and plugin_path.exists()),
+                "hasUnityMcpPackage": bool(manifest_path and has_unity_mcp_dependency(manifest_path)),
+                "selected": normalized_path == normalize_path_string(DASHBOARD_STATE.selected_project_path),
+                "sources": [],
+                "source": source,
+                "activeMcp": False,
+                "sessionId": "",
+                "unityVersion": "",
+                "selectable": bool(normalized_path),
+            }
+            projects_by_key[key] = project
+            name_index[display_name.casefold()] = key
+
+        if source not in project["sources"]:
+            project["sources"].append(source)
+        project["source"] = project["sources"][0]
+        if editor_version and project.get("editorVersion") in {"", "Unknown"}:
+            project["editorVersion"] = editor_version
+        if active_instance:
+            project["activeMcp"] = True
+            project["sessionId"] = active_instance.get("sessionId") or ""
+            project["unityVersion"] = active_instance.get("unityVersion") or project.get("editorVersion") or ""
+            project["editorVersion"] = project["unityVersion"] or project["editorVersion"]
 
     for root in project_roots:
         if not root.exists():
@@ -4670,26 +4981,108 @@ def discover_projects(project_roots: list[Path]) -> list[dict[str, Any]]:
             if not version_file.exists():
                 continue
 
-            normalized_path = normalize_path_string(str(child))
-            if normalized_path in seen:
-                continue
-            seen.add(normalized_path)
+            upsert_project(name=child.name, path=str(child), editor_version=parse_editor_version(version_file), source="configured-root")
 
-            version = parse_editor_version(version_file)
-            has_vrcforge = (child / "Assets" / "VRCForge" / "Editor" / "BlendshapeExporter.cs").exists()
-            has_unity_mcp = has_unity_mcp_dependency(child / "Packages" / "manifest.json")
+    if include_external:
+        for project_path in discover_vcc_projects():
+            upsert_project(name=Path(project_path).name, path=project_path, source="vcc")
 
-            projects.append(
-                {
-                    "name": child.name,
-                    "path": normalized_path,
-                    "editorVersion": version,
-                    "hasVrcForge": has_vrcforge,
-                    "hasUnityMcpPackage": has_unity_mcp,
-                    "selected": normalized_path == normalize_path_string(DASHBOARD_STATE.selected_project_path),
-                }
+        for project in discover_unity_hub_projects():
+            upsert_project(
+                name=project.get("name") or Path(project.get("path") or "").name,
+                path=project.get("path") or "",
+                editor_version=project.get("editorVersion") or "Unknown",
+                source="unity-hub",
             )
 
+        if DASHBOARD_STATE.selected_project_path:
+            selected = Path(DASHBOARD_STATE.selected_project_path)
+            upsert_project(name=selected.name, path=str(selected), source="manual")
+
+        status = CURRENT_UNITY_STATUS
+        if status is None:
+            try:
+                settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
+                status = build_unity_status_snapshot(settings)
+            except Exception:  # noqa: BLE001
+                status = None
+        for instance in (status or {}).get("instances") or []:
+            upsert_project(
+                name=instance.get("project") or instance.get("projectName") or instance.get("sessionId") or "Active Unity Instance",
+                path=instance.get("projectPath") or "",
+                editor_version=instance.get("unityVersion") or "Unknown",
+                source="active-mcp",
+                active_instance=instance,
+            )
+
+    return sorted(
+        projects_by_key.values(),
+        key=lambda item: (not item.get("activeMcp"), str(item.get("name") or "").casefold()),
+    )
+
+
+def discover_vcc_projects() -> list[str]:
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
+    ]
+    projects: list[str] = []
+    for settings_path in candidates:
+        if not settings_path.exists():
+            continue
+        raw_text = ""
+        try:
+            raw_text = settings_path.read_text(encoding="utf-8-sig")
+            payload = json.loads(raw_text)
+        except Exception:  # noqa: BLE001
+            projects.extend(extract_windows_paths_from_text(raw_text or settings_path.read_text(errors="ignore")))
+            continue
+        raw_projects = payload.get("userProjects") or payload.get("projects") or []
+        if isinstance(raw_projects, dict):
+            raw_projects = raw_projects.values()
+        for item in raw_projects if isinstance(raw_projects, list) else []:
+            path = item.get("path") if isinstance(item, dict) else item
+            if isinstance(path, str) and path.strip():
+                projects.append(normalize_path_string(path))
+    return sorted(dict.fromkeys(projects), key=str.casefold)
+
+
+def extract_windows_paths_from_text(value: str) -> list[str]:
+    import re
+
+    paths: list[str] = []
+    for match in re.finditer(r"[A-Za-z]:\\\\[^\"\\r\\n,]+(?:\\\\[^\"\\r\\n,]+)*", value):
+        candidate = match.group(0).replace("\\\\", "\\").strip()
+        if "\\unity" in candidate.casefold() or "\\projects" in candidate.casefold():
+            paths.append(normalize_path_string(candidate))
+    return paths
+
+
+def discover_unity_hub_projects() -> list[dict[str, str]]:
+    hub_projects = Path(os.environ.get("APPDATA", "")) / "UnityHub" / "projects-v1.json"
+    if not hub_projects.exists():
+        return []
+    try:
+        payload = json.loads(hub_projects.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return []
+    projects: list[dict[str, str]] = []
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        path = normalize_path_string(str(value.get("path") or key or "").strip())
+        if not path:
+            continue
+        projects.append(
+            {
+                "name": str(value.get("title") or value.get("name") or Path(path).name),
+                "path": path,
+                "editorVersion": str(value.get("version") or value.get("unityVersion") or "Unknown"),
+            }
+        )
     return projects
 
 
@@ -5148,13 +5541,13 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_unity_status",
         "Read Unity MCP bridge status.",
         "read/debug",
-        lambda params: run_unity_cli_json(load_dashboard_settings(build_agent_connection_request(params)), ["-f", "json", "status"]),
+        lambda params: build_unity_status_snapshot(load_dashboard_settings(build_agent_connection_request(params))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_tools",
         "List Unity MCP tools visible to VRCForge.",
         "read/debug",
-        lambda params: run_unity_cli_json(load_dashboard_settings(build_agent_connection_request(params)), ["-f", "json", "tool", "list"]),
+        lambda params: build_unity_tools_diagnostics(load_dashboard_settings(build_agent_connection_request(params))),
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: read_avatars_sync(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: read_avatar_blendshapes_sync(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))

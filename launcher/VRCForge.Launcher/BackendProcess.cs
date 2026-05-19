@@ -18,8 +18,9 @@ internal sealed class BackendProcess : IDisposable
         this.port = port;
     }
 
-    public Uri DashboardUri => new($"http://127.0.0.1:{port}/dashboard/");
+    public Uri DashboardUri => new($"http://127.0.0.1:{port}/");
     public Uri HealthUri => new($"http://127.0.0.1:{port}/api/health");
+    public Uri DashboardAliasUri => new($"http://127.0.0.1:{port}/dashboard/");
 
     public void Start(string unityProjectPath)
     {

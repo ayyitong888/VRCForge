@@ -72,6 +72,16 @@ If automatic install fails, the launcher shows the error and log path, then offe
 
 如果自动安装失败，Launcher 会显示错误原因和日志路径，并提供 `VRCForge.unitypackage` 手动导入 fallback 与重新检测按钮。
 
+Launcher install is idempotent per Unity project. After a successful install it writes `.vrcforge/install_state.json`; the same VRCForge version and payload checksum will not reinstall on the next launch. If the state is partial or failed, the launcher stops and shows repair/uninstall options instead of blindly touching `Assets/` or `Packages/manifest.json` again.
+
+The project picker merges manual folders, VCC user projects, Unity Hub recent projects, and active Unity MCP instances. Active MCP instances are shown first so a running project such as `milltina` can be selected even if it was not under the default scan root.
+
+The Dashboard opens inside WebView2 first. If WebView2 Runtime is missing or fails to initialize, the launcher falls back to the system browser and shows the Dashboard URL, HTTP status, and log path.
+
+The launcher also includes uninstall buttons:
+- Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
+- Program uninstall opens the NSIS uninstaller when installed from the x64 installer; user data under `%LOCALAPPDATA%\VRCForge` is preserved unless removed manually.
+
 ## Features / 功能状态
 
 | Feature | 功能 | Status |

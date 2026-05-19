@@ -9,6 +9,7 @@ internal sealed class MainForm : Form
 {
     private readonly LauncherPaths paths = new();
     private readonly UnityProjectInstaller installer;
+    private readonly TableLayoutPanel rootLayout = new();
     private readonly TabControl wizard = new();
     private readonly TextBox projectPathBox = new();
     private readonly TextBox statusBox = new();
@@ -38,17 +39,15 @@ internal sealed class MainForm : Form
         statusBox.Dock = DockStyle.Fill;
         statusBox.Font = new Font("Consolas", 9);
 
-        TableLayoutPanel root = new()
-        {
-            Dock = DockStyle.Fill,
-            RowCount = 2,
-            ColumnCount = 1,
-        };
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
-        root.Controls.Add(wizard, 0, 0);
-        root.Controls.Add(statusBox, 0, 1);
-        Controls.Add(root);
+        rootLayout.Dock = DockStyle.Fill;
+        rootLayout.RowCount = 2;
+        rootLayout.ColumnCount = 1;
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
+        rootLayout.Controls.Add(wizard, 0, 0);
+        rootLayout.Controls.Add(statusBox, 0, 1);
+        Controls.Add(rootLayout);
+        wizard.SelectedIndexChanged += (_, _) => UpdateStatusPanelVisibility();
 
         BuildWelcomePage();
         BuildProjectPage();
@@ -110,6 +109,13 @@ internal sealed class MainForm : Form
         panel.Controls.Add(Header("插件检查"));
         panel.Controls.Add(TextBlock("如果检测到旧 Assets/VRCAutoRig，默认迁移到项目根目录 .vrcforge/backups 后再安装新 Assets/VRCForge。"));
         panel.Controls.Add(Button("安装 / 更新 Unity 插件", () => wizard.SelectedIndex = 3));
+        panel.Controls.Add(Button("继续启动 Backend", () => wizard.SelectedIndex = 5));
+        panel.Controls.Add(Button("卸载 Unity 侧插件", () =>
+        {
+            InstallResult result = installer.Uninstall(selectedProjectPath);
+            statusBox.Text = $"{result.Message}\r\n{result.Detail}";
+        }));
+        panel.Controls.Add(Button("打开安装包卸载程序", OpenProgramUninstall));
         panel.Controls.Add(Button("返回选择工程", () => wizard.SelectedIndex = 1));
     }
 
@@ -243,14 +249,84 @@ internal sealed class MainForm : Form
                 }
             }
         }));
+        panel.Controls.Add(Button("打开 Dashboard（优先 WebView）", async () => await OpenDashboardAsync()));
+        panel.Controls.Add(Button("用外部浏览器打开 Dashboard", OpenExternalDashboard));
     }
-
     private void BuildDashboardPage()
     {
         TabPage page = new("Dashboard");
         dashboardWebView.Dock = DockStyle.Fill;
         page.Controls.Add(dashboardWebView);
         wizard.TabPages.Add(page);
+    }
+
+    private void UpdateStatusPanelVisibility()
+    {
+        bool dashboardPage = wizard.SelectedTab?.Text == "Dashboard";
+        statusBox.Visible = !dashboardPage;
+        rootLayout.RowStyles[0].Height = dashboardPage ? 100 : 72;
+        rootLayout.RowStyles[1].Height = dashboardPage ? 0 : 28;
+    }
+
+    private async Task OpenDashboardAsync()
+    {
+        if (backend is null)
+        {
+            statusBox.Text = "Backend is not running yet.";
+            return;
+        }
+
+        wizard.SelectedIndex = 8;
+        string dashboardUrl = backend.DashboardUri.ToString();
+        try
+        {
+            using HttpClient client = new() { Timeout = TimeSpan.FromSeconds(5) };
+            using HttpResponseMessage response = await client.GetAsync(backend.DashboardUri);
+            statusBox.Text = $"Dashboard URL: {dashboardUrl}\r\nHTTP status: {(int)response.StatusCode} {response.ReasonPhrase}";
+        }
+        catch (Exception ex)
+        {
+            statusBox.Text = $"Dashboard URL: {dashboardUrl}\r\nHTTP status check failed: {ex.Message}\r\nLogs: {paths.BackendLogPath.FullName}";
+        }
+
+        if (!paths.HasWebView2Runtime())
+        {
+            OpenExternalDashboard();
+            return;
+        }
+
+        try
+        {
+            await dashboardWebView.EnsureCoreWebView2Async();
+            dashboardWebView.Source = backend.DashboardUri;
+        }
+        catch (Exception ex)
+        {
+            statusBox.Text += $"\r\nWebView2 failed, opening external browser instead: {ex.Message}";
+            OpenExternalDashboard();
+        }
+    }
+
+    private void OpenExternalDashboard()
+    {
+        if (backend is null)
+        {
+            return;
+        }
+        Process.Start(new ProcessStartInfo(backend.DashboardUri.ToString()) { UseShellExecute = true });
+    }
+
+    private void OpenProgramUninstall()
+    {
+        string uninstaller = Path.Combine(paths.ProgramDir.FullName, "Uninstall.exe");
+        if (File.Exists(uninstaller))
+        {
+            Process.Start(new ProcessStartInfo(uninstaller) { UseShellExecute = true });
+            return;
+        }
+
+        statusBox.Text = $"No NSIS uninstaller was found in this install mode.\r\nProgram directory: {paths.ProgramDir.FullName}\r\nUser data is kept in: {paths.UserDataDir.FullName}";
+        OpenFolder(paths.ProgramDir.FullName);
     }
 
     private FlowLayoutPanel Page(string title)
