@@ -538,7 +538,8 @@ def create_agent_mcp_app(gateway: AgentGateway):
         stateless_http=True,
         json_response=True,
         transport_security=TransportSecuritySettings(
-            allowed_hosts=["127.0.0.1:8757", "localhost:8757", "testserver"]
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "testserver"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
         ),
     )
 
