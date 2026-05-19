@@ -11,6 +11,7 @@ internal sealed class MainForm : Form
     private readonly UnityProjectInstaller installer;
     private readonly TableLayoutPanel rootLayout = new();
     private readonly TabControl wizard = new();
+    private readonly ComboBox projectPicker = new();
     private readonly TextBox projectPathBox = new();
     private readonly TextBox statusBox = new();
     private readonly TextBox agentApprovalIdBox = new();
@@ -18,6 +19,11 @@ internal sealed class MainForm : Form
     private BackendProcess? backend;
     private string selectedProjectPath = "";
     private string latestDiagnostics = "";
+
+    private sealed record UnityProjectChoice(string Name, string Path, string Version, string Source)
+    {
+        public string DisplayName => $"{Name} ({Version})";
+    }
 
     public MainForm()
     {
@@ -84,8 +90,21 @@ internal sealed class MainForm : Form
         FlowLayoutPanel panel = Page("Project");
         panel.Controls.Add(Header("选择 Unity 工程目录"));
         panel.Controls.Add(TextBlock("请选择包含 Assets、Packages/manifest.json、ProjectSettings/ProjectVersion.txt 的 VRChat Avatar Unity 工程根目录。"));
+        projectPicker.Width = 900;
+        projectPicker.DropDownStyle = ComboBoxStyle.DropDownList;
+        projectPicker.DisplayMember = nameof(UnityProjectChoice.DisplayName);
+        projectPicker.ValueMember = nameof(UnityProjectChoice.Path);
+        projectPicker.SelectedIndexChanged += (_, _) =>
+        {
+            if (projectPicker.SelectedItem is UnityProjectChoice choice)
+            {
+                projectPathBox.Text = choice.Path;
+            }
+        };
+        panel.Controls.Add(projectPicker);
         projectPathBox.Width = 900;
         panel.Controls.Add(projectPathBox);
+        panel.Controls.Add(Button("Refresh VCC / Unity Hub Projects", LoadProjectChoices));
         panel.Controls.Add(Button("浏览", () =>
         {
             using FolderBrowserDialog dialog = new() { Description = "选择 Unity project root" };
@@ -101,6 +120,7 @@ internal sealed class MainForm : Form
             statusBox.Text = FormatInspection(inspection);
             wizard.SelectedIndex = 2;
         }));
+        LoadProjectChoices();
     }
 
     private void BuildCheckPage()
@@ -463,6 +483,230 @@ internal sealed class MainForm : Form
         {
             statusBox.Text = $"处理 approval 失败: {ex.Message}";
         }
+    }
+
+    private void LoadProjectChoices()
+    {
+        List<UnityProjectChoice> projects = DiscoverUnityProjects();
+        projectPicker.DataSource = projects;
+        if (projects.Count > 0)
+        {
+            projectPicker.SelectedIndex = 0;
+            projectPathBox.Text = projects[0].Path;
+            statusBox.Text = $"Found {projects.Count} Unity project(s) from VCC / Unity Hub.";
+        }
+        else
+        {
+            projectPathBox.Text = "";
+            statusBox.Text = "No Unity projects found in VCC / Unity Hub. Use Browse to select a project manually.";
+        }
+    }
+
+    private static List<UnityProjectChoice> DiscoverUnityProjects()
+    {
+        Dictionary<string, UnityProjectChoice> byPath = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> nameIndex = new(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string path, string name, string version, string source)
+        {
+            path = NormalizeProjectPath(path);
+            if (string.IsNullOrWhiteSpace(path) || !IsUnityProject(path))
+            {
+                return;
+            }
+
+            name = string.IsNullOrWhiteSpace(name) ? Path.GetFileName(path) : name.Trim();
+            version = string.IsNullOrWhiteSpace(version) ? ReadUnityVersion(path) : version.Trim();
+            string nameKey = name.ToLowerInvariant();
+            if (nameIndex.TryGetValue(nameKey, out string? existingPath))
+            {
+                byPath[existingPath] = byPath[existingPath] with { Source = MergeSource(byPath[existingPath].Source, source) };
+                return;
+            }
+
+            if (byPath.TryGetValue(path, out UnityProjectChoice? existing))
+            {
+                byPath[path] = existing with { Source = MergeSource(existing.Source, source) };
+                nameIndex.TryAdd(nameKey, path);
+                return;
+            }
+
+            byPath[path] = new UnityProjectChoice(name, path, version, source);
+            nameIndex[nameKey] = path;
+        }
+
+        foreach (UnityProjectChoice project in ReadVccProjects())
+        {
+            Add(project.Path, project.Name, project.Version, project.Source);
+        }
+        foreach (UnityProjectChoice project in ReadUnityHubProjects())
+        {
+            Add(project.Path, project.Name, project.Version, project.Source);
+        }
+
+        return byPath.Values
+            .OrderBy(project => project.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IEnumerable<UnityProjectChoice> ReadVccProjects()
+    {
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string[] candidates =
+        {
+            Path.Combine(local, "VRChatCreatorCompanion", "settings.json"),
+            Path.Combine(roaming, "VRChatCreatorCompanion", "settings.json"),
+        };
+
+        foreach (string candidate in candidates)
+        {
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            foreach (UnityProjectChoice project in ReadProjectJsonSafe(candidate, "vcc"))
+            {
+                yield return project;
+            }
+        }
+    }
+
+    private static IEnumerable<UnityProjectChoice> ReadUnityHubProjects()
+    {
+        string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string[] candidates =
+        {
+            Path.Combine(roaming, "UnityHub", "projects-v1.json"),
+            Path.Combine(local, "UnityHub", "projects-v1.json"),
+        };
+
+        foreach (string candidate in candidates)
+        {
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            foreach (UnityProjectChoice project in ReadProjectJsonSafe(candidate, "unity-hub"))
+            {
+                yield return project;
+            }
+        }
+    }
+
+    private static IEnumerable<UnityProjectChoice> ReadProjectJson(string path, string source)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("data", out JsonElement data) && data.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty item in data.EnumerateObject())
+            {
+                JsonElement value = item.Value;
+                string projectPath = GetJsonString(value, "path") ?? item.Name;
+                string name = GetJsonString(value, "title") ?? GetJsonString(value, "name") ?? Path.GetFileName(projectPath);
+                string version = GetJsonString(value, "version") ?? ReadUnityVersion(projectPath);
+                yield return new UnityProjectChoice(name, projectPath, version, source);
+            }
+            yield break;
+        }
+
+        if (root.TryGetProperty("userProjects", out JsonElement userProjects))
+        {
+            foreach (UnityProjectChoice project in ReadProjectArray(userProjects, source))
+            {
+                yield return project;
+            }
+        }
+        if (root.TryGetProperty("projects", out JsonElement projects))
+        {
+            foreach (UnityProjectChoice project in ReadProjectArray(projects, source))
+            {
+                yield return project;
+            }
+        }
+    }
+
+    private static IEnumerable<UnityProjectChoice> ReadProjectJsonSafe(string path, string source)
+    {
+        try
+        {
+            return ReadProjectJson(path, source).ToList();
+        }
+        catch
+        {
+            return Array.Empty<UnityProjectChoice>();
+        }
+    }
+
+    private static IEnumerable<UnityProjectChoice> ReadProjectArray(JsonElement projects, string source)
+    {
+        IEnumerable<JsonElement> items = projects.ValueKind switch
+        {
+            JsonValueKind.Array => projects.EnumerateArray(),
+            JsonValueKind.Object => projects.EnumerateObject().Select(property => property.Value),
+            _ => Array.Empty<JsonElement>(),
+        };
+
+        foreach (JsonElement item in items)
+        {
+            string projectPath = item.ValueKind == JsonValueKind.String ? item.GetString() ?? "" : GetJsonString(item, "path") ?? "";
+            string name = item.ValueKind == JsonValueKind.Object ? GetJsonString(item, "name") ?? GetJsonString(item, "title") ?? Path.GetFileName(projectPath) : Path.GetFileName(projectPath);
+            string version = item.ValueKind == JsonValueKind.Object ? GetJsonString(item, "version") ?? ReadUnityVersion(projectPath) : ReadUnityVersion(projectPath);
+            yield return new UnityProjectChoice(name, projectPath, version, source);
+        }
+    }
+
+    private static string? GetJsonString(JsonElement value, string propertyName)
+    {
+        return value.ValueKind == JsonValueKind.Object
+            && value.TryGetProperty(propertyName, out JsonElement property)
+            && property.ValueKind == JsonValueKind.String
+                ? property.GetString()
+                : null;
+    }
+
+    private static bool IsUnityProject(string path)
+    {
+        return Directory.Exists(Path.Combine(path, "Assets"))
+            && File.Exists(Path.Combine(path, "Packages", "manifest.json"))
+            && File.Exists(Path.Combine(path, "ProjectSettings", "ProjectVersion.txt"));
+    }
+
+    private static string NormalizeProjectPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "";
+        }
+        try
+        {
+            return Path.GetFullPath(path.Trim());
+        }
+        catch
+        {
+            return path.Trim();
+        }
+    }
+
+    private static string ReadUnityVersion(string projectPath)
+    {
+        string versionFile = Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt");
+        if (!File.Exists(versionFile))
+        {
+            return "Unknown";
+        }
+        string line = File.ReadLines(versionFile).FirstOrDefault(line => line.StartsWith("m_EditorVersion:", StringComparison.OrdinalIgnoreCase)) ?? "";
+        return line.Split(':', 2).LastOrDefault()?.Trim() ?? "Unknown";
+    }
+
+    private static string MergeSource(string left, string right)
+    {
+        HashSet<string> parts = new((left + "+" + right).Split('+', StringSplitOptions.RemoveEmptyEntries), StringComparer.OrdinalIgnoreCase);
+        return string.Join("+", parts.OrderBy(item => item, StringComparer.OrdinalIgnoreCase));
     }
 
     private HttpClient AgentHttpClient()

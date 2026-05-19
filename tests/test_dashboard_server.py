@@ -315,11 +315,48 @@ class DashboardServerTests(unittest.TestCase):
         combined = "\n".join(path.read_text(encoding="utf-8") for path in editor_dir.glob("*.cs"))
 
         self.assertIn('MenuItem("VRCForge/MCP/Start Bridge Now")', combined)
+        self.assertIn('private const string MenuPath = "VRCForge/Uninstall VRCForge Unity Plugin"', combined)
         self.assertIn("Assets/VRCForge/blendshapes_export.json", combined)
+        self.assertIn('".vrcforge", "backups"', combined)
         old_brand = "VRC" + "AutoRig"
         self.assertNotIn(f'MenuItem("{old_brand}', combined)
         self.assertNotIn(f"[{old_brand}", combined)
         self.assertNotIn(f"Assets/{old_brand}", combined)
+
+    def test_unity_instance_session_id_is_resolved_to_cli_hash(self) -> None:
+        settings = SimpleNamespace(
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_timeout_seconds=5,
+            unity_mcp_instance="session-123",
+        )
+        previous_instance = dashboard_server.DASHBOARD_STATE.unity_instance
+        dashboard_server.DASHBOARD_STATE.unity_instance = ""
+        try:
+            with patch(
+                "dashboard_server.fetch_unity_http_json",
+                return_value=(
+                    True,
+                    {
+                        "instances": [
+                            {
+                                "session_id": "session-123",
+                                "project": "milltina",
+                                "hash": "5d8ae8a25423705c",
+                                "unity_version": "2022.3.22f1",
+                            }
+                        ]
+                    },
+                    "",
+                    200,
+                ),
+            ):
+                dashboard_server.resolve_unity_cli_instance_selector(settings)
+
+            self.assertEqual(settings.unity_mcp_instance, "5d8ae8a25423705c")
+            self.assertEqual(dashboard_server.DASHBOARD_STATE.unity_instance, "5d8ae8a25423705c")
+        finally:
+            dashboard_server.DASHBOARD_STATE.unity_instance = previous_instance
 
     def test_scene_capture_tool_supports_play_mode_game_view_status(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "SceneViewCaptureTool.cs").read_text(
@@ -1528,6 +1565,49 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(projects[0]["hasVrcForge"])
             self.assertTrue(projects[0]["hasUnityMcpPackage"])
             self.assertTrue(projects[0]["selected"])
+
+    def test_discover_projects_merges_active_mcp_instance_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "milltina"
+            (project_dir / "ProjectSettings").mkdir(parents=True)
+            (project_dir / "Packages").mkdir(parents=True)
+            (project_dir / "Assets" / "VRCForge" / "Editor").mkdir(parents=True)
+            (project_dir / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1\n",
+                encoding="utf-8",
+            )
+            (project_dir / "Packages" / "manifest.json").write_text(
+                json.dumps({"dependencies": {"com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"}}),
+                encoding="utf-8",
+            )
+
+            original_status = dashboard_server.CURRENT_UNITY_STATUS
+            dashboard_server.CURRENT_UNITY_STATUS = {
+                "instances": [
+                    {
+                        "project": "milltina",
+                        "projectName": "milltina",
+                        "projectPath": "",
+                        "unityVersion": "2022.3.22f1",
+                        "sessionId": "session-123",
+                        "cliInstanceId": "hash-456",
+                    }
+                ]
+            }
+            try:
+                with patch("dashboard_server.discover_vcc_projects", return_value=[]), patch(
+                    "dashboard_server.discover_unity_hub_projects", return_value=[]
+                ):
+                    projects = dashboard_server.discover_projects([root], include_external=True)
+            finally:
+                dashboard_server.CURRENT_UNITY_STATUS = original_status
+
+            milltina = [project for project in projects if project["name"] == "milltina"]
+            self.assertEqual(len(milltina), 1)
+            self.assertEqual(milltina[0]["path"], dashboard_server.normalize_path_string(str(project_dir)))
+            self.assertTrue(milltina[0]["activeMcp"])
+            self.assertEqual(milltina[0]["cliInstanceId"], "hash-456")
 
     def test_has_unity_mcp_dependency_accepts_utf8_bom_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

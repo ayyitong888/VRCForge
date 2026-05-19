@@ -3053,8 +3053,9 @@ function applyUnityStatus(payload) {
     ? (missingTools.length ? "已连接 / 工具缺失" : "已连接")
     : "未连接";
   refs["unity-status-light"].className = `light ${connected ? "light-on" : "light-off"}`;
-  if (!refs["unity-instance"].value && payload.activeInstance?.sessionId) {
-    refs["unity-instance"].value = payload.activeInstance.sessionId;
+  const activeCliInstance = payload.activeInstance?.cliInstanceId || payload.activeInstance?.hash || payload.activeInstance?.project || payload.activeInstance?.sessionId || "";
+  if (!refs["unity-instance"].value && activeCliInstance) {
+    refs["unity-instance"].value = activeCliInstance;
   }
   const lines = [
     formatConnectionResult("Unity MCP", connected, getConnectionFailureReason(payload)),
@@ -3079,9 +3080,9 @@ function renderProjects(payload) {
     if (project.hasVrcForge) badges.push("VRCForge");
     if (project.hasUnityMcpPackage) badges.push("Unity MCP");
     if (project.sources?.length) badges.push(project.sources.join("+"));
-    const suffix = badges.length ? ` / ${badges.join(" / ")}` : "";
     const disabled = project.selectable === false ? "disabled" : "";
-    return `<option value="${escapeHtml(project.path || "")}" data-session-id="${escapeHtml(project.sessionId || "")}" data-project-name="${escapeHtml(project.name || "")}" data-active-mcp="${project.activeMcp ? "1" : "0"}" ${disabled}>${escapeHtml(project.name)} (${escapeHtml(project.editorVersion)})${escapeHtml(suffix)}</option>`;
+    const instanceId = project.cliInstanceId || project.hash || project.project || project.sessionId || "";
+    return `<option value="${escapeHtml(project.path || "")}" data-instance-id="${escapeHtml(instanceId)}" data-session-id="${escapeHtml(project.sessionId || "")}" data-project-name="${escapeHtml(project.name || "")}" data-active-mcp="${project.activeMcp ? "1" : "0"}" title="${escapeHtml(badges.join(" / "))}" ${disabled}>${escapeHtml(project.name)} (${escapeHtml(project.editorVersion)})</option>`;
   }).join("");
   selectProjectOption(state.selectedProjectPath);
 }
@@ -3089,9 +3090,9 @@ function renderProjects(payload) {
 async function onProjectSelected() {
   const selectedProject = refs["project-select"].value;
   const selectedOption = refs["project-select"].selectedOptions?.[0];
-  const sessionId = selectedOption?.dataset?.sessionId || "";
-  if (sessionId) {
-    refs["unity-instance"].value = sessionId;
+  const instanceId = selectedOption?.dataset?.instanceId || "";
+  if (instanceId) {
+    refs["unity-instance"].value = instanceId;
   } else if (selectedProject) {
     refs["unity-instance"].value = selectedOption?.dataset?.projectName || projectNameFromPath(selectedProject);
   }

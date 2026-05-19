@@ -3186,6 +3186,7 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     elif DASHBOARD_STATE.unity_instance:
         settings.unity_mcp_instance = DASHBOARD_STATE.unity_instance
 
+    resolve_unity_cli_instance_selector(settings)
     return settings
 
 
@@ -4508,12 +4509,17 @@ def normalize_unity_instance(raw: Any) -> dict[str, Any]:
     project = str(raw.get("project") or raw.get("project_name") or raw.get("projectName") or raw.get("name") or "").strip()
     unity_version = str(raw.get("unity_version") or raw.get("unityVersion") or raw.get("version") or "").strip()
     project_path = normalize_path_string(str(raw.get("project_path") or raw.get("projectPath") or raw.get("path") or "").strip())
+    if project_path in {".", "./"}:
+        project_path = ""
+    instance_hash = str(raw.get("hash") or raw.get("project_id") or raw.get("projectId") or "").strip()
+    cli_instance_id = instance_hash or project or session_id
     return {
         "sessionId": session_id,
+        "cliInstanceId": cli_instance_id,
         "project": project,
         "projectName": project,
         "projectPath": project_path,
-        "hash": str(raw.get("hash") or "").strip(),
+        "hash": instance_hash,
         "unityVersion": unity_version,
         "connectedAt": str(raw.get("connected_at") or raw.get("connectedAt") or "").strip(),
         "raw": raw,
@@ -4540,6 +4546,7 @@ def instance_matches_selector(instance: dict[str, Any], selector: str) -> bool:
         return False
     candidates = [
         instance.get("sessionId"),
+        instance.get("cliInstanceId"),
         instance.get("project"),
         instance.get("projectName"),
         instance.get("hash"),
@@ -4559,12 +4566,48 @@ def choose_active_unity_instance(instances: list[dict[str, Any]], settings: Sett
     return None, False
 
 
+def resolve_unity_cli_instance_selector(settings: Settings) -> None:
+    """Map CoplayDev session ids from /api/instances to CLI-safe project ids."""
+    selector = (settings.unity_mcp_instance or DASHBOARD_STATE.unity_instance or "").strip()
+    ok, payload, _error, _status_code = fetch_unity_http_json(settings, "/api/instances")
+    if not ok:
+        return
+
+    instances = normalize_unity_instances_payload(payload)
+    active_instance, _selected_match = choose_active_unity_instance(instances, settings)
+    if not active_instance:
+        return
+
+    cli_selector = str(
+        active_instance.get("cliInstanceId")
+        or active_instance.get("hash")
+        or active_instance.get("project")
+        or active_instance.get("sessionId")
+        or ""
+    ).strip()
+    if not cli_selector:
+        return
+
+    if selector and selector != cli_selector:
+        emit_log(
+            "info",
+            "unity",
+            "Resolved Unity MCP session selector to CLI project selector.",
+            {"selector": selector, "cliSelector": cli_selector, "project": active_instance.get("project")},
+        )
+    settings.unity_mcp_instance = cli_selector
+    DASHBOARD_STATE.unity_instance = cli_selector
+
+
 def build_unity_instances_diagnostics(settings: Settings) -> dict[str, Any]:
     ok, payload, error, status_code = fetch_unity_http_json(settings, "/api/instances")
     instances = normalize_unity_instances_payload(payload) if ok else []
     active_instance, selected_match = choose_active_unity_instance(instances, settings)
-    if active_instance and not DASHBOARD_STATE.unity_instance:
-        DASHBOARD_STATE.unity_instance = active_instance.get("sessionId") or active_instance.get("project") or ""
+    if active_instance:
+        cli_selector = active_instance.get("cliInstanceId") or active_instance.get("hash") or active_instance.get("project") or active_instance.get("sessionId") or ""
+        if cli_selector:
+            DASHBOARD_STATE.unity_instance = cli_selector
+            settings.unity_mcp_instance = cli_selector
     return {
         "ok": ok,
         "reachable": ok,
@@ -4622,6 +4665,7 @@ def collect_tool_names_from_payload(payload: Any) -> list[str]:
 
 
 def build_unity_tools_diagnostics(settings: Settings) -> dict[str, Any]:
+    resolve_unity_cli_instance_selector(settings)
     output = ""
     parsed: Any = None
     error = ""
@@ -4952,6 +4996,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
                 "source": source,
                 "activeMcp": False,
                 "sessionId": "",
+                "cliInstanceId": "",
                 "unityVersion": "",
                 "selectable": bool(normalized_path),
             }
@@ -4966,6 +5011,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         if active_instance:
             project["activeMcp"] = True
             project["sessionId"] = active_instance.get("sessionId") or ""
+            project["cliInstanceId"] = active_instance.get("cliInstanceId") or active_instance.get("hash") or active_instance.get("project") or ""
             project["unityVersion"] = active_instance.get("unityVersion") or project.get("editorVersion") or ""
             project["editorVersion"] = project["unityVersion"] or project["editorVersion"]
 
@@ -5128,6 +5174,8 @@ def resolve_local_path(value: str | Path) -> Path:
 
 
 def normalize_path_string(value: str) -> str:
+    if not str(value or "").strip():
+        return ""
     return str(Path(value)).replace("\\", "/")
 
 
