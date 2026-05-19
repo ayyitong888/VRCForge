@@ -16,6 +16,7 @@ config.json
 docs/
 
 AGENTS.md
+HANDOFF.md
 PROJECT_STATUS.md
 NON_TECHNICAL_TEST_GUIDE.md
 *.local.md

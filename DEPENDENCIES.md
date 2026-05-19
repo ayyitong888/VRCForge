@@ -74,6 +74,14 @@ The helper script can copy it and add MCP for Unity:
 powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
 ```
 
-## Execution Model / ????
+## Execution Model / 执行模型
 
-VRCForge ships predefined Unity tools for avatar reads and writes. It does not ship a VRCForge arbitrary C# execution fallback. Dry-run previews show the MCP tool payload that will be sent to Unity, not generated executable code.
+VRCForge ships predefined Unity tools for normal avatar reads and writes. Dry-run previews show the MCP tool payload that will be sent to Unity, not generated executable code.
+
+Roslyn is preserved only as Advanced Power Mode. It is disabled by default and is not part of the normal Dashboard workflow. To make `vrc_execute_roslyn` available, define `VRCFORGE_ENABLE_ROSLYN` in Unity scripting define symbols and install the DLLs with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/install-roslyn-support.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
+```
+
+Every Roslyn call must pass `confirmAdvancedPowerMode=true`, and Unity shows a modal warning dialog before executing the snippet. If the user cancels the dialog, the tool does not run.

@@ -124,9 +124,9 @@ VRCForge 对写入操作采用受监督流程：
 Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 ```
 
-Core dashboard workflows use predefined Unity tools. VRCForge does not ship its own arbitrary C# execution fallback; dry-run previews show MCP payloads instead of executable code.
+Core dashboard workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode: disabled by default, opt-in via `VRCFORGE_ENABLE_ROSLYN`, and guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog.
 
-核心 Dashboard 流程使用预定义 Unity 工具。VRCForge 不再分发自己的任意 C# 执行回退；dry-run 只预览 MCP payload，不预览可执行代码。
+核心 Dashboard 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留：默认禁用，需要 `VRCFORGE_ENABLE_ROSLYN` 显式开启，并且执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。
 
 ## Developer / Debug Start
 

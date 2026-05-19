@@ -144,6 +144,20 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
 
+    def test_roslyn_advanced_power_mode_requires_explicit_opt_in(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
+        source = (editor_dir / "RoslynExecutor.cs").read_text(encoding="utf-8")
+        bootstrap = (editor_dir / "RoslynSupportBootstrap.cs").read_text(encoding="utf-8")
+
+        self.assertIn("#if VRCFORGE_ENABLE_ROSLYN", source)
+        self.assertIn("#if VRCFORGE_ENABLE_ROSLYN", bootstrap)
+        self.assertIn('name: "vrc_execute_roslyn"', source)
+        self.assertIn("Advanced Power Mode", source)
+        self.assertIn("confirmAdvancedPowerMode", source)
+        self.assertIn("EditorUtility.DisplayDialog", source)
+        self.assertIn('"VRCForge Advanced Power Mode"', source)
+        self.assertIn("VRCFORGE_ENABLE_ROSLYN", bootstrap)
+
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         combined = "\n".join(path.read_text(encoding="utf-8") for path in editor_dir.glob("*.cs"))
