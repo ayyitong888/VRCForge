@@ -66,6 +66,10 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.SHADER_TUNING_PRESETS_PATH,
             dashboard_server.SHADER_TUNING_LOCKS_PATH,
         )
+        self.original_agent_paths = (
+            dashboard_server.AGENT_GATEWAY.config_path,
+            dashboard_server.AGENT_GATEWAY.audit_dir,
+        )
         tuning_root = Path(self.tuning_store_dir.name)
         dashboard_server.TUNING_HISTORY_PATH = tuning_root / "tuning_history.json"
         dashboard_server.TUNING_PRESETS_PATH = tuning_root / "tuning_presets.json"
@@ -73,6 +77,10 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.SHADER_TUNING_HISTORY_PATH = tuning_root / "shader_tuning_history.json"
         dashboard_server.SHADER_TUNING_PRESETS_PATH = tuning_root / "shader_tuning_presets.json"
         dashboard_server.SHADER_TUNING_LOCKS_PATH = tuning_root / "shader_tuning_locks.json"
+        dashboard_server.AGENT_GATEWAY.configure_paths(
+            tuning_root / "agent_gateway.json",
+            tuning_root / "agent_gateway",
+        )
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -98,6 +106,7 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.SHADER_TUNING_PRESETS_PATH,
             dashboard_server.SHADER_TUNING_LOCKS_PATH,
         ) = self.original_tuning_paths
+        dashboard_server.AGENT_GATEWAY.configure_paths(*self.original_agent_paths)
         self.tuning_store_dir.cleanup()
 
     def test_websocket_sends_bootstrap_payload(self) -> None:
@@ -119,6 +128,149 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("目标参考图", response.text)
             self.assertIn("粘贴图片", response.text)
             self.assertIn("选择本地图片", response.text)
+
+    def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        with TestClient(dashboard_server.app) as client:
+            missing_token = client.get("/api/agent/manifest")
+            self.assertEqual(missing_token.status_code, 401)
+
+            headers = {"Authorization": f"Bearer {config.token}"}
+            manifest = client.get("/api/agent/manifest", headers=headers)
+            self.assertEqual(manifest.status_code, 200)
+            payload = manifest.json()
+            self.assertFalse(payload["enabled"])
+            self.assertTrue(payload["requiresToken"])
+            self.assertNotIn("vrcforge_request_roslyn_advanced", {tool["name"] for tool in payload["tools"]})
+
+            blocked_tool = client.post("/api/agent/tool/vrcforge_health", headers=headers, json={"params": {}})
+            self.assertEqual(blocked_tool.status_code, 403)
+            blocked_mcp = client.post("/mcp", json={})
+            self.assertEqual(blocked_mcp.status_code, 401)
+
+    def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            preview = client.post(
+                "/api/agent/tool/vrcforge_preview_blendshape_apply",
+                headers=headers,
+                json={
+                    "agent_name": "codex-test",
+                    "params": {
+                        "avatar_path": "Scene/Avatar",
+                        "adjustments": [
+                            {"rendererPath": "Scene/Avatar/Face", "blendshapeName": "Smile", "targetWeight": 42}
+                        ],
+                    },
+                },
+            )
+            self.assertEqual(preview.status_code, 200)
+            self.assertTrue(preview.json()["ok"])
+            self.assertIn("vrc_apply_blendshapes", preview.json()["result"]["applyPayload"])
+
+            request_apply = client.post(
+                "/api/agent/tool/vrcforge_request_apply",
+                headers=headers,
+                json={
+                    "agent_name": "codex-test",
+                    "params": {
+                        "target_tool": "vrcforge_apply_blendshapes",
+                        "arguments": {"adjustments": []},
+                        "reason": "test supervised loop",
+                    },
+                },
+            )
+            self.assertEqual(request_apply.status_code, 200)
+            approval = request_apply.json()["result"]["approval"]
+            self.assertEqual(approval["status"], "pending")
+
+            approvals = client.get("/api/agent/approvals", headers=headers)
+            self.assertEqual(approvals.status_code, 200)
+            self.assertEqual(approvals.json()["count"], 1)
+
+            agent_cannot_approve = client.post(f"/api/agent/approvals/{approval['id']}/approve", headers=headers)
+            self.assertEqual(agent_cannot_approve.status_code, 401)
+
+            approval_headers = {
+                **headers,
+                "X-VRCForge-Approval-Token": config.approval_token,
+            }
+            approved = client.post(f"/api/agent/approvals/{approval['id']}/approve", headers=approval_headers)
+            self.assertEqual(approved.status_code, 200)
+
+            with patch("dashboard_server.apply_manual_blendshapes_sync", return_value={"ok": True, "appliedAdjustments": []}) as mock_apply:
+                applied = client.post(
+                    "/api/agent/tool/vrcforge_apply_approved",
+                    headers=headers,
+                    json={"agent_name": "codex-test", "params": {"approval_id": approval["id"]}},
+                )
+            self.assertEqual(applied.status_code, 200)
+            self.assertTrue(applied.json()["ok"])
+            self.assertEqual(applied.json()["result"]["status"], "applied")
+            mock_apply.assert_called_once()
+
+    def test_agent_gateway_manifest_describes_codex_debug_loop_tools(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        self.assertIn("vrcforge_capture_screenshot", tool_names)
+        self.assertIn("vrcforge_vision_audit", tool_names)
+        self.assertIn("vrcforge_request_apply", tool_names)
+        self.assertIn("vrcforge_apply_approved", tool_names)
+        self.assertIn("vrcforge_read_recent_logs", tool_names)
+        self.assertIn("vrcforge_apply_blendshapes", {item["name"] for item in payload["writeTargets"]})
+        self.assertNotIn("api_key", json.dumps(payload).lower())
+        self.assertNotIn("approval_token", json.dumps(payload).lower())
+
+    def test_agent_gateway_mcp_lists_codex_debug_loop_tools(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {
+            "Authorization": f"Bearer {config.token}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+
+        with TestClient(dashboard_server.app) as client:
+            initialize = client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "codex-test", "version": "0"},
+                    },
+                },
+            )
+            self.assertEqual(initialize.status_code, 200)
+
+            listed = client.post(
+                "/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
+            self.assertEqual(listed.status_code, 200)
+
+        tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+        self.assertIn("vrcforge_capture_screenshot", tool_names)
+        self.assertIn("vrcforge_vision_audit", tool_names)
+        self.assertIn("vrcforge_request_apply", tool_names)
+        self.assertIn("vrcforge_apply_approved", tool_names)
 
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"

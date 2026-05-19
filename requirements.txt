@@ -12,6 +12,7 @@ google-genai>=1.16.1
 openai>=1.30.0
 
 # Unity MCP bridge client/server helper.
+mcp[cli]>=1.27.0
 mcpforunityserver>=9.6.8
 
 # Local validation and tests.

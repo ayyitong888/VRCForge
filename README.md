@@ -114,6 +114,16 @@ Supported providers include Google AI Studio, OpenAI, Anthropic, Ollama, Google 
 
 支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 以及自定义 OpenAI-compatible endpoint。图片输入能力取决于所选 provider 和模型。
 
+## External Agent Gateway / 外部 Agent 接入
+
+VRCForge includes a local Agent Gateway for Codex, Claude Code, OpenClaw, and other MCP-capable agents. It exposes `http://127.0.0.1:8757/mcp` plus REST diagnostics under `/api/agent/*`.
+
+VRCForge 提供本地 Agent Gateway，可接入 Codex、Claude Code、OpenClaw 等支持 MCP 的外部 agent。它会暴露 `http://127.0.0.1:8757/mcp`，并提供 `/api/agent/*` REST 调试接口。
+
+The gateway is disabled by default. Enable it from the Launcher external-agent page, copy the local token/config, then let the agent read logs, capture screenshots, inspect Unity state, generate plans, and request supervised writes. Actual writes still require user approval before `apply`; the approval token is kept inside the Launcher and is not included in copied agent configs.
+
+Gateway 默认关闭。请在 Launcher 的“外部 Agent 接入”页启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 Launcher 内部使用，不会写进复制给外部 agent 的配置。
+
 ## Safety / 安全原则
 
 VRCForge follows a supervised workflow for write operations:

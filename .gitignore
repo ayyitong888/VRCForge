@@ -13,6 +13,7 @@ artifacts/
 build/
 dist/
 config.json
+agent_gateway.json
 docs/
 
 AGENTS.md

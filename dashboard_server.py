@@ -18,11 +18,12 @@ from threading import Lock
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
@@ -105,6 +106,8 @@ RUNTIME_SETTINGS_PATH = resolve_runtime_path(
 )
 LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
+AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
+AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 DASHBOARD_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -362,6 +365,15 @@ class VisionAuditMultiRequest(ConnectionRequest):
     image_paths: list[str] = Field(default_factory=list)
 
 
+class AgentToolRequest(BaseModel):
+    agent_name: str = "external-agent"
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentSessionRequest(BaseModel):
+    agent_name: str = "external-agent"
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -434,6 +446,18 @@ class DashboardEventBus:
         asyncio.run_coroutine_threadsafe(self.broadcast(event_type, payload), self._loop)
 
 
+class AgentMcpMount:
+    def __init__(self) -> None:
+        self.app = None
+
+    async def __call__(self, scope, receive, send) -> None:
+        if self.app is None:
+            response = JSONResponse({"ok": False, "error": "Agent MCP app is not ready."}, status_code=503)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="VRCForge Dashboard", version="0.3.1-alpha")
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
@@ -449,13 +473,36 @@ STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
+AGENT_GATEWAY = AgentGateway(
+    config_path=AGENT_GATEWAY_CONFIG_PATH,
+    audit_dir=AGENT_GATEWAY_AUDIT_DIR,
+)
+AGENT_MCP_MOUNT = AgentMcpMount()
+AGENT_MCP_APP = None
+AGENT_MCP_CONTEXT = None
+
+
+@app.middleware("http")
+async def authorize_agent_mcp(request: Request, call_next):
+    if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+        try:
+            authenticate_agent_request(request, allow_disabled=False)
+        except HTTPException as exc:
+            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
     global STATUS_MONITOR_TASK
+    global AGENT_MCP_APP
+    global AGENT_MCP_CONTEXT
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    AGENT_MCP_APP = create_agent_mcp_app(AGENT_GATEWAY)
+    AGENT_MCP_CONTEXT = AGENT_MCP_APP.state.fastmcp_server.session_manager.run()
+    await AGENT_MCP_CONTEXT.__aenter__()
+    AGENT_MCP_MOUNT.app = AGENT_MCP_APP
     if not CONFIG_PATH.exists():
         save_dashboard_api_config(DASHBOARD_API_CONFIG)
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
@@ -477,6 +524,8 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global STATUS_MONITOR_TASK
+    global AGENT_MCP_APP
+    global AGENT_MCP_CONTEXT
 
     if STATUS_MONITOR_TASK is not None:
         STATUS_MONITOR_TASK.cancel()
@@ -485,6 +534,11 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         STATUS_MONITOR_TASK = None
+    if AGENT_MCP_CONTEXT is not None:
+        await AGENT_MCP_CONTEXT.__aexit__(None, None, None)
+        AGENT_MCP_CONTEXT = None
+        AGENT_MCP_MOUNT.app = None
+        AGENT_MCP_APP = None
 
 
 @app.get("/")
@@ -534,6 +588,73 @@ def read_health() -> dict[str, Any]:
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
+
+
+@app.get("/api/agent/manifest")
+def read_agent_manifest(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return AGENT_GATEWAY.build_manifest()
+
+
+@app.get("/api/agent/health")
+def read_agent_health(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return AGENT_GATEWAY.build_health()
+
+
+@app.post("/api/agent/session")
+def create_agent_session(request: Request, session_request: AgentSessionRequest) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return {
+        "ok": True,
+        "agentName": session_request.agent_name,
+        "manifest": AGENT_GATEWAY.build_manifest(),
+    }
+
+
+@app.post("/api/agent/tool/{tool_name}")
+def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=False)
+    try:
+        return AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/agent/approvals")
+def read_agent_approvals(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=False)
+    approvals = AGENT_GATEWAY.list_approvals()
+    return {"ok": True, "approvals": approvals, "count": len(approvals)}
+
+
+@app.post("/api/agent/approvals/{approval_id}/approve")
+async def approve_agent_approval(approval_id: str, request: Request) -> dict[str, Any]:
+    authenticate_agent_approval_request(request)
+    try:
+        payload = AGENT_GATEWAY.approve(approval_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/agent/approvals/{approval_id}/reject")
+async def reject_agent_approval(approval_id: str, request: Request) -> dict[str, Any]:
+    authenticate_agent_approval_request(request)
+    try:
+        payload = AGENT_GATEWAY.reject(approval_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.get("/api/agent/logs")
+def read_agent_logs(request: Request, limit: int = 100) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=False)
+    logs = AGENT_GATEWAY.recent_audit_logs(limit=limit)
+    return {"ok": True, "logs": logs, "count": len(logs)}
 
 
 @app.websocket("/ws")
@@ -4474,6 +4595,17 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
         else f"{provider_display_name(settings.llm_provider)} API key is not configured.",
         {"provider": settings.llm_provider, "model": settings.llm_model},
     )
+    agent_health = AGENT_GATEWAY.build_health()
+    components["agentGateway"] = health_component(
+        "ok" if agent_health["enabled"] else "warning",
+        "Agent Gateway is enabled." if agent_health["enabled"] else "Agent Gateway is disabled until enabled in the Launcher.",
+        {
+            "mcpUrl": agent_health["mcpUrl"],
+            "restUrl": agent_health["restUrl"],
+            "pendingApprovalCount": agent_health["pendingApprovalCount"],
+            "allowRoslynAdvanced": agent_health["allowRoslynAdvanced"],
+        },
+    )
 
     return components
 
@@ -4871,12 +5003,242 @@ def load_initial_dashboard_state() -> DashboardState:
     )
 
 
+def authenticate_agent_request(request: Request, allow_disabled: bool = False):
+    try:
+        return AGENT_GATEWAY.authenticate(
+            headers=dict(request.headers),
+            query_params=dict(request.query_params),
+            client_host=request.client.host if request.client else "",
+            allow_disabled=allow_disabled,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+def authenticate_agent_approval_request(request: Request):
+    try:
+        return AGENT_GATEWAY.authenticate_approval(
+            headers=dict(request.headers),
+            query_params=dict(request.query_params),
+            client_host=request.client.host if request.client else "",
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:
+    return ConnectionRequest(**params)
+
+
+def build_agent_dashboard_request(params: dict[str, Any]) -> DashboardRequest:
+    data = dict(params)
+    data.setdefault("settings_path", runtime_settings_path())
+    data.setdefault("source_mode", "unity_live_export")
+    data.setdefault("mock_execute", False)
+    data.setdefault("save_artifacts", True)
+    return DashboardRequest(**data)
+
+
+def build_agent_shader_request(params: dict[str, Any]) -> ShaderMaterialPlanRequest:
+    data = dict(params)
+    data.setdefault("settings_path", runtime_settings_path())
+    data.setdefault("source_mode", "unity_live_export")
+    data.setdefault("mock_execute", False)
+    return ShaderMaterialPlanRequest(**data)
+
+
+def preview_agent_blendshape_apply(params: dict[str, Any]) -> dict[str, Any]:
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or params.get("avatar") or "").strip()
+    adjustments = params.get("adjustments") or []
+    if not avatar_path:
+        raise RuntimeError("avatar_path is required for blendshape apply preview.")
+    if not isinstance(adjustments, list):
+        raise RuntimeError("adjustments must be a list.")
+    payload = render_manual_blendshape_payload_json(avatar_path, adjustments)
+    return {
+        "ok": True,
+        "targetTool": "vrcforge_apply_blendshapes",
+        "avatarPath": avatar_path,
+        "adjustmentCount": len(adjustments),
+        "applyPayload": payload,
+    }
+
+
+def preview_agent_shader_apply(params: dict[str, Any]) -> dict[str, Any]:
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or params.get("avatar") or "").strip()
+    changes = params.get("changes") or []
+    if not isinstance(changes, list):
+        raise RuntimeError("changes must be a list.")
+    return {
+        "ok": True,
+        "targetTool": "vrcforge_apply_shader_tuning",
+        "avatarPath": avatar_path,
+        "changeCount": len(changes),
+        "applyPayload": {
+            "tool": "vrc_apply_material_tuning",
+            "params": {
+                "avatarPath": avatar_path,
+                "changes": changes,
+                "saveAssets": True,
+            },
+        },
+    }
+
+
+def request_agent_restore_last_backup(params: dict[str, Any]) -> dict[str, Any]:
+    kind = str(params.get("kind") or params.get("restoreKind") or "shader").strip().lower()
+    arguments = dict(params)
+    if kind in {"shader", "material", "materials"}:
+        target_tool = "vrcforge_restore_shader_tuning"
+    elif kind in {"blendshape", "blendshapes", "face"}:
+        target_tool = "vrcforge_undo_blendshapes"
+    else:
+        raise RuntimeError("kind must be shader or blendshape.")
+    arguments.pop("kind", None)
+    arguments.pop("restoreKind", None)
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": target_tool,
+            "arguments": arguments,
+            "reason": f"Restore last {kind} backup requested by external agent.",
+            "preview": {"kind": kind, "targetTool": target_tool},
+        }
+    )
+
+
+def request_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
+    if not params.get("code"):
+        raise RuntimeError("code is required for Roslyn Advanced Power Mode.")
+    arguments = dict(params)
+    arguments["confirmAdvancedPowerMode"] = bool(arguments.get("confirmAdvancedPowerMode"))
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": "vrcforge_roslyn_advanced",
+            "arguments": arguments,
+            "reason": "Roslyn Advanced Power Mode request from external agent.",
+            "preview": {
+                "codePreview": str(params.get("code") or "")[:240],
+                "requiresUnityDialog": True,
+                "requiresConfirmAdvancedPowerMode": True,
+            },
+        }
+    )
+
+
+def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
+    if params.get("confirmAdvancedPowerMode") is not True:
+        raise RuntimeError("confirmAdvancedPowerMode=true is required.")
+    settings = load_dashboard_settings(ConnectionRequest(**params))
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_execute_roslyn",
+        {
+            "code": params.get("code") or "",
+            "confirmAdvancedPowerMode": True,
+            "enforceWriteDefaultsOn": params.get("enforceWriteDefaultsOn", True),
+            "targetAvatarPaths": params.get("targetAvatarPaths") or [],
+        },
+    )
+    return {"ok": True, "result": serialize_result(result)}
+
+
+def register_agent_gateway_tools() -> None:
+    AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_unity_status",
+        "Read Unity MCP bridge status.",
+        "read/debug",
+        lambda params: run_unity_cli_json(load_dashboard_settings(build_agent_connection_request(params)), ["-f", "json", "status"]),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_unity_tools",
+        "List Unity MCP tools visible to VRCForge.",
+        "read/debug",
+        lambda params: run_unity_cli_json(load_dashboard_settings(build_agent_connection_request(params)), ["-f", "json", "tool", "list"]),
+    )
+    AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: read_avatars_sync(build_agent_dashboard_request(params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: read_avatar_blendshapes_sync(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
+    AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: run_dashboard_pipeline_sync(build_agent_dashboard_request(params), False))
+    AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
+    AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_request_roslyn_advanced", "Request Roslyn Advanced Power Mode execution with user approval.", "advanced", request_agent_roslyn_advanced, write=True, advanced=True)
+
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_apply_blendshapes",
+        "Apply validated Blendshape adjustments through VRCForge.",
+        "medium",
+        lambda params: apply_manual_blendshapes_sync(ManualBlendshapeApplyRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_run_face_tuning",
+        "Run and apply a generated face tuning plan through VRCForge.",
+        "high",
+        lambda params: run_dashboard_pipeline_sync(build_agent_dashboard_request(params), True),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_apply_shader_tuning",
+        "Apply validated shader/material tuning changes through VRCForge.",
+        "high",
+        lambda params: apply_shader_material_plan_sync(ShaderMaterialApplyRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_restore_shader_tuning",
+        "Restore the last shader/material tuning undo point.",
+        "medium",
+        lambda params: restore_shader_material_plan_sync(ShaderMaterialRestoreRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_undo_blendshapes",
+        "Undo the last Blendshape apply snapshot for an avatar.",
+        "medium",
+        lambda params: undo_manual_blendshapes_sync(UndoBlendshapeRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_apply_clothing_fx",
+        "Apply generated clothing FX assets through VRCForge.",
+        "high",
+        lambda params: apply_clothing_fx_sync(ClothingApplyFxRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_apply_parameter_optimization",
+        "Apply avatar parameter optimization through VRCForge.",
+        "high",
+        lambda params: apply_parameter_optimization_sync(ParameterApplyOptimizationRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_rollback_parameters",
+        "Rollback avatar parameter optimization through VRCForge.",
+        "medium",
+        lambda params: rollback_parameter_optimization_sync(ParameterRollbackRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_roslyn_advanced",
+        "Execute Roslyn Advanced Power Mode through Unity's warning dialog.",
+        "critical",
+        execute_agent_roslyn_advanced,
+        advanced=True,
+    )
+
+
 if DASHBOARD_API_CONFIG is None:
     DASHBOARD_API_CONFIG = load_initial_dashboard_api_config()
 
 
 if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
+
+
+register_agent_gateway_tools()
+app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")
 
 
 def to_http_exception(exc: Exception) -> HTTPException:
