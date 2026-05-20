@@ -46,7 +46,7 @@ Portable/debug package:
 
 - `VRCForge_Windows_x64_0.3.1-alpha.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
-- End users do not need to install Python, Git, or run `pip install` when using the installer.
+- End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
 安装器会把程序安装到 `%ProgramFiles%\VRCForge`，用户数据放在 `%LOCALAPPDATA%\VRCForge`。用户数据包括 `config/`、`logs/`、`artifacts/` 和 `backups/`，更新时不会覆盖。
 
@@ -76,7 +76,9 @@ Launcher install is idempotent per Unity project. After a successful install it 
 
 The project picker merges manual folders, VCC user projects, Unity Hub recent projects, and active Unity MCP instances. Active MCP instances are shown first so a running project such as `milltina` can be selected even if it was not under the default scan root.
 
-The Dashboard opens inside WebView2 first. If WebView2 Runtime is missing or fails to initialize, the launcher falls back to the system browser and shows the Dashboard URL, HTTP status, and log path.
+The Dashboard opens inside WebView2 first. If WebView2 Runtime is missing or fails to initialize, the launcher falls back to the system browser and shows the Dashboard URL, HTTP status, and log path. Dashboard startup is allowed as soon as the packaged HTTP page is reachable; Unity MCP, provider-key, or avatar diagnostics are shown as actionable warnings/errors instead of blocking the Dashboard window.
+
+If the packaged backend launch path fails, the launcher automatically falls back to the bundled `start_dashboard.cmd` and keeps waiting for the same Dashboard URL. This preserves the old debug startup path as an automatic last resort instead of requiring users to return to a source checkout.
 
 The launcher also includes uninstall buttons:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
@@ -188,7 +190,7 @@ VRCForge is distributed under GPL-3.0. If you obtained VRCForge from a third-par
 
 VRCForge 使用 GPL-3.0 发布。如果你从第三方渠道获得 VRCForge，请确认其保留版权声明、GPL-3.0 许可和源代码获取方式。
 
-Binary releases bundle a modified vendored copy of CoplayDev Unity MCP under the MIT License. The upstream MIT license is preserved in the package and copied into release `licenses/` output together with VRCForge distribution notes.
+Binary releases bundle a modified vendored copy of CoplayDev Unity MCP under the MIT License. The upstream MIT license is preserved in the package and copied into release `licenses/` output together with VRCForge distribution notes. Windows x64 releases may also bundle the official uv runtime under `MIT OR Apache-2.0`; its license files and VRCForge distribution notes are copied into release `licenses/`.
 
 二进制 Release 会随包分发一个经过裁剪的 CoplayDev Unity MCP vendored copy，许可证为 MIT。上游 MIT LICENSE 会保留在包内，并与 VRCForge 分发说明一起复制到 release 的 `licenses/` 目录。
 

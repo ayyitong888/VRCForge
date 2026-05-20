@@ -1,0 +1,9 @@
+VRCForge Windows release builds may bundle the official uv Windows x64
+runtime binaries to bootstrap Unity MCP on machines without Python or uv.
+
+Upstream project: https://github.com/astral-sh/uv
+License: MIT OR Apache-2.0
+
+VRCForge does not modify the uv binaries. The bundled files are used only by
+the local Launcher to run `uvx --from mcpforunityserver unity-mcp` with cache
+and managed Python directories under the user's VRCForge data folder.

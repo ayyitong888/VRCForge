@@ -14,13 +14,20 @@ internal sealed class LauncherPaths
     public DirectoryInfo LogsDir { get; }
     public DirectoryInfo ArtifactsDir { get; }
     public DirectoryInfo BackupsDir { get; }
+    public DirectoryInfo ToolsDir { get; }
+    public DirectoryInfo UvDir { get; }
+    public DirectoryInfo BundledUvDir { get; }
     public DirectoryInfo DashboardDir { get; }
     public DirectoryInfo UnityPluginDir { get; }
     public FileInfo BackendExe { get; }
+    public FileInfo StartDashboardCmdPath { get; }
     public FileInfo SettingsPath { get; }
     public FileInfo AgentGatewayConfigPath { get; }
     public FileInfo BackendLogPath { get; }
+    public FileInfo RuntimeDependencyLogPath { get; }
     public FileInfo UnityPackagePath { get; }
+    public FileInfo LocalUvxExe { get; }
+    public FileInfo BundledUvxExe { get; }
 
     public LauncherPaths()
     {
@@ -32,18 +39,25 @@ internal sealed class LauncherPaths
         LogsDir = new DirectoryInfo(Path.Combine(UserDataDir.FullName, "logs"));
         ArtifactsDir = new DirectoryInfo(Path.Combine(UserDataDir.FullName, "artifacts"));
         BackupsDir = new DirectoryInfo(Path.Combine(UserDataDir.FullName, "backups"));
+        ToolsDir = new DirectoryInfo(Path.Combine(UserDataDir.FullName, "tools"));
+        UvDir = new DirectoryInfo(Path.Combine(ToolsDir.FullName, "uv"));
+        BundledUvDir = new DirectoryInfo(Path.Combine(ProgramDir.FullName, "tools", "uv"));
         DashboardDir = new DirectoryInfo(Path.Combine(ProgramDir.FullName, "dashboard"));
         UnityPluginDir = new DirectoryInfo(Path.Combine(ProgramDir.FullName, "unity_plugin"));
         BackendExe = new FileInfo(Path.Combine(ProgramDir.FullName, "backend", "vrcforge_backend.exe"));
+        StartDashboardCmdPath = new FileInfo(Path.Combine(ProgramDir.FullName, "start_dashboard.cmd"));
         SettingsPath = new FileInfo(Path.Combine(ConfigDir.FullName, "settings.json"));
         AgentGatewayConfigPath = new FileInfo(Path.Combine(ConfigDir.FullName, "agent_gateway.json"));
         BackendLogPath = new FileInfo(Path.Combine(LogsDir.FullName, "backend.log"));
+        RuntimeDependencyLogPath = new FileInfo(Path.Combine(LogsDir.FullName, "runtime-dependencies.log"));
         UnityPackagePath = new FileInfo(Path.Combine(UnityPluginDir.FullName, "VRCForge.unitypackage"));
+        LocalUvxExe = new FileInfo(Path.Combine(UvDir.FullName, "uvx.exe"));
+        BundledUvxExe = new FileInfo(Path.Combine(BundledUvDir.FullName, "uvx.exe"));
     }
 
     public void EnsureUserData()
     {
-        foreach (DirectoryInfo directory in new[] { UserDataDir, ConfigDir, LogsDir, ArtifactsDir, BackupsDir })
+        foreach (DirectoryInfo directory in new[] { UserDataDir, ConfigDir, LogsDir, ArtifactsDir, BackupsDir, ToolsDir, UvDir })
         {
             directory.Create();
         }
@@ -54,6 +68,27 @@ internal sealed class LauncherPaths
         }
 
         EnsureAgentGatewayConfig();
+    }
+
+    public void SetUnityMcpCommand(params string[] command)
+    {
+        ConfigDir.Create();
+        if (!SettingsPath.Exists)
+        {
+            File.WriteAllText(SettingsPath.FullName, DefaultSettingsJson);
+        }
+
+        JsonObject root = JsonNode.Parse(File.ReadAllText(SettingsPath.FullName))?.AsObject() ?? new JsonObject();
+        JsonObject unityMcp = root["unity_mcp"] as JsonObject ?? new JsonObject();
+        JsonArray commandArray = new();
+        foreach (string part in command.Where(item => !string.IsNullOrWhiteSpace(item)))
+        {
+            commandArray.Add(part);
+        }
+
+        unityMcp["command"] = commandArray;
+        root["unity_mcp"] = unityMcp;
+        File.WriteAllText(SettingsPath.FullName, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
     }
 
     public JsonObject EnsureAgentGatewayConfig()

@@ -58,6 +58,12 @@ Before every release build, all bundled third-party components must pass
 `packaging/check_third_party_licenses.ps1`. Any new bundled dependency must be
 listed in `packaging/THIRD_PARTY_LICENSES.json` before it can be shipped.
 
+Windows x64 release payloads may also bundle the official uv runtime so the
+Launcher can bootstrap `uvx --from mcpforunityserver unity-mcp` on machines that
+do not have Python or uv installed. uv is licensed `MIT OR Apache-2.0`; release
+builds copy `LICENSE-MIT`, `LICENSE-APACHE`, and VRCForge distribution notes
+into the payload `licenses/` folder.
+
 ## VRCForge Unity Files / VRCForge Unity 文件
 
 Copy or install this repository folder into the Unity project:

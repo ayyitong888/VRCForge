@@ -2,6 +2,7 @@ param(
     [string]$Configuration = "Release",
     [string]$Version = "",
     [string]$CoplayDevPackagePath = "third_party\com.coplaydev.unity-mcp",
+    [string]$UvRuntimeLicensePath = "third_party\uv-runtime",
     [string]$UnityPackagePath = "",
     [string]$PayloadDownloadUrl = "",
     [switch]$AllowDirty,
@@ -12,6 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$uvDownloadUrl = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
 
 function Resolve-DotNetExe {
     $command = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -50,6 +52,41 @@ function Resolve-MakeNsisExe {
     }
 
     throw "NSIS makensis.exe is required to build VRCForge_Web_Installer_x64.exe and VRCForge_Offline_Installer_x64.exe."
+}
+
+function Install-UvRuntime {
+    param(
+        [string]$DestinationDir
+    )
+
+    New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+    $uvPath = Join-Path $DestinationDir "uv.exe"
+    $uvxPath = Join-Path $DestinationDir "uvx.exe"
+    if ((Test-Path -LiteralPath $uvPath) -and (Test-Path -LiteralPath $uvxPath)) {
+        Write-Host "Bundled uv runtime already present: $DestinationDir"
+        return
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge_uv_" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+    try {
+        $zipPath = Join-Path $tempRoot "uv-x86_64-pc-windows-msvc.zip"
+        Write-Host "Downloading uv Windows x64 runtime: $uvDownloadUrl"
+        Invoke-WebRequest -Uri $uvDownloadUrl -OutFile $zipPath
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $tempRoot -Force
+
+        $extractedUv = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter uv.exe | Select-Object -First 1
+        $extractedUvx = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter uvx.exe | Select-Object -First 1
+        if (-not $extractedUv -or -not $extractedUvx) {
+            throw "Downloaded uv archive did not contain uv.exe and uvx.exe."
+        }
+
+        Copy-Item -LiteralPath $extractedUv.FullName -Destination $uvPath -Force
+        Copy-Item -LiteralPath $extractedUvx.FullName -Destination $uvxPath -Force
+        Write-Host "Bundled uv runtime copied to: $DestinationDir"
+    } finally {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Push-Location $repoRoot
@@ -109,6 +146,8 @@ try {
 
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
+    Copy-Item -LiteralPath .\start_dashboard.cmd -Destination (Join-Path $payloadRoot "start_dashboard.cmd") -Force
+    Install-UvRuntime -DestinationDir (Join-Path $payloadRoot "tools\uv")
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "config"),(Join-Path $payloadRoot "logs"),(Join-Path $payloadRoot "artifacts") | Out-Null
 
     $unityPluginRoot = Join-Path $payloadRoot "unity_plugin"
@@ -138,6 +177,14 @@ try {
     if (Test-Path -LiteralPath $coplayDistributionNotes) {
         Copy-Item -LiteralPath $coplayDistributionNotes -Destination (Join-Path $payloadRoot "licenses\CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt") -Force
     }
+    $resolvedUvLicensePath = if ([System.IO.Path]::IsPathRooted($UvRuntimeLicensePath)) {
+        $UvRuntimeLicensePath
+    } else {
+        Join-Path $repoRoot $UvRuntimeLicensePath
+    }
+    Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-MIT") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-MIT.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-APACHE") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-APACHE-2.0.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\uv-DISTRIBUTION-NOTES.txt") -Force
 
     $payloadZip = Join-Path $releaseRoot "VRCForge_Windows_x64_$Version.zip"
     Remove-Item -LiteralPath $payloadZip -Force -ErrorAction SilentlyContinue

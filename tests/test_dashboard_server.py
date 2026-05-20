@@ -415,6 +415,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("check_third_party_licenses.ps1", build_script)
         self.assertIn("check_coplaydev_mcp_license.ps1", build_script)
         self.assertIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
+        self.assertIn("Install-UvRuntime", build_script)
+        self.assertIn("uv-x86_64-pc-windows-msvc.zip", build_script)
+        self.assertIn("uv-LICENSE-MIT.txt", build_script)
+        self.assertIn("uv-LICENSE-APACHE-2.0.txt", build_script)
+        self.assertIn("start_dashboard.cmd", build_script)
         self.assertIn("VRCForge-NOTICE.txt", build_script)
         self.assertIn("build_unitypackage.ps1", build_script)
         self.assertIn("PayloadDownloadUrl is required", build_script)
@@ -455,6 +460,34 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Third-party license gate passed", general_gate)
         self.assertIn("Copyright \\(c\\) 2025 CoplayDev", license_gate)
         self.assertIn("VRCFORGE_DISTRIBUTION_NOTES.txt", license_gate)
+
+    def test_uv_runtime_license_gate_and_launcher_bootstrap_are_present(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        uv_root = repo_root / "third_party" / "uv-runtime"
+        manifest_text = (repo_root / "packaging" / "THIRD_PARTY_LICENSES.json").read_text(encoding="utf-8")
+        general_gate = (repo_root / "packaging" / "check_third_party_licenses.ps1").read_text(encoding="utf-8")
+        runtime_manager = (repo_root / "launcher" / "VRCForge.Launcher" / "RuntimeDependencyManager.cs").read_text(encoding="utf-8")
+        backend_process = (repo_root / "launcher" / "VRCForge.Launcher" / "BackendProcess.cs").read_text(encoding="utf-8")
+        main_form = (repo_root / "launcher" / "VRCForge.Launcher" / "MainForm.cs").read_text(encoding="utf-8")
+        start_cmd = (repo_root / "start_dashboard.cmd").read_text(encoding="utf-8")
+
+        self.assertIn("MIT License", (uv_root / "LICENSE-MIT").read_text(encoding="utf-8"))
+        self.assertIn("Apache License", (uv_root / "LICENSE-APACHE").read_text(encoding="utf-8"))
+        self.assertIn("uv Windows runtime", manifest_text)
+        self.assertIn("requiredLicenseFiles", manifest_text)
+        self.assertIn("Assert-LicenseFile", general_gate)
+        self.assertIn("uv-x86_64-pc-windows-msvc.zip", runtime_manager)
+        self.assertIn("mcpforunityserver", runtime_manager)
+        self.assertIn("BundledUvxExe", runtime_manager)
+        self.assertIn("UV_PYTHON_INSTALL_DIR", backend_process)
+        self.assertIn("StartViaCmdFallback", backend_process)
+        self.assertIn("Dashboard HTTP page is reachable", backend_process)
+        self.assertIn("start_dashboard.cmd fallback", main_form)
+        self.assertIn("启动 Dashboard", main_form)
+        self.assertNotIn("安装 / 更新 Unity 插件", main_form)
+        self.assertNotIn("外部 Agent 接入 / 打开 Dashboard", main_form)
+        self.assertIn("backend\\vrcforge_backend.exe", start_cmd)
+        self.assertIn("VRCFORGE_DASHBOARD_DIR", start_cmd)
 
     def test_unity_install_script_uses_project_backups_and_local_mcp(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "tools" / "install-unity-project.ps1").read_text(encoding="utf-8-sig")

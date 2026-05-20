@@ -9,6 +9,7 @@ internal sealed class MainForm : Form
 {
     private readonly LauncherPaths paths = new();
     private readonly UnityProjectInstaller installer;
+    private readonly RuntimeDependencyManager runtimeDependencies;
     private readonly TableLayoutPanel rootLayout = new();
     private readonly TabControl wizard = new();
     private readonly ComboBox projectPicker = new();
@@ -28,6 +29,7 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         installer = new UnityProjectInstaller(paths);
+        runtimeDependencies = new RuntimeDependencyManager(paths);
 
         Text = "VRCForge x64 Launcher";
         Width = 1180;
@@ -104,7 +106,7 @@ internal sealed class MainForm : Form
         panel.Controls.Add(projectPicker);
         projectPathBox.Width = 900;
         panel.Controls.Add(projectPathBox);
-        panel.Controls.Add(Button("Refresh VCC / Unity Hub Projects", LoadProjectChoices));
+        panel.Controls.Add(Button("刷新工程列表", LoadProjectChoices));
         panel.Controls.Add(Button("浏览", () =>
         {
             using FolderBrowserDialog dialog = new() { Description = "选择 Unity project root" };
@@ -128,15 +130,15 @@ internal sealed class MainForm : Form
         FlowLayoutPanel panel = Page("Check");
         panel.Controls.Add(Header("插件检查"));
         panel.Controls.Add(TextBlock("如果检测到旧 Assets/VRCAutoRig，默认迁移到项目根目录 .vrcforge/backups 后再安装新 Assets/VRCForge。"));
-        panel.Controls.Add(Button("安装 / 更新 Unity 插件", () => wizard.SelectedIndex = 3));
-        panel.Controls.Add(Button("继续启动 Backend", () => wizard.SelectedIndex = 5));
-        panel.Controls.Add(Button("卸载 Unity 侧插件", () =>
+        panel.Controls.Add(Button("安装 Unity 插件", () => wizard.SelectedIndex = 3));
+        panel.Controls.Add(Button("启动 Dashboard", () => wizard.SelectedIndex = 5));
+        panel.Controls.Add(Button("卸载当前工程 Unity 插件", () =>
         {
             InstallResult result = installer.Uninstall(selectedProjectPath);
             statusBox.Text = $"{result.Message}\r\n{result.Detail}";
         }));
-        panel.Controls.Add(Button("打开安装包卸载程序", OpenProgramUninstall));
-        panel.Controls.Add(Button("返回选择工程", () => wizard.SelectedIndex = 1));
+        panel.Controls.Add(Button("卸载 VRCForge 程序", OpenProgramUninstall));
+        panel.Controls.Add(Button("重新选择工程", () => wizard.SelectedIndex = 1));
     }
 
     private void BuildInstallPage()
@@ -144,7 +146,7 @@ internal sealed class MainForm : Form
         FlowLayoutPanel panel = Page("Install");
         panel.Controls.Add(Header("安装 Unity 插件"));
         panel.Controls.Add(TextBlock("安装会备份 Assets/VRCForge、Packages/manifest.json，并复制本地 CoplayDev Unity MCP package。manifest 写入失败会恢复备份并停止。"));
-        panel.Controls.Add(Button("开始自动安装", () =>
+        panel.Controls.Add(Button("开始安装 Unity 插件", () =>
         {
             InstallResult result = installer.InstallOrUpdate(selectedProjectPath);
             statusBox.Text = $"{result.Message}\r\n{result.Detail}";
@@ -182,47 +184,98 @@ internal sealed class MainForm : Form
         FlowLayoutPanel panel = Page("Backend");
         panel.Controls.Add(Header("启动 Backend"));
         panel.Controls.Add(TextBlock("Backend 日志写入 logs/backend.log。Launcher 关闭时会终止 backend 进程。"));
-        panel.Controls.Add(Button("启动 Backend 并等待健康检查", async () =>
+        panel.Controls.Add(Button("启动 Dashboard", async () =>
         {
+            RuntimeDependencyResult runtimeResult = new(
+                false,
+                "Unity MCP runtime check was not completed.",
+                $"Runtime logs: {paths.RuntimeDependencyLogPath.FullName}");
             try
             {
+                statusBox.Text = "正在检查 Unity MCP 运行时依赖...";
+                try
+                {
+                    runtimeResult = await runtimeDependencies.EnsureUnityMcpRuntimeAsync(
+                        new Progress<string>(message => statusBox.Text = message),
+                        CancellationToken.None);
+                }
+                catch (Exception runtimeEx)
+                {
+                    runtimeResult = new RuntimeDependencyResult(
+                        false,
+                        "Unity MCP 运行时准备失败，Dashboard 仍会继续启动。",
+                        $"{runtimeEx.Message}\r\nRuntime logs: {paths.RuntimeDependencyLogPath.FullName}");
+                }
+                statusBox.Text = $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n正在启动 VRCForge backend...";
+
                 backend?.Dispose();
                 backend = new BackendProcess(paths);
                 backend.Start(selectedProjectPath);
-                JsonDocument health = await backend.WaitForHealthAsync(selectedProjectPath, CancellationToken.None);
+                JsonDocument health = await backend.WaitForHealthAsync(
+                    selectedProjectPath,
+                    new Progress<string>(message => statusBox.Text = $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n{message}"),
+                    CancellationToken.None);
                 latestDiagnostics = JsonSerializer.Serialize(health.RootElement, new JsonSerializerOptions { WriteIndented = true });
-                statusBox.Text = FormatHealth(health.RootElement);
-                wizard.SelectedIndex = 6;
+                statusBox.Text = $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n{FormatHealth(health.RootElement)}";
+                await OpenDashboardAsync();
             }
             catch (Exception ex)
             {
-                statusBox.Text = $"Backend startup failed: {ex.Message}\r\nLogs: {paths.BackendLogPath.FullName}";
-                wizard.SelectedIndex = 6;
+                await StartDashboardWithCmdFallbackAsync(runtimeResult, ex);
             }
         }));
+    }
+
+    private async Task StartDashboardWithCmdFallbackAsync(RuntimeDependencyResult runtimeResult, Exception primaryException)
+    {
+        statusBox.Text =
+            $"Packaged backend startup failed, trying start_dashboard.cmd fallback...\r\n" +
+            $"Primary error: {primaryException.Message}\r\n" +
+            $"Backend logs: {paths.BackendLogPath.FullName}\r\n" +
+            $"Runtime logs: {paths.RuntimeDependencyLogPath.FullName}";
+
+        try
+        {
+            backend?.Dispose();
+            backend = new BackendProcess(paths);
+            backend.StartViaCmdFallback(selectedProjectPath);
+            JsonDocument health = await backend.WaitForHealthAsync(
+                selectedProjectPath,
+                new Progress<string>(message => statusBox.Text =
+                    $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n" +
+                    $"Packaged backend failed, using start_dashboard.cmd fallback.\r\n" +
+                    $"Primary error: {primaryException.Message}\r\n\r\n{message}"),
+                CancellationToken.None);
+            latestDiagnostics = JsonSerializer.Serialize(health.RootElement, new JsonSerializerOptions { WriteIndented = true });
+            statusBox.Text =
+                $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n" +
+                $"Packaged backend failed, but start_dashboard.cmd fallback is running.\r\n" +
+                $"Primary error: {primaryException.Message}\r\n\r\n" +
+                $"{FormatHealth(health.RootElement)}";
+            await OpenDashboardAsync();
+        }
+        catch (Exception fallbackException)
+        {
+            statusBox.Text =
+                $"Dashboard startup failed.\r\n\r\n" +
+                $"Packaged backend error: {primaryException.Message}\r\n\r\n" +
+                $"start_dashboard.cmd fallback error: {fallbackException.Message}\r\n\r\n" +
+                $"Backend logs: {paths.BackendLogPath.FullName}\r\n" +
+                $"Runtime logs: {paths.RuntimeDependencyLogPath.FullName}\r\n" +
+                $"Fallback command: {paths.StartDashboardCmdPath.FullName}";
+            wizard.SelectedIndex = 6;
+        }
     }
 
     private void BuildHealthPage()
     {
         FlowLayoutPanel panel = Page("Health");
         panel.Controls.Add(Header("状态诊断"));
-        panel.Controls.Add(TextBlock("如果有 error，先停在这里；可复制诊断信息或打开 logs。"));
+        panel.Controls.Add(TextBlock("这里显示诊断信息。Dashboard 启动不再因为 Unity MCP、Provider 或工程诊断 warning/error 被阻塞。"));
         panel.Controls.Add(Button("复制诊断信息", () => Clipboard.SetText(latestDiagnostics)));
         panel.Controls.Add(Button("打开日志目录", () => OpenFolder(paths.LogsDir.FullName)));
-        panel.Controls.Add(Button("外部 Agent 接入 / 打开 Dashboard", () =>
-        {
-            if (!string.IsNullOrWhiteSpace(latestDiagnostics))
-            {
-                using JsonDocument diagnostics = JsonDocument.Parse(latestDiagnostics);
-                if (diagnostics.RootElement.TryGetProperty("ok", out JsonElement ok) && !ok.GetBoolean())
-                {
-                    statusBox.Text += "\r\nHealth diagnostics contain errors. Dashboard startup is paused until they are fixed.";
-                    return;
-                }
-            }
-
-            wizard.SelectedIndex = 7;
-        }));
+        panel.Controls.Add(Button("打开外部 Agent 接入页", () => wizard.SelectedIndex = 7));
+        panel.Controls.Add(Button("打开 Dashboard", async () => await OpenDashboardAsync()));
     }
 
     private void BuildAgentPage()
@@ -253,23 +306,7 @@ internal sealed class MainForm : Form
         panel.Controls.Add(Button("批准当前 Approval", async () => await PostAgentApprovalAsync("approve")));
         panel.Controls.Add(Button("拒绝当前 Approval", async () => await PostAgentApprovalAsync("reject")));
         panel.Controls.Add(Button("打开日志目录", () => OpenFolder(paths.LogsDir.FullName)));
-        panel.Controls.Add(Button("打开 Dashboard", async () =>
-        {
-            wizard.SelectedIndex = 8;
-            if (backend is not null)
-            {
-                try
-                {
-                    await dashboardWebView.EnsureCoreWebView2Async();
-                    dashboardWebView.Source = backend.DashboardUri;
-                }
-                catch (Exception ex)
-                {
-                    statusBox.Text = $"WebView2 failed to start: {ex.Message}";
-                }
-            }
-        }));
-        panel.Controls.Add(Button("打开 Dashboard（优先 WebView）", async () => await OpenDashboardAsync()));
+        panel.Controls.Add(Button("在内置窗口打开 Dashboard", async () => await OpenDashboardAsync()));
         panel.Controls.Add(Button("用外部浏览器打开 Dashboard", OpenExternalDashboard));
     }
     private void BuildDashboardPage()
@@ -739,7 +776,22 @@ internal sealed class MainForm : Form
             Height = 42,
             Margin = new Padding(0, 8, 0, 8),
         };
-        button.Click += async (_, _) => await action();
+        button.Click += async (_, _) =>
+        {
+            button.Enabled = false;
+            try
+            {
+                await action();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "VRCForge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                button.Enabled = true;
+            }
+        };
         return button;
     }
 

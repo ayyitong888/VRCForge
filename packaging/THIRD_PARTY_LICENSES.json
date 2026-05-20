@@ -13,6 +13,35 @@
       "requiredDistributionNotes": "VRCFORGE_DISTRIBUTION_NOTES.txt",
       "releaseLicenseFile": "licenses/CoplayDev-Unity-MCP-LICENSE.txt",
       "releaseDistributionNotes": "licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt"
+    },
+    {
+      "name": "uv Windows runtime",
+      "path": "third_party/uv-runtime",
+      "license": "MIT OR Apache-2.0",
+      "requiredLicenseFiles": [
+        {
+          "file": "LICENSE-MIT",
+          "requiredText": [
+            "MIT License",
+            "Copyright (c) 2025 Astral Software Inc.",
+            "The above copyright notice and this permission notice shall be included in all"
+          ]
+        },
+        {
+          "file": "LICENSE-APACHE",
+          "requiredText": [
+            "Apache License",
+            "Version 2.0, January 2004",
+            "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
+          ]
+        }
+      ],
+      "requiredDistributionNotes": "VRCFORGE_DISTRIBUTION_NOTES.txt",
+      "releaseLicenseFiles": [
+        "licenses/uv-LICENSE-MIT.txt",
+        "licenses/uv-LICENSE-APACHE-2.0.txt"
+      ],
+      "releaseDistributionNotes": "licenses/uv-DISTRIBUTION-NOTES.txt"
     }
   ]
 }
