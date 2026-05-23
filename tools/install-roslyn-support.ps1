@@ -14,6 +14,7 @@ $resolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $targetFolder = Join-Path $resolvedProjectPath "Assets\Plugins\Roslyn"
 $projectBackupFolder = Join-Path $resolvedProjectPath ".vrcforge\backups"
 $cscRspPath = Join-Path $resolvedProjectPath "Assets\csc.rsp"
+$projectSettingsPath = Join-Path $resolvedProjectPath "ProjectSettings\ProjectSettings.asset"
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge-roslyn-" + [System.Guid]::NewGuid().ToString("N"))
 
 $requiredDlls = @(
@@ -105,6 +106,62 @@ function Enable-RoslynScriptingDefine {
     Add-Content -LiteralPath $cscRspPath -Value $line -Encoding UTF8
 }
 
+function Add-DefineSymbol {
+    param(
+        [string]$Value
+    )
+
+    $parts = @($Value -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($parts -contains "VRCFORGE_ENABLE_ROSLYN") {
+        return ($parts -join ';')
+    }
+
+    $parts += "VRCFORGE_ENABLE_ROSLYN"
+    return ($parts -join ';')
+}
+
+function Enable-RoslynProjectSettingsDefine {
+    if ($SkipEnableDefine -or -not (Test-Path -LiteralPath $projectSettingsPath)) {
+        return
+    }
+
+    $lines = @(Get-Content -LiteralPath $projectSettingsPath -Encoding UTF8)
+    $updated = New-Object System.Collections.Generic.List[string]
+    $inDefineBlock = $false
+    $changed = $false
+
+    foreach ($line in $lines) {
+        if ($line -match '^  scriptingDefineSymbols:\s*$') {
+            $inDefineBlock = $true
+            $updated.Add($line)
+            continue
+        }
+
+        if ($inDefineBlock -and $line -match '^  [A-Za-z0-9]') {
+            $inDefineBlock = $false
+        }
+
+        if ($inDefineBlock -and $line -match '^    ([^:]+):\s*(.*)$') {
+            $platform = $Matches[1]
+            $value = $Matches[2]
+            $newValue = Add-DefineSymbol -Value $value
+            if ($newValue -ne $value) {
+                $line = "    ${platform}: $newValue"
+                $changed = $true
+            }
+        }
+
+        $updated.Add($line)
+    }
+
+    if ($changed) {
+        New-Item -ItemType Directory -Force -Path $projectBackupFolder | Out-Null
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        Copy-Item -LiteralPath $projectSettingsPath -Destination (Join-Path $projectBackupFolder "ProjectSettings_$timestamp.asset") -Force
+        Set-Content -LiteralPath $projectSettingsPath -Value $updated -Encoding UTF8
+    }
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $resolvedProjectPath "Assets"))) {
     throw "Target Unity project is missing Assets/: $resolvedProjectPath"
 }
@@ -140,12 +197,13 @@ if ($missing.Count -gt 0) {
 }
 
 Enable-RoslynScriptingDefine
+Enable-RoslynProjectSettingsDefine
 
 Write-Host "Installed Roslyn Advanced Power Mode DLLs into: $targetFolder"
 if ($SkipEnableDefine) {
     Write-Host "Skipped automatic VRCFORGE_ENABLE_ROSLYN define update. Enable it manually before using vrc_execute_roslyn."
 } else {
-    Write-Host "Enabled VRCFORGE_ENABLE_ROSLYN through Assets\csc.rsp. Unity must recompile before vrc_execute_roslyn appears."
+    Write-Host "Enabled VRCFORGE_ENABLE_ROSLYN through Assets\csc.rsp and ProjectSettings scriptingDefineSymbols. Unity must recompile before vrc_execute_roslyn appears."
 }
 Write-Host "Every call must pass confirmAdvancedPowerMode=true and approve the Unity warning dialog before code executes."
 Write-Host "No global USE_ROSLYN define is used; VRCForge only enables this advanced mode through VRCFORGE_ENABLE_ROSLYN."

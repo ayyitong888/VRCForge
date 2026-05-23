@@ -382,14 +382,13 @@ class DashboardServerTests(unittest.TestCase):
         source = (editor_dir / "RoslynExecutor.cs").read_text(encoding="utf-8")
         bootstrap = (editor_dir / "RoslynSupportBootstrap.cs").read_text(encoding="utf-8")
 
-        self.assertIn("#if VRCFORGE_ENABLE_ROSLYN", source)
-        self.assertIn("#if VRCFORGE_ENABLE_ROSLYN", bootstrap)
+        self.assertNotIn("#if VRCFORGE_ENABLE_ROSLYN", source)
+        self.assertNotIn("#if VRCFORGE_ENABLE_ROSLYN", bootstrap)
         self.assertIn('name: "vrc_execute_roslyn"', source)
         self.assertIn("Advanced Power Mode", source)
         self.assertIn("confirmAdvancedPowerMode", source)
         self.assertIn("EditorUtility.DisplayDialog", source)
         self.assertIn('"VRCForge Advanced Power Mode"', source)
-        self.assertIn("VRCFORGE_ENABLE_ROSLYN", bootstrap)
         self.assertIn("AssemblyResolve", source)
         self.assertIn("Assets/Plugins/Roslyn", bootstrap)
 
@@ -398,6 +397,8 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertIn("VRCFORGE_ENABLE_ROSLYN", installer)
         self.assertIn("Assets\\csc.rsp", installer)
+        self.assertIn("ProjectSettings\\ProjectSettings.asset", installer)
+        self.assertIn("scriptingDefineSymbols", installer)
         self.assertIn("System.Memory.dll", installer)
         self.assertIn("System.Runtime.CompilerServices.Unsafe.dll", installer)
 

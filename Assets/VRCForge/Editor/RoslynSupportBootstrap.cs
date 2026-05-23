@@ -1,4 +1,3 @@
-#if VRCFORGE_ENABLE_ROSLYN
 using System;
 using System.IO;
 using System.Linq;
@@ -56,4 +55,3 @@ namespace VRCForge.Editor
         }
     }
 }
-#endif
