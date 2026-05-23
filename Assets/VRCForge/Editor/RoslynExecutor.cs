@@ -89,6 +89,12 @@ namespace VRCForge.Editor
     {
         public const string ToolName = "vrc_execute_roslyn";
         private static readonly TimeSpan ExecutionTimeout = TimeSpan.FromSeconds(2);
+        private static readonly string RoslynPluginFolder = Path.Combine(Application.dataPath, "Plugins", "Roslyn");
+
+        static RoslynExecutor()
+        {
+            AppDomain.CurrentDomain.AssemblyResolve += ResolveRoslynDependency;
+        }
 
         public class Parameters
         {
@@ -376,7 +382,7 @@ namespace VRCForge.Editor
                 // Try loading from the conventional project plugin folder below.
             }
 
-            var dllPath = Path.Combine(Application.dataPath, "Plugins", "Roslyn", $"{assemblyName}.dll");
+            var dllPath = Path.Combine(RoslynPluginFolder, $"{assemblyName}.dll");
             if (File.Exists(dllPath))
             {
                 var assembly = Assembly.LoadFrom(dllPath);
@@ -388,6 +394,33 @@ namespace VRCForge.Editor
             }
 
             throw new InvalidOperationException($"Could not load Roslyn type '{fullName}'.");
+        }
+
+        private static Assembly ResolveRoslynDependency(object sender, ResolveEventArgs args)
+        {
+            try
+            {
+                var requestedName = new AssemblyName(args.Name).Name;
+                if (string.IsNullOrWhiteSpace(requestedName))
+                {
+                    return null;
+                }
+
+                foreach (var loaded in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (string.Equals(loaded.GetName().Name, requestedName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return loaded;
+                    }
+                }
+
+                var dllPath = Path.Combine(RoslynPluginFolder, $"{requestedName}.dll");
+                return File.Exists(dllPath) ? Assembly.LoadFrom(dllPath) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static bool IsCompilationErrorException(Exception ex)

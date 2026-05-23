@@ -18,6 +18,8 @@ namespace VRCForge.Editor
         private const string PlayModeRecommendedMessage = "建议进入 Play Mode 并启动 Gesture Manager 后再截图；当前将使用 Scene View 截图 / Play Mode with Gesture Manager is recommended; current capture will use Scene View.";
         private const string PlayModeRequiredMessage = "请进入 Play Mode 并启动 Gesture Manager 后再截图 / Please enter Play Mode with Gesture Manager before capturing";
         private const string GestureManagerRecommendedMessage = "建议安装 Gesture Manager 以获得准确效果 / Gesture Manager recommended for accurate preview";
+        private const string GameCameraRenderMessage = "Play Mode capture renders the active Game camera directly to avoid Gesture Manager menu overlays.";
+        private const string ScreenCaptureFallbackMessage = "No active non-overlay Game camera was found; falling back to Game View screen capture. Close Gesture Manager menus if they cover the avatar.";
 
         public static object HandleCommand(JObject @params)
         {
@@ -45,6 +47,7 @@ namespace VRCForge.Editor
                 var captureMode = isPlayMode ? "game_view" : "scene_view";
                 var warnings = new List<string>();
                 var gestureManagerDetected = isPlayMode && IsGestureManagerRunning();
+                var activeGameCamera = isPlayMode ? ResolveActiveGameCamera() : null;
                 var gameViewCaptureMethod = string.Empty;
 
                 if (!isPlayMode)
@@ -68,6 +71,8 @@ namespace VRCForge.Editor
                             requirePlayMode,
                             canCapture = !requirePlayMode || isPlayMode,
                             gestureManagerDetected,
+                            activeGameCameraDetected = activeGameCamera != null,
+                            activeGameCameraName = activeGameCamera != null ? activeGameCamera.name : string.Empty,
                             warnings = warnings.ToArray(),
                             error = requirePlayMode && !isPlayMode ? PlayModeRequiredMessage : string.Empty
                         });
@@ -114,6 +119,8 @@ namespace VRCForge.Editor
                             captureMode,
                             isPlayMode,
                             gestureManagerDetected,
+                            activeGameCameraDetected = activeGameCamera != null,
+                            activeGameCameraName = activeGameCamera != null ? activeGameCamera.name : string.Empty,
                             gameViewCaptureMethod,
                             warnings = warnings.ToArray(),
                             targetCenter = new { x = 0f, y = 0f, z = 0f },
@@ -215,6 +222,15 @@ namespace VRCForge.Editor
         private static string CaptureGameViewToPng(string absolutePath, int width, int height, List<string> warnings)
         {
             EditorApplication.QueuePlayerLoopUpdate();
+            var camera = ResolveActiveGameCamera();
+            if (camera != null)
+            {
+                warnings.Add(GameCameraRenderMessage);
+                CaptureCameraToPng(camera, absolutePath, width, height);
+                return "active_game_camera";
+            }
+
+            warnings.Add(ScreenCaptureFallbackMessage);
             var source = ScreenCapture.CaptureScreenshotAsTexture();
             if (source != null)
             {
@@ -237,15 +253,7 @@ namespace VRCForge.Editor
                 }
             }
 
-            warnings.Add("Game View screen capture texture was not available; falling back to the active Game camera render.");
-            var camera = ResolveActiveGameCamera();
-            if (camera == null)
-            {
-                throw new InvalidOperationException("Game View screenshot texture was not available, and no active Game camera was found.");
-            }
-
-            CaptureCameraToPng(camera, absolutePath, width, height);
-            return "active_game_camera_fallback";
+            throw new InvalidOperationException("Game View screen capture texture was not available, and no active Game camera was found.");
         }
 
         private static Texture2D CenterCropAndResizeTexture(Texture2D source, int width, int height)
@@ -315,15 +323,26 @@ namespace VRCForge.Editor
 
         private static Camera ResolveActiveGameCamera()
         {
-            if (Camera.main != null && Camera.main.isActiveAndEnabled)
+            if (Camera.main != null && Camera.main.isActiveAndEnabled && !IsLikelyOverlayCamera(Camera.main))
             {
                 return Camera.main;
             }
 
             Camera bestCamera = null;
+            Camera fallbackCamera = null;
             foreach (var camera in Camera.allCameras)
             {
                 if (camera == null || !camera.isActiveAndEnabled || !camera.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                if (fallbackCamera == null || camera.depth >= fallbackCamera.depth)
+                {
+                    fallbackCamera = camera;
+                }
+
+                if (IsLikelyOverlayCamera(camera))
                 {
                     continue;
                 }
@@ -334,7 +353,28 @@ namespace VRCForge.Editor
                 }
             }
 
-            return bestCamera;
+            return bestCamera ?? fallbackCamera;
+        }
+
+        private static bool IsLikelyOverlayCamera(Camera camera)
+        {
+            if (camera == null || camera.gameObject == null)
+            {
+                return true;
+            }
+
+            var uiLayer = LayerMask.NameToLayer("UI");
+            if (uiLayer >= 0)
+            {
+                var uiMask = 1 << uiLayer;
+                if ((camera.cullingMask & ~uiMask) == 0)
+                {
+                    return true;
+                }
+            }
+
+            var text = $"{camera.name} {camera.gameObject.name} {LayerMask.LayerToName(camera.gameObject.layer)}".ToLowerInvariant();
+            return ContainsAny(text, "gesture", "menu", "overlay", "canvas", "ui");
         }
 
         private static void TryShowGameView()
@@ -614,7 +654,7 @@ namespace VRCForge.Editor
                 return false;
             }
 
-            return ContainsAny(text, "face", "head", "body", "atama", "顔");
+            return ContainsAny(text, "face", "head", "body", "atama", "顔", "頭", "头");
         }
 
         private static bool ContainsAny(string text, params string[] terms)

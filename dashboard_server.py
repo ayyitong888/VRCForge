@@ -388,6 +388,11 @@ class AgentSessionRequest(BaseModel):
     agent_name: str = "external-agent"
 
 
+class AgentPermissionRequest(BaseModel):
+    execution_mode: str = Field(default="approval")
+    acknowledge_roslyn_risk: bool = Field(default=False)
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -617,6 +622,48 @@ def read_health() -> dict[str, Any]:
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
+
+
+@app.get("/api/app/bootstrap")
+def read_agentic_app_bootstrap() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "app": {
+            "name": "VRCForge",
+            "surface": "tauri-agentic-desktop",
+            "browserRequired": False,
+            "legacyDashboardDebugOnly": True,
+        },
+        "health": build_agentic_app_health(),
+        "agentManifest": AGENT_GATEWAY.build_manifest(),
+        "agentHealth": AGENT_GATEWAY.build_health(),
+        "permission": AGENT_GATEWAY.permission_state(),
+        "approvals": AGENT_GATEWAY.list_approvals(include_expired=False),
+    }
+
+
+@app.get("/api/app/permission")
+def read_agentic_app_permission() -> dict[str, Any]:
+    return {"ok": True, "permission": AGENT_GATEWAY.permission_state()}
+
+
+@app.post("/api/app/permission")
+async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.update_permission_state(
+            request.execution_mode,
+            acknowledge_roslyn_risk=request.acknowledge_roslyn_risk,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentPermission", payload["permission"])
+    return payload
+
+
+def build_agentic_app_health() -> dict[str, Any]:
+    payload = copy.deepcopy(read_health())
+    payload.pop("apiConfig", None)
+    return payload
 
 
 @app.get("/api/agent/manifest")
@@ -5428,8 +5475,8 @@ def load_initial_dashboard_state() -> DashboardState:
     raw = json.loads(settings_path.read_text(encoding="utf-8-sig")) if settings_path.exists() else {}
     dashboard_settings = raw.get("dashboard") or {}
 
-    project_roots = [Path(path) for path in dashboard_settings.get("project_roots", ["E:/unity/Projects"])]
-    unity_editor_path = str(dashboard_settings.get("unity_editor_path", "E:/unity/Unity 2022.3.22f1/Editor/Unity.exe")).strip()
+    project_roots = [Path(path) for path in dashboard_settings.get("project_roots", [])]
+    unity_editor_path = str(dashboard_settings.get("unity_editor_path", "")).strip()
     status_push_interval_seconds = float(dashboard_settings.get("status_push_interval_seconds", 2.5))
 
     return DashboardState(
@@ -5551,7 +5598,8 @@ def request_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
     if not params.get("code"):
         raise RuntimeError("code is required for Roslyn Advanced Power Mode.")
     arguments = dict(params)
-    arguments["confirmAdvancedPowerMode"] = bool(arguments.get("confirmAdvancedPowerMode"))
+    if arguments.get("confirmAdvancedPowerMode") is not True:
+        raise RuntimeError("confirmAdvancedPowerMode=true is required for Roslyn Advanced Power Mode requests.")
     return AGENT_GATEWAY.create_apply_request(
         {
             "target_tool": "vrcforge_roslyn_advanced",

@@ -10,6 +10,7 @@ namespace VRCForge.Editor
     [InitializeOnLoad]
     internal static class RoslynSupportBootstrap
     {
+        private const string RoslynPluginPathHint = "Assets/Plugins/Roslyn";
         private static readonly string[] RequiredDlls =
         {
             "Microsoft.CodeAnalysis.dll",
@@ -17,7 +18,11 @@ namespace VRCForge.Editor
             "Microsoft.CodeAnalysis.Scripting.dll",
             "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
             "System.Collections.Immutable.dll",
-            "System.Reflection.Metadata.dll"
+            "System.Reflection.Metadata.dll",
+            "System.Memory.dll",
+            "System.Runtime.CompilerServices.Unsafe.dll",
+            "System.Buffers.dll",
+            "System.Threading.Tasks.Extensions.dll"
         };
 
         static RoslynSupportBootstrap()
@@ -32,7 +37,7 @@ namespace VRCForge.Editor
                 if (!RoslynDllsInstalled())
                 {
                     UnityEngine.Debug.LogWarning(
-                        "[VRCForge] Roslyn Advanced Power Mode DLLs were not found. vrc_execute_roslyn will report an install hint if called.");
+                        $"[VRCForge] Roslyn Advanced Power Mode DLLs were not found under {RoslynPluginPathHint}. vrc_execute_roslyn will report an install hint if called.");
                     return;
                 }
 

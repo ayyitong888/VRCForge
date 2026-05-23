@@ -3,7 +3,8 @@ param(
     [string]$ProjectPath,
     [string]$CodeAnalysisVersion = "4.12.0",
     [string]$SystemPackageVersion = "8.0.0",
-    [string]$SourceRoslynPath
+    [string]$SourceRoslynPath,
+    [switch]$SkipEnableDefine
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,8 @@ $ErrorActionPreference = "Stop"
 
 $resolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $targetFolder = Join-Path $resolvedProjectPath "Assets\Plugins\Roslyn"
+$projectBackupFolder = Join-Path $resolvedProjectPath ".vrcforge\backups"
+$cscRspPath = Join-Path $resolvedProjectPath "Assets\csc.rsp"
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge-roslyn-" + [System.Guid]::NewGuid().ToString("N"))
 
 $requiredDlls = @(
@@ -19,7 +22,11 @@ $requiredDlls = @(
     "Microsoft.CodeAnalysis.Scripting.dll",
     "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
     "System.Collections.Immutable.dll",
-    "System.Reflection.Metadata.dll"
+    "System.Reflection.Metadata.dll",
+    "System.Memory.dll",
+    "System.Runtime.CompilerServices.Unsafe.dll",
+    "System.Buffers.dll",
+    "System.Threading.Tasks.Extensions.dll"
 )
 
 function Copy-RequiredDllsFromFolder {
@@ -72,6 +79,32 @@ function Install-NuGetDll {
     Copy-Item -LiteralPath $sourceDll -Destination (Join-Path $targetFolder $DllName) -Force
 }
 
+function Enable-RoslynScriptingDefine {
+    if ($SkipEnableDefine) {
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $projectBackupFolder | Out-Null
+    $existingContent = ""
+    if (Test-Path -LiteralPath $cscRspPath) {
+        $existingContent = Get-Content -LiteralPath $cscRspPath -Raw -Encoding UTF8
+        if ($existingContent -match 'VRCFORGE_ENABLE_ROSLYN') {
+            return
+        }
+
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        Copy-Item -LiteralPath $cscRspPath -Destination (Join-Path $projectBackupFolder "csc_rsp_$timestamp.rsp") -Force
+    }
+
+    $line = "-define:VRCFORGE_ENABLE_ROSLYN"
+    if ([string]::IsNullOrWhiteSpace($existingContent)) {
+        Set-Content -LiteralPath $cscRspPath -Value $line -Encoding UTF8
+        return
+    }
+
+    Add-Content -LiteralPath $cscRspPath -Value $line -Encoding UTF8
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $resolvedProjectPath "Assets"))) {
     throw "Target Unity project is missing Assets/: $resolvedProjectPath"
 }
@@ -90,6 +123,10 @@ try {
         Install-NuGetDll -PackageName "Microsoft.CodeAnalysis.CSharp.Scripting" -Version $CodeAnalysisVersion -DllName "Microsoft.CodeAnalysis.CSharp.Scripting.dll"
         Install-NuGetDll -PackageName "System.Collections.Immutable" -Version $SystemPackageVersion -DllName "System.Collections.Immutable.dll"
         Install-NuGetDll -PackageName "System.Reflection.Metadata" -Version $SystemPackageVersion -DllName "System.Reflection.Metadata.dll"
+        Install-NuGetDll -PackageName "System.Memory" -Version "4.5.5" -DllName "System.Memory.dll"
+        Install-NuGetDll -PackageName "System.Runtime.CompilerServices.Unsafe" -Version "6.0.0" -DllName "System.Runtime.CompilerServices.Unsafe.dll"
+        Install-NuGetDll -PackageName "System.Buffers" -Version "4.5.1" -DllName "System.Buffers.dll"
+        Install-NuGetDll -PackageName "System.Threading.Tasks.Extensions" -Version "4.5.4" -DllName "System.Threading.Tasks.Extensions.dll"
     }
 } finally {
     if (Test-Path -LiteralPath $tempRoot) {
@@ -102,7 +139,13 @@ if ($missing.Count -gt 0) {
     throw "Roslyn installation incomplete. Missing: $($missing -join ', ')"
 }
 
+Enable-RoslynScriptingDefine
+
 Write-Host "Installed Roslyn Advanced Power Mode DLLs into: $targetFolder"
-Write-Host "Enable Unity scripting define symbol VRCFORGE_ENABLE_ROSLYN to compile and register vrc_execute_roslyn."
+if ($SkipEnableDefine) {
+    Write-Host "Skipped automatic VRCFORGE_ENABLE_ROSLYN define update. Enable it manually before using vrc_execute_roslyn."
+} else {
+    Write-Host "Enabled VRCFORGE_ENABLE_ROSLYN through Assets\csc.rsp. Unity must recompile before vrc_execute_roslyn appears."
+}
 Write-Host "Every call must pass confirmAdvancedPowerMode=true and approve the Unity warning dialog before code executes."
 Write-Host "No global USE_ROSLYN define is used; VRCForge only enables this advanced mode through VRCFORGE_ENABLE_ROSLYN."

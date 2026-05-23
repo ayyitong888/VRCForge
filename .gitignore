@@ -12,6 +12,9 @@ pycache/
 artifacts/
 build/
 dist/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
 config.json
 agent_gateway.json
 docs/

@@ -148,6 +148,48 @@ class DashboardServerTests(unittest.TestCase):
             blocked_mcp = client.post("/mcp", json={})
             self.assertEqual(blocked_mcp.status_code, 401)
 
+    def test_agentic_app_bootstrap_is_local_desktop_surface(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.get("/api/app/bootstrap")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["app"]["surface"], "tauri-agentic-desktop")
+        self.assertFalse(payload["app"]["browserRequired"])
+        self.assertEqual(payload["permission"]["executionMode"], "approval")
+        self.assertIn("vrcforge_health", {tool["name"] for tool in payload["agentManifest"]["tools"]})
+        serialized = json.dumps(payload).lower()
+        self.assertNotIn("approval_token", serialized)
+        self.assertNotIn("api_key", serialized)
+
+    def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            blocked = client.post("/api/app/permission", json={"execution_mode": "roslyn_full_auto"})
+            self.assertEqual(blocked.status_code, 409)
+
+            enabled = client.post(
+                "/api/app/permission",
+                json={
+                    "execution_mode": "roslyn_full_auto",
+                    "acknowledge_roslyn_risk": True,
+                },
+            )
+            self.assertEqual(enabled.status_code, 200)
+            permission = enabled.json()["permission"]
+            self.assertEqual(permission["executionMode"], "roslyn_full_auto")
+            self.assertTrue(permission["roslynRiskAcknowledged"])
+
+            approval = client.post("/api/app/permission", json={"execution_mode": "approval"})
+            self.assertEqual(approval.status_code, 200)
+            self.assertEqual(approval.json()["permission"]["executionMode"], "approval")
+            self.assertTrue(approval.json()["permission"]["roslynRiskAcknowledged"])
+
+            restored = client.post("/api/app/permission", json={"execution_mode": "roslyn_full_auto"})
+            self.assertEqual(restored.status_code, 200)
+            self.assertEqual(restored.json()["permission"]["executionMode"], "roslyn_full_auto")
+            self.assertTrue(restored.json()["permission"]["roslynRiskAcknowledged"])
+
     def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
@@ -232,6 +274,45 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("api_key", json.dumps(payload).lower())
         self.assertNotIn("approval_token", json.dumps(payload).lower())
 
+    def test_roslyn_advanced_skill_requires_full_auto_env_and_confirmation(self) -> None:
+        with patch.dict(os.environ, {"VRCFORGE_ENABLE_ROSLYN": "1"}):
+            config = dashboard_server.AGENT_GATEWAY.ensure_config()
+            config.enabled = True
+            dashboard_server.AGENT_GATEWAY.save_config(config)
+            dashboard_server.AGENT_GATEWAY.update_permission_state("roslyn_full_auto", acknowledge_roslyn_risk=True)
+            headers = {"Authorization": f"Bearer {config.token}"}
+
+            with TestClient(dashboard_server.app) as client:
+                payload = client.get("/api/agent/manifest", headers=headers).json()
+                tool_names = {tool["name"] for tool in payload["tools"]}
+                self.assertIn("vrcforge_request_roslyn_advanced", tool_names)
+                self.assertIn("vrcforge_roslyn_advanced", {item["name"] for item in payload["writeTargets"]})
+
+                missing_confirm = client.post(
+                    "/api/agent/tool/vrcforge_request_roslyn_advanced",
+                    headers=headers,
+                    json={"agent_name": "codex-test", "params": {"code": "1 + 1"}},
+                )
+                self.assertEqual(missing_confirm.status_code, 200)
+                self.assertFalse(missing_confirm.json()["ok"])
+                self.assertIn("confirmAdvancedPowerMode=true", missing_confirm.json()["error"])
+
+                request = client.post(
+                    "/api/agent/tool/vrcforge_request_roslyn_advanced",
+                    headers=headers,
+                    json={
+                        "agent_name": "codex-test",
+                        "params": {
+                            "code": "1 + 1",
+                            "confirmAdvancedPowerMode": True,
+                        },
+                    },
+                )
+                self.assertEqual(request.status_code, 200)
+                self.assertTrue(request.json()["ok"])
+                approval = request.json()["result"]["approval"]
+                self.assertEqual(approval["targetTool"], "vrcforge_roslyn_advanced")
+
     def test_agent_gateway_mcp_lists_codex_debug_loop_tools(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
@@ -309,6 +390,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorUtility.DisplayDialog", source)
         self.assertIn('"VRCForge Advanced Power Mode"', source)
         self.assertIn("VRCFORGE_ENABLE_ROSLYN", bootstrap)
+        self.assertIn("AssemblyResolve", source)
+        self.assertIn("Assets/Plugins/Roslyn", bootstrap)
+
+        installer = (Path(__file__).resolve().parents[1] / "tools" / "install-roslyn-support.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("VRCFORGE_ENABLE_ROSLYN", installer)
+        self.assertIn("Assets\\csc.rsp", installer)
+        self.assertIn("System.Memory.dll", installer)
+        self.assertIn("System.Runtime.CompilerServices.Unsafe.dll", installer)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -368,6 +459,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("requirePlayMode", source)
         self.assertIn('captureMode = isPlayMode ? "game_view" : "scene_view"', source)
         self.assertIn("ScreenCapture.CaptureScreenshotAsTexture", source)
+        self.assertIn("CaptureCameraToPng(camera, absolutePath, width, height)", source)
+        self.assertIn("active_game_camera", source)
+        self.assertIn("avoid Gesture Manager menu overlays", source)
+        self.assertIn("IsLikelyOverlayCamera", source)
         self.assertIn("IsGestureManagerRunning", source)
         self.assertIn("Gesture Manager recommended for accurate preview", source)
         self.assertIn("Play Mode with Gesture Manager is recommended", source)

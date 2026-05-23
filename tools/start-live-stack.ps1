@@ -1,6 +1,6 @@
 param(
-    [string]$ProjectPath = "E:\unity\Projects\manuka FT2",
-    [string]$UnityEditorPath = "E:\unity\Unity 2022.3.22f1\Editor\Unity.exe",
+    [string]$ProjectPath = "",
+    [string]$UnityEditorPath = "",
     [string]$HostAddress = "127.0.0.1",
     [int]$McpPort = 8080,
     [int]$DashboardPort = 8757,
@@ -21,7 +21,6 @@ $mcpUrl = "http://$HostAddress`:$McpPort"
 function Get-PythonExecutable {
     $candidates = @(
         (Join-Path $repoRoot ".venv\Scripts\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
         (Get-Command "python.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
         (Get-Command "python" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
     ) | Where-Object { $_ }
@@ -169,6 +168,10 @@ function Ensure-Dashboard {
 }
 
 function Ensure-UnityProject {
+    if ([string]::IsNullOrWhiteSpace($ProjectPath)) {
+        throw "ProjectPath is required. Pass -ProjectPath with a Unity project root."
+    }
+
     $projectName = Split-Path -Leaf $ProjectPath
     $existing = Get-UnityInstances | Where-Object { $_.project -eq $projectName } | Select-Object -First 1
     if ($existing) {
@@ -181,7 +184,7 @@ function Ensure-UnityProject {
         return Wait-UnityInstance -ProjectName $projectName -Seconds $UnityWaitSeconds
     }
 
-    if (-not (Test-Path -LiteralPath $UnityEditorPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($UnityEditorPath) -and -not (Test-Path -LiteralPath $UnityEditorPath)) {
         throw "Unity editor not found: $UnityEditorPath"
     }
     if (-not (Test-Path -LiteralPath $ProjectPath)) {

@@ -32,6 +32,8 @@ class AgentGatewayConfig:
     allow_write_requests: bool = True
     allow_roslyn_advanced: bool = False
     approval_timeout_seconds: int = 600
+    execution_mode: str = "approval"
+    roslyn_risk_acknowledged: bool = False
 
 
 @dataclass
@@ -126,6 +128,8 @@ class AgentGateway:
                 "allow_write_requests": True,
                 "allow_roslyn_advanced": False,
                 "approval_timeout_seconds": 600,
+                "execution_mode": "approval",
+                "roslyn_risk_acknowledged": False,
             }
             for key, value in defaults.items():
                 if key not in raw:
@@ -140,6 +144,8 @@ class AgentGateway:
                 allow_write_requests=bool(raw.get("allow_write_requests", True)),
                 allow_roslyn_advanced=bool(raw.get("allow_roslyn_advanced", False)),
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
+                execution_mode=normalize_execution_mode(raw.get("execution_mode")),
+                roslyn_risk_acknowledged=bool(raw.get("roslyn_risk_acknowledged", False)),
             )
             if changed:
                 self.save_config(config)
@@ -155,6 +161,8 @@ class AgentGateway:
             "allow_write_requests": bool(config.allow_write_requests),
             "allow_roslyn_advanced": bool(config.allow_roslyn_advanced),
             "approval_timeout_seconds": int(config.approval_timeout_seconds),
+            "execution_mode": normalize_execution_mode(config.execution_mode),
+            "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
         }
         self.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -213,6 +221,9 @@ class AgentGateway:
             "requiresToken": config.require_token,
             "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
+            "executionMode": normalize_execution_mode(config.execution_mode),
+            "roslynFullAuto": normalize_execution_mode(config.execution_mode) == "roslyn_full_auto",
+            "roslynRiskAcknowledged": config.roslyn_risk_acknowledged,
             "approvalTimeoutSeconds": config.approval_timeout_seconds,
             "tools": tools,
             "toolCount": len(tools),
@@ -233,7 +244,53 @@ class AgentGateway:
             "pendingApprovalCount": len(pending),
             "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
+            "permission": self.permission_state(config),
         }
+
+    def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        mode = normalize_execution_mode(config.execution_mode)
+        return {
+            "executionMode": mode,
+            "perActionApproval": mode == "approval",
+            "roslynFullAuto": mode == "roslyn_full_auto",
+            "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
+            "allowWriteRequests": bool(config.allow_write_requests),
+            "allowRoslynAdvanced": self.roslyn_available(config),
+            "roslynEnvEnabled": os.environ.get("VRCFORGE_ENABLE_ROSLYN", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+        }
+
+    def update_permission_state(
+        self,
+        execution_mode: str,
+        acknowledge_roslyn_risk: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            config = self.ensure_config()
+            mode = normalize_execution_mode(execution_mode)
+            entering_roslyn = mode == "roslyn_full_auto"
+            if entering_roslyn and not config.roslyn_risk_acknowledged and not acknowledge_roslyn_risk:
+                raise AgentGatewayError(
+                    "Roslyn full-auto requires one-time risk acknowledgement.",
+                    status_code=409,
+                )
+
+            previous = self.permission_state(config)
+            config.execution_mode = mode
+            if acknowledge_roslyn_risk and entering_roslyn:
+                config.roslyn_risk_acknowledged = True
+            config.allow_roslyn_advanced = entering_roslyn
+            self.save_config(config)
+            updated = self.permission_state(config)
+            self.append_audit(
+                {
+                    "event": "permission_mode_updated",
+                    "previous": previous,
+                    "updated": updated,
+                }
+            )
+            return {"ok": True, "permission": updated}
 
     def call_tool(
         self,
@@ -567,11 +624,9 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_request_apply",
         "vrcforge_apply_approved",
         "vrcforge_restore_last_backup",
+        "vrcforge_request_roslyn_advanced",
     ]:
         register(tool_name)
-
-    if gateway.roslyn_available():
-        register("vrcforge_request_roslyn_advanced")
 
     app = mcp.streamable_http_app()
     app.state.fastmcp_server = mcp
@@ -580,6 +635,13 @@ def create_agent_mcp_app(gateway: AgentGateway):
 
 def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def normalize_execution_mode(value: Any) -> str:
+    mode = str(value or "approval").strip().lower().replace("-", "_")
+    if mode in {"roslyn_full_auto", "full_auto", "roslyn_auto", "advanced"}:
+        return "roslyn_full_auto"
+    return "approval"
 
 
 def summarize_params(value: Any) -> dict[str, Any]:
