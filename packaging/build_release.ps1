@@ -36,6 +36,34 @@ function Resolve-DotNetExe {
     throw ".NET SDK 8.0+ is required to build VRCForge.exe. Only the runtime is not enough."
 }
 
+function Resolve-NpmExe {
+    $command = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $candidate = Join-Path $env:ProgramFiles "nodejs\npm.cmd"
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+
+    throw "Node.js/npm is required to build the Tauri desktop app."
+}
+
+function Resolve-CargoExe {
+    $command = Get-Command cargo.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $candidate = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+
+    throw "Rust cargo is required to build the Tauri desktop app."
+}
+
 function Resolve-MakeNsisExe {
     $command = Get-Command makensis -ErrorAction SilentlyContinue
     if ($command) {
@@ -52,6 +80,37 @@ function Resolve-MakeNsisExe {
     }
 
     throw "NSIS makensis.exe is required to build VRCForge_Web_Installer_x64.exe and VRCForge_Offline_Installer_x64.exe."
+}
+
+function Build-TauriDesktopApp {
+    param(
+        [string]$DestinationExe
+    )
+
+    $npmExe = Resolve-NpmExe
+    $cargoExe = Resolve-CargoExe
+    $cargoDir = Split-Path -Parent $cargoExe
+    if ($env:PATH -notlike "*$cargoDir*") {
+        $env:PATH = "$cargoDir;$env:PATH"
+    }
+
+    Write-Host "Installing Tauri frontend dependencies..."
+    & $npmExe ci
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm ci failed."
+    }
+
+    Write-Host "Building Tauri desktop app..."
+    & $npmExe run tauri:build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri desktop build failed."
+    }
+
+    $tauriExe = Join-Path $repoRoot "src-tauri\target\release\vrcforge-agentic-app.exe"
+    if (-not (Test-Path -LiteralPath $tauriExe)) {
+        throw "Tauri build did not produce expected exe: $tauriExe"
+    }
+    Copy-Item -LiteralPath $tauriExe -Destination $DestinationExe -Force
 }
 
 function Install-UvRuntime {
@@ -129,6 +188,12 @@ try {
     Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $payloadRoot,$releaseRoot | Out-Null
 
+    $legacyLauncherBuildRoot = Join-Path $repoRoot "dist\legacy-launcher-build"
+    Remove-Item -LiteralPath $legacyLauncherBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $legacyLauncherBuildRoot | Out-Null
+
+    Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
+
     & $dotnetExe publish .\launcher\VRCForge.Launcher\VRCForge.Launcher.csproj `
         -c $Configuration `
         -r win-x64 `
@@ -136,16 +201,19 @@ try {
         -p:Version=$Version `
         -p:DebugType=none `
         -p:DebugSymbols=false `
-        -o $payloadRoot
+        -o $legacyLauncherBuildRoot
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet publish failed."
     }
-    Remove-Item -LiteralPath (Join-Path $payloadRoot "VRCForge.pdb") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $legacyLauncherBuildRoot "VRCForge.pdb") -Force -ErrorAction SilentlyContinue
 
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
 
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
+    $legacyLauncherPayloadRoot = Join-Path $payloadRoot "tools\legacy-launcher"
+    New-Item -ItemType Directory -Force -Path $legacyLauncherPayloadRoot | Out-Null
+    Copy-Item -Path (Join-Path $legacyLauncherBuildRoot "*") -Destination $legacyLauncherPayloadRoot -Recurse -Force
     Copy-Item -LiteralPath .\start_dashboard.cmd -Destination (Join-Path $payloadRoot "start_dashboard.cmd") -Force
     Install-UvRuntime -DestinationDir (Join-Path $payloadRoot "tools\uv")
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "config"),(Join-Path $payloadRoot "logs"),(Join-Path $payloadRoot "artifacts") | Out-Null

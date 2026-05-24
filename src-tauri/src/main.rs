@@ -192,6 +192,19 @@ fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
 }
 
 fn repo_root() -> Result<PathBuf, String> {
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let packaged_markers = [
+                exe_dir.join("backend").join("vrcforge_backend.exe"),
+                exe_dir.join("dashboard").join("index.html"),
+                exe_dir.join("unity_plugin"),
+            ];
+            if packaged_markers.iter().any(|marker| marker.exists()) {
+                return Ok(exe_dir.to_path_buf());
+            }
+        }
+    }
+
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
