@@ -32,6 +32,18 @@ export type AgentManifest = {
   roslynRiskAcknowledged: boolean;
 };
 
+export type ApiConfig = {
+  provider: string;
+  providerLabel?: string;
+  api_key?: string;
+  apiKeyPresent: boolean;
+  base_url?: string;
+  model?: string;
+  usesBaseUrl?: boolean;
+  authHeader?: string;
+  apiKeyRequired: boolean;
+};
+
 export type AgentApproval = {
   id: string;
   status: string;
@@ -119,6 +131,7 @@ export type AppBootstrap = {
     };
   };
   agentManifest: AgentManifest;
+  apiConfig?: ApiConfig;
   agentHealth: {
     ok: boolean;
     enabled: boolean;
@@ -154,6 +167,14 @@ export async function updatePermission(
       execution_mode: executionMode,
       acknowledge_roslyn_risk: acknowledgeRoslynRisk,
     }),
+  });
+}
+
+export async function updateApiConfig(endpoint: string, config: { provider: string; api_key: string; base_url?: string; model?: string }) {
+  return requestJson<{ ok?: boolean; apiConfig: ApiConfig }>(`${endpoint}/api/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
   });
 }
 

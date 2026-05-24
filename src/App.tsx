@@ -34,6 +34,7 @@ import {
   PermissionState,
   rejectAgentApproval,
   sendAgentMessage,
+  updateApiConfig,
   updatePermission,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
@@ -80,8 +81,14 @@ export default function App() {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
+  const [apiProvider, setApiProvider] = useState("gemini");
+  const [apiKey, setApiKey] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [apiModel, setApiModel] = useState("gemini-2.5-flash");
+  const [savingApiConfig, setSavingApiConfig] = useState(false);
 
   const permission = bootstrap?.permission;
+  const apiConfig = bootstrap?.apiConfig;
   const healthComponents = bootstrap?.health.components ?? {};
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
@@ -89,9 +96,33 @@ export default function App() {
   const pendingApprovals = bootstrap?.agentHealth.pendingApprovalCount ?? 0;
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const projects = bootstrap?.health.projects?.projects ?? [];
+  const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
+  const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
+  const agentModeLabel = !runtimeConnected
+    ? "Agent 离线"
+    : vrcForgeSkillsReady
+      ? `VRCForge Skills ${vrcForgeToolsCount}`
+      : "普通 Agent";
+  const needsApiSetup = runtimeConnected && Boolean(apiConfig?.apiKeyRequired && !apiConfig.apiKeyPresent);
 
   const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
   const activeProject = bootstrap?.health.projects?.selectedProjectPath || projectItems[0]?.path || projectItems[0]?.name || "Unity Projects";
+  const projectPromptTitle = projectItems[0]?.name ? `需要在 ${projectItems[0].name} 里面构建什么？` : "";
+  const emptyProjectState = useMemo(() => {
+    if (projectItems.length > 0) {
+      return null;
+    }
+    if (loading && !error) {
+      return { name: "扫描中", meta: "wait" };
+    }
+    if (error) {
+      return { name: "刷新失败", meta: "retry" };
+    }
+    if (!runtimeConnected) {
+      return { name: "Agent 离线", meta: "retry" };
+    }
+    return { name: "未发现 Unity 项目", meta: "empty" };
+  }, [error, loading, projectItems.length, runtimeConnected]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -101,22 +132,42 @@ export default function App() {
     void startRuntime();
   }, []);
 
-  async function startRuntime() {
+  useEffect(() => {
+    if (!apiConfig) {
+      return;
+    }
+    setApiProvider(apiConfig.provider || "gemini");
+    setApiBaseUrl(apiConfig.base_url || "");
+    setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
+  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshSilently();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [endpoint]);
+
+  async function startRuntime(): Promise<string | null> {
     setLoading(true);
     setError("");
+    let targetEndpoint = endpoint;
     try {
       if (isTauriRuntime()) {
         await invoke("ensure_agent_notes_file");
         const result = await invoke<BackendStartResult>("start_backend");
-        setEndpoint(result.endpoint);
+        targetEndpoint = result.endpoint;
+        setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
-        await refreshWithRetry(result.endpoint);
+        await refreshWithRetry(targetEndpoint);
       } else {
         setBackendMessage("dev");
-        await refreshWithRetry(endpoint);
+        await refreshWithRetry(targetEndpoint);
       }
+      return targetEndpoint;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return null;
     } finally {
       setLoading(false);
     }
@@ -126,6 +177,16 @@ export default function App() {
     setError("");
     const payload = await fetchBootstrap(target);
     setBootstrap(payload);
+  }
+
+  async function refreshSilently(target = endpoint) {
+    try {
+      const payload = await fetchBootstrap(target);
+      setBootstrap(payload);
+      setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
+    } catch {
+      // Keep the current UI usable; explicit retry remains available.
+    }
   }
 
   async function refreshWithRetry(target = endpoint) {
@@ -183,16 +244,24 @@ export default function App() {
     if (!message || sending) {
       return;
     }
-    setInput("");
     setError("");
     setSending(true);
-    const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
-    setConversation((items) => [...items, userItem]);
     try {
-      const response = await sendAgentMessage(endpoint, message, sessionId || undefined);
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      setInput("");
+      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
+      setConversation((items) => [...items, userItem]);
+      const response = await sendAgentMessage(targetEndpoint, message, sessionId || undefined);
       setSessionId(response.sessionId || response.session_id);
       setConversation((items) => [...items, { id: response.turnId || response.turn_id, type: "agent", response }]);
-      await refresh();
+      await refresh(targetEndpoint);
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
       setConversation((items) => [...items, { id: `error-${Date.now()}`, type: "error", text }]);
@@ -253,6 +322,37 @@ export default function App() {
     setError("");
   }
 
+  async function saveApiProvider(event?: FormEvent) {
+    event?.preventDefault();
+    if (!apiProvider || !apiModel || (providerNeedsApiKey(apiProvider) && !apiKey.trim())) {
+      return;
+    }
+    setSavingApiConfig(true);
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      await updateApiConfig(targetEndpoint, {
+        provider: apiProvider,
+        api_key: apiKey.trim(),
+        base_url: apiBaseUrl.trim(),
+        model: apiModel.trim(),
+      });
+      setApiKey("");
+      await refresh(targetEndpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingApiConfig(false);
+    }
+  }
+
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
@@ -289,7 +389,7 @@ export default function App() {
                 />
               ))
             ) : (
-              <SidebarProject name={runtimeConnected ? "未发现 Unity 项目" : "扫描中"} meta={runtimeConnected ? "empty" : "wait"} active />
+              <SidebarProject name={emptyProjectState?.name || "未发现 Unity 项目"} meta={emptyProjectState?.meta} active />
             )}
           </SidebarSection>
 
@@ -320,7 +420,7 @@ export default function App() {
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
               <span className="text-muted-foreground">/</span>
-              <span className="truncate font-medium">{sessionId ? "Agent Session" : "New Task"}</span>
+              <span className="truncate font-medium">{sessionId ? "Agent Session" : "新任务"}</span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? "runtime ready" : "runtime offline"} />
@@ -333,22 +433,52 @@ export default function App() {
 
           {error ? (
             <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-              <div className="rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
+              <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
                 <span className="break-words">{error}</span>
+                <Button
+                  variant="ghost"
+                  className="ml-auto h-7 shrink-0 px-2 text-xs text-destructive/80 hover:bg-destructive/10"
+                  onClick={() => void startRuntime()}
+                  disabled={loading}
+                >
+                  {loading ? "重连中" : "重连"}
+                </Button>
               </div>
             </div>
           ) : null}
 
-          {conversation.length === 0 ? (
+          {needsApiSetup ? (
             <div className="flex min-h-0 flex-1 items-center justify-center p-8">
               <div className="w-full max-w-4xl">
-                <h1 className="mb-8 text-center text-3xl font-semibold tracking-normal">我们应该在 VRCForge 中构建什么？</h1>
+                <ProviderSetup
+                  provider={apiProvider}
+                  apiKey={apiKey}
+                  baseUrl={apiBaseUrl}
+                  model={apiModel}
+                  saving={savingApiConfig}
+                  onProviderChange={(provider) => {
+                    setApiProvider(provider);
+                    setApiModel(defaultModelForProvider(provider));
+                    setApiBaseUrl(defaultBaseUrlForProvider(provider));
+                  }}
+                  onApiKeyChange={setApiKey}
+                  onBaseUrlChange={setApiBaseUrl}
+                  onModelChange={setApiModel}
+                  onSubmit={saveApiProvider}
+                />
+              </div>
+            </div>
+          ) : conversation.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+              <div className="w-full max-w-4xl">
+                {projectPromptTitle ? <h1 className="mb-8 text-center text-3xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
                 <Composer
                   input={input}
                   setInput={setInput}
                   sending={sending}
                   permission={permission}
-                  backendMessage={backendMessage}
+                  statusLabel={agentModeLabel}
+                  projectLabel={projectItems[0]?.name || ""}
                   onSubmit={submitMessage}
                   onSwitchMode={switchMode}
                 />
@@ -376,7 +506,8 @@ export default function App() {
                     setInput={setInput}
                     sending={sending}
                     permission={permission}
-                    backendMessage={backendMessage}
+                    statusLabel={agentModeLabel}
+                    projectLabel={projectItems[0]?.name || ""}
                     onSubmit={submitMessage}
                     onSwitchMode={switchMode}
                     compact
@@ -419,7 +550,8 @@ function Composer({
   setInput,
   sending,
   permission,
-  backendMessage,
+  statusLabel,
+  projectLabel,
   onSubmit,
   onSwitchMode,
   compact = false,
@@ -428,46 +560,146 @@ function Composer({
   setInput: (value: string) => void;
   sending: boolean;
   permission?: PermissionState;
-  backendMessage: string;
+  statusLabel: string;
+  projectLabel: string;
   onSubmit: (event?: FormEvent) => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   compact?: boolean;
 }) {
   return (
-    <form onSubmit={onSubmit} className={cn("rounded-2xl border border-border bg-card shadow-composer", compact ? "p-3" : "p-4")}>
-      <textarea
-        value={input}
-        onChange={(event) => setInput(event.target.value)}
-        className="min-h-[86px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-        placeholder="尽管问"
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-            onSubmit();
-          }
-        }}
-      />
-      <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Badge tone={permission?.roslynFullAuto ? "danger" : "warn"} className="max-w-full">
-            <Shield className="mr-1 h-3.5 w-3.5 shrink-0" />
+    <form onSubmit={onSubmit} className="overflow-hidden rounded-3xl bg-muted/70 shadow-composer">
+      <div className={cn("rounded-3xl border border-border bg-card", compact ? "p-3" : "p-4")}>
+        <textarea
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+          placeholder="尽管问"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              onSubmit();
+            }
+          }}
+        />
+        <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <button
               type="button"
-              className="truncate"
+              className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm text-amber-700 transition-colors hover:bg-amber-500/10"
               onClick={() => onSwitchMode(permission?.roslynFullAuto ? "approval" : "roslyn_full_auto")}
             >
-              {permission?.roslynFullAuto ? "Roslyn full-auto" : "Ask before changes"}
+              <Shield className="h-4 w-4 shrink-0" />
+              <span className="truncate">{permission?.roslynFullAuto ? "Roslyn full-auto" : "Ask before changes"}</span>
+              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
             </button>
-            <ChevronDown className="ml-1 h-3.5 w-3.5 shrink-0" />
-          </Badge>
-          <Badge tone="muted" className="max-w-[220px] truncate">
-            {backendMessage}
-          </Badge>
+            <Badge tone="muted" className="max-w-[220px] truncate">
+              {statusLabel}
+            </Badge>
+          </div>
+          <Button className="h-10 w-10 rounded-full px-0" disabled={sending || !input.trim()} type="submit">
+            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </Button>
         </div>
-        <Button className="h-10 w-10 rounded-full px-0" disabled={sending || !input.trim()} type="submit">
-          {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+      </div>
+      <div className="flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
+        <Folder className="h-4 w-4 shrink-0" />
+        <span className="truncate">{projectLabel ? `进入 ${projectLabel} 工作` : "进入项目工作"}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+      </div>
+    </form>
+  );
+}
+
+function ProviderSetup({
+  provider,
+  apiKey,
+  baseUrl,
+  model,
+  saving,
+  onProviderChange,
+  onApiKeyChange,
+  onBaseUrlChange,
+  onModelChange,
+  onSubmit,
+}: {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  saving: boolean;
+  onProviderChange: (value: string) => void;
+  onApiKeyChange: (value: string) => void;
+  onBaseUrlChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  onSubmit: (event?: FormEvent) => void;
+}) {
+  const requiresBaseUrl = provider === "openai" || provider === "openai-compatible" || provider === "ollama" || provider === "vertexai";
+
+  return (
+    <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+      <div className="grid gap-4">
+        <FieldLabel label="API 供应商">
+          <select
+            value={provider}
+            onChange={(event) => onProviderChange(event.target.value)}
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+          >
+            <option value="gemini">Google AI Studio</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI Compatible</option>
+            <option value="ollama">Ollama</option>
+            <option value="vertexai">Vertex AI</option>
+          </select>
+        </FieldLabel>
+        <FieldLabel label="API Key">
+          {providerNeedsApiKey(provider) ? (
+            <input
+              value={apiKey}
+              onChange={(event) => onApiKeyChange(event.target.value)}
+              type="password"
+              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              autoComplete="off"
+            />
+          ) : (
+            <input
+              value=""
+              readOnly
+              className="h-10 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground outline-none"
+            />
+          )}
+        </FieldLabel>
+        {requiresBaseUrl ? (
+          <FieldLabel label="Base URL">
+            <input
+              value={baseUrl}
+              onChange={(event) => onBaseUrlChange(event.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+            />
+          </FieldLabel>
+        ) : null}
+        <FieldLabel label="Model">
+          <input
+            value={model}
+            onChange={(event) => onModelChange(event.target.value)}
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+          />
+        </FieldLabel>
+      </div>
+      <div className="mt-5 flex justify-end">
+        <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim()) || !model.trim()} type="submit">
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          保存
         </Button>
       </div>
     </form>
+  );
+}
+
+function FieldLabel({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="grid min-w-0 gap-2 text-sm">
+      <span className="truncate font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -675,6 +907,46 @@ function StatusChip({ ok, label }: { ok: boolean; label: string }) {
       <span className="truncate">{label}</span>
     </Badge>
   );
+}
+
+function getHealthDetailNumber(detail: unknown, key: string): number {
+  if (!detail || typeof detail !== "object") {
+    return 0;
+  }
+  const value = (detail as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function defaultModelForProvider(provider: string): string {
+  switch (provider) {
+    case "anthropic":
+      return "claude-3-5-sonnet-latest";
+    case "openai":
+    case "openai-compatible":
+      return "gpt-4o-mini";
+    case "ollama":
+      return "llava";
+    case "vertexai":
+      return "gemini-2.5-flash";
+    case "gemini":
+    default:
+      return "gemini-2.5-flash";
+  }
+}
+
+function defaultBaseUrlForProvider(provider: string): string {
+  switch (provider) {
+    case "openai":
+      return "https://api.openai.com/v1";
+    case "ollama":
+      return "http://127.0.0.1:11434/v1";
+    default:
+      return "";
+  }
+}
+
+function providerNeedsApiKey(provider: string): boolean {
+  return provider !== "ollama" && provider !== "vertexai";
 }
 
 function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {

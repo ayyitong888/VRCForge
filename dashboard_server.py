@@ -644,6 +644,7 @@ def read_agentic_app_bootstrap() -> dict[str, Any]:
             "legacyDashboardDebugOnly": True,
         },
         "health": build_agentic_app_health(),
+        "apiConfig": serialize_app_api_config(),
         "agentManifest": AGENT_GATEWAY.build_manifest(),
         "agentHealth": AGENT_GATEWAY.build_health(),
         "permission": AGENT_GATEWAY.permission_state(),
@@ -729,6 +730,12 @@ def build_agentic_app_health() -> dict[str, Any]:
     payload = copy.deepcopy(read_health())
     payload.pop("apiConfig", None)
     return payload
+
+
+def serialize_app_api_config() -> dict[str, Any]:
+    config = serialize_api_config(include_secret=False)
+    config.pop("api_key", None)
+    return config
 
 
 @app.get("/api/agent/manifest")
