@@ -58,7 +58,7 @@ const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 const navItems = [
   { label: "新对话", icon: Plus },
   { label: "搜索", icon: Search },
-  { label: "Skills", icon: Wrench },
+  { label: "能力库", icon: Wrench },
   { label: "自动化", icon: Clock3 },
   { label: "审批", icon: Shield },
   { label: "日志", icon: TerminalSquare },
@@ -99,10 +99,10 @@ export default function App() {
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
   const agentModeLabel = !runtimeConnected
-    ? "Agent 离线"
+    ? "核心未连接"
     : vrcForgeSkillsReady
-      ? `VRCForge Skills ${vrcForgeToolsCount}`
-      : "普通 Agent";
+      ? `头像能力 ${vrcForgeToolsCount}`
+      : "基础模式";
   const needsApiSetup = runtimeConnected && Boolean(apiConfig?.apiKeyRequired && !apiConfig.apiKeyPresent);
 
   const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
@@ -119,7 +119,7 @@ export default function App() {
       return { name: "刷新失败", meta: "retry" };
     }
     if (!runtimeConnected) {
-      return { name: "Agent 离线", meta: "retry" };
+      return { name: "核心未连接", meta: "retry" };
     }
     return { name: "未发现 Unity 项目", meta: "empty" };
   }, [error, loading, projectItems.length, runtimeConnected]);
@@ -420,11 +420,11 @@ export default function App() {
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
               <span className="text-muted-foreground">/</span>
-              <span className="truncate font-medium">{sessionId ? "Agent Session" : "新任务"}</span>
+              <span className="truncate font-medium">{sessionId ? "当前会话" : "新任务"}</span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <StatusChip ok={runtimeConnected} label={runtimeConnected ? "runtime ready" : "runtime offline"} />
-              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} approvals</Badge>
+              <StatusChip ok={runtimeConnected} label={runtimeConnected ? "核心在线" : "核心离线"} />
+              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} 待确认</Badge>
               <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
@@ -524,11 +524,11 @@ export default function App() {
           <section className="w-full max-w-lg rounded-lg border border-destructive/40 bg-card p-6 shadow-panel">
             <div className="flex min-w-0 items-center gap-3 text-destructive">
               <AlertTriangle className="h-5 w-5 shrink-0" />
-              <h2 className="truncate text-lg font-semibold">Roslyn full-auto</h2>
+              <h2 className="truncate text-lg font-semibold">Roslyn 高级自动</h2>
             </div>
             <div className="mt-5 grid gap-3 text-sm">
-              <DataLine label="risk_acknowledged" value={permission?.roslynRiskAcknowledged ? "true" : "false"} />
-              <DataLine label="mode" value="roslyn_full_auto" />
+              <DataLine label="风险确认" value={permission?.roslynRiskAcknowledged ? "已确认" : "未确认"} />
+              <DataLine label="模式" value="高级自动" />
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setShowRoslynWarning(false)}>
@@ -588,7 +588,7 @@ function Composer({
               onClick={() => onSwitchMode(permission?.roslynFullAuto ? "approval" : "roslyn_full_auto")}
             >
               <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">{permission?.roslynFullAuto ? "Roslyn full-auto" : "Ask before changes"}</span>
+              <span className="truncate">{permission?.roslynFullAuto ? "高级自动" : "逐项确认"}</span>
               <ChevronDown className="h-3.5 w-3.5 shrink-0" />
             </button>
             <Badge tone="muted" className="max-w-[220px] truncate">
@@ -645,12 +645,12 @@ function ProviderSetup({
           >
             <option value="gemini">Google AI Studio</option>
             <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI Compatible</option>
+            <option value="openai">兼容接口</option>
             <option value="ollama">Ollama</option>
             <option value="vertexai">Vertex AI</option>
           </select>
         </FieldLabel>
-        <FieldLabel label="API Key">
+        <FieldLabel label="访问密钥">
           {providerNeedsApiKey(provider) ? (
             <input
               value={apiKey}
@@ -668,7 +668,7 @@ function ProviderSetup({
           )}
         </FieldLabel>
         {requiresBaseUrl ? (
-          <FieldLabel label="Base URL">
+          <FieldLabel label="接口地址">
             <input
               value={baseUrl}
               onChange={(event) => onBaseUrlChange(event.target.value)}
@@ -676,7 +676,7 @@ function ProviderSetup({
             />
           </FieldLabel>
         ) : null}
-        <FieldLabel label="Model">
+        <FieldLabel label="模型">
           <input
             value={model}
             onChange={(event) => onModelChange(event.target.value)}
@@ -733,7 +733,7 @@ function ConversationCard({
   }
 
   if (item.type === "result") {
-    return <ShellResultCard title={item.error === "rejected" ? "Rejected" : "Shell result"} result={item.result} error={item.error} />;
+    return <ShellResultCard title={item.error === "rejected" ? "已驳回" : "执行结果"} result={item.result} error={item.error} />;
   }
 
   const response = item.response;
@@ -745,15 +745,15 @@ function ConversationCard({
       <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
         <div className="flex min-w-0 items-center gap-2">
           <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-          <div className="truncate text-sm font-semibold">Plan</div>
+          <div className="truncate text-sm font-semibold">方案</div>
           <Badge tone="muted" className="ml-auto shrink-0">
-            {response.plan.planner}
+            {displayPlanner(response.plan.planner)}
           </Badge>
         </div>
         <div className="mt-4 grid gap-3">
-          <DataLine label="summary" value={response.plan.summary} />
-          <DataLine label="next" value={response.plan.nextStep || "-"} />
-          {response.plan.shellCommand ? <DataLine label="command" value={response.plan.shellCommand} mono /> : null}
+          <DataLine label="摘要" value={response.plan.summary} />
+          <DataLine label="下一步" value={displayStep(response.plan.nextStep || "-")} />
+          {response.plan.shellCommand ? <DataLine label="命令" value={response.plan.shellCommand} mono /> : null}
         </div>
       </section>
 
@@ -761,12 +761,12 @@ function ConversationCard({
         <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
           <div className="mb-3 flex items-center gap-2">
             <TerminalSquare className="h-4 w-4 text-primary" />
-            <div className="truncate text-sm font-semibold">Shell</div>
+            <div className="truncate text-sm font-semibold">命令</div>
             <Badge tone={riskTone(shell.classification.risk)} className="ml-auto shrink-0">
               {shell.classification.risk}
             </Badge>
           </div>
-          <DataLine label="cwd" value={shell.classification.cwd} />
+          <DataLine label="目录" value={shell.classification.cwd} />
           <div className="mt-3 overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
             <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
           </div>
@@ -782,9 +782,9 @@ function ConversationCard({
         </section>
       ) : null}
 
-      {shell?.result ? <ShellResultCard title="Shell result" result={shell.result} /> : null}
+      {shell?.result ? <ShellResultCard title="执行结果" result={shell.result} /> : null}
       {approval ? <ApprovalCard approval={approval} loading={loading} onApprove={onApprove} onReject={onReject} /> : null}
-      {shell?.error ? <ShellResultCard title="Shell error" error={shell.error} /> : null}
+      {shell?.error ? <ShellResultCard title="执行错误" error={shell.error} /> : null}
     </div>
   );
 }
@@ -804,24 +804,24 @@ function ApprovalCard({
     <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-panel">
       <div className="flex min-w-0 items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-        <div className="truncate text-sm font-semibold">Approval</div>
+        <div className="truncate text-sm font-semibold">待确认</div>
         <Badge tone="warn" className="ml-auto shrink-0">
           {approval.riskLevel || "high"}
         </Badge>
       </div>
       <div className="mt-4 grid gap-3">
-        <DataLine label="command" value={approval.preview?.command || "-"} mono />
-        <DataLine label="cwd" value={approval.preview?.cwd || "-"} />
-        <DataLine label="reason" value={approval.reason || "-"} />
+        <DataLine label="命令" value={approval.preview?.command || "-"} mono />
+        <DataLine label="目录" value={approval.preview?.cwd || "-"} />
+        <DataLine label="原因" value={approval.reason || "-"} />
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="outline" disabled={loading} onClick={() => onReject(approval.id)}>
           <X className="h-4 w-4" />
-          Reject
+          驳回
         </Button>
         <Button variant="primary" disabled={loading} onClick={() => onApprove(approval.id)}>
           <Check className="h-4 w-4" />
-          Approve
+          同意执行
         </Button>
       </div>
     </section>
@@ -836,16 +836,16 @@ function ShellResultCard({ title, result, error }: { title: string; result?: Age
         <div className="truncate text-sm font-semibold">{title}</div>
         {result ? (
           <Badge tone={result.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-            exit {result.exitCode}
+            退出码 {result.exitCode}
           </Badge>
         ) : null}
       </div>
-      {error ? <DataLine label="error" value={error} /> : null}
+      {error ? <DataLine label="错误" value={error} /> : null}
       {result ? (
         <div className="grid gap-3">
-          <DataLine label="duration" value={`${result.durationSeconds}s`} />
-          <OutputBlock label="stdout" value={result.stdout} />
-          {result.stderr ? <OutputBlock label="stderr" value={result.stderr} danger /> : null}
+          <DataLine label="耗时" value={`${result.durationSeconds}s`} />
+          <OutputBlock label="输出" value={result.stdout} />
+          {result.stderr ? <OutputBlock label="错误输出" value={result.stderr} danger /> : null}
         </div>
       ) : null}
     </section>
@@ -947,6 +947,23 @@ function defaultBaseUrlForProvider(provider: string): string {
 
 function providerNeedsApiKey(provider: string): boolean {
   return provider !== "ollama" && provider !== "vertexai";
+}
+
+function displayPlanner(planner: string): string {
+  if (planner === "deterministic-local") {
+    return "本地规划";
+  }
+  return planner || "规划";
+}
+
+function displayStep(step: string): string {
+  const labels: Record<string, string> = {
+    classify_shell: "检查命令风险",
+    execute_shell: "执行命令",
+    request_approval: "等待确认",
+    done: "完成",
+  };
+  return labels[step] || step;
 }
 
 function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {

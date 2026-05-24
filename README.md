@@ -128,9 +128,9 @@ Supported providers include Google AI Studio, OpenAI, Anthropic, Ollama, Google 
 
 ## External Agent Gateway / 外部 Agent 接入
 
-VRCForge includes a local Agent Gateway for Codex, Claude Code, OpenClaw, and other MCP-capable agents. It exposes `http://127.0.0.1:8757/mcp` plus REST diagnostics under `/api/agent/*`.
+VRCForge includes a local Agent Gateway for MCP-capable external agents. It exposes `http://127.0.0.1:8757/mcp` plus REST diagnostics under `/api/agent/*`.
 
-VRCForge 提供本地 Agent Gateway，可接入 Codex、Claude Code、OpenClaw 等支持 MCP 的外部 agent。它会暴露 `http://127.0.0.1:8757/mcp`，并提供 `/api/agent/*` REST 调试接口。
+VRCForge 提供本地 Agent Gateway，可接入支持 MCP 的外部 agent。它会暴露 `http://127.0.0.1:8757/mcp`，并提供 `/api/agent/*` REST 调试接口。
 
 The gateway is disabled by default. Enable it from the Launcher external-agent page, copy the local token/config, then let the agent read logs, capture screenshots, inspect Unity state, generate plans, and request supervised writes. Actual writes still require user approval before `apply`; the approval token is kept inside the Launcher and is not included in copied agent configs.
 
