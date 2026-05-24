@@ -83,6 +83,10 @@ function Resolve-MakeNsisExe {
 }
 
 function Build-TauriDesktopApp {
+    param(
+        [string]$DestinationExe
+    )
+
     $npmExe = Resolve-NpmExe
     $cargoExe = Resolve-CargoExe
     $cargoDir = Split-Path -Parent $cargoExe
@@ -106,7 +110,8 @@ function Build-TauriDesktopApp {
     if (-not (Test-Path -LiteralPath $tauriExe)) {
         throw "Tauri build did not produce expected exe: $tauriExe"
     }
-    return $tauriExe
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestinationExe) | Out-Null
+    Copy-Item -LiteralPath $tauriExe -Destination $DestinationExe -Force
 }
 
 function Install-UvRuntime {
@@ -179,18 +184,16 @@ try {
     & .\packaging\check_third_party_licenses.ps1
     & .\packaging\check_coplaydev_mcp_license.ps1 -PackagePath $CoplayDevPackagePath
 
-    $tauriExe = Build-TauriDesktopApp
-
     $payloadRoot = Join-Path $repoRoot "dist\VRCForge_Windows_x64"
     $releaseRoot = Join-Path $repoRoot "dist\release"
     Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $payloadRoot,$releaseRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+    Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
+    New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
 
     $legacyLauncherBuildRoot = Join-Path $repoRoot "dist\legacy-launcher-build"
     Remove-Item -LiteralPath $legacyLauncherBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $legacyLauncherBuildRoot | Out-Null
-
-    Copy-Item -LiteralPath $tauriExe -Destination (Join-Path $payloadRoot "VRCForge.exe") -Force
 
     & $dotnetExe publish .\launcher\VRCForge.Launcher\VRCForge.Launcher.csproj `
         -c $Configuration `
