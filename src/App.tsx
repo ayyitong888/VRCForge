@@ -89,9 +89,9 @@ export default function App() {
   const pendingApprovals = bootstrap?.agentHealth.pendingApprovalCount ?? 0;
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const projects = bootstrap?.health.projects?.projects ?? [];
-  const activeProject = bootstrap?.health.projects?.selectedProjectPath || bootstrap?.health.projectRoot || "VRCForge";
 
   const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
+  const activeProject = bootstrap?.health.projects?.selectedProjectPath || projectItems[0]?.path || projectItems[0]?.name || "Unity Projects";
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -110,10 +110,10 @@ export default function App() {
         const result = await invoke<BackendStartResult>("start_backend");
         setEndpoint(result.endpoint);
         setBackendMessage(result.message);
-        await refresh(result.endpoint);
+        await refreshWithRetry(result.endpoint);
       } else {
         setBackendMessage("dev");
-        await refresh(endpoint);
+        await refreshWithRetry(endpoint);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -126,6 +126,20 @@ export default function App() {
     setError("");
     const payload = await fetchBootstrap(target);
     setBootstrap(payload);
+  }
+
+  async function refreshWithRetry(target = endpoint) {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      try {
+        await refresh(target);
+        return;
+      } catch (cause) {
+        lastError = cause;
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || "Failed to fetch runtime bootstrap."));
   }
 
   async function switchMode(mode: PermissionState["executionMode"], acknowledge = false) {
@@ -270,12 +284,12 @@ export default function App() {
                 <SidebarProject
                   key={`${project.path || project.name || index}`}
                   name={project.name || project.path || "Unity Project"}
-                  meta={project.unityVersion || (project.sources ?? []).join("+")}
+                  meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                   active={index === 0}
                 />
               ))
             ) : (
-              <SidebarProject name={shortPath(activeProject)} meta="local" active />
+              <SidebarProject name={runtimeConnected ? "未发现 Unity 项目" : "扫描中"} meta={runtimeConnected ? "empty" : "wait"} active />
             )}
           </SidebarSection>
 
@@ -304,7 +318,7 @@ export default function App() {
         <section className="flex min-w-0 flex-col bg-workspace">
           <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
             <div className="flex min-w-0 items-center gap-2 text-sm">
-              <span className="truncate text-muted-foreground">{shortPath(activeProject)}</span>
+              <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
               <span className="text-muted-foreground">/</span>
               <span className="truncate font-medium">{sessionId ? "Agent Session" : "New Task"}</span>
             </div>

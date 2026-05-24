@@ -5172,6 +5172,9 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         for project_path in discover_vcc_projects():
             upsert_project(name=Path(project_path).name, path=project_path, source="vcc")
 
+        for project_path in discover_alcom_projects():
+            upsert_project(name=Path(project_path).name, path=project_path, source="alcom")
+
         for project in discover_unity_hub_projects():
             upsert_project(
                 name=project.get("name") or Path(project.get("path") or "").name,
@@ -5209,8 +5212,28 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
 def discover_vcc_projects() -> list[str]:
     candidates = [
         Path(os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
         Path(os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
     ]
+    return discover_projects_from_settings_files(candidates)
+
+
+def discover_alcom_projects() -> list[str]:
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+        Path(os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "ALCOM" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "ALCOM" / "settings.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Alcom" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "Alcom" / "settings.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "vrc-get" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "vrc-get" / "settings.json",
+    ]
+    return discover_projects_from_settings_files(candidates)
+
+
+def discover_projects_from_settings_files(candidates: list[Path]) -> list[str]:
     projects: list[str] = []
     for settings_path in candidates:
         if not settings_path.exists():
@@ -5222,14 +5245,39 @@ def discover_vcc_projects() -> list[str]:
         except Exception:  # noqa: BLE001
             projects.extend(extract_windows_paths_from_text(raw_text or settings_path.read_text(errors="ignore")))
             continue
-        raw_projects = payload.get("userProjects") or payload.get("projects") or []
-        if isinstance(raw_projects, dict):
-            raw_projects = raw_projects.values()
-        for item in raw_projects if isinstance(raw_projects, list) else []:
-            path = item.get("path") if isinstance(item, dict) else item
-            if isinstance(path, str) and path.strip():
-                projects.append(normalize_path_string(path))
-    return sorted(dict.fromkeys(projects), key=str.casefold)
+        projects.extend(extract_project_paths_from_json(payload))
+    return sorted(
+        {
+            normalize_path_string(project)
+            for project in projects
+            if project and is_unity_project_path(Path(normalize_path_string(project)))
+        },
+        key=str.casefold,
+    )
+
+
+def extract_project_paths_from_json(payload: Any) -> list[str]:
+    paths: list[str] = []
+
+    def visit(value: Any, key_hint: str = "") -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lowered = str(key).casefold()
+                if lowered in {"userprojects", "projects", "recentprojects", "knownprojects"}:
+                    visit(item, lowered)
+                elif lowered in {"path", "projectpath", "project", "directorypath"}:
+                    if isinstance(item, str) and item.strip():
+                        paths.append(normalize_path_string(item))
+                elif key_hint in {"userprojects", "projects", "recentprojects", "knownprojects"}:
+                    visit(item, key_hint)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, key_hint)
+        elif isinstance(value, str) and key_hint in {"userprojects", "projects", "recentprojects", "knownprojects"}:
+            paths.append(normalize_path_string(value))
+
+    visit(payload)
+    return paths
 
 
 def extract_windows_paths_from_text(value: str) -> list[str]:
@@ -5244,31 +5292,80 @@ def extract_windows_paths_from_text(value: str) -> list[str]:
 
 
 def discover_unity_hub_projects() -> list[dict[str, str]]:
-    hub_projects = Path(os.environ.get("APPDATA", "")) / "UnityHub" / "projects-v1.json"
-    if not hub_projects.exists():
-        return []
-    try:
-        payload = json.loads(hub_projects.read_text(encoding="utf-8-sig"))
-    except Exception:  # noqa: BLE001
-        return []
-    data = payload.get("data") if isinstance(payload, dict) else {}
-    if not isinstance(data, dict):
-        return []
     projects: list[dict[str, str]] = []
-    for key, value in data.items():
-        if not isinstance(value, dict):
+    seen: set[str] = set()
+    for hub_projects in [
+        Path(os.environ.get("APPDATA", "")) / "UnityHub" / "projects-v1.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "UnityHub" / "projects-v1.json",
+    ]:
+        if not hub_projects.exists():
             continue
-        path = normalize_path_string(str(value.get("path") or key or "").strip())
-        if not path:
+        try:
+            payload = json.loads(hub_projects.read_text(encoding="utf-8-sig"))
+        except Exception:  # noqa: BLE001
             continue
-        projects.append(
-            {
-                "name": str(value.get("title") or value.get("name") or Path(path).name),
-                "path": path,
-                "editorVersion": str(value.get("version") or value.get("unityVersion") or "Unknown"),
-            }
-        )
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                continue
+            path = normalize_path_string(str(value.get("path") or key or "").strip())
+            if not path or not is_unity_project_path(Path(path)):
+                continue
+            key_text = path.casefold()
+            if key_text in seen:
+                continue
+            seen.add(key_text)
+            projects.append(
+                {
+                    "name": str(value.get("title") or value.get("name") or Path(path).name),
+                    "path": path,
+                    "editorVersion": str(value.get("version") or value.get("unityVersion") or "Unknown"),
+                }
+            )
+
+    for project_root in discover_unity_hub_project_roots():
+        if not project_root.exists():
+            continue
+        for child in sorted(project_root.iterdir(), key=lambda item: item.name.casefold()):
+            if not child.is_dir() or not is_unity_project_path(child):
+                continue
+            path = normalize_path_string(str(child))
+            key_text = path.casefold()
+            if key_text in seen:
+                continue
+            seen.add(key_text)
+            projects.append(
+                {
+                    "name": child.name,
+                    "path": path,
+                    "editorVersion": parse_editor_version(child / "ProjectSettings" / "ProjectVersion.txt"),
+                }
+            )
     return projects
+
+
+def discover_unity_hub_project_roots() -> list[Path]:
+    roots: list[Path] = []
+    for project_dir in [
+        Path(os.environ.get("APPDATA", "")) / "UnityHub" / "projectDir.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "UnityHub" / "projectDir.json",
+    ]:
+        if not project_dir.exists():
+            continue
+        try:
+            payload = json.loads(project_dir.read_text(encoding="utf-8-sig"))
+        except Exception:  # noqa: BLE001
+            continue
+        directory = payload.get("directoryPath") if isinstance(payload, dict) else ""
+        if isinstance(directory, str) and directory.strip():
+            roots.append(Path(normalize_path_string(directory)))
+    return roots
+
+
+def is_unity_project_path(path: Path) -> bool:
+    return (path / "Assets").exists() and (path / "Packages").exists() and (path / "ProjectSettings" / "ProjectVersion.txt").exists()
 
 
 def parse_editor_version(version_file: Path) -> str:

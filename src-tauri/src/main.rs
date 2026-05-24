@@ -13,7 +13,11 @@ use std::{
 };
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use tauri::{Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, State,
+};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8757;
@@ -258,6 +262,35 @@ fn main() {
         .manage(BackendState {
             child: Mutex::new(None),
         })
+        .setup(|app| {
+            let show_item = MenuItem::with_id(app, "show", "显示 VRCForge", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出 VRCForge", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("VRCForge")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             backend_endpoint,
             start_backend,
@@ -265,17 +298,18 @@ fn main() {
             ensure_agent_notes_file
         ])
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                if let Some(state) = window.try_state::<BackendState>() {
-                    if let Ok(mut guard) = state.child.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                    }
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running VRCForge");
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }

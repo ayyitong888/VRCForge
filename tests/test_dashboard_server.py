@@ -1832,6 +1832,43 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(milltina[0]["activeMcp"])
             self.assertEqual(milltina[0]["cliInstanceId"], "hash-456")
 
+    def test_discover_projects_merges_vcc_alcom_and_unity_hub_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "Avatar Project"
+            (project_dir / "Assets").mkdir(parents=True)
+            (project_dir / "Packages").mkdir(parents=True)
+            (project_dir / "ProjectSettings").mkdir(parents=True)
+            (project_dir / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1\n",
+                encoding="utf-8",
+            )
+
+            vcc_settings = root / "vcc-settings.json"
+            alcom_settings = root / "vrc-get-settings.json"
+            unity_hub_projects = root / "projects-v1.json"
+            vcc_settings.write_text(json.dumps({"userProjects": [str(project_dir)]}), encoding="utf-8")
+            alcom_settings.write_text(json.dumps({"projects": [{"path": str(project_dir)}]}), encoding="utf-8")
+            unity_hub_projects.write_text(
+                json.dumps({"data": {str(project_dir): {"path": str(project_dir), "title": "Avatar Project", "version": "2022.3.22f1"}}}),
+                encoding="utf-8",
+            )
+
+            with patch("dashboard_server.discover_vcc_projects", return_value=[str(project_dir)]), patch(
+                "dashboard_server.discover_alcom_projects", return_value=[str(project_dir)]
+            ), patch("dashboard_server.discover_unity_hub_projects", return_value=[
+                {"name": "Avatar Project", "path": str(project_dir), "editorVersion": "2022.3.22f1"}
+            ]):
+                projects = dashboard_server.discover_projects([], include_external=True)
+
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["name"], "Avatar Project")
+            self.assertEqual(projects[0]["sources"], ["vcc", "alcom", "unity-hub"])
+            self.assertEqual(projects[0]["editorVersion"], "2022.3.22f1")
+
+            self.assertEqual(dashboard_server.discover_projects_from_settings_files([vcc_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
+            self.assertEqual(dashboard_server.discover_projects_from_settings_files([alcom_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
+
     def test_has_unity_mcp_dependency_accepts_utf8_bom_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manifest_path = Path(temp_dir) / "manifest.json"

@@ -115,7 +115,7 @@ export type AppBootstrap = {
     projectRoot?: string;
     projects?: {
       selectedProjectPath?: string;
-      projects?: Array<{ name?: string; path?: string; unityVersion?: string; sources?: string[] }>;
+      projects?: Array<{ name?: string; path?: string; editorVersion?: string; unityVersion?: string; sources?: string[] }>;
     };
   };
   agentManifest: AgentManifest;
