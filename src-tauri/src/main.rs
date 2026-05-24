@@ -11,11 +11,15 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::{Manager, State};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8757;
 const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct BackendState {
     child: Mutex<Option<Child>>,
@@ -79,6 +83,8 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
 
     let child = command
         .spawn()

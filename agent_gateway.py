@@ -55,6 +55,15 @@ class AgentWriteHandler:
     advanced: bool = False
 
 
+@dataclass
+class UserConstraintsSnapshot:
+    path: Path
+    content: str = ""
+    status: str = "ok"
+    message: str = "No user constraints configured."
+    error: str = ""
+
+
 class AgentGateway:
     def __init__(
         self,
@@ -206,6 +215,7 @@ class AgentGateway:
 
     def build_manifest(self) -> dict[str, Any]:
         config = self.ensure_config()
+        user_constraints = self.read_user_constraints()
         tools = [
             self._serialize_tool(tool, config)
             for tool in self._tools.values()
@@ -228,10 +238,12 @@ class AgentGateway:
             "tools": tools,
             "toolCount": len(tools),
             "writeTargets": self.visible_write_targets(config),
+            "userConstraints": self._serialize_user_constraints(user_constraints),
         }
 
     def build_health(self) -> dict[str, Any]:
         config = self.ensure_config()
+        user_constraints = self.read_user_constraints()
         pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
         return {
             "ok": config.enabled,
@@ -245,6 +257,7 @@ class AgentGateway:
             "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
             "permission": self.permission_state(config),
+            "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
         }
 
     def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
@@ -307,8 +320,10 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable agent tool: {name}", status_code=404)
 
         params = params or {}
+        user_constraints = self.read_user_constraints()
+        tool_params = self._inject_user_constraints(params, tool, user_constraints)
         try:
-            result = tool.handler(params)
+            result = tool.handler(tool_params)
             self.append_audit(
                 {
                     "event": "tool_call",
@@ -356,13 +371,23 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable write target: {target_tool}", status_code=404)
 
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
+        user_constraints = self.read_user_constraints()
+        arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        preview = params.get("preview")
+        if user_constraints.content and isinstance(preview, dict):
+            preview = {
+                **preview,
+                "userConstraintsApplied": True,
+                "userConstraintsPath": str(user_constraints.path),
+            }
         approval = self._new_approval(
             agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent"),
             target_tool=target_tool,
             arguments=arguments,
             reason=str(params.get("reason") or ""),
-            preview=params.get("preview"),
+            preview=preview,
             risk_level=write_handler.risk_level,
+            user_constraints=user_constraints,
         )
         return {
             "ok": True,
@@ -402,7 +427,12 @@ class AgentGateway:
             self.append_audit({"event": "approval_applying", "approval": approval})
 
         try:
-            result = write_handler.handler(ensure_dict(approval.get("arguments") or {}))
+            user_constraints = self.read_user_constraints()
+            arguments = self._inject_user_constraints_for_apply(
+                ensure_dict(approval.get("arguments") or {}),
+                user_constraints,
+            )
+            result = write_handler.handler(arguments)
             with self._lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
@@ -451,9 +481,44 @@ class AgentGateway:
                 continue
         return entries
 
+    def read_user_constraints(self) -> UserConstraintsSnapshot:
+        path = self.user_constraints_path
+        try:
+            if not path.exists():
+                return UserConstraintsSnapshot(
+                    path=path,
+                    content="",
+                    status="ok",
+                    message="User AGENTS.md is not configured.",
+                )
+            content = path.read_text(encoding="utf-8-sig").strip()
+        except (OSError, UnicodeError) as exc:
+            return UserConstraintsSnapshot(
+                path=path,
+                content="",
+                status="warning",
+                message="User AGENTS.md could not be read.",
+                error=str(exc),
+            )
+        return UserConstraintsSnapshot(
+            path=path,
+            content=content,
+            status="ok",
+            message="User constraints are active." if content else "User AGENTS.md is empty.",
+        )
+
     @property
     def audit_log_path(self) -> Path:
         return self.audit_dir / "approvals.jsonl"
+
+    @property
+    def user_constraints_path(self) -> Path:
+        if self.config_path.parent.name.lower() == "config":
+            return self.config_path.parent.parent / "AGENTS.md"
+        user_data_dir = os.environ.get("VRCFORGE_USER_DATA_DIR", "").strip()
+        if user_data_dir:
+            return Path(user_data_dir) / "AGENTS.md"
+        return self.config_path.parent / "AGENTS.md"
 
     def visible_write_targets(self, config: AgentGatewayConfig | None = None) -> list[dict[str, Any]]:
         config = config or self.ensure_config()
@@ -492,6 +557,70 @@ class AgentGateway:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    def _serialize_user_constraints(
+        self,
+        snapshot: UserConstraintsSnapshot,
+        include_error: bool = False,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": snapshot.status,
+            "path": str(snapshot.path),
+            "enabled": bool(snapshot.content),
+            "message": snapshot.message,
+            "characterCount": len(snapshot.content),
+        }
+        if include_error and snapshot.error:
+            payload["error"] = snapshot.error
+        return payload
+
+    def _inject_user_constraints(
+        self,
+        params: dict[str, Any],
+        tool: AgentTool,
+        snapshot: UserConstraintsSnapshot,
+    ) -> dict[str, Any]:
+        if not snapshot.content:
+            return dict(params)
+        if tool.category not in {"read/debug", "plan/preview", "supervised-write", "advanced"}:
+            return dict(params)
+        return self._with_user_constraints(params, snapshot)
+
+    def _inject_user_constraints_for_apply(
+        self,
+        params: dict[str, Any],
+        snapshot: UserConstraintsSnapshot,
+    ) -> dict[str, Any]:
+        if not snapshot.content:
+            return dict(params)
+        return self._with_user_constraints(params, snapshot)
+
+    def _with_user_constraints(
+        self,
+        params: dict[str, Any],
+        snapshot: UserConstraintsSnapshot,
+    ) -> dict[str, Any]:
+        enriched = dict(params)
+        enriched["_vrcforge_user_constraints"] = {
+            "source": "user_agents_md",
+            "path": str(snapshot.path),
+            "content": snapshot.content,
+        }
+        enriched.setdefault("user_constraints", snapshot.content)
+        enriched.setdefault("userConstraints", snapshot.content)
+        instruction = enriched.get("instruction")
+        constraints_block = (
+            "\n\nUser constraints from %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md:\n"
+            f"{snapshot.content}"
+        )
+        if isinstance(instruction, str) and instruction.strip():
+            if snapshot.content not in instruction:
+                enriched["instruction"] = instruction.rstrip() + constraints_block
+        elif "instruction" in enriched or any(
+            key in enriched for key in ("avatar", "avatar_path", "avatarPath", "inventory", "changes", "adjustments")
+        ):
+            enriched["instruction"] = "Follow the user constraints below." + constraints_block
+        return enriched
+
     def _extract_token(self, headers: dict[str, str], query_params: dict[str, str]) -> str:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
@@ -528,6 +657,7 @@ class AgentGateway:
         reason: str,
         preview: Any,
         risk_level: str,
+        user_constraints: UserConstraintsSnapshot | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         config = self.ensure_config()
@@ -544,6 +674,9 @@ class AgentGateway:
             "paramsSummary": summarize_params(arguments),
             "preview": preview if preview is not None else summarize_params(arguments),
         }
+        if user_constraints and user_constraints.content:
+            approval["userConstraintsApplied"] = True
+            approval["userConstraintsPath"] = str(user_constraints.path)
         with self._lock:
             self._approvals[approval["id"]] = approval
             self.append_audit({"event": "approval_requested", "approval": approval})
@@ -649,7 +782,17 @@ def summarize_params(value: Any) -> dict[str, Any]:
         return {
             str(key): summarize_value(key, item)
             for key, item in value.items()
-            if str(key).lower() not in {"token", "authorization", "api_key", "apikey", "secret"}
+            if str(key).lower()
+            not in {
+                "token",
+                "authorization",
+                "api_key",
+                "apikey",
+                "secret",
+                "user_constraints",
+                "userconstraints",
+                "_vrcforge_user_constraints",
+            }
         }
     return {"value": summarize_value("value", value)}
 
@@ -676,7 +819,16 @@ def redact_sensitive(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if lowered in {"token", "authorization", "api_key", "apikey", "secret"}:
+            if lowered in {
+                "token",
+                "authorization",
+                "api_key",
+                "apikey",
+                "secret",
+                "user_constraints",
+                "userconstraints",
+                "_vrcforge_user_constraints",
+            }:
                 result[str(key)] = "<redacted>"
             elif lowered in {"arguments"}:
                 result[str(key)] = summarize_params(item)

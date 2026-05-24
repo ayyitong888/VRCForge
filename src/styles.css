@@ -4,21 +4,21 @@
 
 @layer base {
   :root {
-    --background: 334 43% 98%;
+    --background: 0 0% 98%;
     --foreground: 223 26% 13%;
     --card: 0 0% 100%;
     --card-foreground: 223 26% 13%;
-    --primary: 332 72% 45%;
+    --primary: 221 83% 53%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 32% 92%;
+    --secondary: 220 14% 96%;
     --secondary-foreground: 223 26% 13%;
-    --muted: 216 28% 94%;
+    --muted: 220 14% 96%;
     --muted-foreground: 220 12% 42%;
     --destructive: 349 74% 44%;
     --destructive-foreground: 0 0% 100%;
-    --border: 220 18% 84%;
-    --input: 220 18% 84%;
-    --ring: 332 72% 45%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 221 83% 53%;
   }
 
   .dark {
