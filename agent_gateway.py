@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import os
+import re
 import secrets
+import shlex
+import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,6 +82,7 @@ class AgentGateway:
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         self._approvals: dict[str, dict[str, Any]] = {}
+        self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
@@ -84,6 +90,7 @@ class AgentGateway:
             self.config_path = config_path
             self.audit_dir = audit_dir
             self._approvals.clear()
+            self._runtime_sessions.clear()
 
     def register_tool(
         self,
@@ -246,7 +253,8 @@ class AgentGateway:
         user_constraints = self.read_user_constraints()
         pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
         return {
-            "ok": config.enabled,
+            "ok": True,
+            "runtimeAlive": True,
             "enabled": config.enabled,
             "requiresToken": config.require_token,
             "configPath": str(self.config_path),
@@ -258,6 +266,16 @@ class AgentGateway:
             "allowRoslynAdvanced": self.roslyn_available(config),
             "permission": self.permission_state(config),
             "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
+            "shellExecutor": {
+                "status": "ok",
+                "shell": "powershell",
+                "timeoutSeconds": 120,
+            },
+            "deterministicPlanner": {
+                "status": "ok",
+                "available": True,
+            },
+            "runtimeSessions": len(self._runtime_sessions),
         }
 
     def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
@@ -356,6 +374,248 @@ class AgentGateway:
                 "agent": agent_name,
                 "error": str(exc),
             }
+
+    def runtime_message(
+        self,
+        params: dict[str, Any] | None = None,
+        agent_name: str = "desktop-agent",
+    ) -> dict[str, Any]:
+        params = params or {}
+        message = str(params.get("message") or "").strip()
+        if not message:
+            raise AgentGatewayError("message is required.")
+
+        now = utc_now_iso()
+        session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
+        if not session_id:
+            session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        observe = self.runtime_observe(session_id=session_id)
+        plan = self._plan_agent_turn(message, params, observe)
+
+        shell_payload: dict[str, Any] | None = None
+        command = str(params.get("shell_command") or params.get("shellCommand") or plan.get("shellCommand") or "").strip()
+        if command:
+            shell_payload = self.execute_shell(
+                {
+                    "command": command,
+                    "cwd": params.get("cwd"),
+                    "workspace_root": params.get("workspace_root") or params.get("workspaceRoot"),
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "reason": plan.get("summary") or "Agent shell step",
+                },
+                agent_name=agent_name,
+            )
+
+        turn = {
+            "id": turn_id,
+            "createdAt": now,
+            "message": message,
+            "observe": summarize_params(observe),
+            "plan": plan,
+        }
+        if shell_payload is not None:
+            turn["shell"] = shell_payload
+
+        with self._lock:
+            session = self._runtime_sessions.setdefault(
+                session_id,
+                {
+                    "id": session_id,
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "turns": [],
+                },
+            )
+            session["updatedAt"] = utc_now_iso()
+            session["turns"].append(turn)
+
+        self.append_audit(
+            {
+                "event": "agent_runtime_turn",
+                "agent": agent_name,
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "messageSummary": summarize_text(message),
+                "plan": plan,
+                "shellStatus": shell_payload.get("status") if shell_payload else "none",
+            }
+        )
+
+        payload = {
+            "ok": True,
+            "session_id": session_id,
+            "sessionId": session_id,
+            "turn_id": turn_id,
+            "turnId": turn_id,
+            "observe": observe,
+            "plan": plan,
+        }
+        if shell_payload is not None:
+            payload["shell"] = shell_payload
+            if shell_payload.get("approval_id"):
+                payload["approval_id"] = shell_payload["approval_id"]
+                payload["approvalId"] = shell_payload["approval_id"]
+            if shell_payload.get("result"):
+                payload["result"] = shell_payload["result"]
+        return payload
+
+    def runtime_observe(self, session_id: str | None = None) -> dict[str, Any]:
+        config = self.ensure_config()
+        user_constraints = self.read_user_constraints()
+        pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
+        session = self._runtime_sessions.get(session_id or "")
+        return {
+            "ok": True,
+            "runtime": {
+                "alive": True,
+                "executionMode": normalize_execution_mode(config.execution_mode),
+                "gatewayEnabled": config.enabled,
+            },
+            "workspaceRoot": str(self.default_workspace_root),
+            "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
+            "approvalQueue": {
+                "pendingCount": len(pending),
+            },
+            "shellExecutor": {
+                "available": True,
+                "shell": "powershell",
+                "timeoutSeconds": 120,
+            },
+            "deterministicPlanner": {
+                "available": True,
+            },
+            "tools": {
+                "count": len(self.build_manifest().get("tools", [])),
+            },
+            "session": {
+                "id": session_id or "",
+                "turnCount": len(session.get("turns", [])) if isinstance(session, dict) else 0,
+            },
+        }
+
+    def get_runtime_session(self, session_id: str) -> dict[str, Any]:
+        session = self._runtime_sessions.get(session_id)
+        if not session:
+            raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)
+        return {"ok": True, "session": session}
+
+    def classify_shell(self, params: dict[str, Any] | str) -> dict[str, Any]:
+        if isinstance(params, str):
+            params = {"command": params}
+        command = str(params.get("command") or "").strip()
+        workspace_root = self._resolve_workspace_root(params)
+        cwd = self._resolve_cwd(params, workspace_root)
+        reasons: list[str] = []
+
+        if not command:
+            return self._shell_classification(command, cwd, workspace_root, "reject", ["Command is empty."])
+        if len(command) > 4000:
+            return self._shell_classification(command, cwd, workspace_root, "reject", ["Command is too long."])
+
+        if not is_path_within(cwd, workspace_root):
+            reasons.append("cwd is outside the workspace root.")
+
+        lowered = command.lower()
+        if "\n" in command or "\r" in command:
+            reasons.append("Command contains multiple lines.")
+        if re.search(r"&&|\|\||[;|]|(?:^|\s)(?:\d?>|\*>|>>)", command):
+            reasons.append("Command contains chaining, pipeline, or redirection syntax.")
+        if "$(" in command or "{" in command or "}" in command or '@"' in command or "@'" in command:
+            reasons.append("Command contains advanced PowerShell syntax.")
+        if re.search(r"(^|\s|['\"])(?:\\\\|[a-zA-Z]:\\)", command):
+            outside_paths = [
+                token
+                for token in tokenize_command(command)
+                if looks_like_absolute_path(strip_quotes(token)) and not is_path_within(Path(strip_quotes(token)), workspace_root)
+            ]
+            if outside_paths:
+                reasons.append("Command references an absolute path outside the workspace root.")
+        if ".." in [part for token in tokenize_command(command) for part in re.split(r"[\\/]+", strip_quotes(token))]:
+            reasons.append("Command contains parent path traversal.")
+        if re.search(r"\.(ps1|bat|cmd|exe)(?:\s|$)", lowered):
+            reasons.append("Command executes a script or executable directly.")
+
+        tokens = tokenize_command(command)
+        if not tokens:
+            return self._shell_classification(command, cwd, workspace_root, "reject", ["Command could not be parsed."])
+
+        if reasons:
+            return self._shell_classification(command, cwd, workspace_root, "high", reasons)
+
+        command_name = strip_quotes(tokens[0]).lower()
+        args = [strip_quotes(token) for token in tokens[1:]]
+        low_reasons = self._low_risk_reasons(command_name, args, workspace_root)
+        if low_reasons:
+            return self._shell_classification(command, cwd, workspace_root, "low", low_reasons)
+
+        return self._shell_classification(command, cwd, workspace_root, "high", ["Command is not in the low-risk allowlist."])
+
+    def execute_shell(
+        self,
+        params: dict[str, Any],
+        agent_name: str = "desktop-agent",
+    ) -> dict[str, Any]:
+        classification = self.classify_shell(params)
+        command = classification["command"]
+        if classification["risk"] == "reject":
+            self.append_audit({"event": "shell_rejected", "classification": classification, "agent": agent_name})
+            return {"ok": False, "status": "rejected", "classification": classification, "error": "; ".join(classification["reasons"])}
+
+        if classification["risk"] == "high":
+            approval = self._create_shell_approval(params, classification, agent_name)
+            return {
+                "ok": True,
+                "status": "pending_approval",
+                "classification": classification,
+                "approval": approval,
+                "approval_id": approval["id"],
+                "approvalId": approval["id"],
+            }
+
+        result = self._run_shell_command(command, Path(classification["cwd"]), timeout_seconds=int(params.get("timeout_seconds") or 120))
+        self.append_audit(
+            {
+                "event": "shell_executed",
+                "agent": agent_name,
+                "classification": classification,
+                "result": summarize_shell_result(result),
+            }
+        )
+        return {"ok": result["ok"], "status": "executed", "classification": classification, "result": result}
+
+    def execute_approved_shell(self, params: dict[str, Any]) -> dict[str, Any]:
+        approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
+        if not approval_id:
+            raise AgentGatewayError("approval_id is required.")
+        approval = self._approvals.get(approval_id) or self._load_approval_from_audit(approval_id)
+        if not approval:
+            raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
+        if approval.get("targetTool") != "vrcforge_shell_execute":
+            raise AgentGatewayError("Approval is not a shell execution approval.", status_code=400)
+        return self.apply_approved({"approval_id": approval_id})
+
+    def execute_shell_payload(self, params: dict[str, Any]) -> dict[str, Any]:
+        command = str(params.get("command") or "").strip()
+        expected_hash = str(params.get("command_hash") or params.get("commandHash") or "")
+        if expected_hash and expected_hash != command_hash(command):
+            raise AgentGatewayError("Stored shell approval command hash does not match.")
+        workspace_root = self._resolve_workspace_root(params)
+        cwd = self._resolve_cwd(params, workspace_root)
+        result = self._run_shell_command(command, cwd, timeout_seconds=int(params.get("timeout_seconds") or 120))
+        self.append_audit(
+            {
+                "event": "shell_approved_executed",
+                "sessionId": params.get("session_id") or params.get("sessionId") or "",
+                "turnId": params.get("turn_id") or params.get("turnId") or "",
+                "commandHash": command_hash(command),
+                "cwd": str(cwd),
+                "workspaceRoot": str(workspace_root),
+                "result": summarize_shell_result(result),
+            }
+        )
+        return result
 
     def create_apply_request(self, params: dict[str, Any]) -> dict[str, Any]:
         config = self.ensure_config()
@@ -621,6 +881,252 @@ class AgentGateway:
             enriched["instruction"] = "Follow the user constraints below." + constraints_block
         return enriched
 
+    @property
+    def default_workspace_root(self) -> Path:
+        app_dir = os.environ.get("VRCFORGE_APP_DIR", "").strip()
+        if app_dir:
+            return Path(app_dir).resolve()
+        return Path.cwd().resolve()
+
+    def _resolve_workspace_root(self, params: dict[str, Any]) -> Path:
+        raw = str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+        return self.default_workspace_root
+
+    def _resolve_cwd(self, params: dict[str, Any], workspace_root: Path) -> Path:
+        raw = str(params.get("cwd") or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+        return workspace_root
+
+    def _shell_classification(
+        self,
+        command: str,
+        cwd: Path,
+        workspace_root: Path,
+        risk: str,
+        reasons: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "ok": risk != "reject",
+            "command": command,
+            "commandHash": command_hash(command),
+            "risk": risk,
+            "reasons": reasons,
+            "cwd": str(cwd),
+            "workspaceRoot": str(workspace_root),
+        }
+
+    def _low_risk_reasons(self, command_name: str, args: list[str], workspace_root: Path) -> list[str]:
+        read_only = {"get-childitem", "dir", "ls", "get-content", "type", "rg", "findstr"}
+        if command_name in read_only:
+            if self._args_stay_in_workspace(args, workspace_root):
+                return ["Read-only workspace inspection command."]
+            return []
+
+        if command_name in {"python", "node", "npm", "uv"} and args in (["--version"], ["-v"]):
+            return ["Read-only environment version probe."]
+
+        if command_name == "where" and len(args) == 1 and re.fullmatch(r"[a-zA-Z0-9_.-]+", args[0] or ""):
+            return ["Read-only executable lookup."]
+
+        if command_name == "git":
+            return self._git_low_risk_reasons(args, workspace_root)
+
+        return []
+
+    def _args_stay_in_workspace(self, args: list[str], workspace_root: Path) -> bool:
+        for arg in args:
+            if not arg or arg.startswith("-"):
+                continue
+            cleaned = strip_quotes(arg)
+            if cleaned in {".", "*"}:
+                continue
+            if ".." in re.split(r"[\\/]+", cleaned):
+                return False
+            if looks_like_absolute_path(cleaned) and not is_path_within(Path(cleaned), workspace_root):
+                return False
+        return True
+
+    def _git_low_risk_reasons(self, args: list[str], workspace_root: Path) -> list[str]:
+        if not args:
+            return []
+        if "-c" in args or any(arg.startswith("--config") for arg in args):
+            return []
+        if args[0] == "--no-pager":
+            args = args[1:]
+        if not args:
+            return []
+
+        verb = args[0]
+        rest = args[1:]
+        if verb == "status" and all(arg in {"--short", "-s", "--porcelain", "--branch", "-b"} for arg in rest):
+            return ["Read-only git status command."]
+        if verb == "log" and self._git_log_args_are_low_risk(rest):
+            return ["Read-only git log command."]
+        if verb == "diff" and self._git_diff_args_are_low_risk(rest, workspace_root):
+            return ["Read-only git diff command."]
+        if verb == "show" and "--stat" in rest and "--ext-diff" not in rest:
+            return ["Read-only git show stat command."]
+        return []
+
+    def _git_log_args_are_low_risk(self, args: list[str]) -> bool:
+        allowed_flags = {"--oneline", "--decorate", "--no-decorate"}
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in allowed_flags:
+                index += 1
+                continue
+            if arg == "-n" and index + 1 < len(args) and args[index + 1].isdigit():
+                index += 2
+                continue
+            if re.fullmatch(r"-\d{1,3}", arg):
+                index += 1
+                continue
+            return False
+        return True
+
+    def _git_diff_args_are_low_risk(self, args: list[str], workspace_root: Path) -> bool:
+        if "--ext-diff" in args or "--cached" in args:
+            return False
+        if args == ["--stat"] or not args:
+            return True
+        if "--" in args:
+            path_args = args[args.index("--") + 1 :]
+            return self._args_stay_in_workspace(path_args, workspace_root)
+        return all(arg in {"--stat", "--name-only", "--name-status"} for arg in args)
+
+    def _create_shell_approval(
+        self,
+        params: dict[str, Any],
+        classification: dict[str, Any],
+        agent_name: str,
+    ) -> dict[str, Any]:
+        session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
+        turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
+        with self._lock:
+            for approval in self._approvals.values():
+                if (
+                    approval.get("targetTool") == "vrcforge_shell_execute"
+                    and approval.get("status") == "pending"
+                    and approval.get("sessionId") == session_id
+                    and approval.get("turnId") == turn_id
+                    and turn_id
+                ):
+                    return redact_sensitive(dict(approval))
+
+        arguments = {
+            "command": classification["command"],
+            "command_hash": classification["commandHash"],
+            "cwd": classification["cwd"],
+            "workspace_root": classification["workspaceRoot"],
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "timeout_seconds": int(params.get("timeout_seconds") or 120),
+        }
+        approval = self._new_approval(
+            agent_name=agent_name,
+            target_tool="vrcforge_shell_execute",
+            arguments=arguments,
+            reason=str(params.get("reason") or "High-risk shell command requires approval."),
+            preview={
+                "command": classification["command"],
+                "cwd": classification["cwd"],
+                "workspaceRoot": classification["workspaceRoot"],
+                "riskReasons": classification["reasons"],
+            },
+            risk_level="high",
+            user_constraints=self.read_user_constraints(),
+        )
+        with self._lock:
+            stored = self._approvals.get(approval["id"])
+            if stored is not None:
+                stored["sessionId"] = session_id
+                stored["turnId"] = turn_id
+                stored["commandHash"] = classification["commandHash"]
+        self.append_audit(
+            {
+                "event": "shell_approval_requested",
+                "agent": agent_name,
+                "approvalId": approval["id"],
+                "classification": classification,
+            }
+        )
+        return approval
+
+    def _run_shell_command(self, command: str, cwd: Path, timeout_seconds: int = 120) -> dict[str, Any]:
+        started = time.monotonic()
+        started_at = utc_now_iso()
+        env = os.environ.copy()
+        env["GIT_PAGER"] = "cat"
+        env["GIT_EXTERNAL_DIFF"] = ""
+        process_args = [
+            "powershell",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        process = subprocess.Popen(  # noqa: S603 - shell execution is the supervised capability under test.
+            process_args,
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+        )
+        timed_out = False
+        try:
+            stdout, stderr = process.communicate(timeout=max(1, min(timeout_seconds, 600)))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_process_tree(process)
+            stdout, stderr = process.communicate()
+
+        duration = time.monotonic() - started
+        exit_code = process.returncode if process.returncode is not None else -1
+        return {
+            "ok": exit_code == 0 and not timed_out,
+            "command": command,
+            "cwd": str(cwd),
+            "exitCode": exit_code,
+            "timedOut": timed_out,
+            "startedAt": started_at,
+            "finishedAt": utc_now_iso(),
+            "durationSeconds": round(duration, 3),
+            "stdout": truncate_text(stdout),
+            "stderr": truncate_text(stderr),
+            "stdoutTruncated": len(stdout or "") > 12000,
+            "stderrTruncated": len(stderr or "") > 12000,
+        }
+
+    def _plan_agent_turn(self, message: str, params: dict[str, Any], observe: dict[str, Any]) -> dict[str, Any]:
+        command = extract_shell_command_candidate(message, params)
+        summary = "Observed runtime state and prepared the next action."
+        if command:
+            summary = "Prepared a shell step for the requested task."
+        elif "health" in message.lower() or "健康" in message:
+            summary = "Observed runtime health. No shell step is required."
+        return {
+            "summary": summary,
+            "planner": "deterministic-local",
+            "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
+            "shellNeeded": bool(command),
+            "shellCommand": command,
+            "expectedResult": "Shell output will be returned inline." if command else "Runtime observation is available.",
+            "nextStep": "classify_shell" if command else "await_user_instruction",
+        }
+
     def _extract_token(self, headers: dict[str, str], query_params: dict[str, str]) -> str:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
@@ -740,6 +1246,11 @@ def create_agent_mcp_app(gateway: AgentGateway):
         mcp.tool(name=name)(tool)
 
     for tool_name in [
+        "vrcforge_agent_observe",
+        "vrcforge_agent_message",
+        "vrcforge_classify_shell",
+        "vrcforge_execute_shell",
+        "vrcforge_execute_approved_shell",
         "vrcforge_health",
         "vrcforge_unity_status",
         "vrcforge_unity_tools",
@@ -764,6 +1275,101 @@ def create_agent_mcp_app(gateway: AgentGateway):
     app = mcp.streamable_http_app()
     app.state.fastmcp_server = mcp
     return app
+
+
+def tokenize_command(command: str) -> list[str]:
+    try:
+        return shlex.split(command, posix=False)
+    except ValueError:
+        return []
+
+
+def strip_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def looks_like_absolute_path(value: str) -> bool:
+    return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|\\\\)", value))
+
+
+def is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def command_hash(command: str) -> str:
+    return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+
+
+def summarize_text(text: str, limit: int = 240) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
+
+
+def truncate_text(text: str, limit: int = 12000) -> str:
+    if len(text or "") <= limit:
+        return text or ""
+    return (text or "")[:limit] + "\n[truncated]"
+
+
+def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": result.get("ok"),
+        "exitCode": result.get("exitCode"),
+        "timedOut": result.get("timedOut"),
+        "durationSeconds": result.get("durationSeconds"),
+        "stdoutSummary": summarize_text(str(result.get("stdout") or "")),
+        "stderrSummary": summarize_text(str(result.get("stderr") or "")),
+    }
+
+
+def kill_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            check=False,
+        )
+        return
+    process.kill()
+
+
+def extract_shell_command_candidate(message: str, params: dict[str, Any]) -> str:
+    explicit = str(params.get("shell_command") or params.get("shellCommand") or "").strip()
+    if explicit:
+        return explicit
+    stripped = message.strip()
+    lowered = stripped.lower()
+    if lowered.startswith("/shell "):
+        return stripped[7:].strip()
+    if lowered.startswith("shell:"):
+        return stripped[6:].strip()
+    fenced = re.search(r"```(?:powershell|pwsh|shell|bash|cmd)?\s*([\s\S]+?)```", stripped, re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+    inline = re.search(r"`([^`\n]+)`", stripped)
+    if inline:
+        return inline.group(1).strip()
+    if "git status" in lowered or "工作树" in stripped or "仓库状态" in stripped:
+        return "git --no-pager status --short"
+    if "git log" in lowered or "最近提交" in stripped:
+        return "git --no-pager log --oneline -n 10"
+    if "列目录" in stripped or "文件列表" in stripped or lowered in {"ls", "dir"}:
+        return "Get-ChildItem"
+    return ""
 
 
 def ensure_dict(value: Any) -> dict[str, Any]:

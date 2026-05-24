@@ -190,6 +190,87 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(restored.json()["permission"]["executionMode"], "roslyn_full_auto")
             self.assertTrue(restored.json()["permission"]["roslynRiskAcknowledged"])
 
+    def test_agent_runtime_message_observes_and_plans_without_unity(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/app/agent/message", json={"message": "检查仓库状态"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["observe"]["ok"])
+        self.assertEqual(payload["plan"]["planner"], "deterministic-local")
+        self.assertIn("session_id", payload)
+        self.assertIn("turn_id", payload)
+
+    def test_shell_classifier_low_high_and_reject_cases(self) -> None:
+        workspace_root = str(Path(__file__).resolve().parents[1])
+
+        low = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "git --no-pager status --short", "workspace_root": workspace_root}
+        )
+        self.assertEqual(low["risk"], "low")
+
+        high = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Set-Content test.txt hi", "workspace_root": workspace_root}
+        )
+        self.assertEqual(high["risk"], "high")
+
+        redirected = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Get-Content a.txt > b.txt", "workspace_root": workspace_root}
+        )
+        self.assertEqual(redirected["risk"], "high")
+
+        chained = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Get-ChildItem; Remove-Item test.txt", "workspace_root": workspace_root}
+        )
+        self.assertEqual(chained["risk"], "high")
+
+        rejected = dashboard_server.AGENT_GATEWAY.classify_shell({"command": "", "workspace_root": workspace_root})
+        self.assertEqual(rejected["risk"], "reject")
+
+    def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            target = Path(workspace) / "agent-loop.txt"
+            with TestClient(dashboard_server.app) as client:
+                low = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "列目录",
+                        "workspace_root": workspace,
+                        "cwd": workspace,
+                    },
+                )
+                self.assertEqual(low.status_code, 200)
+                self.assertEqual(low.json()["shell"]["status"], "executed")
+                self.assertEqual(low.json()["shell"]["classification"]["risk"], "low")
+
+                high = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "写入测试文件",
+                        "shell_command": "Set-Content -Path agent-loop.txt -Value hi -Encoding utf8",
+                        "workspace_root": workspace,
+                        "cwd": workspace,
+                    },
+                )
+                self.assertEqual(high.status_code, 200)
+                high_payload = high.json()
+                self.assertEqual(high_payload["shell"]["status"], "pending_approval")
+                self.assertFalse(target.exists())
+
+                approval_id = high_payload["shell"]["approval_id"]
+                approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                self.assertEqual(approved.status_code, 200)
+                approved_payload = approved.json()
+                self.assertTrue(approved_payload["ok"])
+                self.assertEqual(approved_payload["execution"]["status"], "applied")
+                self.assertTrue(target.exists())
+                self.assertEqual(target.read_text(encoding="utf-8-sig").strip(), "hi")
+
+                replay = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                self.assertEqual(replay.status_code, 200)
+                self.assertFalse(replay.json()["ok"])
+
     def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
@@ -265,6 +346,11 @@ class DashboardServerTests(unittest.TestCase):
             payload = client.get("/api/agent/manifest", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
+        self.assertIn("vrcforge_agent_observe", tool_names)
+        self.assertIn("vrcforge_agent_message", tool_names)
+        self.assertIn("vrcforge_classify_shell", tool_names)
+        self.assertIn("vrcforge_execute_shell", tool_names)
+        self.assertIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
@@ -348,6 +434,8 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(listed.status_code, 200)
 
         tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+        self.assertIn("vrcforge_agent_message", tool_names)
+        self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)

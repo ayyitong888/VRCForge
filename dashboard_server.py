@@ -388,6 +388,15 @@ class AgentSessionRequest(BaseModel):
     agent_name: str = "external-agent"
 
 
+class AgentRuntimeMessageRequest(BaseModel):
+    agent_name: str = "desktop-agent"
+    session_id: str | None = None
+    message: str
+    shell_command: str | None = None
+    cwd: str | None = None
+    workspace_root: str | None = None
+
+
 class AgentPermissionRequest(BaseModel):
     execution_mode: str = Field(default="approval")
     acknowledge_roslyn_risk: bool = Field(default=False)
@@ -660,6 +669,62 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
     return payload
 
 
+@app.post("/api/app/agent/message")
+async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.runtime_message(
+        {
+            "session_id": runtime_request.session_id,
+            "message": runtime_request.message,
+            "shell_command": runtime_request.shell_command,
+            "cwd": runtime_request.cwd,
+            "workspace_root": runtime_request.workspace_root,
+        },
+        agent_name=runtime_request.agent_name,
+    )
+    await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.get("/api/app/agent/session/{session_id}")
+def app_agent_runtime_session(session_id: str) -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.get_runtime_session(session_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/app/agent/approvals")
+def app_agent_approvals() -> dict[str, Any]:
+    approvals = AGENT_GATEWAY.list_approvals()
+    return {"ok": True, "approvals": approvals, "count": len(approvals)}
+
+
+@app.post("/api/app/agent/approvals/{approval_id}/approve")
+async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
+    try:
+        approved = AGENT_GATEWAY.approve(approval_id)
+        execution = None
+        approval = approved.get("approval") if isinstance(approved, dict) else None
+        if isinstance(approval, dict) and approval.get("targetTool") == "vrcforge_shell_execute" and approved.get("ok"):
+            execution = AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
+        payload = {"ok": bool(approved.get("ok")), "approval": approved.get("approval"), "execution": execution}
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/agent/approvals/{approval_id}/reject")
+async def app_agent_reject(approval_id: str) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.reject(approval_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
 def build_agentic_app_health() -> dict[str, Any]:
     payload = copy.deepcopy(read_health())
     payload.pop("apiConfig", None)
@@ -686,6 +751,33 @@ def create_agent_session(request: Request, session_request: AgentSessionRequest)
         "agentName": session_request.agent_name,
         "manifest": AGENT_GATEWAY.build_manifest(),
     }
+
+
+@app.post("/api/agent/runtime/message")
+def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=False)
+    try:
+        return AGENT_GATEWAY.runtime_message(
+            {
+                "session_id": runtime_request.session_id,
+                "message": runtime_request.message,
+                "shell_command": runtime_request.shell_command,
+                "cwd": runtime_request.cwd,
+                "workspace_root": runtime_request.workspace_root,
+            },
+            agent_name=runtime_request.agent_name,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/agent/runtime/session/{session_id}")
+def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=False)
+    try:
+        return AGENT_GATEWAY.get_runtime_session(session_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/agent/tool/{tool_name}")
@@ -5632,6 +5724,11 @@ def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def register_agent_gateway_tools() -> None:
+    AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
+    AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
+    AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
@@ -5715,6 +5812,12 @@ def register_agent_gateway_tools() -> None:
         "critical",
         execute_agent_roslyn_advanced,
         advanced=True,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_shell_execute",
+        "Execute an approved high-risk shell command.",
+        "high",
+        AGENT_GATEWAY.execute_shell_payload,
     )
 
 

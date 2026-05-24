@@ -1,24 +1,41 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Activity,
   AlertTriangle,
   Bot,
-  CheckCircle2,
-  CircleDot,
-  ClipboardCheck,
-  Code2,
+  Check,
+  ChevronDown,
+  Clock3,
+  Folder,
+  History,
+  Loader2,
   Moon,
-  Play,
-  RefreshCw,
-  ShieldCheck,
+  Plus,
+  Search,
+  Send,
+  Settings,
+  Shield,
+  Sparkles,
   Sun,
   TerminalSquare,
   Wrench,
+  X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
-import { ApiError, AppBootstrap, fetchBootstrap, PermissionState, updatePermission } from "./lib/api";
+import {
+  AgentApproval,
+  AgentRuntimeResponse,
+  AgentShellResult,
+  ApiError,
+  AppBootstrap,
+  approveAgentApproval,
+  fetchBootstrap,
+  PermissionState,
+  rejectAgentApproval,
+  sendAgentMessage,
+  updatePermission,
+} from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
 type BackendStartResult = {
@@ -29,15 +46,21 @@ type BackendStartResult = {
   message: string;
 };
 
-type MetricTone = "default" | "success" | "warning" | "error" | "info";
+type ConversationItem =
+  | { id: string; type: "user"; text: string }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse }
+  | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
+  | { id: string; type: "error"; text: string };
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
+
 const navItems = [
-  { label: "工作台", icon: Bot },
+  { label: "新对话", icon: Plus },
+  { label: "搜索", icon: Search },
   { label: "Skills", icon: Wrench },
-  { label: "审批", icon: ClipboardCheck },
-  { label: "诊断", icon: Activity },
-  { label: "Roslyn", icon: Code2 },
+  { label: "自动化", icon: Clock3 },
+  { label: "审批", icon: Shield },
+  { label: "日志", icon: TerminalSquare },
 ];
 
 function isTauriRuntime() {
@@ -47,12 +70,16 @@ function isTauriRuntime() {
 export default function App() {
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
-  const [backendMessage, setBackendMessage] = useState("等待启动");
+  const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [showRoslynWarning, setShowRoslynWarning] = useState(false);
   const [pendingMode, setPendingMode] = useState<PermissionState["executionMode"] | null>(null);
+  const [input, setInput] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [conversation, setConversation] = useState<ConversationItem[]>([]);
 
   const permission = bootstrap?.permission;
   const healthComponents = bootstrap?.health.components ?? {};
@@ -61,6 +88,10 @@ export default function App() {
   const runtimeConnected = Boolean(bootstrap?.ok);
   const pendingApprovals = bootstrap?.agentHealth.pendingApprovalCount ?? 0;
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
+  const projects = bootstrap?.health.projects?.projects ?? [];
+  const activeProject = bootstrap?.health.projects?.selectedProjectPath || bootstrap?.health.projectRoot || "VRCForge";
+
+  const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -75,12 +106,13 @@ export default function App() {
     setError("");
     try {
       if (isTauriRuntime()) {
+        await invoke("ensure_agent_notes_file");
         const result = await invoke<BackendStartResult>("start_backend");
         setEndpoint(result.endpoint);
         setBackendMessage(result.message);
         await refresh(result.endpoint);
       } else {
-        setBackendMessage("开发预览");
+        setBackendMessage("dev");
         await refresh(endpoint);
       }
     } catch (cause) {
@@ -131,24 +163,99 @@ export default function App() {
     await switchMode(pendingMode, true);
   }
 
+  async function submitMessage(event?: FormEvent) {
+    event?.preventDefault();
+    const message = input.trim();
+    if (!message || sending) {
+      return;
+    }
+    setInput("");
+    setError("");
+    setSending(true);
+    const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
+    setConversation((items) => [...items, userItem]);
+    try {
+      const response = await sendAgentMessage(endpoint, message, sessionId || undefined);
+      setSessionId(response.sessionId || response.session_id);
+      setConversation((items) => [...items, { id: response.turnId || response.turn_id, type: "agent", response }]);
+      await refresh();
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setConversation((items) => [...items, { id: `error-${Date.now()}`, type: "error", text }]);
+      setError(text);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function approveShell(approvalId: string) {
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await approveAgentApproval(endpoint, approvalId);
+      setConversation((items) => [
+        ...items,
+        {
+          id: `result-${approvalId}-${Date.now()}`,
+          type: "result",
+          approvalId,
+          result: payload.execution?.result,
+          error: payload.execution?.error,
+        },
+      ]);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function rejectShell(approvalId: string) {
+    setLoading(true);
+    setError("");
+    try {
+      await rejectAgentApproval(endpoint, approvalId);
+      setConversation((items) => [
+        ...items,
+        {
+          id: `result-${approvalId}-${Date.now()}`,
+          type: "result",
+          approvalId,
+          error: "rejected",
+        },
+      ]);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function newConversation() {
+    setConversation([]);
+    setSessionId("");
+    setError("");
+  }
+
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <div className="grid min-h-screen grid-cols-[240px_minmax(0,1fr)]">
-        <aside className="border-r border-border bg-card px-4 py-5">
+    <main className="h-screen overflow-hidden bg-background text-foreground">
+      <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="flex min-w-0 flex-col border-r border-border bg-sidebar px-4 py-4">
           <div className="flex h-10 items-center gap-3 px-2">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Bot className="h-4 w-4" />
-            </div>
+            <Bot className="h-5 w-5 shrink-0 text-primary" />
             <div className="truncate text-base font-semibold">VRCForge</div>
           </div>
 
-          <nav className="mt-8 space-y-1">
+          <nav className="mt-5 space-y-1">
             {navItems.map(({ label, icon: Icon }, index) => (
               <button
                 key={label}
+                onClick={index === 0 ? newConversation : undefined}
                 className={cn(
                   "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-                  index === 0 ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  index === 0 ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 <Icon className="h-4 w-4 shrink-0" />
@@ -156,166 +263,127 @@ export default function App() {
               </button>
             ))}
           </nav>
+
+          <SidebarSection title="项目">
+            {projectItems.length > 0 ? (
+              projectItems.map((project, index) => (
+                <SidebarProject
+                  key={`${project.path || project.name || index}`}
+                  name={project.name || project.path || "Unity Project"}
+                  meta={project.unityVersion || (project.sources ?? []).join("+")}
+                  active={index === 0}
+                />
+              ))
+            ) : (
+              <SidebarProject name={shortPath(activeProject)} meta="local" active />
+            )}
+          </SidebarSection>
+
+          <SidebarSection title="对话">
+            {conversation.length > 0 ? (
+              <button className="flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm text-foreground">
+                <History className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="truncate">{conversation.find((item) => item.type === "user")?.type === "user" ? conversation.find((item) => item.type === "user")?.text : "当前会话"}</span>
+              </button>
+            ) : (
+              <button className="flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground">
+                <History className="h-4 w-4 shrink-0" />
+                <span className="truncate">空会话</span>
+              </button>
+            )}
+          </SidebarSection>
+
+          <div className="mt-auto">
+            <button className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground">
+              <Settings className="h-4 w-4 shrink-0" />
+              <span className="truncate">设置</span>
+            </button>
+          </div>
         </aside>
 
-        <section className="flex min-w-0 flex-col">
-          <header className="flex h-16 items-center justify-between border-b border-border bg-background px-8">
-            <div className="min-w-0">
-              <h1 className="truncate text-xl font-semibold">工作台</h1>
-              <div className="truncate text-xs text-muted-foreground">{backendMessage}</div>
+        <section className="flex min-w-0 flex-col bg-workspace">
+          <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
+            <div className="flex min-w-0 items-center gap-2 text-sm">
+              <span className="truncate text-muted-foreground">{shortPath(activeProject)}</span>
+              <span className="text-muted-foreground">/</span>
+              <span className="truncate font-medium">{sessionId ? "Agent Session" : "New Task"}</span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {permission?.roslynFullAuto ? <Badge tone="danger">Roslyn 全自动</Badge> : <Badge tone="ok">逐条审批</Badge>}
-              <Button variant="outline" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+              <StatusChip ok={runtimeConnected} label={runtimeConnected ? "runtime ready" : "runtime offline"} />
+              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} approvals</Badge>
+              <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
             </div>
           </header>
 
-          <div className="flex-1 overflow-auto p-8">
-            <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)_340px] gap-8">
-              <div className="min-w-0 space-y-8">
-                {error ? (
-                  <section className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
-                    <span className="break-words">{error}</span>
-                  </section>
-                ) : null}
-
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="flex min-w-0 items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold">Runtime</div>
-                      <div className="mt-1 flex min-w-0 items-center gap-2 text-sm">
-                        <CircleDot className={cn("h-4 w-4 shrink-0", runtimeConnected ? "text-emerald-600" : "text-amber-600")} />
-                        <span className="truncate">{runtimeConnected ? "connected" : "starting"}</span>
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 gap-2">
-                      <Button variant="outline" className="h-9 w-9 px-0" onClick={() => refresh()} disabled={loading}>
-                        <RefreshCw className="h-4 w-4" />
-                      </Button>
-                      <Button variant="primary" className="h-9 px-3" onClick={startRuntime} disabled={loading}>
-                        <Play className="h-4 w-4" />
-                        <span className="whitespace-nowrap">启动</span>
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="mt-6 grid grid-cols-2 gap-4">
-                    <Value label="Endpoint" value={endpoint} />
-                    <Value label="Gateway" value={bootstrap?.agentHealth.enabled ? "enabled" : "disabled"} />
-                    <Value label="Version" value={bootstrap?.health.version ?? "-"} />
-                    <Value label="Mode" value={permission?.executionMode ?? "-"} />
-                  </div>
-                </section>
-
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold">Execution</div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Button
-                          variant={permission?.executionMode === "approval" ? "primary" : "outline"}
-                          onClick={() => switchMode("approval")}
-                          disabled={loading}
-                        >
-                          <ShieldCheck className="h-4 w-4" />
-                          <span className="whitespace-nowrap">逐条审批</span>
-                        </Button>
-                        <Button
-                          variant={permission?.executionMode === "roslyn_full_auto" ? "danger" : "outline"}
-                          onClick={() => switchMode("roslyn_full_auto")}
-                          disabled={loading}
-                        >
-                          <Code2 className="h-4 w-4" />
-                          <span className="whitespace-nowrap">Roslyn 全自动</span>
-                        </Button>
-                      </div>
-                    </div>
-                    {permission?.roslynFullAuto ? (
-                      <Badge tone="danger" className="shrink-0">
-                        active
-                      </Badge>
-                    ) : (
-                      <Badge tone="ok" className="shrink-0">
-                        guarded
-                      </Badge>
-                    )}
-                  </div>
-                </section>
-
-                <section className="grid grid-cols-2 gap-8">
-                  <DataCard title="Skills" value={toolCount} tone="info" />
-                  <DataCard title="待审批" value={pendingApprovals} tone={pendingApprovals > 0 ? "warning" : "default"} />
-                </section>
-
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="mb-5 flex items-center gap-2 text-sm font-semibold">
-                    <Activity className="h-4 w-4" />
-                    运行诊断
-                  </div>
-                  <div className="grid grid-cols-4 gap-4">
-                    <Metric label="errors" value={healthErrors} tone={healthErrors > 0 ? "error" : "default"} />
-                    <Metric label="warnings" value={healthWarnings} tone={healthWarnings > 0 ? "warning" : "default"} />
-                    <Metric label="approvals" value={pendingApprovals} tone={pendingApprovals > 0 ? "warning" : "default"} />
-                    <Metric label="skills" value={toolCount} tone="info" />
-                  </div>
-                </section>
+          {error ? (
+            <div className="mx-auto mt-3 w-full max-w-4xl px-4">
+              <div className="rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
+                <span className="break-words">{error}</span>
               </div>
-
-              <aside className="min-w-0 space-y-8">
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="mb-4 flex items-center gap-2 text-sm font-semibold">
-                    <ClipboardCheck className="h-4 w-4" />
-                    待审批队列
-                  </div>
-                  <div className="rounded-md border border-border bg-background px-3 py-3 text-sm">
-                    <span className="block truncate">{pendingApprovals > 0 ? `${pendingApprovals} pending` : "empty"}</span>
-                  </div>
-                </section>
-
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="mb-4 flex items-center gap-2 text-sm font-semibold">
-                    <TerminalSquare className="h-4 w-4" />
-                    桌面闭环
-                  </div>
-                  <div className="space-y-3">
-                    <LoopItem label="Runtime" ok={runtimeConnected} />
-                    <LoopItem label="Manifest" ok={toolCount > 0} />
-                    <LoopItem label="Permission" ok={Boolean(permission)} />
-                  </div>
-                </section>
-
-                <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-                  <div className="mb-4 text-sm font-semibold">Components</div>
-                  <div className="space-y-2">
-                    {Object.entries(healthComponents)
-                      .slice(0, 7)
-                      .map(([name, component]) => (
-                        <div key={name} className="flex min-w-0 items-center justify-between gap-3 rounded-sm bg-muted/60 px-2 py-2">
-                          <span className="min-w-0 truncate text-xs font-medium">{name}</span>
-                          <Badge tone={statusBadgeTone(component.status)} className="shrink-0">
-                            {component.status}
-                          </Badge>
-                        </div>
-                      ))}
-                  </div>
-                </section>
-              </aside>
             </div>
-          </div>
+          ) : null}
+
+          {conversation.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+              <div className="w-full max-w-4xl">
+                <h1 className="mb-8 text-center text-3xl font-semibold tracking-normal">我们应该在 VRCForge 中构建什么？</h1>
+                <Composer
+                  input={input}
+                  setInput={setInput}
+                  sending={sending}
+                  permission={permission}
+                  backendMessage={backendMessage}
+                  onSubmit={submitMessage}
+                  onSwitchMode={switchMode}
+                />
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+                <div className="mx-auto max-w-4xl space-y-5">
+                  {conversation.map((item) => (
+                    <ConversationCard
+                      key={item.id}
+                      item={item}
+                      loading={loading}
+                      onApprove={approveShell}
+                      onReject={rejectShell}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="shrink-0 border-t border-border bg-workspace/95 px-6 py-4">
+                <div className="mx-auto max-w-4xl">
+                  <Composer
+                    input={input}
+                    setInput={setInput}
+                    sending={sending}
+                    permission={permission}
+                    backendMessage={backendMessage}
+                    onSubmit={submitMessage}
+                    onSwitchMode={switchMode}
+                    compact
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </section>
       </div>
 
       {showRoslynWarning ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-          <section className="w-full max-w-lg rounded-md border border-destructive/40 bg-card p-6 shadow-panel">
-            <div className="flex items-center gap-3 text-destructive">
+          <section className="w-full max-w-lg rounded-lg border border-destructive/40 bg-card p-6 shadow-panel">
+            <div className="flex min-w-0 items-center gap-3 text-destructive">
               <AlertTriangle className="h-5 w-5 shrink-0" />
-              <h2 className="truncate text-lg font-semibold">Roslyn 全自动</h2>
+              <h2 className="truncate text-lg font-semibold">Roslyn full-auto</h2>
             </div>
-            <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
-              <Value label="risk_acknowledged" value={permission?.roslynRiskAcknowledged ? "true" : "false"} />
-              <Value label="mode" value="roslyn_full_auto" />
+            <div className="mt-5 grid gap-3 text-sm">
+              <DataLine label="risk_acknowledged" value={permission?.roslynRiskAcknowledged ? "true" : "false"} />
+              <DataLine label="mode" value="roslyn_full_auto" />
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setShowRoslynWarning(false)}>
@@ -332,53 +400,277 @@ export default function App() {
   );
 }
 
-function Value({ label, value }: { label: string; value: string }) {
+function Composer({
+  input,
+  setInput,
+  sending,
+  permission,
+  backendMessage,
+  onSubmit,
+  onSwitchMode,
+  compact = false,
+}: {
+  input: string;
+  setInput: (value: string) => void;
+  sending: boolean;
+  permission?: PermissionState;
+  backendMessage: string;
+  onSubmit: (event?: FormEvent) => void;
+  onSwitchMode: (mode: PermissionState["executionMode"]) => void;
+  compact?: boolean;
+}) {
   return (
-    <div className="min-w-0 rounded-md border border-border bg-background px-3 py-2">
-      <div className="truncate text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 break-words text-sm font-medium">{value}</div>
+    <form onSubmit={onSubmit} className={cn("rounded-2xl border border-border bg-card shadow-composer", compact ? "p-3" : "p-4")}>
+      <textarea
+        value={input}
+        onChange={(event) => setInput(event.target.value)}
+        className="min-h-[86px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+        placeholder="尽管问"
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            onSubmit();
+          }
+        }}
+      />
+      <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge tone={permission?.roslynFullAuto ? "danger" : "warn"} className="max-w-full">
+            <Shield className="mr-1 h-3.5 w-3.5 shrink-0" />
+            <button
+              type="button"
+              className="truncate"
+              onClick={() => onSwitchMode(permission?.roslynFullAuto ? "approval" : "roslyn_full_auto")}
+            >
+              {permission?.roslynFullAuto ? "Roslyn full-auto" : "Ask before changes"}
+            </button>
+            <ChevronDown className="ml-1 h-3.5 w-3.5 shrink-0" />
+          </Badge>
+          <Badge tone="muted" className="max-w-[220px] truncate">
+            {backendMessage}
+          </Badge>
+        </div>
+        <Button className="h-10 w-10 rounded-full px-0" disabled={sending || !input.trim()} type="submit">
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function ConversationCard({
+  item,
+  loading,
+  onApprove,
+  onReject,
+}: {
+  item: ConversationItem;
+  loading: boolean;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
+  if (item.type === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[78%] rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
+          <p className="whitespace-pre-wrap break-words">{item.text}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (item.type === "error") {
+    return (
+      <div className="rounded-lg border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
+        <span className="break-words">{item.text}</span>
+      </div>
+    );
+  }
+
+  if (item.type === "result") {
+    return <ShellResultCard title={item.error === "rejected" ? "Rejected" : "Shell result"} result={item.result} error={item.error} />;
+  }
+
+  const response = item.response;
+  const shell = response.shell;
+  const approval = shell?.approval;
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
+        <div className="flex min-w-0 items-center gap-2">
+          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+          <div className="truncate text-sm font-semibold">Plan</div>
+          <Badge tone="muted" className="ml-auto shrink-0">
+            {response.plan.planner}
+          </Badge>
+        </div>
+        <div className="mt-4 grid gap-3">
+          <DataLine label="summary" value={response.plan.summary} />
+          <DataLine label="next" value={response.plan.nextStep || "-"} />
+          {response.plan.shellCommand ? <DataLine label="command" value={response.plan.shellCommand} mono /> : null}
+        </div>
+      </section>
+
+      {shell?.classification ? (
+        <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
+          <div className="mb-3 flex items-center gap-2">
+            <TerminalSquare className="h-4 w-4 text-primary" />
+            <div className="truncate text-sm font-semibold">Shell</div>
+            <Badge tone={riskTone(shell.classification.risk)} className="ml-auto shrink-0">
+              {shell.classification.risk}
+            </Badge>
+          </div>
+          <DataLine label="cwd" value={shell.classification.cwd} />
+          <div className="mt-3 overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
+            <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
+          </div>
+          {shell.classification.reasons.length ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {shell.classification.reasons.map((reason) => (
+                <Badge key={reason} tone="muted" className="max-w-full">
+                  <span className="truncate">{reason}</span>
+                </Badge>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {shell?.result ? <ShellResultCard title="Shell result" result={shell.result} /> : null}
+      {approval ? <ApprovalCard approval={approval} loading={loading} onApprove={onApprove} onReject={onReject} /> : null}
+      {shell?.error ? <ShellResultCard title="Shell error" error={shell.error} /> : null}
     </div>
   );
 }
 
-function DataCard({ title, value, tone }: { title: string; value: number; tone: MetricTone }) {
+function ApprovalCard({
+  approval,
+  loading,
+  onApprove,
+  onReject,
+}: {
+  approval: AgentApproval;
+  loading: boolean;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
   return (
-    <section className="rounded-md border border-border bg-card p-5 shadow-panel">
-      <div className="truncate text-sm font-semibold">{title}</div>
-      <div className={cn("mt-5 text-4xl font-semibold", metricToneClass(tone))}>{formatCount(value)}</div>
+    <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-panel">
+      <div className="flex min-w-0 items-center gap-2">
+        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+        <div className="truncate text-sm font-semibold">Approval</div>
+        <Badge tone="warn" className="ml-auto shrink-0">
+          {approval.riskLevel || "high"}
+        </Badge>
+      </div>
+      <div className="mt-4 grid gap-3">
+        <DataLine label="command" value={approval.preview?.command || "-"} mono />
+        <DataLine label="cwd" value={approval.preview?.cwd || "-"} />
+        <DataLine label="reason" value={approval.reason || "-"} />
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="outline" disabled={loading} onClick={() => onReject(approval.id)}>
+          <X className="h-4 w-4" />
+          Reject
+        </Button>
+        <Button variant="primary" disabled={loading} onClick={() => onApprove(approval.id)}>
+          <Check className="h-4 w-4" />
+          Approve
+        </Button>
+      </div>
     </section>
   );
 }
 
-function Metric({ label, value, tone }: { label: string; value: number; tone: MetricTone }) {
+function ShellResultCard({ title, result, error }: { title: string; result?: AgentShellResult; error?: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-border bg-background p-3">
-      <div className="truncate text-xs text-muted-foreground">{label}</div>
-      <div className={cn("mt-2 truncate text-2xl font-semibold", metricToneClass(tone))}>{formatCount(value)}</div>
+    <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
+      <div className="mb-3 flex min-w-0 items-center gap-2">
+        <TerminalSquare className="h-4 w-4 shrink-0 text-primary" />
+        <div className="truncate text-sm font-semibold">{title}</div>
+        {result ? (
+          <Badge tone={result.ok ? "ok" : "danger"} className="ml-auto shrink-0">
+            exit {result.exitCode}
+          </Badge>
+        ) : null}
+      </div>
+      {error ? <DataLine label="error" value={error} /> : null}
+      {result ? (
+        <div className="grid gap-3">
+          <DataLine label="duration" value={`${result.durationSeconds}s`} />
+          <OutputBlock label="stdout" value={result.stdout} />
+          {result.stderr ? <OutputBlock label="stderr" value={result.stderr} danger /> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function OutputBlock({ label, value, danger = false }: { label: string; value: string; danger?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-xs text-muted-foreground">{label}</div>
+      <pre
+        className={cn(
+          "max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/50 p-3 font-mono text-xs",
+          danger ? "text-destructive" : "text-foreground",
+        )}
+      >
+        {value || "-"}
+      </pre>
     </div>
   );
 }
 
-function LoopItem({ label, ok }: { label: string; ok: boolean }) {
+function DataLine({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3 rounded-sm bg-muted/60 px-2 py-2 text-sm">
+    <div className="grid min-w-0 grid-cols-[120px_minmax(0,1fr)] gap-3 text-sm">
+      <div className="truncate text-muted-foreground">{label}</div>
+      <div className={cn("min-w-0 break-words font-medium", mono && "font-mono text-xs")}>{value}</div>
+    </div>
+  );
+}
+
+function SidebarSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="mt-8 min-w-0">
+      <div className="mb-3 px-2 text-xs font-medium text-muted-foreground">{title}</div>
+      <div className="space-y-1">{children}</div>
+    </section>
+  );
+}
+
+function SidebarProject({ name, meta, active = false }: { name: string; meta?: string; active?: boolean }) {
+  return (
+    <button
+      className={cn(
+        "flex h-11 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+        active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      <Folder className="h-4 w-4 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{name}</span>
+      {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
+    </button>
+  );
+}
+
+function StatusChip({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <Badge tone={ok ? "ok" : "warn"} className="max-w-[180px]">
       <span className="truncate">{label}</span>
-      {ok ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />}
-    </div>
+    </Badge>
   );
 }
 
-function metricToneClass(tone: MetricTone) {
-  if (tone === "success") return "text-emerald-600";
-  if (tone === "warning") return "text-amber-600";
-  if (tone === "error") return "text-destructive";
-  if (tone === "info") return "text-blue-600";
-  return "text-foreground";
+function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {
+  if (risk === "low") return "ok";
+  if (risk === "high") return "warn";
+  if (risk === "reject") return "danger";
+  return "muted";
 }
 
-function statusBadgeTone(status: string): "ok" | "warn" | "danger" | "muted" {
-  if (status === "ok") return "ok";
-  if (status === "warning") return "warn";
-  if (status === "error") return "danger";
-  return "muted";
+function shortPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).slice(-1)[0] || path;
 }

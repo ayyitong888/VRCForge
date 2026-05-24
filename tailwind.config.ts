@@ -31,6 +31,8 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        sidebar: "hsl(var(--sidebar))",
+        workspace: "hsl(var(--workspace))",
       },
       borderRadius: {
         lg: "8px",
@@ -39,6 +41,7 @@ export default {
       },
       boxShadow: {
         panel: "0 12px 28px rgba(17, 24, 39, 0.08)",
+        composer: "0 16px 42px rgba(17, 24, 39, 0.12)",
       },
     },
   },

@@ -32,6 +32,67 @@ export type AgentManifest = {
   roslynRiskAcknowledged: boolean;
 };
 
+export type AgentApproval = {
+  id: string;
+  status: string;
+  targetTool?: string;
+  riskLevel?: string;
+  reason?: string;
+  createdAt?: string;
+  preview?: {
+    command?: string;
+    cwd?: string;
+    workspaceRoot?: string;
+    riskReasons?: string[];
+  };
+};
+
+export type AgentShellResult = {
+  ok: boolean;
+  command: string;
+  cwd: string;
+  exitCode: number;
+  timedOut: boolean;
+  durationSeconds: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+};
+
+export type AgentRuntimeResponse = {
+  ok: boolean;
+  session_id: string;
+  sessionId: string;
+  turn_id: string;
+  turnId: string;
+  observe: Record<string, unknown>;
+  plan: {
+    summary: string;
+    planner: string;
+    shellNeeded: boolean;
+    shellCommand?: string;
+    expectedResult?: string;
+    nextStep?: string;
+  };
+  shell?: {
+    ok: boolean;
+    status: "executed" | "pending_approval" | "rejected" | string;
+    classification?: {
+      risk: "low" | "high" | "reject" | string;
+      reasons: string[];
+      command: string;
+      cwd: string;
+    };
+    approval?: AgentApproval;
+    approval_id?: string;
+    approvalId?: string;
+    result?: AgentShellResult;
+    error?: string;
+  };
+  result?: AgentShellResult;
+};
+
 export type HealthComponent = {
   status: "ok" | "warning" | "error" | "unknown";
   message: string;
@@ -51,6 +112,11 @@ export type AppBootstrap = {
     version: string;
     portableMode: boolean;
     components: Record<string, HealthComponent>;
+    projectRoot?: string;
+    projects?: {
+      selectedProjectPath?: string;
+      projects?: Array<{ name?: string; path?: string; unityVersion?: string; sources?: string[] }>;
+    };
   };
   agentManifest: AgentManifest;
   agentHealth: {
@@ -59,7 +125,7 @@ export type AppBootstrap = {
     pendingApprovalCount: number;
   };
   permission: PermissionState;
-  approvals: Array<Record<string, unknown>>;
+  approvals: AgentApproval[];
 };
 
 export class ApiError extends Error {
@@ -88,6 +154,39 @@ export async function updatePermission(
       execution_mode: executionMode,
       acknowledge_roslyn_risk: acknowledgeRoslynRisk,
     }),
+  });
+}
+
+export async function sendAgentMessage(
+  endpoint: string,
+  message: string,
+  sessionId?: string,
+): Promise<AgentRuntimeResponse> {
+  return requestJson(`${endpoint}/api/app/agent/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId || null,
+      message,
+    }),
+  });
+}
+
+export async function approveAgentApproval(
+  endpoint: string,
+  approvalId: string,
+): Promise<{ ok: boolean; approval?: AgentApproval; execution?: { status?: string; result?: AgentShellResult; error?: string } }> {
+  return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
+    method: "POST",
+  });
+}
+
+export async function rejectAgentApproval(
+  endpoint: string,
+  approvalId: string,
+): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+  return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
+    method: "POST",
   });
 }
 

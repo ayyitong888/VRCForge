@@ -107,6 +107,34 @@ try {
   assert(approval.status === 200, "Switching back to approval should succeed.");
   assert(approval.json.permission.roslynRiskAcknowledged === true, "Risk acknowledgement must not reset.");
 
+  const lowRiskTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "列目录",
+    workspace_root: smokeRoot,
+    cwd: smokeRoot,
+  });
+  assert(lowRiskTurn.status === 200, "Agent runtime message should accept natural language input.");
+  assert(lowRiskTurn.json.plan.planner === "deterministic-local", "Agent runtime should produce a plan.");
+  assert(lowRiskTurn.json.shell.status === "executed", "Low-risk shell commands should execute directly.");
+  assert(lowRiskTurn.json.shell.classification.risk === "low", "Directory listing should be low-risk.");
+
+  const highRiskTarget = path.join(smokeRoot, "approved-shell.txt");
+  const highRiskTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "写入测试文件",
+    shell_command: "Set-Content -Path approved-shell.txt -Value ok -Encoding utf8",
+    workspace_root: smokeRoot,
+    cwd: smokeRoot,
+  });
+  assert(highRiskTurn.status === 200, "High-risk shell turn should return normally.");
+  assert(highRiskTurn.json.shell.status === "pending_approval", "High-risk shell command should require approval.");
+  assert(!fs.existsSync(highRiskTarget), "High-risk shell command must not execute before approval.");
+  const shellApproval = await postJson(
+    `${endpoint}/api/app/agent/approvals/${highRiskTurn.json.shell.approval_id}/approve`,
+    {},
+  );
+  assert(shellApproval.status === 200, "Desktop approval endpoint should approve shell execution.");
+  assert(shellApproval.json.execution.status === "applied", "Approved shell payload should execute.");
+  assert(fs.existsSync(highRiskTarget), "Approved high-risk shell command should create the target file.");
+
   console.log("agentic app smoke passed");
 } finally {
   child.kill();
