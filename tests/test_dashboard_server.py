@@ -353,6 +353,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
+        self.assertIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_apply_approved", tool_names)
         self.assertIn("vrcforge_read_recent_logs", tool_names)
@@ -360,44 +361,48 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("api_key", json.dumps(payload).lower())
         self.assertNotIn("approval_token", json.dumps(payload).lower())
 
-    def test_roslyn_advanced_skill_requires_full_auto_env_and_confirmation(self) -> None:
-        with patch.dict(os.environ, {"VRCFORGE_ENABLE_ROSLYN": "1"}):
-            config = dashboard_server.AGENT_GATEWAY.ensure_config()
-            config.enabled = True
-            dashboard_server.AGENT_GATEWAY.save_config(config)
+    def test_roslyn_advanced_skill_requires_full_auto_mode_and_confirmation(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            initial = client.get("/api/agent/manifest", headers=headers).json()
+            initial_tool_names = {tool["name"] for tool in initial["tools"]}
+            self.assertIn("vrcforge_roslyn_status", initial_tool_names)
+            self.assertNotIn("vrcforge_request_roslyn_advanced", initial_tool_names)
+
             dashboard_server.AGENT_GATEWAY.update_permission_state("roslyn_full_auto", acknowledge_roslyn_risk=True)
-            headers = {"Authorization": f"Bearer {config.token}"}
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+            tool_names = {tool["name"] for tool in payload["tools"]}
+            self.assertIn("vrcforge_request_roslyn_advanced", tool_names)
+            self.assertIn("vrcforge_roslyn_advanced", {item["name"] for item in payload["writeTargets"]})
 
-            with TestClient(dashboard_server.app) as client:
-                payload = client.get("/api/agent/manifest", headers=headers).json()
-                tool_names = {tool["name"] for tool in payload["tools"]}
-                self.assertIn("vrcforge_request_roslyn_advanced", tool_names)
-                self.assertIn("vrcforge_roslyn_advanced", {item["name"] for item in payload["writeTargets"]})
+            missing_confirm = client.post(
+                "/api/agent/tool/vrcforge_request_roslyn_advanced",
+                headers=headers,
+                json={"agent_name": "codex-test", "params": {"code": "1 + 1"}},
+            )
+            self.assertEqual(missing_confirm.status_code, 200)
+            self.assertFalse(missing_confirm.json()["ok"])
+            self.assertIn("confirmAdvancedPowerMode=true", missing_confirm.json()["error"])
 
-                missing_confirm = client.post(
-                    "/api/agent/tool/vrcforge_request_roslyn_advanced",
-                    headers=headers,
-                    json={"agent_name": "codex-test", "params": {"code": "1 + 1"}},
-                )
-                self.assertEqual(missing_confirm.status_code, 200)
-                self.assertFalse(missing_confirm.json()["ok"])
-                self.assertIn("confirmAdvancedPowerMode=true", missing_confirm.json()["error"])
-
-                request = client.post(
-                    "/api/agent/tool/vrcforge_request_roslyn_advanced",
-                    headers=headers,
-                    json={
-                        "agent_name": "codex-test",
-                        "params": {
-                            "code": "1 + 1",
-                            "confirmAdvancedPowerMode": True,
-                        },
+            request = client.post(
+                "/api/agent/tool/vrcforge_request_roslyn_advanced",
+                headers=headers,
+                json={
+                    "agent_name": "codex-test",
+                    "params": {
+                        "code": "1 + 1",
+                        "confirmAdvancedPowerMode": True,
                     },
-                )
-                self.assertEqual(request.status_code, 200)
-                self.assertTrue(request.json()["ok"])
-                approval = request.json()["result"]["approval"]
-                self.assertEqual(approval["targetTool"], "vrcforge_roslyn_advanced")
+                },
+            )
+            self.assertEqual(request.status_code, 200)
+            self.assertTrue(request.json()["ok"])
+            approval = request.json()["result"]["approval"]
+            self.assertEqual(approval["targetTool"], "vrcforge_roslyn_advanced")
 
     def test_agent_gateway_mcp_lists_codex_debug_loop_tools(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -438,6 +443,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
+        self.assertIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_apply_approved", tool_names)
 
@@ -478,6 +484,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorUtility.DisplayDialog", source)
         self.assertIn('"VRCForge Advanced Power Mode"', source)
         self.assertIn("AssemblyResolve", source)
+        self.assertIn('name: "vrc_check_roslyn_status"', source)
+        self.assertIn("BatchStatusSmoke", source)
+        self.assertIn("BatchExecutionSmoke", source)
+        self.assertIn("EvaluateSnippetWithTimeout", source)
         self.assertIn("Assets/Plugins/Roslyn", bootstrap)
 
         installer = (Path(__file__).resolve().parents[1] / "tools" / "install-roslyn-support.ps1").read_text(
@@ -489,6 +499,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("scriptingDefineSymbols", installer)
         self.assertIn("System.Memory.dll", installer)
         self.assertIn("System.Runtime.CompilerServices.Unsafe.dll", installer)
+        self.assertIn("System.Text.Encoding.CodePages.dll", installer)
+        self.assertIn("System.Numerics.Vectors.dll", installer)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -502,6 +514,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(f'MenuItem("{old_brand}', combined)
         self.assertNotIn(f"[{old_brand}", combined)
         self.assertNotIn(f"Assets/{old_brand}", combined)
+
+        installer = (Path(__file__).resolve().parents[1] / "tools" / "install-unity-project.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Move-DirectoryWithMeta", installer)
+        self.assertIn("VRCAutoRig.meta", installer)
 
     def test_unity_instance_session_id_is_resolved_to_cli_hash(self) -> None:
         settings = SimpleNamespace(

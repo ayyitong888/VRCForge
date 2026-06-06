@@ -288,7 +288,7 @@ class AgentGateway:
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
             "allowRoslynAdvanced": self.roslyn_available(config),
-            "roslynEnvEnabled": os.environ.get("VRCFORGE_ENABLE_ROSLYN", "").strip().lower()
+            "legacyRoslynEnvEnabled": os.environ.get("VRCFORGE_ENABLE_ROSLYN", "").strip().lower()
             in {"1", "true", "yes", "on"},
         }
 
@@ -795,9 +795,7 @@ class AgentGateway:
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
         config = config or self.ensure_config()
-        if not config.allow_roslyn_advanced:
-            return False
-        return os.environ.get("VRCFORGE_ENABLE_ROSLYN", "").strip().lower() in {"1", "true", "yes", "on"}
+        return bool(config.allow_roslyn_advanced)
 
     def append_audit(self, entry: dict[str, Any]) -> None:
         safe_entry = redact_sensitive({
@@ -1261,6 +1259,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_capture_screenshot",
         "vrcforge_vision_audit",
         "vrcforge_read_recent_logs",
+        "vrcforge_roslyn_status",
         "vrcforge_plan_face_tuning",
         "vrcforge_plan_shader_tuning",
         "vrcforge_preview_blendshape_apply",

@@ -97,3 +97,15 @@ powershell -ExecutionPolicy Bypass -File tools/install-roslyn-support.ps1 -Proje
 ```
 
 Every Roslyn call must pass `confirmAdvancedPowerMode=true`, and Unity shows a modal warning dialog before executing the snippet. If the user cancels the dialog, the tool does not run.
+
+Use the read-only Unity tool `vrc_check_roslyn_status` to verify the installed DLLs, `VRCFORGE_ENABLE_ROSLYN` flag, and runtime type loading before requesting execution. For CI or local Unity batch checks, run:
+
+```powershell
+Unity.exe -batchmode -quit -projectPath "PATH_TO_UNITY_PROJECT" -executeMethod VRCForge.Editor.RoslynStatusTool.BatchStatusSmoke -logFile roslyn-status-smoke.log
+```
+
+To prove Roslyn can dynamically compile and execute inside Unity, run the fixed safe execution smoke. It evaluates a hardcoded C# snippet through the same `CSharpScript.EvaluateAsync` path and expects `result=42`:
+
+```powershell
+Unity.exe -batchmode -quit -projectPath "PATH_TO_UNITY_PROJECT" -executeMethod VRCForge.Editor.RoslynStatusTool.BatchExecutionSmoke -logFile roslyn-execution-smoke.log
+```

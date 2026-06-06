@@ -21,7 +21,9 @@ namespace VRCForge.Editor
             "System.Memory.dll",
             "System.Runtime.CompilerServices.Unsafe.dll",
             "System.Buffers.dll",
-            "System.Threading.Tasks.Extensions.dll"
+            "System.Threading.Tasks.Extensions.dll",
+            "System.Text.Encoding.CodePages.dll",
+            "System.Numerics.Vectors.dll"
         };
 
         static RoslynSupportBootstrap()

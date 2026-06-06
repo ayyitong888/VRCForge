@@ -27,7 +27,9 @@ $requiredDlls = @(
     "System.Memory.dll",
     "System.Runtime.CompilerServices.Unsafe.dll",
     "System.Buffers.dll",
-    "System.Threading.Tasks.Extensions.dll"
+    "System.Threading.Tasks.Extensions.dll",
+    "System.Text.Encoding.CodePages.dll",
+    "System.Numerics.Vectors.dll"
 )
 
 function Copy-RequiredDllsFromFolder {
@@ -184,6 +186,8 @@ try {
         Install-NuGetDll -PackageName "System.Runtime.CompilerServices.Unsafe" -Version "6.0.0" -DllName "System.Runtime.CompilerServices.Unsafe.dll"
         Install-NuGetDll -PackageName "System.Buffers" -Version "4.5.1" -DllName "System.Buffers.dll"
         Install-NuGetDll -PackageName "System.Threading.Tasks.Extensions" -Version "4.5.4" -DllName "System.Threading.Tasks.Extensions.dll"
+        Install-NuGetDll -PackageName "System.Text.Encoding.CodePages" -Version "7.0.0" -DllName "System.Text.Encoding.CodePages.dll"
+        Install-NuGetDll -PackageName "System.Numerics.Vectors" -Version "4.5.0" -DllName "System.Numerics.Vectors.dll"
     }
 } finally {
     if (Test-Path -LiteralPath $tempRoot) {

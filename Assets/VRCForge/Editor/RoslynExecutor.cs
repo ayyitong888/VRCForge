@@ -87,7 +87,23 @@ namespace VRCForge.Editor
     public static class RoslynExecutor
     {
         public const string ToolName = "vrc_execute_roslyn";
-        private static readonly TimeSpan ExecutionTimeout = TimeSpan.FromSeconds(2);
+        private const int DefaultExecutionTimeoutSeconds = 10;
+        private const int MaxExecutionTimeoutSeconds = 30;
+        private static readonly string[] RequiredRoslynDlls =
+        {
+            "Microsoft.CodeAnalysis.dll",
+            "Microsoft.CodeAnalysis.CSharp.dll",
+            "Microsoft.CodeAnalysis.Scripting.dll",
+            "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
+            "System.Collections.Immutable.dll",
+            "System.Reflection.Metadata.dll",
+            "System.Memory.dll",
+            "System.Runtime.CompilerServices.Unsafe.dll",
+            "System.Buffers.dll",
+            "System.Threading.Tasks.Extensions.dll",
+            "System.Text.Encoding.CodePages.dll",
+            "System.Numerics.Vectors.dll"
+        };
         private static readonly string RoslynPluginFolder = Path.Combine(Application.dataPath, "Plugins", "Roslyn");
 
         static RoslynExecutor()
@@ -108,6 +124,9 @@ namespace VRCForge.Editor
 
             [ToolParameter("Optional avatar root paths whose AnimatorControllers should have Write Defaults forced ON.", Required = false)]
             public string[] targetAvatarPaths { get; set; }
+
+            [ToolParameter("Optional execution timeout in seconds. Clamped to 1-30 seconds.", Required = false)]
+            public int? timeoutSeconds { get; set; } = DefaultExecutionTimeoutSeconds;
         }
 
         public sealed class ScriptGlobals
@@ -142,19 +161,21 @@ namespace VRCForge.Editor
                     return new ErrorResponse("Roslyn Advanced Power Mode execution was cancelled by the user.");
                 }
 
+                var executionTimeout = BuildExecutionTimeout(parameters.timeoutSeconds);
                 var startedAt = Stopwatch.StartNew();
                 var executionResult = RoslynMainThreadDispatcher.Run(
                     () => ExecuteSnippet(
                         parameters.code,
                         parameters.enforceWriteDefaultsOn ?? true,
-                        parameters.targetAvatarPaths),
-                    ExecutionTimeout);
+                        parameters.targetAvatarPaths,
+                        executionTimeout),
+                    executionTimeout + TimeSpan.FromSeconds(2));
 
                 startedAt.Stop();
-                if (startedAt.Elapsed > ExecutionTimeout)
+                if (startedAt.Elapsed > executionTimeout)
                 {
                     return new ErrorResponse(
-                        $"Roslyn snippet exceeded the 2 second safety budget ({startedAt.Elapsed.TotalSeconds:F2}s).");
+                        $"Roslyn snippet exceeded the {executionTimeout.TotalSeconds:F0} second safety budget ({startedAt.Elapsed.TotalSeconds:F2}s).");
                 }
 
                 return new SuccessResponse(
@@ -197,24 +218,37 @@ namespace VRCForge.Editor
         private static (object result, int writeDefaultsUpdated) ExecuteSnippet(
             string code,
             bool enforceWriteDefaultsOn,
-            IEnumerable<string> targetAvatarPaths)
+            IEnumerable<string> targetAvatarPaths,
+            TimeSpan executionTimeout)
         {
-            var options = BuildScriptOptions();
-            var globals = new ScriptGlobals();
-            var evaluation = EvaluateScriptAsync(code, options, globals);
-            var completed = Task.WhenAny(evaluation, Task.Delay(ExecutionTimeout)).GetAwaiter().GetResult();
-
-            if (completed != evaluation)
-            {
-                throw new TimeoutException("Snippet did not finish within the 2 second safety budget.");
-            }
-
-            var result = evaluation.GetAwaiter().GetResult();
+            var result = EvaluateSnippetWithTimeout(code, executionTimeout);
             var writeDefaultsUpdated = enforceWriteDefaultsOn ? EnsureWriteDefaultsOn(targetAvatarPaths) : 0;
 
             AssetDatabase.SaveAssets();
             EditorSceneManager.SaveOpenScenes();
             return (result, writeDefaultsUpdated);
+        }
+
+        private static object EvaluateSnippetWithTimeout(string code, TimeSpan executionTimeout)
+        {
+            var options = BuildScriptOptions();
+            var globals = new ScriptGlobals();
+            var evaluation = EvaluateScriptAsync(code, options, globals);
+            var completed = Task.WhenAny(evaluation, Task.Delay(executionTimeout)).GetAwaiter().GetResult();
+
+            if (completed != evaluation)
+            {
+                throw new TimeoutException($"Snippet did not finish within the {executionTimeout.TotalSeconds:F0} second safety budget.");
+            }
+
+            return evaluation.GetAwaiter().GetResult();
+        }
+
+        private static TimeSpan BuildExecutionTimeout(int? requestedSeconds)
+        {
+            var seconds = requestedSeconds ?? DefaultExecutionTimeoutSeconds;
+            seconds = Mathf.Clamp(seconds, 1, MaxExecutionTimeoutSeconds);
+            return TimeSpan.FromSeconds(seconds);
         }
 
         private static object BuildScriptOptions()
@@ -328,7 +362,7 @@ namespace VRCForge.Editor
             return (Task<object>)task;
         }
 
-        private static bool TryResolveRoslynRuntime(out string error)
+        internal static bool TryResolveRoslynRuntime(out string error)
         {
             error = string.Empty;
             try
@@ -346,6 +380,102 @@ namespace VRCForge.Editor
                 error =
                     "Roslyn runtime is unavailable. Install Roslyn DLLs under Assets/Plugins/Roslyn or run tools/install-roslyn-support.ps1. "
                     + ex.Message;
+                return false;
+            }
+        }
+
+        internal static object BuildStatusPayload()
+        {
+            var dlls = RequiredRoslynDlls
+                .Select(name =>
+                {
+                    var path = Path.Combine(RoslynPluginFolder, name);
+                    return new
+                    {
+                        name,
+                        installed = File.Exists(path),
+                        path = path.Replace("\\", "/")
+                    };
+                })
+                .ToArray();
+            var missing = dlls
+                .Where(item => !item.installed)
+                .Select(item => item.name)
+                .ToArray();
+            var runtimeResolved = TryResolveRoslynRuntime(out var runtimeError);
+            var defineEnabled = HasRoslynDefine();
+
+            return new
+            {
+                ok = missing.Length == 0 && runtimeResolved,
+                installed = missing.Length == 0,
+                runtimeResolved,
+                defineEnabled,
+                pluginFolder = RoslynPluginFolder.Replace("\\", "/"),
+                requiredDllCount = RequiredRoslynDlls.Length,
+                missingDlls = missing,
+                dlls,
+                runtimeError
+            };
+        }
+
+        internal static object BuildExecutionSmokePayload()
+        {
+            if (!TryResolveRoslynRuntime(out var runtimeError))
+            {
+                return new
+                {
+                    ok = false,
+                    compiled = false,
+                    executed = false,
+                    expected = 42.0f,
+                    result = (object)null,
+                    runtimeError,
+                    code = "<fixed-smoke-snippet>"
+                };
+            }
+
+            var startedAt = Stopwatch.StartNew();
+            var result = EvaluateSnippetWithTimeout(
+                "new UnityEngine.Vector3(1f, 2f, 3f).x + 41f",
+                TimeSpan.FromSeconds(DefaultExecutionTimeoutSeconds));
+            startedAt.Stop();
+            var numericResult = Convert.ToSingle(result);
+            var ok = Math.Abs(numericResult - 42.0f) < 0.001f;
+
+            return new
+            {
+                ok,
+                compiled = true,
+                executed = true,
+                expected = 42.0f,
+                result = numericResult,
+                resultType = result?.GetType().FullName ?? "",
+                durationMs = startedAt.Elapsed.TotalMilliseconds,
+                runtimeError = "",
+                code = "<fixed-smoke-snippet>"
+            };
+        }
+
+        private static bool HasRoslynDefine()
+        {
+            try
+            {
+                var cscRspPath = Path.Combine(Application.dataPath, "csc.rsp");
+                if (File.Exists(cscRspPath)
+                    && File.ReadAllText(cscRspPath).Contains("VRCFORGE_ENABLE_ROSLYN"))
+                {
+                    return true;
+                }
+
+                var symbols = PlayerSettings.GetScriptingDefineSymbolsForGroup(
+                    EditorUserBuildSettings.selectedBuildTargetGroup);
+                return symbols
+                    .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(symbol => symbol.Trim() == "VRCFORGE_ENABLE_ROSLYN");
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -677,6 +807,53 @@ namespace VRCForge.Editor
                 && component.gameObject.scene.IsValid()
                 && component.gameObject.scene.isLoaded
                 && !EditorUtility.IsPersistent(component);
+        }
+    }
+
+    [McpForUnityTool(
+        name: "vrc_check_roslyn_status",
+        Description = "Read-only Roslyn Advanced Power Mode diagnostics for installed DLLs, define state, and runtime loadability."
+    )]
+    public static class RoslynStatusTool
+    {
+        public const string ToolName = "vrc_check_roslyn_status";
+
+        public static object HandleCommand(JObject @params)
+        {
+            try
+            {
+                return new SuccessResponse(
+                    "Roslyn Advanced Power Mode status checked.",
+                    RoslynExecutor.BuildStatusPayload());
+            }
+            catch (Exception ex)
+            {
+                return new ErrorResponse($"Roslyn status check failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        public static void BatchStatusSmoke()
+        {
+            var status = RoslynExecutor.BuildStatusPayload();
+            var ok = (bool)(status.GetType().GetProperty("ok")?.GetValue(status) ?? false);
+            UnityEngine.Debug.Log("[VRCForge Roslyn Status Smoke] "
+                + Newtonsoft.Json.JsonConvert.SerializeObject(status));
+            if (!ok)
+            {
+                EditorApplication.Exit(1);
+            }
+        }
+
+        public static void BatchExecutionSmoke()
+        {
+            var execution = RoslynExecutor.BuildExecutionSmokePayload();
+            var ok = (bool)(execution.GetType().GetProperty("ok")?.GetValue(execution) ?? false);
+            UnityEngine.Debug.Log("[VRCForge Roslyn Execution Smoke] "
+                + Newtonsoft.Json.JsonConvert.SerializeObject(execution));
+            if (!ok)
+            {
+                EditorApplication.Exit(1);
+            }
         }
     }
 }

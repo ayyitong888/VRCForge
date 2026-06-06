@@ -34,10 +34,33 @@ function New-BackupPath([string]$BackupRoot, [string]$Prefix) {
 
 function Copy-DirectoryClean([string]$Source, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Recurse -Force
+        Remove-DirectoryWithMeta $Destination
     }
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Copy-Item -Path (Join-Path $Source "*") -Destination $Destination -Recurse -Force
+    $sourceMeta = "$Source.meta"
+    $destinationMeta = "$Destination.meta"
+    if ((Test-Path -LiteralPath $sourceMeta) -and -not (Test-Path -LiteralPath $destinationMeta)) {
+        Copy-Item -LiteralPath $sourceMeta -Destination $destinationMeta -Force
+    }
+}
+
+function Move-DirectoryWithMeta([string]$Source, [string]$Destination) {
+    Move-Item -LiteralPath $Source -Destination $Destination -Force
+    $sourceMeta = "$Source.meta"
+    if (Test-Path -LiteralPath $sourceMeta) {
+        Move-Item -LiteralPath $sourceMeta -Destination "$Destination.meta" -Force
+    }
+}
+
+function Remove-DirectoryWithMeta([string]$Path) {
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+    $metaPath = "$Path.meta"
+    if (Test-Path -LiteralPath $metaPath) {
+        Remove-Item -LiteralPath $metaPath -Force
+    }
 }
 
 function Restore-DirectoryBackup([string]$BackupPath, [string]$TargetPath) {
@@ -45,9 +68,13 @@ function Restore-DirectoryBackup([string]$BackupPath, [string]$TargetPath) {
         return
     }
     if (Test-Path -LiteralPath $TargetPath) {
-        Remove-Item -LiteralPath $TargetPath -Recurse -Force
+        Remove-DirectoryWithMeta $TargetPath
     }
     Move-Item -LiteralPath $BackupPath -Destination $TargetPath -Force
+    $backupMetaPath = "$BackupPath.meta"
+    if (Test-Path -LiteralPath $backupMetaPath) {
+        Move-Item -LiteralPath $backupMetaPath -Destination "$TargetPath.meta" -Force
+    }
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -104,16 +131,19 @@ try {
     if (Test-Path -LiteralPath $legacyTargetToolFolder) {
         Write-Host "Detected legacy VRCForge/VRCAutoRig Unity plugin folder. Migrating to Assets/VRCForge."
         $legacyBackupPath = New-BackupPath $backupRoot "VRCAutoRig"
-        Move-Item -LiteralPath $legacyTargetToolFolder -Destination $legacyBackupPath -Force
+        Move-DirectoryWithMeta $legacyTargetToolFolder $legacyBackupPath
         if (Test-Path -LiteralPath $legacyTargetToolFolder) {
             throw "Legacy Assets/VRCAutoRig still exists after migration attempt. Stop before installing new plugin."
+        }
+        if (Test-Path -LiteralPath "$legacyTargetToolFolder.meta") {
+            throw "Legacy Assets/VRCAutoRig.meta still exists after migration attempt. Stop before installing new plugin."
         }
         Write-Host "Moved legacy Unity tool folder to: $legacyBackupPath"
     }
 
     if (Test-Path -LiteralPath $targetVrcForge) {
         $vrcForgeBackupPath = New-BackupPath $backupRoot "VRCForge"
-        Move-Item -LiteralPath $targetVrcForge -Destination $vrcForgeBackupPath -Force
+        Move-DirectoryWithMeta $targetVrcForge $vrcForgeBackupPath
         Write-Host "Backed up existing Assets/VRCForge to: $vrcForgeBackupPath"
     }
 
@@ -128,7 +158,7 @@ try {
     if ($sourceMcpPackage) {
         if (Test-Path -LiteralPath $targetMcpPackagePath) {
             $mcpBackupPath = New-BackupPath $backupRoot "com.coplaydev.unity-mcp"
-            Move-Item -LiteralPath $targetMcpPackagePath -Destination $mcpBackupPath -Force
+            Move-DirectoryWithMeta $targetMcpPackagePath $mcpBackupPath
             Write-Host "Backed up existing Unity MCP package to: $mcpBackupPath"
         }
         try {

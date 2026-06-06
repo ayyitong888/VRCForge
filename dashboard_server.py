@@ -5810,6 +5810,12 @@ def request_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def read_agent_roslyn_status(params: dict[str, Any]) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    result = invoke_unity_mcp(settings, "vrc_check_roslyn_status", {})
+    return {"ok": True, "result": serialize_result(result)}
+
+
 def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("confirmAdvancedPowerMode") is not True:
         raise RuntimeError("confirmAdvancedPowerMode=true is required.")
@@ -5822,6 +5828,7 @@ def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
             "confirmAdvancedPowerMode": True,
             "enforceWriteDefaultsOn": params.get("enforceWriteDefaultsOn", True),
             "targetAvatarPaths": params.get("targetAvatarPaths") or [],
+            "timeoutSeconds": params.get("timeoutSeconds", 10),
         },
     )
     return {"ok": True, "result": serialize_result(result)}
@@ -5853,6 +5860,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
+    AGENT_GATEWAY.register_tool("vrcforge_roslyn_status", "Read Roslyn Advanced Power Mode diagnostics from Unity.", "read/debug", read_agent_roslyn_status)
     AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: run_dashboard_pipeline_sync(build_agent_dashboard_request(params), False))
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
