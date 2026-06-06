@@ -17,6 +17,42 @@ export type AgentTool = {
   available: boolean;
 };
 
+export type AgentSkill = {
+  schema?: string;
+  name: string;
+  title: string;
+  description?: string;
+  category?: string;
+  source: "builtin" | "user" | string;
+  enabled: boolean;
+  available: boolean;
+  permissionMode: string;
+  riskLevel?: string;
+  whenToUse?: string;
+  inputs?: string[];
+  outputs?: string[];
+  sideEffects?: string;
+  backupRestore?: string;
+  tools?: string[];
+  allowedTools?: string[];
+  testCommand?: string;
+  instructions?: string;
+  advanced?: boolean;
+  write?: boolean;
+  tags?: string[];
+  storagePath?: string;
+};
+
+export type AgentSkillRegistry = {
+  ok: boolean;
+  schema: string;
+  skills: AgentSkill[];
+  count: number;
+  availableCount: number;
+  builtinCount: number;
+  userCount: number;
+};
+
 export type AgentManifest = {
   ok: boolean;
   name: string;
@@ -24,6 +60,7 @@ export type AgentManifest = {
   enabled: boolean;
   toolCount: number;
   tools: AgentTool[];
+  skills: AgentSkill[];
   writeTargets: Array<{ name: string; description: string; riskLevel: string; advanced: boolean }>;
   allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
@@ -194,6 +231,32 @@ export async function updateApiConfig(endpoint: string, config: { provider: stri
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
+  });
+}
+
+export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
+  return requestJson<AgentSkillRegistry>(`${endpoint}/api/app/skills`);
+}
+
+export async function createSkill(endpoint: string, skill: Partial<AgentSkill>): Promise<AgentSkillRegistry & { skill: AgentSkill }> {
+  return requestJson(`${endpoint}/api/app/skills`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(skill),
+  });
+}
+
+export async function updateSkill(endpoint: string, skillId: string, skill: Partial<AgentSkill>): Promise<AgentSkillRegistry & { skill: AgentSkill }> {
+  return requestJson(`${endpoint}/api/app/skills/${encodeURIComponent(skillId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(skill),
+  });
+}
+
+export async function deleteSkill(endpoint: string, skillId: string): Promise<AgentSkillRegistry> {
+  return requestJson(`${endpoint}/api/app/skills/${encodeURIComponent(skillId)}`, {
+    method: "DELETE",
   });
 }
 

@@ -26,17 +26,23 @@ import { Button } from "./components/ui/button";
 import {
   AgentApproval,
   AgentRuntimeResponse,
+  AgentSkill,
+  AgentSkillRegistry,
   AgentSkillResult,
   AgentShellResult,
   ApiError,
   AppBootstrap,
   approveAgentApproval,
+  createSkill,
+  deleteSkill,
   fetchBootstrap,
+  fetchSkills,
   PermissionState,
   rejectAgentApproval,
   sendAgentMessage,
   updateApiConfig,
   updatePermission,
+  updateSkill,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
@@ -54,15 +60,17 @@ type ConversationItem =
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string };
 
+type ActiveView = "chat" | "skills";
+
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
 const navItems = [
-  { label: "新对话", icon: Plus },
-  { label: "搜索", icon: Search },
-  { label: "能力库", icon: Wrench },
-  { label: "自动化", icon: Clock3 },
-  { label: "审批", icon: Shield },
-  { label: "日志", icon: TerminalSquare },
+  { id: "new", label: "新对话", icon: Plus },
+  { id: "search", label: "搜索", icon: Search },
+  { id: "skills", label: "能力库", icon: Wrench },
+  { id: "automation", label: "自动化", icon: Clock3 },
+  { id: "approvals", label: "审批", icon: Shield },
+  { id: "logs", label: "日志", icon: TerminalSquare },
 ];
 
 function isTauriRuntime() {
@@ -82,11 +90,16 @@ export default function App() {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
+  const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [apiProvider, setApiProvider] = useState("gemini");
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
+  const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
+  const [selectedSkillName, setSelectedSkillName] = useState("");
+  const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
+  const [savingSkill, setSavingSkill] = useState(false);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -96,6 +109,8 @@ export default function App() {
   const runtimeConnected = Boolean(bootstrap?.ok);
   const pendingApprovals = bootstrap?.agentHealth.pendingApprovalCount ?? 0;
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
+  const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
+  const skillCount = skillRegistry?.count ?? skills.length;
   const projects = bootstrap?.health.projects?.projects ?? [];
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
@@ -318,9 +333,92 @@ export default function App() {
   }
 
   function newConversation() {
+    setActiveView("chat");
     setConversation([]);
     setSessionId("");
     setError("");
+  }
+
+  async function openSkills() {
+    setActiveView("skills");
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchSkills(targetEndpoint);
+      setSkillRegistry(payload);
+      if (!selectedSkillName && payload.skills.length > 0) {
+        const firstUserSkill = payload.skills.find((skill) => skill.source === "user") || payload.skills[0];
+        selectSkill(firstUserSkill);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function selectSkill(skill: AgentSkill) {
+    setSelectedSkillName(skill.name);
+    setSkillDraft({ ...skill });
+  }
+
+  function newSkill() {
+    setSelectedSkillName("");
+    setSkillDraft(emptySkillDraft());
+  }
+
+  async function saveSkill(event?: FormEvent) {
+    event?.preventDefault();
+    if (!skillDraft.name || savingSkill) {
+      return;
+    }
+    setSavingSkill(true);
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = selectedSkillName
+        ? await updateSkill(targetEndpoint, selectedSkillName, skillDraft)
+        : await createSkill(targetEndpoint, skillDraft);
+      setSkillRegistry(payload);
+      setSelectedSkillName(payload.skill.name);
+      setSkillDraft({ ...payload.skill });
+      await refresh(targetEndpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingSkill(false);
+    }
+  }
+
+  async function removeSelectedSkill() {
+    if (!selectedSkillName || savingSkill) {
+      return;
+    }
+    setSavingSkill(true);
+    setError("");
+    try {
+      const payload = await deleteSkill(endpoint, selectedSkillName);
+      setSkillRegistry(payload);
+      setSelectedSkillName("");
+      setSkillDraft(emptySkillDraft());
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingSkill(false);
+    }
   }
 
   async function saveApiProvider(event?: FormEvent) {
@@ -364,13 +462,15 @@ export default function App() {
           </div>
 
           <nav className="mt-5 space-y-1">
-            {navItems.map(({ label, icon: Icon }, index) => (
+            {navItems.map(({ id, label, icon: Icon }, index) => (
               <button
                 key={label}
-                onClick={index === 0 ? newConversation : undefined}
+                onClick={id === "new" ? newConversation : id === "skills" ? () => void openSkills() : undefined}
                 className={cn(
                   "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-                  index === 0 ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  (activeView === "chat" && index === 0) || (activeView === "skills" && id === "skills")
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 <Icon className="h-4 w-4 shrink-0" />
@@ -421,7 +521,7 @@ export default function App() {
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
               <span className="text-muted-foreground">/</span>
-              <span className="truncate font-medium">{sessionId ? "当前会话" : "新任务"}</span>
+              <span className="truncate font-medium">{activeView === "skills" ? "能力库" : sessionId ? "当前会话" : "新任务"}</span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? "核心在线" : "核心离线"} />
@@ -448,7 +548,20 @@ export default function App() {
             </div>
           ) : null}
 
-          {needsApiSetup ? (
+          {activeView === "skills" ? (
+            <SkillsWorkspace
+              skills={skills}
+              skillCount={skillCount}
+              selectedSkillName={selectedSkillName}
+              draft={skillDraft}
+              saving={savingSkill}
+              onSelect={selectSkill}
+              onNew={newSkill}
+              onDraftChange={setSkillDraft}
+              onSave={saveSkill}
+              onDelete={removeSelectedSkill}
+            />
+          ) : needsApiSetup ? (
             <div className="flex min-h-0 flex-1 items-center justify-center p-8">
               <div className="w-full max-w-4xl">
                 <ProviderSetup
@@ -692,6 +805,238 @@ function ProviderSetup({
         </Button>
       </div>
     </form>
+  );
+}
+
+function SkillsWorkspace({
+  skills,
+  skillCount,
+  selectedSkillName,
+  draft,
+  saving,
+  onSelect,
+  onNew,
+  onDraftChange,
+  onSave,
+  onDelete,
+}: {
+  skills: AgentSkill[];
+  skillCount: number;
+  selectedSkillName: string;
+  draft: Partial<AgentSkill>;
+  saving: boolean;
+  onSelect: (skill: AgentSkill) => void;
+  onNew: () => void;
+  onDraftChange: (skill: Partial<AgentSkill>) => void;
+  onSave: (event?: FormEvent) => void;
+  onDelete: () => void;
+}) {
+  const editable = draft.source !== "builtin";
+  const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+        <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+          <div className="mb-4 flex items-center gap-2">
+            <Wrench className="h-4 w-4 shrink-0 text-primary" />
+            <div className="truncate text-sm font-semibold">能力库</div>
+            <Badge tone="muted" className="ml-auto shrink-0">
+              {skillCount}
+            </Badge>
+          </div>
+          <div className="max-h-[calc(100vh-180px)] space-y-1 overflow-auto pr-1">
+            {skills.map((skill) => (
+              <button
+                key={`${skill.source}-${skill.name}`}
+                onClick={() => onSelect(skill)}
+                className={cn(
+                  "grid w-full min-w-0 gap-1 rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  selectedSkillName === skill.name ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate font-medium">{skill.title || skill.name}</span>
+                  <Badge tone={skill.available ? "ok" : "warn"} className="h-6 shrink-0">
+                    {skill.source}
+                  </Badge>
+                </div>
+                <div className="truncate text-xs text-muted-foreground">{skill.permissionMode}</div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <form onSubmit={onSave} className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+          <div className="mb-5 flex items-center gap-2">
+            <div className="truncate text-sm font-semibold">{editable ? "用户能力" : "内置能力"}</div>
+            <Badge tone={draft.available === false ? "warn" : "muted"} className="ml-auto shrink-0">
+              {draft.permissionMode || "instruction_only"}
+            </Badge>
+          </div>
+          <div className="grid gap-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="名称">
+                <input
+                  value={draft.name || ""}
+                  onChange={(event) => onDraftChange({ ...draft, name: event.target.value })}
+                  disabled={!editable || userSkillSelected}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="标题">
+                <input
+                  value={draft.title || ""}
+                  onChange={(event) => onDraftChange({ ...draft, title: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <FieldLabel label="分类">
+                <input
+                  value={draft.category || ""}
+                  onChange={(event) => onDraftChange({ ...draft, category: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="权限">
+                <select
+                  value={draft.permissionMode || "instruction_only"}
+                  onChange={(event) => onDraftChange({ ...draft, permissionMode: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                >
+                  <option value="instruction_only">instruction_only</option>
+                  <option value="read_only">read_only</option>
+                  <option value="preview">preview</option>
+                  <option value="approval_required">approval_required</option>
+                  <option value="advanced_power_mode">advanced_power_mode</option>
+                </select>
+              </FieldLabel>
+              <FieldLabel label="风险">
+                <select
+                  value={draft.riskLevel || "low"}
+                  onChange={(event) => onDraftChange({ ...draft, riskLevel: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                >
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </FieldLabel>
+            </div>
+            <FieldLabel label="何时使用">
+              <textarea
+                value={draft.whenToUse || ""}
+                onChange={(event) => onDraftChange({ ...draft, whenToUse: event.target.value })}
+                disabled={!editable}
+                className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+              />
+            </FieldLabel>
+            <FieldLabel label="描述">
+              <textarea
+                value={draft.description || ""}
+                onChange={(event) => onDraftChange({ ...draft, description: event.target.value })}
+                disabled={!editable}
+                className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+              />
+            </FieldLabel>
+            <FieldLabel label="可用工具">
+              <input
+                value={(draft.allowedTools || draft.tools || []).join(", ")}
+                onChange={(event) => {
+                  const tools = splitList(event.target.value);
+                  onDraftChange({ ...draft, tools, allowedTools: tools });
+                }}
+                disabled={!editable}
+                className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+              />
+            </FieldLabel>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="输入">
+                <textarea
+                  value={(draft.inputs || []).join("\n")}
+                  onChange={(event) => onDraftChange({ ...draft, inputs: splitLines(event.target.value) })}
+                  disabled={!editable}
+                  className="min-h-24 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="输出">
+                <textarea
+                  value={(draft.outputs || []).join("\n")}
+                  onChange={(event) => onDraftChange({ ...draft, outputs: splitLines(event.target.value) })}
+                  disabled={!editable}
+                  className="min-h-24 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="副作用">
+                <input
+                  value={draft.sideEffects || ""}
+                  onChange={(event) => onDraftChange({ ...draft, sideEffects: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="备份恢复">
+                <input
+                  value={draft.backupRestore || ""}
+                  onChange={(event) => onDraftChange({ ...draft, backupRestore: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="测试命令">
+                <input
+                  value={draft.testCommand || ""}
+                  onChange={(event) => onDraftChange({ ...draft, testCommand: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="标签">
+                <input
+                  value={(draft.tags || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, tags: splitList(event.target.value) })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <FieldLabel label="指令">
+              <textarea
+                value={draft.instructions || ""}
+                onChange={(event) => onDraftChange({ ...draft, instructions: event.target.value })}
+                disabled={!editable}
+                className="min-h-40 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+              />
+            </FieldLabel>
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onNew} disabled={saving}>
+              新建
+            </Button>
+            {userSkillSelected ? (
+              <Button type="button" variant="danger" onClick={onDelete} disabled={saving}>
+                删除
+              </Button>
+            ) : null}
+            <Button type="submit" disabled={!editable || saving || !draft.name}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              保存
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -973,6 +1318,44 @@ function providerNeedsApiKey(provider: string): boolean {
   return provider !== "ollama" && provider !== "vertexai";
 }
 
+function emptySkillDraft(): Partial<AgentSkill> {
+  return {
+    name: "",
+    title: "",
+    description: "",
+    category: "user",
+    source: "user",
+    enabled: true,
+    available: true,
+    permissionMode: "instruction_only",
+    riskLevel: "low",
+    whenToUse: "",
+    inputs: [],
+    outputs: [],
+    sideEffects: "none",
+    backupRestore: "not required",
+    tools: [],
+    allowedTools: [],
+    testCommand: "",
+    instructions: "",
+    tags: ["user"],
+  };
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function splitLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function displayPlanner(planner: string): string {
   if (planner === "deterministic-local") {
     return "本地规划";
@@ -1001,6 +1384,7 @@ function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {
 
 function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" {
   if (skill.status === "executed" && skill.ok) return "ok";
+  if (skill.status === "loaded" && skill.ok) return "ok";
   if (skill.status === "blocked") return "warn";
   if (skill.status === "failed" || !skill.ok) return "danger";
   return "muted";
@@ -1009,6 +1393,7 @@ function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" 
 function displaySkillStatus(status: string): string {
   const labels: Record<string, string> = {
     executed: "已运行",
+    loaded: "已加载",
     failed: "失败",
     blocked: "已阻止",
   };

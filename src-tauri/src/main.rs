@@ -151,7 +151,7 @@ fn backend_command(root: &Path) -> Result<Command, String> {
 }
 
 fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
-    for dir in ["config", "logs", "artifacts", "backups"] {
+    for dir in ["config", "logs", "artifacts", "backups", "skills"] {
         fs::create_dir_all(user_data.join(dir)).map_err(|error| format!("无法创建用户数据目录: {error}"))?;
     }
     let settings_path = user_data.join("config").join("settings.json");

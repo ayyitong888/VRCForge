@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -78,6 +79,64 @@ RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_apply_approved",
     "vrcforge_restore_last_backup",
     "vrcforge_request_roslyn_advanced",
+}
+
+SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
+SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
+
+BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
+    "vrcforge_skill_manifest": {
+        "title": "Skill Registry",
+        "inputs": [],
+        "outputs": ["Registered skill metadata and availability."],
+        "sideEffects": "none",
+    },
+    "vrcforge_unity_status": {
+        "title": "Unity MCP Status",
+        "inputs": ["Optional Unity MCP host, port, and instance."],
+        "outputs": ["MCP reachability, active Unity instance, and selected project status."],
+        "sideEffects": "none",
+    },
+    "vrcforge_unity_tools": {
+        "title": "Unity Tool Diagnostics",
+        "outputs": ["Tool counts, VRCForge tool counts, and missing required Unity tools."],
+        "sideEffects": "none",
+    },
+    "vrcforge_list_avatars": {
+        "title": "Avatar Discovery",
+        "outputs": ["Avatar names and scene paths from the active Unity instance."],
+        "sideEffects": "none",
+    },
+    "vrcforge_capture_screenshot": {
+        "title": "Gesture/Game View Capture",
+        "inputs": ["Capture angle, dimensions, and optional avatar path."],
+        "outputs": ["Screenshot path and capture diagnostics."],
+        "sideEffects": "writes artifact image only",
+    },
+    "vrcforge_roslyn_status": {
+        "title": "Roslyn Status",
+        "outputs": ["Roslyn DLL, project flag, compiler, and Unity execution readiness."],
+        "sideEffects": "none",
+        "tags": ["roslyn", "advanced"],
+    },
+    "vrcforge_request_roslyn_advanced": {
+        "title": "Roslyn Advanced Request",
+        "permissionMode": "advanced_power_mode",
+        "inputs": ["C# code, timeout, confirmAdvancedPowerMode=true."],
+        "outputs": ["Approval record for Unity Roslyn execution."],
+        "sideEffects": "requests critical code execution approval",
+        "backupRestore": "caller must preview and back up affected Unity assets before writes",
+        "tags": ["roslyn", "critical", "advanced"],
+    },
+    "vrcforge_roslyn_advanced": {
+        "title": "Roslyn Advanced Execute",
+        "permissionMode": "advanced_power_mode",
+        "inputs": ["Approved Roslyn code payload."],
+        "outputs": ["Compiled snippet result and Unity execution diagnostics."],
+        "sideEffects": "can execute arbitrary approved C# inside Unity",
+        "backupRestore": "requires explicit user acknowledgement and audit logging",
+        "tags": ["roslyn", "critical", "advanced"],
+    },
 }
 
 
@@ -257,13 +316,67 @@ class AgentGateway:
             "tools": tools,
             "toolCount": len(tools),
             "writeTargets": self.visible_write_targets(config),
+            "skills": self.build_skill_registry(config)["skills"],
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
+
+    def build_skill_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        builtin_skills = self._builtin_skill_definitions(config)
+        user_skills = self._load_user_skills()
+        skills = [*builtin_skills, *user_skills]
+        available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
+        return {
+            "ok": True,
+            "schema": "vrcforge.skills.v1",
+            "skills": skills,
+            "count": len(skills),
+            "availableCount": available_count,
+            "builtinCount": len(builtin_skills),
+            "userCount": len(user_skills),
+            "storage": {
+                "scope": "user-data",
+                "writable": True,
+            },
+        }
+
+    def create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        skills = self._load_user_skills()
+        skill = self._normalize_user_skill(payload)
+        skill_id = str(skill["name"])
+        self._ensure_user_skill_can_use_id(skill_id, skills)
+        skills.append(skill)
+        self._save_user_skills(skills)
+        self.append_audit({"event": "user_skill_created", "skill": skill_id})
+        return {"ok": True, "skill": skill, **self.build_skill_registry()}
+
+    def update_user_skill(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        skill_id = normalize_skill_id(skill_id)
+        skills = self._load_user_skills()
+        for index, existing in enumerate(skills):
+            if existing.get("name") == skill_id:
+                next_payload = {**existing, **payload, "name": skill_id}
+                skills[index] = self._normalize_user_skill(next_payload, existing_id=skill_id)
+                self._save_user_skills(skills)
+                self.append_audit({"event": "user_skill_updated", "skill": skill_id})
+                return {"ok": True, "skill": skills[index], **self.build_skill_registry()}
+        raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+
+    def delete_user_skill(self, skill_id: str) -> dict[str, Any]:
+        skill_id = normalize_skill_id(skill_id)
+        skills = self._load_user_skills()
+        kept = [skill for skill in skills if skill.get("name") != skill_id]
+        if len(kept) == len(skills):
+            raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+        self._save_user_skills(kept)
+        self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
+        return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
 
     def build_health(self) -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
         pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
+        skills = self.build_skill_registry(config)
         return {
             "ok": True,
             "runtimeAlive": True,
@@ -286,6 +399,17 @@ class AgentGateway:
             "deterministicPlanner": {
                 "status": "ok",
                 "available": True,
+            },
+            "skills": {
+                "schema": skills["schema"],
+                "count": skills["count"],
+                "availableCount": skills["availableCount"],
+                "builtinCount": skills["builtinCount"],
+                "userCount": skills["userCount"],
+                "roslynPresent": any(
+                    "roslyn" in {str(tag).lower() for tag in ensure_list(skill.get("tags"))}
+                    for skill in skills["skills"]
+                ),
             },
             "runtimeSessions": len(self._runtime_sessions),
         }
@@ -514,6 +638,7 @@ class AgentGateway:
             "tools": {
                 "count": len(self.build_manifest().get("tools", [])),
             },
+            "skills": summarize_skill_registry(self.build_skill_registry()),
             "session": {
                 "id": session_id or "",
                 "turnCount": len(session.get("turns", [])) if isinstance(session, dict) else 0,
@@ -792,6 +917,82 @@ class AgentGateway:
             message="User constraints are active." if content else "User AGENTS.md is empty.",
         )
 
+    def _builtin_skill_definitions(self, config: AgentGatewayConfig) -> list[dict[str, Any]]:
+        skills: list[dict[str, Any]] = []
+        for tool in self._tools.values():
+            skills.append(self._skill_from_tool(tool, config))
+        for handler in self._write_handlers.values():
+            skills.append(self._skill_from_write_handler(handler, config))
+        return sorted(skills, key=lambda item: (str(item.get("category") or ""), str(item.get("name") or "")))
+
+    def _skill_from_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
+        override = BUILTIN_SKILL_OVERRIDES.get(tool.name, {})
+        advanced = bool(tool.advanced)
+        permission_mode = str(override.get("permissionMode") or self._permission_mode_for_tool(tool))
+        tags = sorted({*ensure_string_list(override.get("tags")), tool.category, "builtin", *("advanced" if advanced else "",)})
+        return {
+            "schema": "vrcforge.skill.v1",
+            "name": tool.name,
+            "title": override.get("title") or title_from_name(tool.name),
+            "description": tool.description,
+            "category": tool.category,
+            "source": "builtin",
+            "enabled": True,
+            "available": self._tool_visible(tool, config),
+            "permissionMode": permission_mode,
+            "riskLevel": "critical" if advanced else "medium" if tool.write else "low",
+            "whenToUse": override.get("whenToUse") or tool.description,
+            "inputs": ensure_string_list(override.get("inputs")) or ["Tool-specific JSON arguments."],
+            "outputs": ensure_string_list(override.get("outputs")) or ["Tool result JSON."],
+            "sideEffects": override.get("sideEffects") or ("may request or perform approved writes" if tool.write else "none"),
+            "backupRestore": override.get("backupRestore") or ("required before writes" if tool.write else "not required"),
+            "tools": [tool.name],
+            "allowedTools": [tool.name],
+            "testCommand": override.get("testCommand") or "",
+            "instructions": "",
+            "advanced": advanced,
+            "write": tool.write,
+            "tags": [tag for tag in tags if tag],
+        }
+
+    def _skill_from_write_handler(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
+        override = BUILTIN_SKILL_OVERRIDES.get(handler.name, {})
+        advanced = bool(handler.advanced)
+        tags = sorted({*ensure_string_list(override.get("tags")), "supervised-write", "builtin", *("advanced" if advanced else "",)})
+        return {
+            "schema": "vrcforge.skill.v1",
+            "name": handler.name,
+            "title": override.get("title") or title_from_name(handler.name),
+            "description": handler.description,
+            "category": "supervised-write",
+            "source": "builtin",
+            "enabled": True,
+            "available": self._write_handler_visible(handler, config),
+            "permissionMode": str(override.get("permissionMode") or ("advanced_power_mode" if advanced else "approval_required")),
+            "riskLevel": handler.risk_level,
+            "whenToUse": override.get("whenToUse") or handler.description,
+            "inputs": ensure_string_list(override.get("inputs")) or ["Approved write payload."],
+            "outputs": ensure_string_list(override.get("outputs")) or ["Write result JSON and audit record."],
+            "sideEffects": override.get("sideEffects") or "writes Unity project or generated artifacts after approval",
+            "backupRestore": override.get("backupRestore") or "requires preview, backup, apply, validate, restore path",
+            "tools": ["vrcforge_request_apply", "vrcforge_apply_approved", handler.name],
+            "allowedTools": ["vrcforge_request_apply", "vrcforge_apply_approved"],
+            "testCommand": override.get("testCommand") or "",
+            "instructions": "",
+            "advanced": advanced,
+            "write": True,
+            "tags": [tag for tag in tags if tag],
+        }
+
+    def _permission_mode_for_tool(self, tool: AgentTool) -> str:
+        if tool.advanced:
+            return "advanced_power_mode"
+        if tool.write:
+            return "approval_required"
+        if tool.category == "plan/preview":
+            return "preview"
+        return "read_only"
+
     @property
     def audit_log_path(self) -> Path:
         return self.audit_dir / "approvals.jsonl"
@@ -804,6 +1005,119 @@ class AgentGateway:
         if user_data_dir:
             return Path(user_data_dir) / "AGENTS.md"
         return self.config_path.parent / "AGENTS.md"
+
+    @property
+    def user_skills_dir(self) -> Path:
+        if self.config_path.parent.name.lower() == "config":
+            return self.config_path.parent.parent / "skills"
+        user_data_dir = os.environ.get("VRCFORGE_USER_DATA_DIR", "").strip()
+        if user_data_dir:
+            return Path(user_data_dir) / "skills"
+        return self.config_path.parent / "skills"
+
+    def _load_user_skills(self) -> list[dict[str, Any]]:
+        skills_dir = self.user_skills_dir
+        if not skills_dir.exists():
+            return []
+        skills: list[dict[str, Any]] = []
+        for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+            try:
+                parsed = parse_skill_markdown(skill_file)
+                normalized = self._normalize_user_skill(parsed, existing_id=str(parsed.get("name") or skill_file.parent.name))
+                normalized["storagePath"] = str(skill_file)
+                skills.append(normalized)
+            except Exception as exc:  # noqa: BLE001 - one broken user skill must not break startup.
+                fallback_name = normalize_skill_id(skill_file.parent.name)
+                skills.append(
+                    {
+                        "schema": "vrcforge.skill.v1",
+                        "name": fallback_name,
+                        "title": fallback_name,
+                        "description": "User skill could not be loaded.",
+                        "category": "user",
+                        "source": "user",
+                        "enabled": False,
+                        "available": False,
+                        "permissionMode": "instruction_only",
+                        "riskLevel": "low",
+                        "whenToUse": "",
+                        "inputs": [],
+                        "outputs": [],
+                        "sideEffects": "none",
+                        "backupRestore": "not required",
+                        "tools": [],
+                        "allowedTools": [],
+                        "testCommand": "",
+                        "instructions": "",
+                        "advanced": False,
+                        "write": False,
+                        "tags": ["user", "invalid"],
+                        "storagePath": str(skill_file),
+                        "loadError": str(exc),
+                    }
+                )
+        return skills
+
+    def _find_user_skill(self, skill_id: str) -> dict[str, Any] | None:
+        skill_id = normalize_skill_id(skill_id)
+        for skill in self._load_user_skills():
+            if skill.get("name") == skill_id:
+                return skill
+        return None
+
+    def _save_user_skills(self, skills: list[dict[str, Any]]) -> None:
+        skills_dir = self.user_skills_dir
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        existing_dirs = {path.name: path for path in skills_dir.iterdir() if path.is_dir()}
+        wanted = {str(skill.get("name") or "") for skill in skills}
+        for name, path in existing_dirs.items():
+            if name not in wanted and SKILL_ID_RE.fullmatch(name):
+                remove_tree(path)
+        for skill in skills:
+            skill_id = normalize_skill_id(str(skill.get("name") or ""))
+            skill_dir = skills_dir / skill_id
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(render_skill_markdown(skill), encoding="utf-8")
+
+    def _normalize_user_skill(self, payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
+        skill_id = normalize_skill_id(str(payload.get("name") or existing_id or ""))
+        if not SKILL_ID_RE.fullmatch(skill_id):
+            raise AgentGatewayError("Skill name must match [a-z][a-z0-9_.-]{1,80}.", status_code=400)
+        permission_mode = normalize_skill_permission(payload.get("permissionMode") or payload.get("permission_mode"))
+        tools = ensure_string_list(payload.get("tools") or payload.get("allowedTools") or payload.get("allowed_tools"))
+        allowed_tools = ensure_string_list(payload.get("allowedTools") or payload.get("allowed_tools") or tools)
+        title = str(payload.get("title") or title_from_name(skill_id)).strip()
+        instructions = str(payload.get("instructions") or payload.get("body") or "").strip()
+        return {
+            "schema": "vrcforge.skill.v1",
+            "name": skill_id,
+            "title": title[:120],
+            "description": str(payload.get("description") or "").strip()[:500],
+            "category": str(payload.get("category") or "user").strip()[:80],
+            "source": "user",
+            "enabled": bool(payload.get("enabled", True)),
+            "available": bool(payload.get("enabled", True)),
+            "permissionMode": permission_mode,
+            "riskLevel": normalize_risk_level(payload.get("riskLevel") or payload.get("risk_level")),
+            "whenToUse": str(payload.get("whenToUse") or payload.get("when_to_use") or "").strip()[:1000],
+            "inputs": ensure_string_list(payload.get("inputs")),
+            "outputs": ensure_string_list(payload.get("outputs")),
+            "sideEffects": str(payload.get("sideEffects") or payload.get("side_effects") or "none").strip()[:500],
+            "backupRestore": str(payload.get("backupRestore") or payload.get("backup_restore") or "not required").strip()[:500],
+            "tools": tools,
+            "allowedTools": allowed_tools,
+            "testCommand": str(payload.get("testCommand") or payload.get("test_command") or "").strip()[:500],
+            "instructions": instructions,
+            "advanced": permission_mode == "advanced_power_mode",
+            "write": permission_mode in {"approval_required", "advanced_power_mode"},
+            "tags": sorted({"user", *ensure_string_list(payload.get("tags"))}),
+        }
+
+    def _ensure_user_skill_can_use_id(self, skill_id: str, skills: list[dict[str, Any]]) -> None:
+        if skill_id in self._tools or skill_id in self._write_handlers:
+            raise AgentGatewayError(f"Skill name conflicts with a builtin tool: {skill_id}", status_code=409)
+        if any(skill.get("name") == skill_id for skill in skills):
+            raise AgentGatewayError(f"User skill already exists: {skill_id}", status_code=409)
 
     def visible_write_targets(self, config: AgentGatewayConfig | None = None) -> list[dict[str, Any]]:
         config = config or self.ensure_config()
@@ -1172,6 +1486,9 @@ class AgentGateway:
 
         text = message.strip()
         lowered = text.lower()
+        user_route = self._match_user_skill_route(lowered, text, skill_params)
+        if user_route:
+            return user_route
 
         if has_any(lowered, text, ["roslyn"]) and has_any(lowered, text, ["status", "diagnostic", "状态", "诊断", "检查"]):
             return self._runtime_skill_route("vrcforge_roslyn_status", skill_params, "roslyn status")
@@ -1179,6 +1496,8 @@ class AgentGateway:
             return self._runtime_skill_route("vrcforge_capture_screenshot", skill_params, "screenshot capture")
         if has_any(lowered, text, ["gesture", "play mode", "game view", "捕获状态", "截图状态"]):
             return self._runtime_skill_route("vrcforge_capture_status", skill_params, "capture status")
+        if has_any(lowered, text, ["skill", "skills", "能力库"]):
+            return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
         if has_any(lowered, text, ["tools", "skill", "skills", "工具", "能力", "列表"]) and has_any(
             lowered,
             text,
@@ -1205,6 +1524,33 @@ class AgentGateway:
             return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
         return None
 
+    def _match_user_skill_route(self, lowered: str, original: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        for skill in self._load_user_skills():
+            if not skill.get("enabled", True):
+                continue
+            haystacks = [
+                str(skill.get("name") or "").lower(),
+                str(skill.get("title") or "").lower(),
+                str(skill.get("description") or "").lower(),
+                str(skill.get("whenToUse") or "").lower(),
+            ]
+            if any(item and item in lowered for item in haystacks):
+                return {
+                    "tool": str(skill.get("name")),
+                    "category": str(skill.get("category") or "user"),
+                    "params": dict(params),
+                    "reason": "user skill match",
+                }
+            title = str(skill.get("title") or "")
+            if title and title in original:
+                return {
+                    "tool": str(skill.get("name")),
+                    "category": str(skill.get("category") or "user"),
+                    "params": dict(params),
+                    "reason": "user skill match",
+                }
+        return None
+
     def _runtime_skill_route(self, tool_name: str, params: dict[str, Any], reason: str) -> dict[str, Any]:
         tool = self._tools.get(tool_name)
         return {
@@ -1223,6 +1569,28 @@ class AgentGateway:
         config = self.ensure_config()
         tool = self._tools.get(tool_name)
         if not tool:
+            user_skill = self._find_user_skill(tool_name)
+            if user_skill:
+                payload = {
+                    "ok": bool(user_skill.get("enabled", True)),
+                    "status": "loaded" if user_skill.get("enabled", True) else "blocked",
+                    "tool": str(user_skill.get("name") or tool_name),
+                    "category": str(user_skill.get("category") or "user"),
+                    "write": bool(user_skill.get("write")),
+                    "advanced": bool(user_skill.get("advanced")),
+                    "summary": str(user_skill.get("description") or user_skill.get("title") or ""),
+                    "paramsSummary": summarize_params(params),
+                    "result": redact_sensitive(user_skill),
+                }
+                self.append_audit(
+                    {
+                        "event": "runtime_user_skill_loaded",
+                        "skill": user_skill.get("name"),
+                        "agent": agent_name,
+                        "status": payload["status"],
+                    }
+                )
+                return payload
             return {
                 "ok": False,
                 "status": "blocked",
@@ -1422,6 +1790,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
         "vrcforge_execute_approved_shell",
+        "vrcforge_skill_manifest",
         "vrcforge_health",
         "vrcforge_unity_status",
         "vrcforge_unity_tools",
@@ -1503,6 +1872,28 @@ def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def summarize_skill_registry(registry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": registry.get("schema"),
+        "count": registry.get("count"),
+        "availableCount": registry.get("availableCount"),
+        "builtinCount": registry.get("builtinCount"),
+        "userCount": registry.get("userCount"),
+        "skills": [
+            {
+                "name": skill.get("name"),
+                "title": skill.get("title"),
+                "source": skill.get("source"),
+                "category": skill.get("category"),
+                "permissionMode": skill.get("permissionMode"),
+                "available": skill.get("available"),
+            }
+            for skill in ensure_list(registry.get("skills"))[:80]
+            if isinstance(skill, dict)
+        ],
+    }
+
+
 def kill_process_tree(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
@@ -1550,6 +1941,183 @@ def has_any(lowered_text: str, original_text: str, needles: list[str]) -> bool:
 
 def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def ensure_string_list(value: Any) -> list[str]:
+    items = ensure_list(value)
+    result: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def normalize_skill_id(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_.-]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-._")
+    return text
+
+
+def normalize_skill_permission(value: Any) -> str:
+    text = str(value or "instruction_only").strip().lower().replace("-", "_")
+    aliases = {
+        "read": "read_only",
+        "readonly": "read_only",
+        "plan": "preview",
+        "approve": "approval_required",
+        "approval": "approval_required",
+        "write": "approval_required",
+        "advanced": "advanced_power_mode",
+        "roslyn": "advanced_power_mode",
+    }
+    text = aliases.get(text, text)
+    return text if text in SKILL_PERMISSION_MODES else "instruction_only"
+
+
+def normalize_risk_level(value: Any) -> str:
+    text = str(value or "low").strip().lower()
+    return text if text in {"low", "medium", "high", "critical"} else "low"
+
+
+def title_from_name(name: str) -> str:
+    text = re.sub(r"^vrcforge_", "", name or "")
+    return " ".join(part.capitalize() for part in re.split(r"[_\-.]+", text) if part) or name
+
+
+def parse_skill_markdown(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8-sig")
+    metadata: dict[str, Any] = {}
+    body = text
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            metadata = parse_frontmatter_block(parts[1])
+            body = parts[2].lstrip("\r\n")
+    metadata["body"] = body.strip()
+    metadata.setdefault("name", path.parent.name)
+    return metadata
+
+
+def parse_frontmatter_block(block: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    current_key = ""
+    for raw_line in block.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        stripped = line.strip()
+        if stripped.startswith("- ") and current_key:
+            payload.setdefault(current_key, [])
+            if isinstance(payload[current_key], list):
+                payload[current_key].append(strip_simple_yaml_scalar(stripped[2:].strip()))
+            continue
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        current_key = camelize_key(key.strip())
+        value = raw_value.strip()
+        if not value:
+            payload[current_key] = []
+        elif value.startswith("[") and value.endswith("]"):
+            payload[current_key] = [
+                strip_simple_yaml_scalar(item.strip())
+                for item in value[1:-1].split(",")
+                if item.strip()
+            ]
+        else:
+            payload[current_key] = strip_simple_yaml_scalar(value)
+    return payload
+
+
+def strip_simple_yaml_scalar(value: str) -> Any:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1]
+    lowered = text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return text
+
+
+def camelize_key(key: str) -> str:
+    aliases = {
+        "permission_mode": "permissionMode",
+        "risk_level": "riskLevel",
+        "when_to_use": "whenToUse",
+        "side_effects": "sideEffects",
+        "backup_restore": "backupRestore",
+        "allowed_tools": "allowedTools",
+        "test_command": "testCommand",
+    }
+    if key in aliases:
+        return aliases[key]
+    if "_" not in key:
+        return key
+    head, *tail = key.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
+
+def render_skill_markdown(skill: dict[str, Any]) -> str:
+    metadata_keys = [
+        "name",
+        "title",
+        "description",
+        "category",
+        "permissionMode",
+        "riskLevel",
+        "whenToUse",
+        "inputs",
+        "outputs",
+        "sideEffects",
+        "backupRestore",
+        "tools",
+        "allowedTools",
+        "testCommand",
+        "enabled",
+        "tags",
+    ]
+    lines = ["---"]
+    for key in metadata_keys:
+        value = skill.get(key)
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            for item in value:
+                lines.append(f"  - {yaml_scalar(str(item))}")
+        elif isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        else:
+            lines.append(f"{key}: {yaml_scalar(str(value or ''))}")
+    lines.append("---")
+    lines.append("")
+    lines.append(str(skill.get("instructions") or "").strip())
+    lines.append("")
+    return "\n".join(lines)
+
+
+def yaml_scalar(value: str) -> str:
+    text = value.replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return '""'
+    if re.search(r"[:#\[\],]|^\s|\s$", text):
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def remove_tree(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
 
 
 def normalize_execution_mode(value: Any) -> str:

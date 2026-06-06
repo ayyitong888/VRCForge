@@ -125,6 +125,39 @@ try {
   assert(unityStatusTurn.json.skill.tool === "vrcforge_unity_status", "Runtime should execute the routed Unity status skill.");
   assert(["executed", "failed", "blocked"].includes(unityStatusTurn.json.skill.status), "Unity status skill should produce a bounded status.");
 
+  const skillManifestTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "列一下 skills",
+  });
+  assert(skillManifestTurn.status === 200, "Skill manifest turn should return normally.");
+  assert(skillManifestTurn.json.plan.skillTool === "vrcforge_skill_manifest", "Skill list intent should route to the manifest skill.");
+  assert(skillManifestTurn.json.skill.result.toolCount >= 10, "Skill manifest should include the registered tools.");
+  assert(!("token" in skillManifestTurn.json.skill.result), "Skill manifest must not leak the local gateway token.");
+
+  const createdSkill = await requestJson(`${endpoint}/api/app/skills`, "POST", {
+    name: "smoke-review",
+    title: "Smoke Review",
+    description: "Smoke skill for registry validation.",
+    whenToUse: "smoke review",
+    inputs: ["runtime state"],
+    outputs: ["smoke notes"],
+    allowedTools: ["vrcforge_health"],
+    instructions: "Load this skill only for the smoke review phrase.",
+  });
+  assert(createdSkill.status === 200, "User skill creation should succeed.");
+  assert(createdSkill.json.skill.name === "smoke-review", "Created skill should be normalized.");
+  assert(fs.existsSync(path.join(smokeRoot, "skills", "smoke-review", "SKILL.md")), "User skill should be stored as SKILL.md.");
+
+  const userSkillTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "smoke review",
+  });
+  assert(userSkillTurn.status === 200, "User skill runtime turn should return normally.");
+  assert(userSkillTurn.json.skill.status === "loaded", "User skill should load instructions instead of executing hidden code.");
+  assert(userSkillTurn.json.skill.result.name === "smoke-review", "Loaded user skill should match the request.");
+
+  const deletedSkill = await requestJson(`${endpoint}/api/app/skills/smoke-review`, "DELETE");
+  assert(deletedSkill.status === 200, "User skill deletion should succeed.");
+  assert(!fs.existsSync(path.join(smokeRoot, "skills", "smoke-review", "SKILL.md")), "Deleted user skill should remove SKILL.md.");
+
   const highRiskTarget = path.join(smokeRoot, "approved-shell.txt");
   const highRiskTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "写入测试文件",
@@ -180,10 +213,14 @@ async function waitForJson(url, timeoutMs) {
 }
 
 async function postJson(url, body) {
+  return requestJson(url, "POST", body);
+}
+
+async function requestJson(url, method, body) {
   const response = await fetch(url, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   let json = {};
   try {

@@ -217,6 +217,63 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["skill"]["status"], "executed")
         self.assertIn("result", payload["skill"])
 
+    def test_agent_runtime_routes_skill_manifest_request(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/app/agent/message", json={"message": "列一下 skills"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["plan"]["skillTool"], "vrcforge_skill_manifest")
+        self.assertEqual(payload["skill"]["status"], "executed")
+        self.assertGreater(payload["skill"]["result"]["toolCount"], 10)
+        self.assertNotIn("token", payload["skill"]["result"])
+
+    def test_app_skill_registry_crud_uses_local_skill_markdown(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            initial = client.get("/api/app/skills")
+            self.assertEqual(initial.status_code, 200)
+            initial_payload = initial.json()
+            self.assertEqual(initial_payload["schema"], "vrcforge.skills.v1")
+            builtin_names = {skill["name"] for skill in initial_payload["skills"] if skill["source"] == "builtin"}
+            self.assertIn("vrcforge_roslyn_status", builtin_names)
+
+            created = client.post(
+                "/api/app/skills",
+                json={
+                    "name": "avatar-review",
+                    "title": "Avatar Review",
+                    "description": "Check avatar state before edits.",
+                    "whenToUse": "avatar review",
+                    "inputs": ["Unity project context"],
+                    "outputs": ["Review notes"],
+                    "allowedTools": ["vrcforge_unity_status", "vrcforge_list_avatars"],
+                    "instructions": "Inspect Unity status before suggesting writes.",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            created_payload = created.json()
+            self.assertEqual(created_payload["skill"]["name"], "avatar-review")
+            skill_file = dashboard_server.AGENT_GATEWAY.user_skills_dir / "avatar-review" / "SKILL.md"
+            self.assertTrue(skill_file.exists())
+            self.assertIn("Inspect Unity status", skill_file.read_text(encoding="utf-8"))
+
+            turn = client.post(
+                "/api/app/agent/message",
+                json={"message": "avatar review"},
+            )
+            self.assertEqual(turn.status_code, 200)
+            self.assertEqual(turn.json()["skill"]["status"], "loaded")
+            self.assertEqual(turn.json()["skill"]["result"]["name"], "avatar-review")
+
+            updated = client.put("/api/app/skills/avatar-review", json={"title": "Avatar Review Updated"})
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["skill"]["title"], "Avatar Review Updated")
+
+            deleted = client.delete("/api/app/skills/avatar-review")
+            self.assertEqual(deleted.status_code, 200)
+            self.assertFalse(skill_file.exists())
+
     def test_shell_classifier_low_high_and_reject_cases(self) -> None:
         workspace_root = str(Path(__file__).resolve().parents[1])
 
@@ -366,6 +423,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_classify_shell", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertIn("vrcforge_execute_approved_shell", tool_names)
+        self.assertIn("vrcforge_skill_manifest", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_roslyn_status", tool_names)
