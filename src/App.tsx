@@ -26,6 +26,7 @@ import { Button } from "./components/ui/button";
 import {
   AgentApproval,
   AgentRuntimeResponse,
+  AgentSkillResult,
   AgentShellResult,
   ApiError,
   AppBootstrap,
@@ -738,6 +739,7 @@ function ConversationCard({
 
   const response = item.response;
   const shell = response.shell;
+  const skill = response.skill;
   const approval = shell?.approval;
 
   return (
@@ -753,6 +755,7 @@ function ConversationCard({
         <div className="mt-4 grid gap-3">
           <DataLine label="摘要" value={response.plan.summary} />
           <DataLine label="下一步" value={displayStep(response.plan.nextStep || "-")} />
+          {response.plan.skillTool ? <DataLine label="能力" value={response.plan.skillTool} mono /> : null}
           {response.plan.shellCommand ? <DataLine label="命令" value={response.plan.shellCommand} mono /> : null}
         </div>
       </section>
@@ -782,10 +785,31 @@ function ConversationCard({
         </section>
       ) : null}
 
+      {skill ? <SkillResultCard skill={skill} /> : null}
       {shell?.result ? <ShellResultCard title="执行结果" result={shell.result} /> : null}
       {approval ? <ApprovalCard approval={approval} loading={loading} onApprove={onApprove} onReject={onReject} /> : null}
       {shell?.error ? <ShellResultCard title="执行错误" error={shell.error} /> : null}
     </div>
+  );
+}
+
+function SkillResultCard({ skill }: { skill: AgentSkillResult }) {
+  return (
+    <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
+      <div className="mb-3 flex min-w-0 items-center gap-2">
+        <Wrench className="h-4 w-4 shrink-0 text-primary" />
+        <div className="truncate text-sm font-semibold">能力结果</div>
+        <Badge tone={skillTone(skill)} className="ml-auto shrink-0">
+          {displaySkillStatus(skill.status)}
+        </Badge>
+      </div>
+      <div className="grid gap-3">
+        <DataLine label="工具" value={skill.tool || "-"} mono />
+        {skill.category ? <DataLine label="类别" value={skill.category} /> : null}
+        {skill.error ? <DataLine label="错误" value={skill.error} /> : null}
+        {skill.result !== undefined ? <OutputBlock label="数据" value={formatPayload(skill.result)} /> : null}
+      </div>
+    </section>
   );
 }
 
@@ -960,7 +984,9 @@ function displayStep(step: string): string {
   const labels: Record<string, string> = {
     classify_shell: "检查命令风险",
     execute_shell: "执行命令",
+    call_skill: "调用能力",
     request_approval: "等待确认",
+    await_user_instruction: "等待输入",
     done: "完成",
   };
   return labels[step] || step;
@@ -971,6 +997,36 @@ function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {
   if (risk === "high") return "warn";
   if (risk === "reject") return "danger";
   return "muted";
+}
+
+function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" {
+  if (skill.status === "executed" && skill.ok) return "ok";
+  if (skill.status === "blocked") return "warn";
+  if (skill.status === "failed" || !skill.ok) return "danger";
+  return "muted";
+}
+
+function displaySkillStatus(status: string): string {
+  const labels: Record<string, string> = {
+    executed: "已运行",
+    failed: "失败",
+    blocked: "已阻止",
+  };
+  return labels[status] || status || "-";
+}
+
+function formatPayload(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function shortPath(path: string) {

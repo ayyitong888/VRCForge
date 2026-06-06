@@ -69,6 +69,18 @@ class UserConstraintsSnapshot:
     error: str = ""
 
 
+RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
+RUNTIME_BLOCKED_SKILLS = {
+    "vrcforge_agent_message",
+    "vrcforge_execute_shell",
+    "vrcforge_execute_approved_shell",
+    "vrcforge_request_apply",
+    "vrcforge_apply_approved",
+    "vrcforge_restore_last_backup",
+    "vrcforge_request_roslyn_advanced",
+}
+
+
 class AgentGateway:
     def __init__(
         self,
@@ -394,6 +406,7 @@ class AgentGateway:
         plan = self._plan_agent_turn(message, params, observe)
 
         shell_payload: dict[str, Any] | None = None
+        skill_payload: dict[str, Any] | None = None
         command = str(params.get("shell_command") or params.get("shellCommand") or plan.get("shellCommand") or "").strip()
         if command:
             shell_payload = self.execute_shell(
@@ -407,6 +420,12 @@ class AgentGateway:
                 },
                 agent_name=agent_name,
             )
+        elif plan.get("skillNeeded") and plan.get("skillTool"):
+            skill_payload = self._execute_runtime_skill(
+                str(plan.get("skillTool") or ""),
+                ensure_dict(plan.get("skillParams")),
+                agent_name=agent_name,
+            )
 
         turn = {
             "id": turn_id,
@@ -417,6 +436,8 @@ class AgentGateway:
         }
         if shell_payload is not None:
             turn["shell"] = shell_payload
+        if skill_payload is not None:
+            turn["skill"] = skill_payload
 
         with self._lock:
             session = self._runtime_sessions.setdefault(
@@ -440,6 +461,8 @@ class AgentGateway:
                 "messageSummary": summarize_text(message),
                 "plan": plan,
                 "shellStatus": shell_payload.get("status") if shell_payload else "none",
+                "skillStatus": skill_payload.get("status") if skill_payload else "none",
+                "skillTool": skill_payload.get("tool") if skill_payload else "",
             }
         )
 
@@ -459,6 +482,8 @@ class AgentGateway:
                 payload["approvalId"] = shell_payload["approval_id"]
             if shell_payload.get("result"):
                 payload["result"] = shell_payload["result"]
+        if skill_payload is not None:
+            payload["skill"] = skill_payload
         return payload
 
     def runtime_observe(self, session_id: str | None = None) -> dict[str, Any]:
@@ -1110,9 +1135,12 @@ class AgentGateway:
 
     def _plan_agent_turn(self, message: str, params: dict[str, Any], observe: dict[str, Any]) -> dict[str, Any]:
         command = extract_shell_command_candidate(message, params)
+        skill_route = self._match_runtime_skill(message, params) if not command else None
         summary = "Observed runtime state and prepared the next action."
         if command:
             summary = "Prepared a shell step for the requested task."
+        elif skill_route:
+            summary = f"Prepared {skill_route['tool']} skill call."
         elif "health" in message.lower() or "健康" in message:
             summary = "Observed runtime health. No shell step is required."
         return {
@@ -1121,9 +1149,154 @@ class AgentGateway:
             "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
             "shellNeeded": bool(command),
             "shellCommand": command,
+            "skillNeeded": bool(skill_route),
+            "skillTool": skill_route.get("tool") if skill_route else "",
+            "skillCategory": skill_route.get("category") if skill_route else "",
+            "skillParams": skill_route.get("params") if skill_route else {},
+            "skillReason": skill_route.get("reason") if skill_route else "",
             "expectedResult": "Shell output will be returned inline." if command else "Runtime observation is available.",
-            "nextStep": "classify_shell" if command else "await_user_instruction",
+            "nextStep": "classify_shell" if command else "call_skill" if skill_route else "await_user_instruction",
         }
+
+    def _match_runtime_skill(self, message: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        explicit_tool = str(
+            params.get("skill_tool")
+            or params.get("skillTool")
+            or params.get("tool_name")
+            or params.get("toolName")
+            or ""
+        ).strip()
+        skill_params = ensure_dict(params.get("skill_params") or params.get("skillParams"))
+        if explicit_tool:
+            return self._runtime_skill_route(explicit_tool, skill_params, "explicit tool request")
+
+        text = message.strip()
+        lowered = text.lower()
+
+        if has_any(lowered, text, ["roslyn"]) and has_any(lowered, text, ["status", "diagnostic", "状态", "诊断", "检查"]):
+            return self._runtime_skill_route("vrcforge_roslyn_status", skill_params, "roslyn status")
+        if has_any(lowered, text, ["screenshot", "capture", "截图", "拍照", "截屏"]):
+            return self._runtime_skill_route("vrcforge_capture_screenshot", skill_params, "screenshot capture")
+        if has_any(lowered, text, ["gesture", "play mode", "game view", "捕获状态", "截图状态"]):
+            return self._runtime_skill_route("vrcforge_capture_status", skill_params, "capture status")
+        if has_any(lowered, text, ["tools", "skill", "skills", "工具", "能力", "列表"]) and has_any(
+            lowered,
+            text,
+            ["unity", "mcp", "vrcforge", "工具", "能力"],
+        ):
+            return self._runtime_skill_route("vrcforge_unity_tools", skill_params, "unity tool list")
+        if has_any(lowered, text, ["health", "健康"]):
+            return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
+        if has_any(lowered, text, ["unity", "mcp", "连接", "连上", "实例"]):
+            return self._runtime_skill_route("vrcforge_unity_status", skill_params, "unity status")
+        if has_any(lowered, text, ["avatar", "avatars", "角色", "模型", "工程刷新", "刷新列表"]):
+            return self._runtime_skill_route("vrcforge_list_avatars", skill_params, "avatar list")
+        if has_any(lowered, text, ["blendshape", "blend shape", "形态键", "表情键", "脸部", "面部"]):
+            if has_any(lowered, text, ["plan", "方案", "调整", "调脸", "优化"]):
+                return self._runtime_skill_route("vrcforge_plan_face_tuning", skill_params, "face tuning plan")
+            return self._runtime_skill_route("vrcforge_scan_blendshapes", skill_params, "blendshape scan")
+        if has_any(lowered, text, ["shader", "material", "materials", "材质", "着色器"]):
+            if has_any(lowered, text, ["plan", "方案", "调整", "优化"]):
+                return self._runtime_skill_route("vrcforge_plan_shader_tuning", skill_params, "shader tuning plan")
+            return self._runtime_skill_route("vrcforge_scan_materials", skill_params, "material scan")
+        if has_any(lowered, text, ["logs", "log", "日志"]):
+            return self._runtime_skill_route("vrcforge_read_recent_logs", {"limit": 80, **skill_params}, "recent logs")
+        if has_any(lowered, text, ["diagnostic", "诊断", "状态"]):
+            return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
+        return None
+
+    def _runtime_skill_route(self, tool_name: str, params: dict[str, Any], reason: str) -> dict[str, Any]:
+        tool = self._tools.get(tool_name)
+        return {
+            "tool": tool_name,
+            "category": tool.category if tool else "",
+            "params": dict(params),
+            "reason": reason,
+        }
+
+    def _execute_runtime_skill(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        agent_name: str,
+    ) -> dict[str, Any]:
+        config = self.ensure_config()
+        tool = self._tools.get(tool_name)
+        if not tool:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "tool": tool_name,
+                "error": f"Unknown skill: {tool_name}",
+            }
+        if tool.name in RUNTIME_BLOCKED_SKILLS or tool.write or tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "tool": tool.name,
+                "category": tool.category,
+                "write": tool.write,
+                "advanced": tool.advanced,
+                "error": "This skill cannot run directly from the runtime loop.",
+            }
+        if not self._tool_visible(tool, config):
+            return {
+                "ok": False,
+                "status": "blocked",
+                "tool": tool.name,
+                "category": tool.category,
+                "write": tool.write,
+                "advanced": tool.advanced,
+                "error": "This skill is unavailable in the current permission mode.",
+            }
+
+        user_constraints = self.read_user_constraints()
+        tool_params = self._inject_user_constraints(params, tool, user_constraints)
+        try:
+            result = tool.handler(tool_params)
+            payload = {
+                "ok": True,
+                "status": "executed",
+                "tool": tool.name,
+                "category": tool.category,
+                "write": tool.write,
+                "advanced": tool.advanced,
+                "summary": tool.description,
+                "paramsSummary": summarize_params(params),
+                "result": redact_sensitive(result),
+            }
+            self.append_audit(
+                {
+                    "event": "runtime_skill_executed",
+                    "tool": tool.name,
+                    "agent": agent_name,
+                    "paramsSummary": summarize_params(params),
+                    "status": "ok",
+                }
+            )
+            return payload
+        except Exception as exc:  # noqa: BLE001 - runtime must keep the agent loop alive.
+            self.append_audit(
+                {
+                    "event": "runtime_skill_executed",
+                    "tool": tool.name,
+                    "agent": agent_name,
+                    "paramsSummary": summarize_params(params),
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+            return {
+                "ok": False,
+                "status": "failed",
+                "tool": tool.name,
+                "category": tool.category,
+                "write": tool.write,
+                "advanced": tool.advanced,
+                "summary": tool.description,
+                "paramsSummary": summarize_params(params),
+                "error": str(exc),
+            }
 
     def _extract_token(self, headers: dict[str, str], query_params: dict[str, str]) -> str:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
@@ -1369,6 +1542,10 @@ def extract_shell_command_candidate(message: str, params: dict[str, Any]) -> str
     if "列目录" in stripped or "文件列表" in stripped or lowered in {"ls", "dir"}:
         return "Get-ChildItem"
     return ""
+
+
+def has_any(lowered_text: str, original_text: str, needles: list[str]) -> bool:
+    return any((needle.lower() in lowered_text) if needle.isascii() else (needle in original_text) for needle in needles)
 
 
 def ensure_dict(value: Any) -> dict[str, Any]:

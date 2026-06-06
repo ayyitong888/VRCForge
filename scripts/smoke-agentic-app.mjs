@@ -117,6 +117,14 @@ try {
   assert(lowRiskTurn.json.shell.status === "executed", "Low-risk shell commands should execute directly.");
   assert(lowRiskTurn.json.shell.classification.risk === "low", "Directory listing should be low-risk.");
 
+  const unityStatusTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "检查 Unity MCP 状态",
+  });
+  assert(unityStatusTurn.status === 200, "Unity status skill turn should return normally.");
+  assert(unityStatusTurn.json.plan.skillTool === "vrcforge_unity_status", "Unity status intent should route to the Unity status skill.");
+  assert(unityStatusTurn.json.skill.tool === "vrcforge_unity_status", "Runtime should execute the routed Unity status skill.");
+  assert(["executed", "failed", "blocked"].includes(unityStatusTurn.json.skill.status), "Unity status skill should produce a bounded status.");
+
   const highRiskTarget = path.join(smokeRoot, "approved-shell.txt");
   const highRiskTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "写入测试文件",

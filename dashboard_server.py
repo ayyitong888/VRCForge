@@ -393,6 +393,8 @@ class AgentRuntimeMessageRequest(BaseModel):
     session_id: str | None = None
     message: str
     shell_command: str | None = None
+    skill_tool: str | None = None
+    skill_params: dict[str, Any] = Field(default_factory=dict)
     cwd: str | None = None
     workspace_root: str | None = None
 
@@ -677,6 +679,8 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "session_id": runtime_request.session_id,
             "message": runtime_request.message,
             "shell_command": runtime_request.shell_command,
+            "skill_tool": runtime_request.skill_tool,
+            "skill_params": runtime_request.skill_params,
             "cwd": runtime_request.cwd,
             "workspace_root": runtime_request.workspace_root,
         },
@@ -769,6 +773,8 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
                 "session_id": runtime_request.session_id,
                 "message": runtime_request.message,
                 "shell_command": runtime_request.shell_command,
+                "skill_tool": runtime_request.skill_tool,
+                "skill_params": runtime_request.skill_params,
                 "cwd": runtime_request.cwd,
                 "workspace_root": runtime_request.workspace_root,
             },

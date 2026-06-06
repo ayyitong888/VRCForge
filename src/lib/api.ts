@@ -72,6 +72,19 @@ export type AgentShellResult = {
   stderrTruncated?: boolean;
 };
 
+export type AgentSkillResult = {
+  ok: boolean;
+  status: "executed" | "failed" | "blocked" | string;
+  tool: string;
+  category?: string;
+  write?: boolean;
+  advanced?: boolean;
+  summary?: string;
+  paramsSummary?: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
+};
+
 export type AgentRuntimeResponse = {
   ok: boolean;
   session_id: string;
@@ -84,6 +97,11 @@ export type AgentRuntimeResponse = {
     planner: string;
     shellNeeded: boolean;
     shellCommand?: string;
+    skillNeeded?: boolean;
+    skillTool?: string;
+    skillCategory?: string;
+    skillParams?: Record<string, unknown>;
+    skillReason?: string;
     expectedResult?: string;
     nextStep?: string;
   };
@@ -102,6 +120,7 @@ export type AgentRuntimeResponse = {
     result?: AgentShellResult;
     error?: string;
   };
+  skill?: AgentSkillResult;
   result?: AgentShellResult;
 };
 

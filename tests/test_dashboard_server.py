@@ -202,6 +202,21 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("session_id", payload)
         self.assertIn("turn_id", payload)
 
+    def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/app/agent/message", json={"message": "检查 Unity MCP 状态"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["plan"]["shellNeeded"])
+        self.assertTrue(payload["plan"]["skillNeeded"])
+        self.assertEqual(payload["plan"]["skillTool"], "vrcforge_unity_status")
+        self.assertEqual(payload["plan"]["nextStep"], "call_skill")
+        self.assertEqual(payload["skill"]["tool"], "vrcforge_unity_status")
+        self.assertEqual(payload["skill"]["status"], "executed")
+        self.assertIn("result", payload["skill"])
+
     def test_shell_classifier_low_high_and_reject_cases(self) -> None:
         workspace_root = str(Path(__file__).resolve().parents[1])
 
