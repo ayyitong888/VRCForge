@@ -141,18 +141,26 @@ try {
     inputs: ["runtime state"],
     outputs: ["smoke notes"],
     allowedTools: ["vrcforge_health"],
-    instructions: "Load this skill only for the smoke review phrase.",
+    entrypointTool: "vrcforge_health",
+    argumentHint: "target",
+    instructions: "Load this skill only for the smoke review phrase. Args=$ARGUMENTS",
   });
   assert(createdSkill.status === 200, "User skill creation should succeed.");
   assert(createdSkill.json.skill.name === "smoke-review", "Created skill should be normalized.");
   assert(fs.existsSync(path.join(smokeRoot, "skills", "smoke-review", "SKILL.md")), "User skill should be stored as SKILL.md.");
 
   const userSkillTurn = await postJson(`${endpoint}/api/app/agent/message`, {
-    message: "smoke review",
+    message: "/smoke-review target-avatar",
   });
   assert(userSkillTurn.status === 200, "User skill runtime turn should return normally.");
-  assert(userSkillTurn.json.skill.status === "loaded", "User skill should load instructions instead of executing hidden code.");
+  assert(userSkillTurn.json.skill.status === "executed", "User skill entrypoint should execute through an allowed read-only tool.");
   assert(userSkillTurn.json.skill.result.name === "smoke-review", "Loaded user skill should match the request.");
+  assert(userSkillTurn.json.skill.result.arguments === "target-avatar", "Direct skill invocation should pass arguments.");
+  assert(userSkillTurn.json.skill.entrypointTool === "vrcforge_health", "User skill should expose its read-only entrypoint.");
+
+  const skillCheck = await requestJson(`${endpoint}/api/app/skills/check`, "GET");
+  assert(skillCheck.status === 200, "Skill check should be available.");
+  assert(skillCheck.json.count >= createdSkill.json.count, "Skill check should cover registered skills.");
 
   const deletedSkill = await requestJson(`${endpoint}/api/app/skills/smoke-review`, "DELETE");
   assert(deletedSkill.status === 200, "User skill deletion should succeed.");

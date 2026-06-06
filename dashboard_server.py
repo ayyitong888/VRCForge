@@ -735,6 +735,11 @@ def app_agent_skills() -> dict[str, Any]:
     return AGENT_GATEWAY.build_skill_registry()
 
 
+@app.get("/api/app/skills/check")
+def app_agent_skills_check() -> dict[str, Any]:
+    return AGENT_GATEWAY.check_skill_registry()
+
+
 @app.post("/api/app/skills")
 def app_create_agent_skill(payload: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -787,6 +792,12 @@ def read_agent_health(request: Request) -> dict[str, Any]:
 def read_agent_skills(request: Request) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
     return AGENT_GATEWAY.build_skill_registry()
+
+
+@app.get("/api/agent/skills/check")
+def read_agent_skills_check(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return AGENT_GATEWAY.check_skill_registry()
 
 
 @app.post("/api/agent/session")
@@ -5882,6 +5893,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda _params: AGENT_GATEWAY.build_manifest())
+    AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda _params: AGENT_GATEWAY.check_skill_registry())
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",

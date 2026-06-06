@@ -237,6 +237,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(initial_payload["schema"], "vrcforge.skills.v1")
             builtin_names = {skill["name"] for skill in initial_payload["skills"] if skill["source"] == "builtin"}
             self.assertIn("vrcforge_roslyn_status", builtin_names)
+            self.assertIn("runtime-diagnostics", builtin_names)
+            runtime_skill = next(skill for skill in initial_payload["skills"] if skill["name"] == "runtime-diagnostics")
+            self.assertEqual(runtime_skill["skillType"], "group")
+            self.assertIn("vrcforge_skill_check", runtime_skill["allowedTools"])
 
             created = client.post(
                 "/api/app/skills",
@@ -248,6 +252,9 @@ class DashboardServerTests(unittest.TestCase):
                     "inputs": ["Unity project context"],
                     "outputs": ["Review notes"],
                     "allowedTools": ["vrcforge_unity_status", "vrcforge_list_avatars"],
+                    "disallowedTools": ["vrcforge_execute_shell"],
+                    "entrypointTool": "vrcforge_unity_status",
+                    "argumentHint": "avatar path",
                     "instructions": "Inspect Unity status before suggesting writes.",
                 },
             )
@@ -256,15 +263,25 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(created_payload["skill"]["name"], "avatar-review")
             skill_file = dashboard_server.AGENT_GATEWAY.user_skills_dir / "avatar-review" / "SKILL.md"
             self.assertTrue(skill_file.exists())
-            self.assertIn("Inspect Unity status", skill_file.read_text(encoding="utf-8"))
+            skill_text = skill_file.read_text(encoding="utf-8")
+            self.assertIn("allowed-tools:", skill_text)
+            self.assertIn("disallowed-tools:", skill_text)
+            self.assertIn("entrypoint-tool: vrcforge_unity_status", skill_text)
+            self.assertIn("Inspect Unity status", skill_text)
+
+            check = client.get("/api/app/skills/check")
+            self.assertEqual(check.status_code, 200)
+            self.assertGreaterEqual(check.json()["count"], initial_payload["count"])
 
             turn = client.post(
                 "/api/app/agent/message",
-                json={"message": "avatar review"},
+                json={"message": "/avatar-review Scene/Hero"},
             )
             self.assertEqual(turn.status_code, 200)
-            self.assertEqual(turn.json()["skill"]["status"], "loaded")
+            self.assertEqual(turn.json()["skill"]["status"], "executed")
             self.assertEqual(turn.json()["skill"]["result"]["name"], "avatar-review")
+            self.assertEqual(turn.json()["skill"]["result"]["arguments"], "Scene/Hero")
+            self.assertEqual(turn.json()["skill"]["entrypointTool"], "vrcforge_unity_status")
 
             updated = client.put("/api/app/skills/avatar-review", json={"title": "Avatar Review Updated"})
             self.assertEqual(updated.status_code, 200)
@@ -273,6 +290,48 @@ class DashboardServerTests(unittest.TestCase):
             deleted = client.delete("/api/app/skills/avatar-review")
             self.assertEqual(deleted.status_code, 200)
             self.assertFalse(skill_file.exists())
+
+    def test_skill_markdown_hyphen_frontmatter_and_dependency_check(self) -> None:
+        skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "hyphen-skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: hyphen-skill",
+                    "title: Hyphen Skill",
+                    "permission-mode: read-only",
+                    "risk-level: low",
+                    "when-to-use: hyphen skill",
+                    "allowed-tools:",
+                    "  - vrcforge_health",
+                    "entrypoint-tool: vrcforge_health",
+                    "argument-hint: target",
+                    "requires-env:",
+                    "  - VRCFORGE_TEST_MISSING_ENV",
+                    "supported-os:",
+                    "  - windows",
+                    "disable-model-invocation: true",
+                    "---",
+                    "Use $ARGUMENTS safely.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with TestClient(dashboard_server.app) as client:
+            skills = client.get("/api/app/skills").json()["skills"]
+            skill = next(item for item in skills if item["name"] == "hyphen-skill")
+            self.assertEqual(skill["permissionMode"], "read_only")
+            self.assertEqual(skill["entrypointTool"], "vrcforge_health")
+            self.assertTrue(skill["disableModelInvocation"])
+            self.assertEqual(skill["argumentHint"], "target")
+            self.assertEqual(skill["validation"]["status"], "error")
+            self.assertIn("missing env", "; ".join(skill["validation"]["reasons"]))
+
+            check = client.get("/api/app/skills/check")
+            self.assertEqual(check.status_code, 200)
+            check_skill = next(item for item in check.json()["checks"] if item["name"] == "hyphen-skill")
+            self.assertEqual(check_skill["status"], "error")
 
     def test_shell_classifier_low_high_and_reject_cases(self) -> None:
         workspace_root = str(Path(__file__).resolve().parents[1])

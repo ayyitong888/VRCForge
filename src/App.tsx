@@ -33,10 +33,12 @@ import {
   ApiError,
   AppBootstrap,
   approveAgentApproval,
+  checkSkills,
   createSkill,
   deleteSkill,
   fetchBootstrap,
   fetchSkills,
+  AgentSkillCheck,
   PermissionState,
   rejectAgentApproval,
   sendAgentMessage,
@@ -97,6 +99,7 @@ export default function App() {
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
   const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
+  const [skillCheck, setSkillCheck] = useState<AgentSkillCheck | null>(null);
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
   const [savingSkill, setSavingSkill] = useState(false);
@@ -353,6 +356,7 @@ export default function App() {
       }
       const payload = await fetchSkills(targetEndpoint);
       setSkillRegistry(payload);
+      setSkillCheck(await checkSkills(targetEndpoint));
       if (!selectedSkillName && payload.skills.length > 0) {
         const firstUserSkill = payload.skills.find((skill) => skill.source === "user") || payload.skills[0];
         selectSkill(firstUserSkill);
@@ -370,6 +374,23 @@ export default function App() {
   function newSkill() {
     setSelectedSkillName("");
     setSkillDraft(emptySkillDraft());
+  }
+
+  async function runSkillCheck() {
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      setSkillCheck(await checkSkills(targetEndpoint));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   async function saveSkill(event?: FormEvent) {
@@ -392,6 +413,7 @@ export default function App() {
         ? await updateSkill(targetEndpoint, selectedSkillName, skillDraft)
         : await createSkill(targetEndpoint, skillDraft);
       setSkillRegistry(payload);
+      setSkillCheck(await checkSkills(targetEndpoint));
       setSelectedSkillName(payload.skill.name);
       setSkillDraft({ ...payload.skill });
       await refresh(targetEndpoint);
@@ -411,6 +433,7 @@ export default function App() {
     try {
       const payload = await deleteSkill(endpoint, selectedSkillName);
       setSkillRegistry(payload);
+      setSkillCheck(await checkSkills(endpoint));
       setSelectedSkillName("");
       setSkillDraft(emptySkillDraft());
       await refresh();
@@ -552,11 +575,13 @@ export default function App() {
             <SkillsWorkspace
               skills={skills}
               skillCount={skillCount}
+              skillCheck={skillCheck}
               selectedSkillName={selectedSkillName}
               draft={skillDraft}
               saving={savingSkill}
               onSelect={selectSkill}
               onNew={newSkill}
+              onCheck={runSkillCheck}
               onDraftChange={setSkillDraft}
               onSave={saveSkill}
               onDelete={removeSelectedSkill}
@@ -811,28 +836,34 @@ function ProviderSetup({
 function SkillsWorkspace({
   skills,
   skillCount,
+  skillCheck,
   selectedSkillName,
   draft,
   saving,
   onSelect,
   onNew,
+  onCheck,
   onDraftChange,
   onSave,
   onDelete,
 }: {
   skills: AgentSkill[];
   skillCount: number;
+  skillCheck: AgentSkillCheck | null;
   selectedSkillName: string;
   draft: Partial<AgentSkill>;
   saving: boolean;
   onSelect: (skill: AgentSkill) => void;
   onNew: () => void;
+  onCheck: () => void;
   onDraftChange: (skill: Partial<AgentSkill>) => void;
   onSave: (event?: FormEvent) => void;
   onDelete: () => void;
 }) {
-  const editable = draft.source !== "builtin";
+  const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
+  const selectedCheck = skillCheck?.checks.find((item) => item.name === draft.name);
+  const checkTone = selectedCheck?.status === "error" ? "danger" : selectedCheck?.status === "warning" ? "warn" : "muted";
 
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
@@ -840,10 +871,13 @@ function SkillsWorkspace({
         <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
           <div className="mb-4 flex items-center gap-2">
             <Wrench className="h-4 w-4 shrink-0 text-primary" />
-            <div className="truncate text-sm font-semibold">能力库</div>
+            <div className="truncate text-sm font-semibold">Skills</div>
             <Badge tone="muted" className="ml-auto shrink-0">
               {skillCount}
             </Badge>
+            <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCheck} disabled={saving}>
+              Check
+            </Button>
           </div>
           <div className="max-h-[calc(100vh-180px)] space-y-1 overflow-auto pr-1">
             {skills.map((skill) => (
@@ -858,7 +892,7 @@ function SkillsWorkspace({
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="min-w-0 flex-1 truncate font-medium">{skill.title || skill.name}</span>
                   <Badge tone={skill.available ? "ok" : "warn"} className="h-6 shrink-0">
-                    {skill.source}
+                    {skill.skillType || skill.source}
                   </Badge>
                 </div>
                 <div className="truncate text-xs text-muted-foreground">{skill.permissionMode}</div>
@@ -869,14 +903,14 @@ function SkillsWorkspace({
 
         <form onSubmit={onSave} className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
           <div className="mb-5 flex items-center gap-2">
-            <div className="truncate text-sm font-semibold">{editable ? "用户能力" : "内置能力"}</div>
-            <Badge tone={draft.available === false ? "warn" : "muted"} className="ml-auto shrink-0">
-              {draft.permissionMode || "instruction_only"}
+            <div className="truncate text-sm font-semibold">{editable ? "User Skill" : "Read Only Skill"}</div>
+            <Badge tone={checkTone} className="ml-auto shrink-0">
+              {selectedCheck?.status || draft.permissionMode || "instruction_only"}
             </Badge>
           </div>
           <div className="grid gap-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="名称">
+              <FieldLabel label="Name">
                 <input
                   value={draft.name || ""}
                   onChange={(event) => onDraftChange({ ...draft, name: event.target.value })}
@@ -884,7 +918,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="标题">
+              <FieldLabel label="Title">
                 <input
                   value={draft.title || ""}
                   onChange={(event) => onDraftChange({ ...draft, title: event.target.value })}
@@ -893,8 +927,8 @@ function SkillsWorkspace({
                 />
               </FieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-3">
-              <FieldLabel label="分类">
+            <div className="grid gap-4 md:grid-cols-4">
+              <FieldLabel label="Category">
                 <input
                   value={draft.category || ""}
                   onChange={(event) => onDraftChange({ ...draft, category: event.target.value })}
@@ -902,7 +936,15 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="权限">
+              <FieldLabel label="Type">
+                <input
+                  value={draft.skillType || "package"}
+                  onChange={(event) => onDraftChange({ ...draft, skillType: event.target.value })}
+                  disabled
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Permission">
                 <select
                   value={draft.permissionMode || "instruction_only"}
                   onChange={(event) => onDraftChange({ ...draft, permissionMode: event.target.value })}
@@ -916,7 +958,7 @@ function SkillsWorkspace({
                   <option value="advanced_power_mode">advanced_power_mode</option>
                 </select>
               </FieldLabel>
-              <FieldLabel label="风险">
+              <FieldLabel label="Risk">
                 <select
                   value={draft.riskLevel || "low"}
                   onChange={(event) => onDraftChange({ ...draft, riskLevel: event.target.value })}
@@ -930,7 +972,36 @@ function SkillsWorkspace({
                 </select>
               </FieldLabel>
             </div>
-            <FieldLabel label="何时使用">
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled !== false}
+                  onChange={(event) => onDraftChange({ ...draft, enabled: event.target.checked })}
+                  disabled={!editable}
+                />
+                <span className="truncate">Enabled</span>
+              </label>
+              <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={draft.userInvocable !== false}
+                  onChange={(event) => onDraftChange({ ...draft, userInvocable: event.target.checked })}
+                  disabled={!editable}
+                />
+                <span className="truncate">Slash callable</span>
+              </label>
+              <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.disableModelInvocation)}
+                  onChange={(event) => onDraftChange({ ...draft, disableModelInvocation: event.target.checked })}
+                  disabled={!editable}
+                />
+                <span className="truncate">Manual only</span>
+              </label>
+            </div>
+            <FieldLabel label="When To Use">
               <textarea
                 value={draft.whenToUse || ""}
                 onChange={(event) => onDraftChange({ ...draft, whenToUse: event.target.value })}
@@ -938,27 +1009,63 @@ function SkillsWorkspace({
                 className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
               />
             </FieldLabel>
-            <FieldLabel label="描述">
+            <FieldLabel label="Description">
               <textarea
                 value={draft.description || ""}
                 onChange={(event) => onDraftChange({ ...draft, description: event.target.value })}
                 disabled={!editable}
-                className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
+                className="min-h-16 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
               />
             </FieldLabel>
-            <FieldLabel label="可用工具">
-              <input
-                value={(draft.allowedTools || draft.tools || []).join(", ")}
-                onChange={(event) => {
-                  const tools = splitList(event.target.value);
-                  onDraftChange({ ...draft, tools, allowedTools: tools });
-                }}
-                disabled={!editable}
-                className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
-              />
-            </FieldLabel>
+            <div className="grid gap-4 md:grid-cols-3">
+              <FieldLabel label="Allowed Tools">
+                <input
+                  value={(draft.allowedTools || draft.tools || []).join(", ")}
+                  onChange={(event) => {
+                    const tools = splitList(event.target.value);
+                    onDraftChange({ ...draft, tools, allowedTools: tools });
+                  }}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Disallowed Tools">
+                <input
+                  value={(draft.disallowedTools || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, disallowedTools: splitList(event.target.value) })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Entrypoint">
+                <input
+                  value={draft.entrypointTool || ""}
+                  onChange={(event) => onDraftChange({ ...draft, entrypointTool: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="输入">
+              <FieldLabel label="Argument Hint">
+                <input
+                  value={draft.argumentHint || ""}
+                  onChange={(event) => onDraftChange({ ...draft, argumentHint: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Test Command">
+                <input
+                  value={draft.testCommand || ""}
+                  onChange={(event) => onDraftChange({ ...draft, testCommand: event.target.value })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="Inputs">
                 <textarea
                   value={(draft.inputs || []).join("\n")}
                   onChange={(event) => onDraftChange({ ...draft, inputs: splitLines(event.target.value) })}
@@ -966,7 +1073,7 @@ function SkillsWorkspace({
                   className="min-h-24 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="输出">
+              <FieldLabel label="Outputs">
                 <textarea
                   value={(draft.outputs || []).join("\n")}
                   onChange={(event) => onDraftChange({ ...draft, outputs: splitLines(event.target.value) })}
@@ -976,7 +1083,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="副作用">
+              <FieldLabel label="Side Effects">
                 <input
                   value={draft.sideEffects || ""}
                   onChange={(event) => onDraftChange({ ...draft, sideEffects: event.target.value })}
@@ -984,7 +1091,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="备份恢复">
+              <FieldLabel label="Backup Restore">
                 <input
                   value={draft.backupRestore || ""}
                   onChange={(event) => onDraftChange({ ...draft, backupRestore: event.target.value })}
@@ -993,16 +1100,42 @@ function SkillsWorkspace({
                 />
               </FieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="测试命令">
+            <div className="grid gap-4 md:grid-cols-3">
+              <FieldLabel label="Requires Env">
                 <input
-                  value={draft.testCommand || ""}
-                  onChange={(event) => onDraftChange({ ...draft, testCommand: event.target.value })}
+                  value={(draft.requiresEnv || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, requiresEnv: splitList(event.target.value) })}
                   disabled={!editable}
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="标签">
+              <FieldLabel label="Requires Binaries">
+                <input
+                  value={(draft.requiresBinaries || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, requiresBinaries: splitList(event.target.value) })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Supported OS">
+                <input
+                  value={(draft.supportedOs || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, supportedOs: splitList(event.target.value) })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FieldLabel label="Support Files">
+                <input
+                  value={(draft.supportFiles || []).join(", ")}
+                  onChange={(event) => onDraftChange({ ...draft, supportFiles: splitList(event.target.value) })}
+                  disabled={!editable}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+                />
+              </FieldLabel>
+              <FieldLabel label="Tags">
                 <input
                   value={(draft.tags || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, tags: splitList(event.target.value) })}
@@ -1011,7 +1144,7 @@ function SkillsWorkspace({
                 />
               </FieldLabel>
             </div>
-            <FieldLabel label="指令">
+            <FieldLabel label="Instructions">
               <textarea
                 value={draft.instructions || ""}
                 onChange={(event) => onDraftChange({ ...draft, instructions: event.target.value })}
@@ -1019,19 +1152,28 @@ function SkillsWorkspace({
                 className="min-h-40 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
               />
             </FieldLabel>
+            {selectedCheck?.reasons?.length ? (
+              <div className="grid gap-1 rounded-md border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
+                {selectedCheck.reasons.map((reason) => (
+                  <div key={reason} className="break-words">
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
           <div className="mt-5 flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={onNew} disabled={saving}>
-              新建
+              New
             </Button>
             {userSkillSelected ? (
               <Button type="button" variant="danger" onClick={onDelete} disabled={saving}>
-                删除
+                Delete
               </Button>
             ) : null}
             <Button type="submit" disabled={!editable || saving || !draft.name}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              保存
+              Save
             </Button>
           </div>
         </form>
@@ -1039,7 +1181,6 @@ function SkillsWorkspace({
     </div>
   );
 }
-
 function FieldLabel({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="grid min-w-0 gap-2 text-sm">
@@ -1325,6 +1466,7 @@ function emptySkillDraft(): Partial<AgentSkill> {
     description: "",
     category: "user",
     source: "user",
+    skillType: "package",
     enabled: true,
     available: true,
     permissionMode: "instruction_only",
@@ -1336,6 +1478,15 @@ function emptySkillDraft(): Partial<AgentSkill> {
     backupRestore: "not required",
     tools: [],
     allowedTools: [],
+    disallowedTools: [],
+    entrypointTool: "",
+    userInvocable: true,
+    disableModelInvocation: false,
+    argumentHint: "",
+    requiresEnv: [],
+    requiresBinaries: [],
+    supportedOs: ["windows"],
+    supportFiles: [],
     testCommand: "",
     instructions: "",
     tags: ["user"],

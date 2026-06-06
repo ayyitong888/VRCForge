@@ -9,6 +9,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -83,12 +84,19 @@ RUNTIME_BLOCKED_SKILLS = {
 
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
+SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(.*))?\s*$")
 
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
         "title": "Skill Registry",
         "inputs": [],
         "outputs": ["Registered skill metadata and availability."],
+        "sideEffects": "none",
+    },
+    "vrcforge_skill_check": {
+        "title": "Skill Registry Check",
+        "inputs": [],
+        "outputs": ["Per-skill validation status and dependency reasons."],
         "sideEffects": "none",
     },
     "vrcforge_unity_status": {
@@ -138,6 +146,224 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "tags": ["roslyn", "critical", "advanced"],
     },
 }
+
+BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
+    {
+        "name": "runtime-diagnostics",
+        "title": "Runtime Diagnostics",
+        "description": "Inspect backend, agent runtime, logs, and gateway skill state.",
+        "category": "diagnostics",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "health status, logs, runtime diagnosis, backend diagnosis, agent status",
+        "inputs": ["Optional session or log limit."],
+        "outputs": ["Health, logs, tool, and skill registry snapshots."],
+        "sideEffects": "none",
+        "backupRestore": "not required",
+        "allowedTools": [
+            "vrcforge_health",
+            "vrcforge_skill_manifest",
+            "vrcforge_skill_check",
+            "vrcforge_agent_observe",
+            "vrcforge_read_recent_logs",
+        ],
+        "entrypointTool": "vrcforge_health",
+        "tags": ["builtin", "group", "diagnostics"],
+    },
+    {
+        "name": "unity-bridge-diagnostics",
+        "title": "Unity Bridge Diagnostics",
+        "description": "Inspect Unity MCP reachability, active instances, and registered Unity tools.",
+        "category": "unity-bridge",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "Unity MCP status, active Unity instance, missing VRCForge tools",
+        "inputs": ["Optional MCP host, port, or session id."],
+        "outputs": ["Unity bridge state, active project, registered tools, and missing tools."],
+        "sideEffects": "none",
+        "backupRestore": "not required",
+        "allowedTools": ["vrcforge_unity_status", "vrcforge_unity_tools"],
+        "entrypointTool": "vrcforge_unity_status",
+        "tags": ["builtin", "group", "unity", "mcp"],
+    },
+    {
+        "name": "avatar-inventory-scan",
+        "title": "Avatar Inventory Scan",
+        "description": "Scan avatars, blendshapes, materials, animator state, and animation bindings.",
+        "category": "avatar-scan",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "avatar list, avatar scan, blendshape scan, material scan, animator scan",
+        "inputs": ["Unity project context and optional avatar path."],
+        "outputs": ["Avatar, blendshape, material, animator, and binding inventory."],
+        "sideEffects": "none",
+        "backupRestore": "not required",
+        "allowedTools": [
+            "vrcforge_list_avatars",
+            "vrcforge_scan_blendshapes",
+            "vrcforge_scan_materials",
+        ],
+        "entrypointTool": "vrcforge_list_avatars",
+        "tags": ["builtin", "group", "avatar", "scan"],
+    },
+    {
+        "name": "gesture-vision-review",
+        "title": "Gesture Vision Review",
+        "description": "Capture Play Mode or Game View screenshots and run advisory vision checks.",
+        "category": "vision",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "Gesture Manager screenshot, Game View capture, visual review, screenshot audit",
+        "inputs": ["Capture angle, dimensions, target image, and optional prompt."],
+        "outputs": ["Capture status, image artifact path, and advisory review result."],
+        "sideEffects": "writes artifact image only",
+        "backupRestore": "not required",
+        "allowedTools": [
+            "vrcforge_capture_status",
+            "vrcforge_capture_screenshot",
+            "vrcforge_vision_audit",
+        ],
+        "entrypointTool": "vrcforge_capture_status",
+        "tags": ["builtin", "group", "vision", "capture"],
+    },
+    {
+        "name": "face-tuning-workflow",
+        "title": "Face Tuning Workflow",
+        "description": "Plan, preview, approve, apply, and restore face Blendshape tuning.",
+        "category": "face",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "face tuning, expression tuning, blendshape edit, face restore",
+        "inputs": ["Avatar path, tuning request, blendshape targets, and approval id."],
+        "outputs": ["Plan, dry-run preview, approval request, apply result, and restore result."],
+        "sideEffects": "can write Unity avatar Blendshape values after approval",
+        "backupRestore": "requires preview, backup, apply, validate, restore path",
+        "allowedTools": [
+            "vrcforge_scan_blendshapes",
+            "vrcforge_plan_face_tuning",
+            "vrcforge_preview_blendshape_apply",
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_apply_blendshapes",
+            "vrcforge_run_face_tuning",
+            "vrcforge_undo_blendshapes",
+            "vrcforge_restore_last_backup",
+        ],
+        "entrypointTool": "vrcforge_plan_face_tuning",
+        "tags": ["builtin", "group", "face", "blendshape", "write"],
+    },
+    {
+        "name": "shader-material-workflow",
+        "title": "Shader Material Workflow",
+        "description": "Plan, preview, approve, apply, and restore shader/material tuning.",
+        "category": "shader",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "shader tuning, material tuning, lilToon, Poiyomi, material restore",
+        "inputs": ["Avatar path, material targets, tuning request, and approval id."],
+        "outputs": ["Material inventory, tuning plan, dry-run preview, apply result, and restore result."],
+        "sideEffects": "can write Unity material settings after approval",
+        "backupRestore": "requires preview, backup, apply, validate, restore path",
+        "allowedTools": [
+            "vrcforge_scan_materials",
+            "vrcforge_plan_shader_tuning",
+            "vrcforge_preview_shader_apply",
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_apply_shader_tuning",
+            "vrcforge_restore_shader_tuning",
+            "vrcforge_restore_last_backup",
+        ],
+        "entrypointTool": "vrcforge_plan_shader_tuning",
+        "tags": ["builtin", "group", "shader", "material", "write"],
+    },
+    {
+        "name": "approval-restore-control",
+        "title": "Approval Restore Control",
+        "description": "Manage supervised write requests, approved apply calls, and restore paths.",
+        "category": "approval",
+        "permissionMode": "approval_required",
+        "riskLevel": "medium",
+        "whenToUse": "approval queue, apply approved, restore last backup, rollback",
+        "inputs": ["Approval id, target tool, payload summary, and restore request."],
+        "outputs": ["Approval record, apply result, restore result, and audit trail."],
+        "sideEffects": "can apply or restore Unity project changes after approval",
+        "backupRestore": "uses stored approval and restore metadata",
+        "allowedTools": [
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_restore_last_backup",
+            "vrcforge_restore_shader_tuning",
+            "vrcforge_undo_blendshapes",
+            "vrcforge_rollback_parameters",
+        ],
+        "entrypointTool": "vrcforge_request_apply",
+        "tags": ["builtin", "group", "approval", "restore"],
+    },
+    {
+        "name": "parameter-fx-workflow",
+        "title": "Parameter FX Workflow",
+        "description": "Apply clothing FX assets and avatar parameter optimization through approval.",
+        "category": "avatar-write",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "clothing FX, parameter optimization, menu parameter rollback",
+        "inputs": ["Avatar path, generated FX payload, parameter plan, and approval id."],
+        "outputs": ["FX apply result, parameter apply result, and rollback result."],
+        "sideEffects": "can write animator, expression, and generated asset files after approval",
+        "backupRestore": "requires backup and rollback metadata",
+        "allowedTools": [
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_apply_clothing_fx",
+            "vrcforge_apply_parameter_optimization",
+            "vrcforge_rollback_parameters",
+        ],
+        "entrypointTool": "vrcforge_request_apply",
+        "tags": ["builtin", "group", "fx", "parameters", "write"],
+    },
+    {
+        "name": "shell-debug-loop",
+        "title": "Shell Debug Loop",
+        "description": "Classify shell commands, run low-risk commands, and queue high-risk commands for approval.",
+        "category": "debug",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "shell command, terminal debug, file inspection, approved command execution",
+        "inputs": ["Command, workspace root, cwd, and approval id."],
+        "outputs": ["Risk classification, shell output, or pending approval."],
+        "sideEffects": "low-risk reads may run directly; high-risk commands require approval",
+        "backupRestore": "caller must back up before write commands",
+        "allowedTools": [
+            "vrcforge_classify_shell",
+            "vrcforge_execute_shell",
+            "vrcforge_execute_approved_shell",
+            "vrcforge_shell_execute",
+        ],
+        "entrypointTool": "vrcforge_classify_shell",
+        "tags": ["builtin", "group", "shell", "debug"],
+    },
+    {
+        "name": "roslyn-advanced-power",
+        "title": "Roslyn Advanced Power",
+        "description": "Inspect, request, and execute explicitly approved Roslyn Advanced Power Mode flows.",
+        "category": "advanced",
+        "permissionMode": "advanced_power_mode",
+        "riskLevel": "critical",
+        "whenToUse": "Roslyn status, dynamic C# repair, advanced Unity execution",
+        "inputs": ["C# code, timeout, approval id, and confirmAdvancedPowerMode=true."],
+        "outputs": ["Roslyn status, approval record, and execution result."],
+        "sideEffects": "can execute approved C# inside Unity",
+        "backupRestore": "requires risk acknowledgement, audit log, and backup before asset writes",
+        "allowedTools": [
+            "vrcforge_roslyn_status",
+            "vrcforge_request_roslyn_advanced",
+            "vrcforge_roslyn_advanced",
+        ],
+        "entrypointTool": "vrcforge_roslyn_status",
+        "tags": ["builtin", "group", "roslyn", "advanced", "critical"],
+    },
+]
 
 
 class AgentGateway:
@@ -325,7 +551,10 @@ class AgentGateway:
         builtin_skills = self._builtin_skill_definitions(config)
         user_skills = self._load_user_skills()
         skills = [*builtin_skills, *user_skills]
+        skills = [self._decorate_skill_validation(skill, config) for skill in skills]
         available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
+        warning_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "warning")
+        error_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "error")
         return {
             "ok": True,
             "schema": "vrcforge.skills.v1",
@@ -334,10 +563,41 @@ class AgentGateway:
             "availableCount": available_count,
             "builtinCount": len(builtin_skills),
             "userCount": len(user_skills),
+            "warningCount": warning_count,
+            "errorCount": error_count,
             "storage": {
                 "scope": "user-data",
                 "writable": True,
+                "path": str(self.user_skills_dir),
             },
+        }
+
+    def check_skill_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        registry = self.build_skill_registry(config)
+        checks = []
+        for skill in registry["skills"]:
+            validation = ensure_dict(skill.get("validation"))
+            checks.append(
+                {
+                    "name": skill.get("name"),
+                    "title": skill.get("title"),
+                    "source": skill.get("source"),
+                    "skillType": skill.get("skillType"),
+                    "status": validation.get("status") or ("ok" if skill.get("available") else "warning"),
+                    "reasons": ensure_string_list(validation.get("reasons")),
+                    "available": bool(skill.get("available")),
+                }
+            )
+        errors = [item for item in checks if item["status"] == "error"]
+        warnings = [item for item in checks if item["status"] == "warning"]
+        return {
+            "ok": not errors,
+            "schema": "vrcforge.skills.check.v1",
+            "count": len(checks),
+            "errorCount": len(errors),
+            "warningCount": len(warnings),
+            "checks": checks,
         }
 
     def create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -919,11 +1179,54 @@ class AgentGateway:
 
     def _builtin_skill_definitions(self, config: AgentGatewayConfig) -> list[dict[str, Any]]:
         skills: list[dict[str, Any]] = []
+        for group in BUILTIN_SKILL_GROUPS:
+            skills.append(self._skill_from_builtin_group(group, config))
         for tool in self._tools.values():
             skills.append(self._skill_from_tool(tool, config))
         for handler in self._write_handlers.values():
             skills.append(self._skill_from_write_handler(handler, config))
         return sorted(skills, key=lambda item: (str(item.get("category") or ""), str(item.get("name") or "")))
+
+    def _skill_from_builtin_group(self, group: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+        allowed_tools = ensure_string_list(group.get("allowedTools") or group.get("tools"))
+        permission_mode = normalize_skill_permission(group.get("permissionMode"))
+        available = bool(group.get("enabled", True)) and all(
+            self._skill_dependency_visible(tool_name, config) for tool_name in allowed_tools
+        )
+        return {
+            "schema": "vrcforge.skill.v1",
+            "name": str(group.get("name") or ""),
+            "title": str(group.get("title") or title_from_name(str(group.get("name") or ""))),
+            "description": str(group.get("description") or ""),
+            "category": str(group.get("category") or "builtin"),
+            "source": "builtin",
+            "skillType": "group",
+            "enabled": bool(group.get("enabled", True)),
+            "available": available,
+            "permissionMode": permission_mode,
+            "riskLevel": normalize_risk_level(group.get("riskLevel")),
+            "whenToUse": str(group.get("whenToUse") or ""),
+            "inputs": ensure_string_list(group.get("inputs")),
+            "outputs": ensure_string_list(group.get("outputs")),
+            "sideEffects": str(group.get("sideEffects") or "none"),
+            "backupRestore": str(group.get("backupRestore") or "not required"),
+            "tools": allowed_tools,
+            "allowedTools": allowed_tools,
+            "disallowedTools": ensure_string_list(group.get("disallowedTools")),
+            "entrypointTool": str(group.get("entrypointTool") or ""),
+            "userInvocable": normalize_bool(group.get("userInvocable"), True),
+            "disableModelInvocation": normalize_bool(group.get("disableModelInvocation"), False),
+            "argumentHint": str(group.get("argumentHint") or ""),
+            "requiresEnv": ensure_string_list(group.get("requiresEnv")),
+            "requiresBinaries": ensure_string_list(group.get("requiresBinaries")),
+            "supportedOs": ensure_string_list(group.get("supportedOs")),
+            "supportFiles": ensure_string_list(group.get("supportFiles")),
+            "testCommand": str(group.get("testCommand") or ""),
+            "instructions": str(group.get("instructions") or ""),
+            "advanced": permission_mode == "advanced_power_mode",
+            "write": permission_mode in {"approval_required", "advanced_power_mode"},
+            "tags": sorted({"builtin", "group", *ensure_string_list(group.get("tags"))}),
+        }
 
     def _skill_from_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
         override = BUILTIN_SKILL_OVERRIDES.get(tool.name, {})
@@ -937,6 +1240,7 @@ class AgentGateway:
             "description": tool.description,
             "category": tool.category,
             "source": "builtin",
+            "skillType": "tool",
             "enabled": True,
             "available": self._tool_visible(tool, config),
             "permissionMode": permission_mode,
@@ -948,6 +1252,15 @@ class AgentGateway:
             "backupRestore": override.get("backupRestore") or ("required before writes" if tool.write else "not required"),
             "tools": [tool.name],
             "allowedTools": [tool.name],
+            "disallowedTools": [],
+            "entrypointTool": tool.name,
+            "userInvocable": True,
+            "disableModelInvocation": False,
+            "argumentHint": "",
+            "requiresEnv": [],
+            "requiresBinaries": [],
+            "supportedOs": [],
+            "supportFiles": [],
             "testCommand": override.get("testCommand") or "",
             "instructions": "",
             "advanced": advanced,
@@ -966,6 +1279,7 @@ class AgentGateway:
             "description": handler.description,
             "category": "supervised-write",
             "source": "builtin",
+            "skillType": "tool",
             "enabled": True,
             "available": self._write_handler_visible(handler, config),
             "permissionMode": str(override.get("permissionMode") or ("advanced_power_mode" if advanced else "approval_required")),
@@ -977,6 +1291,15 @@ class AgentGateway:
             "backupRestore": override.get("backupRestore") or "requires preview, backup, apply, validate, restore path",
             "tools": ["vrcforge_request_apply", "vrcforge_apply_approved", handler.name],
             "allowedTools": ["vrcforge_request_apply", "vrcforge_apply_approved"],
+            "disallowedTools": [],
+            "entrypointTool": handler.name,
+            "userInvocable": True,
+            "disableModelInvocation": False,
+            "argumentHint": "",
+            "requiresEnv": [],
+            "requiresBinaries": [],
+            "supportedOs": [],
+            "supportFiles": [],
             "testCommand": override.get("testCommand") or "",
             "instructions": "",
             "advanced": advanced,
@@ -992,6 +1315,16 @@ class AgentGateway:
         if tool.category == "plan/preview":
             return "preview"
         return "read_only"
+
+    def _skill_dependency_visible(self, tool_name: str, config: AgentGatewayConfig) -> bool:
+        tool_name = str(tool_name or "").strip()
+        tool = self._tools.get(tool_name)
+        if tool:
+            return self._tool_visible(tool, config)
+        handler = self._write_handlers.get(tool_name)
+        if handler:
+            return self._write_handler_visible(handler, config)
+        return False
 
     @property
     def audit_log_path(self) -> Path:
@@ -1036,6 +1369,7 @@ class AgentGateway:
                         "description": "User skill could not be loaded.",
                         "category": "user",
                         "source": "user",
+                        "skillType": "package",
                         "enabled": False,
                         "available": False,
                         "permissionMode": "instruction_only",
@@ -1047,6 +1381,15 @@ class AgentGateway:
                         "backupRestore": "not required",
                         "tools": [],
                         "allowedTools": [],
+                        "disallowedTools": [],
+                        "entrypointTool": "",
+                        "userInvocable": False,
+                        "disableModelInvocation": True,
+                        "argumentHint": "",
+                        "requiresEnv": [],
+                        "requiresBinaries": [],
+                        "supportedOs": [],
+                        "supportFiles": [],
                         "testCommand": "",
                         "instructions": "",
                         "advanced": False,
@@ -1080,37 +1423,74 @@ class AgentGateway:
             (skill_dir / "SKILL.md").write_text(render_skill_markdown(skill), encoding="utf-8")
 
     def _normalize_user_skill(self, payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
-        skill_id = normalize_skill_id(str(payload.get("name") or existing_id or ""))
+        skill_id = normalize_skill_id(str(first_payload_value(payload, "name") or existing_id or ""))
         if not SKILL_ID_RE.fullmatch(skill_id):
             raise AgentGatewayError("Skill name must match [a-z][a-z0-9_.-]{1,80}.", status_code=400)
-        permission_mode = normalize_skill_permission(payload.get("permissionMode") or payload.get("permission_mode"))
-        tools = ensure_string_list(payload.get("tools") or payload.get("allowedTools") or payload.get("allowed_tools"))
-        allowed_tools = ensure_string_list(payload.get("allowedTools") or payload.get("allowed_tools") or tools)
-        title = str(payload.get("title") or title_from_name(skill_id)).strip()
-        instructions = str(payload.get("instructions") or payload.get("body") or "").strip()
+        permission_mode = normalize_skill_permission(
+            first_payload_value(payload, "permissionMode", "permission_mode", "permission-mode")
+        )
+        tools = ensure_string_list(first_payload_value(payload, "tools", "allowedTools", "allowed_tools", "allowed-tools"))
+        allowed_tools = ensure_string_list(
+            first_payload_value(payload, "allowedTools", "allowed_tools", "allowed-tools", default=tools)
+        )
+        disallowed_tools = ensure_string_list(first_payload_value(payload, "disallowedTools", "disallowed_tools", "disallowed-tools"))
+        title = str(first_payload_value(payload, "title", default=title_from_name(skill_id))).strip()
+        instructions = str(first_payload_value(payload, "instructions", "body", default="")).strip()
         return {
             "schema": "vrcforge.skill.v1",
             "name": skill_id,
             "title": title[:120],
-            "description": str(payload.get("description") or "").strip()[:500],
-            "category": str(payload.get("category") or "user").strip()[:80],
+            "description": str(first_payload_value(payload, "description", default="")).strip()[:500],
+            "category": str(first_payload_value(payload, "category", default="user")).strip()[:80],
             "source": "user",
-            "enabled": bool(payload.get("enabled", True)),
-            "available": bool(payload.get("enabled", True)),
+            "skillType": "package",
+            "enabled": normalize_bool(first_payload_value(payload, "enabled", default=True), True),
+            "available": normalize_bool(first_payload_value(payload, "enabled", default=True), True),
             "permissionMode": permission_mode,
-            "riskLevel": normalize_risk_level(payload.get("riskLevel") or payload.get("risk_level")),
-            "whenToUse": str(payload.get("whenToUse") or payload.get("when_to_use") or "").strip()[:1000],
-            "inputs": ensure_string_list(payload.get("inputs")),
-            "outputs": ensure_string_list(payload.get("outputs")),
-            "sideEffects": str(payload.get("sideEffects") or payload.get("side_effects") or "none").strip()[:500],
-            "backupRestore": str(payload.get("backupRestore") or payload.get("backup_restore") or "not required").strip()[:500],
+            "riskLevel": normalize_risk_level(first_payload_value(payload, "riskLevel", "risk_level", "risk-level")),
+            "whenToUse": str(first_payload_value(payload, "whenToUse", "when_to_use", "when-to-use", default="")).strip()[:1000],
+            "inputs": ensure_string_list(first_payload_value(payload, "inputs")),
+            "outputs": ensure_string_list(first_payload_value(payload, "outputs")),
+            "sideEffects": str(
+                first_payload_value(payload, "sideEffects", "side_effects", "side-effects", default="none")
+            ).strip()[:500],
+            "backupRestore": str(
+                first_payload_value(payload, "backupRestore", "backup_restore", "backup-restore", default="not required")
+            ).strip()[:500],
             "tools": tools,
             "allowedTools": allowed_tools,
-            "testCommand": str(payload.get("testCommand") or payload.get("test_command") or "").strip()[:500],
+            "disallowedTools": disallowed_tools,
+            "entrypointTool": str(
+                first_payload_value(payload, "entrypointTool", "entrypoint_tool", "entrypoint-tool", default="")
+            ).strip(),
+            "userInvocable": normalize_bool(
+                first_payload_value(payload, "userInvocable", "user_invocable", "user-invocable", default=True),
+                True,
+            ),
+            "disableModelInvocation": normalize_bool(
+                first_payload_value(
+                    payload,
+                    "disableModelInvocation",
+                    "disable_model_invocation",
+                    "disable-model-invocation",
+                    default=False,
+                ),
+                False,
+            ),
+            "argumentHint": str(
+                first_payload_value(payload, "argumentHint", "argument_hint", "argument-hint", default="")
+            ).strip()[:240],
+            "requiresEnv": ensure_string_list(first_payload_value(payload, "requiresEnv", "requires_env", "requires-env")),
+            "requiresBinaries": ensure_string_list(
+                first_payload_value(payload, "requiresBinaries", "requires_binaries", "requires-binaries")
+            ),
+            "supportedOs": ensure_string_list(first_payload_value(payload, "supportedOs", "supported_os", "supported-os")),
+            "supportFiles": ensure_string_list(first_payload_value(payload, "supportFiles", "support_files", "support-files")),
+            "testCommand": str(first_payload_value(payload, "testCommand", "test_command", "test-command", default="")).strip()[:500],
             "instructions": instructions,
             "advanced": permission_mode == "advanced_power_mode",
             "write": permission_mode in {"approval_required", "advanced_power_mode"},
-            "tags": sorted({"user", *ensure_string_list(payload.get("tags"))}),
+            "tags": sorted({"user", *ensure_string_list(first_payload_value(payload, "tags"))}),
         }
 
     def _ensure_user_skill_can_use_id(self, skill_id: str, skills: list[dict[str, Any]]) -> None:
@@ -1118,6 +1498,70 @@ class AgentGateway:
             raise AgentGatewayError(f"Skill name conflicts with a builtin tool: {skill_id}", status_code=409)
         if any(skill.get("name") == skill_id for skill in skills):
             raise AgentGatewayError(f"User skill already exists: {skill_id}", status_code=409)
+
+    def _decorate_skill_validation(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+        next_skill = dict(skill)
+        validation = self._validate_skill(next_skill, config)
+        next_skill["validation"] = validation
+        next_skill["availabilityReasons"] = ensure_string_list(validation.get("reasons"))
+        if validation.get("status") == "error":
+            next_skill["available"] = False
+        return next_skill
+
+    def _validate_skill(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+        status = "ok"
+        reasons: list[str] = []
+        if skill.get("loadError"):
+            return {"status": "error", "reasons": [str(skill.get("loadError"))]}
+        if not skill.get("enabled", True):
+            status = "warning"
+            reasons.append("skill disabled")
+
+        known_tools = set(self._tools) | set(self._write_handlers)
+        allowed_tools = ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
+        disallowed_tools = ensure_string_list(skill.get("disallowedTools"))
+        unknown_allowed = [item for item in allowed_tools if item and item not in known_tools]
+        unknown_disallowed = [item for item in disallowed_tools if item and item not in known_tools]
+        if unknown_allowed:
+            status = "error"
+            reasons.append("unknown allowed tools: " + ", ".join(unknown_allowed[:8]))
+        elif unknown_disallowed and status == "ok":
+            status = "warning"
+            reasons.append("unknown disallowed tools: " + ", ".join(unknown_disallowed[:8]))
+
+        entrypoint = str(skill.get("entrypointTool") or "").strip()
+        if entrypoint:
+            if entrypoint not in known_tools:
+                status = "error"
+                reasons.append(f"unknown entrypoint tool: {entrypoint}")
+            elif entrypoint in disallowed_tools:
+                status = "error"
+                reasons.append(f"entrypoint tool is disallowed: {entrypoint}")
+            elif allowed_tools and entrypoint not in allowed_tools:
+                status = "error"
+                reasons.append(f"entrypoint tool is not in allowed tools: {entrypoint}")
+            elif not self._skill_dependency_visible(entrypoint, config) and status == "ok":
+                status = "warning"
+                reasons.append(f"entrypoint tool is unavailable: {entrypoint}")
+
+        missing_env = [name for name in ensure_string_list(skill.get("requiresEnv")) if name and not os.environ.get(name)]
+        if missing_env:
+            status = "error"
+            reasons.append("missing env: " + ", ".join(missing_env[:8]))
+        missing_bins = [name for name in ensure_string_list(skill.get("requiresBinaries")) if name and not shutil.which(name)]
+        if missing_bins:
+            status = "error"
+            reasons.append("missing binaries: " + ", ".join(missing_bins[:8]))
+
+        supported_os = [item.lower() for item in ensure_string_list(skill.get("supportedOs")) if item]
+        if supported_os and current_os_key() not in supported_os and "any" not in supported_os:
+            status = "error"
+            reasons.append(f"unsupported os: {current_os_key()}")
+
+        if not skill.get("available", True) and status == "ok":
+            status = "warning"
+            reasons.append("dependencies unavailable")
+        return {"status": status, "reasons": reasons}
 
     def visible_write_targets(self, config: AgentGatewayConfig | None = None) -> list[dict[str, Any]]:
         config = config or self.ensure_config()
@@ -1486,7 +1930,13 @@ class AgentGateway:
 
         text = message.strip()
         lowered = text.lower()
-        user_route = self._match_user_skill_route(lowered, text, skill_params)
+        direct_invocation = extract_skill_invocation(text)
+        if direct_invocation:
+            invocation_name, invocation_args = direct_invocation
+            invocation_params = {**skill_params, "arguments": invocation_args, "rawArguments": invocation_args}
+            return self._runtime_skill_route(invocation_name, invocation_params, "direct skill invocation")
+
+        user_route = self._match_package_skill_route(lowered, text, skill_params)
         if user_route:
             return user_route
 
@@ -1497,6 +1947,8 @@ class AgentGateway:
         if has_any(lowered, text, ["gesture", "play mode", "game view", "捕获状态", "截图状态"]):
             return self._runtime_skill_route("vrcforge_capture_status", skill_params, "capture status")
         if has_any(lowered, text, ["skill", "skills", "能力库"]):
+            if has_any(lowered, text, ["check", "validate", "validation", "inspect"]):
+                return self._runtime_skill_route("vrcforge_skill_check", skill_params, "skill registry check")
             return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
         if has_any(lowered, text, ["tools", "skill", "skills", "工具", "能力", "列表"]) and has_any(
             lowered,
@@ -1524,16 +1976,30 @@ class AgentGateway:
             return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
         return None
 
-    def _match_user_skill_route(self, lowered: str, original: str, params: dict[str, Any]) -> dict[str, Any] | None:
-        for skill in self._load_user_skills():
+    def _match_package_skill_route(self, lowered: str, original: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        registry = self.build_skill_registry()
+        for skill in ensure_list(registry.get("skills")):
+            if not isinstance(skill, dict):
+                continue
             if not skill.get("enabled", True):
+                continue
+            if skill.get("disableModelInvocation"):
+                continue
+            source = str(skill.get("source") or "")
+            skill_type = str(skill.get("skillType") or "")
+            if source != "user" and skill_type != "group":
                 continue
             haystacks = [
                 str(skill.get("name") or "").lower(),
                 str(skill.get("title") or "").lower(),
-                str(skill.get("description") or "").lower(),
-                str(skill.get("whenToUse") or "").lower(),
             ]
+            if source == "user":
+                haystacks.extend(
+                    [
+                        str(skill.get("description") or "").lower(),
+                        str(skill.get("whenToUse") or "").lower(),
+                    ]
+                )
             if any(item and item in lowered for item in haystacks):
                 return {
                     "tool": str(skill.get("name")),
@@ -1553,12 +2019,27 @@ class AgentGateway:
 
     def _runtime_skill_route(self, tool_name: str, params: dict[str, Any], reason: str) -> dict[str, Any]:
         tool = self._tools.get(tool_name)
+        if not tool:
+            registry_skill = self._find_registry_skill(tool_name)
+            return {
+                "tool": tool_name,
+                "category": str(registry_skill.get("category") or "") if registry_skill else "",
+                "params": dict(params),
+                "reason": reason,
+            }
         return {
             "tool": tool_name,
             "category": tool.category if tool else "",
             "params": dict(params),
             "reason": reason,
         }
+
+    def _find_registry_skill(self, skill_id: str, config: AgentGatewayConfig | None = None) -> dict[str, Any] | None:
+        skill_id = normalize_skill_id(skill_id)
+        for skill in ensure_list(self.build_skill_registry(config).get("skills")):
+            if isinstance(skill, dict) and normalize_skill_id(str(skill.get("name") or "")) == skill_id:
+                return skill
+        return None
 
     def _execute_runtime_skill(
         self,
@@ -1569,28 +2050,9 @@ class AgentGateway:
         config = self.ensure_config()
         tool = self._tools.get(tool_name)
         if not tool:
-            user_skill = self._find_user_skill(tool_name)
-            if user_skill:
-                payload = {
-                    "ok": bool(user_skill.get("enabled", True)),
-                    "status": "loaded" if user_skill.get("enabled", True) else "blocked",
-                    "tool": str(user_skill.get("name") or tool_name),
-                    "category": str(user_skill.get("category") or "user"),
-                    "write": bool(user_skill.get("write")),
-                    "advanced": bool(user_skill.get("advanced")),
-                    "summary": str(user_skill.get("description") or user_skill.get("title") or ""),
-                    "paramsSummary": summarize_params(params),
-                    "result": redact_sensitive(user_skill),
-                }
-                self.append_audit(
-                    {
-                        "event": "runtime_user_skill_loaded",
-                        "skill": user_skill.get("name"),
-                        "agent": agent_name,
-                        "status": payload["status"],
-                    }
-                )
-                return payload
+            registry_skill = self._find_registry_skill(tool_name, config)
+            if registry_skill:
+                return self._execute_skill_package(registry_skill, params, agent_name, config)
             return {
                 "ok": False,
                 "status": "blocked",
@@ -1665,6 +2127,113 @@ class AgentGateway:
                 "paramsSummary": summarize_params(params),
                 "error": str(exc),
             }
+
+    def _execute_skill_package(
+        self,
+        skill: dict[str, Any],
+        params: dict[str, Any],
+        agent_name: str,
+        config: AgentGatewayConfig,
+    ) -> dict[str, Any]:
+        validation = ensure_dict(skill.get("validation")) or self._validate_skill(skill, config)
+        status = "loaded" if skill.get("enabled", True) and validation.get("status") != "error" else "blocked"
+        result = redact_sensitive(build_runtime_skill_payload(skill, params))
+        payload = {
+            "ok": status == "loaded",
+            "status": status,
+            "tool": str(skill.get("name") or ""),
+            "category": str(skill.get("category") or ""),
+            "write": bool(skill.get("write")),
+            "advanced": bool(skill.get("advanced")),
+            "summary": str(skill.get("description") or skill.get("title") or ""),
+            "paramsSummary": summarize_params(params),
+            "result": result,
+        }
+        if status != "loaded":
+            payload["error"] = "; ".join(ensure_string_list(validation.get("reasons"))) or "Skill is unavailable."
+            self.append_audit(
+                {
+                    "event": "runtime_skill_package_loaded",
+                    "skill": skill.get("name"),
+                    "agent": agent_name,
+                    "status": payload["status"],
+                    "error": payload.get("error"),
+                }
+            )
+            return payload
+
+        entrypoint = str(skill.get("entrypointTool") or "").strip()
+        if entrypoint:
+            entrypoint_result = self._execute_skill_entrypoint(skill, entrypoint, params, agent_name, config)
+            payload["entrypointTool"] = entrypoint
+            payload["entrypoint"] = entrypoint_result
+            if entrypoint_result.get("status") == "executed":
+                payload["status"] = "executed"
+                payload["ok"] = True
+            elif entrypoint_result.get("status") in {"blocked", "failed"}:
+                payload["status"] = entrypoint_result.get("status")
+                payload["ok"] = False
+                payload["error"] = entrypoint_result.get("error")
+
+        self.append_audit(
+            {
+                "event": "runtime_skill_package_loaded",
+                "skill": skill.get("name"),
+                "agent": agent_name,
+                "status": payload["status"],
+                "entrypointTool": entrypoint,
+            }
+        )
+        return payload
+
+    def _execute_skill_entrypoint(
+        self,
+        skill: dict[str, Any],
+        entrypoint: str,
+        params: dict[str, Any],
+        agent_name: str,
+        config: AgentGatewayConfig,
+    ) -> dict[str, Any]:
+        allowed_tools = ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
+        disallowed_tools = ensure_string_list(skill.get("disallowedTools"))
+        if entrypoint in disallowed_tools:
+            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint tool is disallowed."}
+        if allowed_tools and entrypoint not in allowed_tools:
+            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint tool is not allowed."}
+        tool = self._tools.get(entrypoint)
+        if not tool:
+            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint requires approval or is not callable directly."}
+        if tool.name in RUNTIME_BLOCKED_SKILLS or tool.write or tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES:
+            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint cannot run directly from the runtime loop."}
+        if not self._tool_visible(tool, config):
+            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint is unavailable in the current permission mode."}
+        tool_params = {
+            key: value
+            for key, value in params.items()
+            if key not in {"arguments", "rawArguments", "skillArguments"}
+        }
+        user_constraints = self.read_user_constraints()
+        tool_params = self._inject_user_constraints(tool_params, tool, user_constraints)
+        try:
+            result = tool.handler(tool_params)
+            self.append_audit(
+                {
+                    "event": "runtime_skill_entrypoint_executed",
+                    "skill": skill.get("name"),
+                    "tool": entrypoint,
+                    "agent": agent_name,
+                    "status": "ok",
+                }
+            )
+            return {
+                "ok": True,
+                "status": "executed",
+                "tool": entrypoint,
+                "category": tool.category,
+                "result": redact_sensitive(result),
+            }
+        except Exception as exc:  # noqa: BLE001 - keep the agent loop alive.
+            return {"ok": False, "status": "failed", "tool": entrypoint, "category": tool.category, "error": str(exc)}
 
     def _extract_token(self, headers: dict[str, str], query_params: dict[str, str]) -> str:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
@@ -1791,6 +2360,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_execute_shell",
         "vrcforge_execute_approved_shell",
         "vrcforge_skill_manifest",
+        "vrcforge_skill_check",
         "vrcforge_health",
         "vrcforge_unity_status",
         "vrcforge_unity_tools",
@@ -1884,14 +2454,66 @@ def summarize_skill_registry(registry: dict[str, Any]) -> dict[str, Any]:
                 "name": skill.get("name"),
                 "title": skill.get("title"),
                 "source": skill.get("source"),
+                "skillType": skill.get("skillType"),
                 "category": skill.get("category"),
                 "permissionMode": skill.get("permissionMode"),
                 "available": skill.get("available"),
+                "allowedTools": skill.get("allowedTools"),
+                "entrypointTool": skill.get("entrypointTool"),
             }
             for skill in ensure_list(registry.get("skills"))[:80]
             if isinstance(skill, dict)
         ],
     }
+
+
+def extract_skill_invocation(message: str) -> tuple[str, str] | None:
+    match = SKILL_INVOCATION_RE.match(str(message or ""))
+    if not match:
+        return None
+    skill_name = normalize_skill_id(match.group(1) or "")
+    if not skill_name:
+        return None
+    return skill_name, (match.group(2) or "").strip()
+
+
+def build_runtime_skill_payload(skill: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    arguments = str(params.get("arguments") or params.get("rawArguments") or params.get("skillArguments") or "").strip()
+    resolved_instructions = resolve_skill_arguments(str(skill.get("instructions") or ""), arguments)
+    return {
+        "name": skill.get("name"),
+        "title": skill.get("title"),
+        "source": skill.get("source"),
+        "skillType": skill.get("skillType"),
+        "category": skill.get("category"),
+        "permissionMode": skill.get("permissionMode"),
+        "riskLevel": skill.get("riskLevel"),
+        "whenToUse": skill.get("whenToUse"),
+        "inputs": skill.get("inputs"),
+        "outputs": skill.get("outputs"),
+        "sideEffects": skill.get("sideEffects"),
+        "backupRestore": skill.get("backupRestore"),
+        "allowedTools": skill.get("allowedTools"),
+        "disallowedTools": skill.get("disallowedTools"),
+        "entrypointTool": skill.get("entrypointTool"),
+        "argumentHint": skill.get("argumentHint"),
+        "arguments": arguments,
+        "instructions": resolved_instructions,
+        "validation": skill.get("validation"),
+        "availabilityReasons": skill.get("availabilityReasons"),
+        "tags": skill.get("tags"),
+    }
+
+
+def resolve_skill_arguments(instructions: str, arguments: str) -> str:
+    text = str(instructions or "")
+    if not arguments:
+        return text
+    text = text.replace("$ARGUMENTS", arguments).replace("{arguments}", arguments)
+    parts = tokenize_command(arguments)
+    for index, value in enumerate(parts, start=1):
+        text = text.replace(f"${index}", strip_quotes(value))
+    return text
 
 
 def kill_process_tree(process: subprocess.Popen) -> None:
@@ -1989,6 +2611,36 @@ def normalize_risk_level(value: Any) -> str:
     return text if text in {"low", "medium", "high", "critical"} else "low"
 
 
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def first_payload_value(payload: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return default
+
+
+def current_os_key() -> str:
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform.lower()
+
+
 def title_from_name(name: str) -> str:
     text = re.sub(r"^vrcforge_", "", name or "")
     return " ".join(part.capitalize() for part in re.split(r"[_\-.]+", text) if part) or name
@@ -2052,6 +2704,7 @@ def strip_simple_yaml_scalar(value: str) -> Any:
 
 
 def camelize_key(key: str) -> str:
+    normalized = key.strip().replace("-", "_")
     aliases = {
         "permission_mode": "permissionMode",
         "risk_level": "riskLevel",
@@ -2059,46 +2712,64 @@ def camelize_key(key: str) -> str:
         "side_effects": "sideEffects",
         "backup_restore": "backupRestore",
         "allowed_tools": "allowedTools",
+        "disallowed_tools": "disallowedTools",
+        "entrypoint_tool": "entrypointTool",
+        "user_invocable": "userInvocable",
+        "disable_model_invocation": "disableModelInvocation",
+        "argument_hint": "argumentHint",
+        "requires_env": "requiresEnv",
+        "requires_binaries": "requiresBinaries",
+        "supported_os": "supportedOs",
+        "support_files": "supportFiles",
         "test_command": "testCommand",
     }
-    if key in aliases:
-        return aliases[key]
-    if "_" not in key:
+    if normalized in aliases:
+        return aliases[normalized]
+    if "_" not in normalized:
         return key
-    head, *tail = key.split("_")
+    head, *tail = normalized.split("_")
     return head + "".join(part.capitalize() for part in tail)
 
 
 def render_skill_markdown(skill: dict[str, Any]) -> str:
     metadata_keys = [
-        "name",
-        "title",
-        "description",
-        "category",
-        "permissionMode",
-        "riskLevel",
-        "whenToUse",
-        "inputs",
-        "outputs",
-        "sideEffects",
-        "backupRestore",
-        "tools",
-        "allowedTools",
-        "testCommand",
-        "enabled",
-        "tags",
+        ("name", "name"),
+        ("title", "title"),
+        ("description", "description"),
+        ("category", "category"),
+        ("permission-mode", "permissionMode"),
+        ("risk-level", "riskLevel"),
+        ("when-to-use", "whenToUse"),
+        ("inputs", "inputs"),
+        ("outputs", "outputs"),
+        ("side-effects", "sideEffects"),
+        ("backup-restore", "backupRestore"),
+        ("tools", "tools"),
+        ("allowed-tools", "allowedTools"),
+        ("disallowed-tools", "disallowedTools"),
+        ("entrypoint-tool", "entrypointTool"),
+        ("user-invocable", "userInvocable"),
+        ("disable-model-invocation", "disableModelInvocation"),
+        ("argument-hint", "argumentHint"),
+        ("requires-env", "requiresEnv"),
+        ("requires-binaries", "requiresBinaries"),
+        ("supported-os", "supportedOs"),
+        ("support-files", "supportFiles"),
+        ("test-command", "testCommand"),
+        ("enabled", "enabled"),
+        ("tags", "tags"),
     ]
     lines = ["---"]
-    for key in metadata_keys:
+    for yaml_key, key in metadata_keys:
         value = skill.get(key)
         if isinstance(value, list):
-            lines.append(f"{key}:")
+            lines.append(f"{yaml_key}:")
             for item in value:
                 lines.append(f"  - {yaml_scalar(str(item))}")
         elif isinstance(value, bool):
-            lines.append(f"{key}: {'true' if value else 'false'}")
+            lines.append(f"{yaml_key}: {'true' if value else 'false'}")
         else:
-            lines.append(f"{key}: {yaml_scalar(str(value or ''))}")
+            lines.append(f"{yaml_key}: {yaml_scalar(str(value or ''))}")
     lines.append("---")
     lines.append("")
     lines.append(str(skill.get("instructions") or "").strip())
@@ -2180,7 +2851,7 @@ def redact_sensitive(value: Any) -> Any:
                 "_vrcforge_user_constraints",
             }:
                 result[str(key)] = "<redacted>"
-            elif lowered in {"arguments"}:
+            elif lowered in {"arguments"} and isinstance(item, dict):
                 result[str(key)] = summarize_params(item)
             else:
                 result[str(key)] = redact_sensitive(item)

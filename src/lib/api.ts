@@ -35,12 +35,24 @@ export type AgentSkill = {
   backupRestore?: string;
   tools?: string[];
   allowedTools?: string[];
+  disallowedTools?: string[];
+  entrypointTool?: string;
+  userInvocable?: boolean;
+  disableModelInvocation?: boolean;
+  argumentHint?: string;
+  requiresEnv?: string[];
+  requiresBinaries?: string[];
+  supportedOs?: string[];
+  supportFiles?: string[];
   testCommand?: string;
   instructions?: string;
   advanced?: boolean;
   write?: boolean;
   tags?: string[];
   storagePath?: string;
+  skillType?: string;
+  validation?: { status?: "ok" | "warning" | "error" | string; reasons?: string[] };
+  availabilityReasons?: string[];
 };
 
 export type AgentSkillRegistry = {
@@ -51,6 +63,25 @@ export type AgentSkillRegistry = {
   availableCount: number;
   builtinCount: number;
   userCount: number;
+  warningCount?: number;
+  errorCount?: number;
+};
+
+export type AgentSkillCheck = {
+  ok: boolean;
+  schema: string;
+  count: number;
+  errorCount: number;
+  warningCount: number;
+  checks: Array<{
+    name: string;
+    title?: string;
+    source?: string;
+    skillType?: string;
+    status: "ok" | "warning" | "error" | string;
+    reasons?: string[];
+    available?: boolean;
+  }>;
 };
 
 export type AgentManifest = {
@@ -236,6 +267,10 @@ export async function updateApiConfig(endpoint: string, config: { provider: stri
 
 export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
   return requestJson<AgentSkillRegistry>(`${endpoint}/api/app/skills`);
+}
+
+export async function checkSkills(endpoint: string): Promise<AgentSkillCheck> {
+  return requestJson<AgentSkillCheck>(`${endpoint}/api/app/skills/check`);
 }
 
 export async function createSkill(endpoint: string, skill: Partial<AgentSkill>): Promise<AgentSkillRegistry & { skill: AgentSkill }> {
