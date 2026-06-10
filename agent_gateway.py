@@ -906,12 +906,17 @@ class AgentGateway:
             "runtimeSessions": len(self._runtime_sessions),
         }
 
+    def auto_approval_enabled(self, config: AgentGatewayConfig | None = None) -> bool:
+        config = config or self.ensure_config()
+        return normalize_execution_mode(config.execution_mode) in {"auto", "roslyn_full_auto"}
+
     def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         return {
             "executionMode": mode,
             "perActionApproval": mode == "approval",
+            "autoApprove": mode in {"auto", "roslyn_full_auto"},
             "roslynFullAuto": mode == "roslyn_full_auto",
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
@@ -1207,6 +1212,11 @@ class AgentGateway:
 
         if classification["risk"] == "high":
             approval = self._create_shell_approval(params, classification, agent_name)
+            if self.auto_approval_enabled():
+                auto_payload = self._auto_execute_approval(approval)
+                if auto_payload is not None:
+                    auto_payload["classification"] = classification
+                    return auto_payload
             return {
                 "ok": True,
                 "status": "pending_approval",
@@ -1291,12 +1301,53 @@ class AgentGateway:
             risk_level=write_handler.risk_level,
             user_constraints=user_constraints,
         )
+        if self.auto_approval_enabled(config):
+            auto_payload = self._auto_execute_approval(approval)
+            if auto_payload is not None:
+                return auto_payload
         return {
             "ok": True,
             "status": "pending",
             "approval": approval,
             "message": "Apply request is waiting for user approval.",
         }
+
+    def _auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
+        """Auto-approve and apply an approval under the auto / full-permission tiers.
+
+        Returns the execution payload, or None when auto-approval could not
+        proceed (caller then falls back to the normal pending flow). The
+        approval record and audit trail are still produced, so every auto
+        decision stays reviewable.
+        """
+        approval_id = str(approval.get("id") or "").strip()
+        if not approval_id:
+            return None
+        approved = self.approve(approval_id)
+        if not approved.get("ok"):
+            return None
+        self.append_audit(
+            {
+                "event": "approval_auto_approved",
+                "approvalId": approval_id,
+                "mode": normalize_execution_mode(self.ensure_config().execution_mode),
+            }
+        )
+        applied = self.apply_approved({"approval_id": approval_id})
+        payload: dict[str, Any] = {
+            "ok": bool(applied.get("ok")),
+            "status": "executed" if applied.get("ok") else "failed",
+            "autoApproved": True,
+            "approval": applied.get("approval") or approved.get("approval") or approval,
+            "approval_id": approval_id,
+            "approvalId": approval_id,
+            "message": "Approval was auto-approved by the current permission mode.",
+        }
+        if applied.get("result") is not None:
+            payload["result"] = applied.get("result")
+        if not applied.get("ok"):
+            payload["error"] = str(applied.get("error") or "Auto-approved execution failed.")
+        return payload
 
     def apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
         approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
@@ -3036,9 +3087,17 @@ def remove_tree(path: Path) -> None:
 
 
 def normalize_execution_mode(value: Any) -> str:
+    """Three permission tiers:
+
+    - "approval"          受限模式（沙箱）：高风险 shell 与写操作逐项审批。
+    - "auto"              自动审批：审批仍然生成并留痕，但立即自动批准执行；Roslyn 高级工具保持关闭。
+    - "roslyn_full_auto"  完全权限：自动审批 + Roslyn 高级工具，首次开启需要一次性风险确认。
+    """
     mode = str(value or "approval").strip().lower().replace("-", "_")
-    if mode in {"roslyn_full_auto", "full_auto", "roslyn_auto", "advanced"}:
+    if mode in {"roslyn_full_auto", "full_auto", "roslyn_auto", "advanced", "full", "full_permission"}:
         return "roslyn_full_auto"
+    if mode in {"auto", "auto_approve", "auto_approval", "autoapprove"}:
+        return "auto"
     return "approval"
 
 

@@ -1,11 +1,21 @@
+export type ExecutionMode = "approval" | "auto" | "roslyn_full_auto";
+
 export type PermissionState = {
-  executionMode: "approval" | "roslyn_full_auto";
+  executionMode: ExecutionMode;
   perActionApproval: boolean;
+  autoApprove?: boolean;
   roslynFullAuto: boolean;
   roslynRiskAcknowledged: boolean;
   allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
   roslynEnvEnabled: boolean;
+};
+
+export type AgentNotes = {
+  ok: boolean;
+  path: string;
+  exists: boolean;
+  content: string;
 };
 
 export type AgentTool = {
@@ -262,6 +272,18 @@ export async function updateApiConfig(endpoint: string, config: { provider: stri
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
+  });
+}
+
+export async function fetchAgentNotes(endpoint: string): Promise<AgentNotes> {
+  return requestJson<AgentNotes>(`${endpoint}/api/app/agent-notes`);
+}
+
+export async function saveAgentNotes(endpoint: string, content: string): Promise<{ ok: boolean; path: string; bytes: number }> {
+  return requestJson(`${endpoint}/api/app/agent-notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
   });
 }
 

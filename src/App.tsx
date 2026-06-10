@@ -18,7 +18,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
@@ -37,8 +37,11 @@ import {
   fetchBootstrap,
   fetchSkills,
   AgentSkillCheck,
+  ExecutionMode,
   PermissionState,
+  fetchAgentNotes,
   rejectAgentApproval,
+  saveAgentNotes,
   sendAgentMessage,
   updateApiConfig,
   updatePermission,
@@ -69,6 +72,16 @@ const navItems = [
   { id: "skills", label: "能力库", icon: Wrench },
 ];
 
+const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
+  { value: "approval", label: "受限模式", description: "沙箱模式：高风险命令与写操作逐项审批，最安全。" },
+  { value: "auto", label: "自动审批", description: "审批自动通过并留痕，Roslyn 高级能力保持关闭。" },
+  { value: "roslyn_full_auto", label: "完全权限", description: "自动审批 + Roslyn 全自动，风险最高，首次开启需确认。" },
+];
+
+function executionModeLabel(mode?: string): string {
+  return EXECUTION_MODES.find((item) => item.value === mode)?.label || "受限模式";
+}
+
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -98,6 +111,12 @@ export default function App() {
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
   const [savingSkill, setSavingSkill] = useState(false);
+  const [agentNotes, setAgentNotes] = useState("");
+  const [agentNotesPath, setAgentNotesPath] = useState("");
+  const [agentNotesLoaded, setAgentNotesLoaded] = useState(false);
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [notesMessage, setNotesMessage] = useState("");
+  const conversationEndRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -105,7 +124,8 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
-  const pendingApprovals = bootstrap?.agentHealth.pendingApprovalCount ?? 0;
+  const pendingApprovalItems = (bootstrap?.approvals ?? []).filter((item) => item.status === "pending");
+  const pendingApprovals = Math.max(bootstrap?.agentHealth.pendingApprovalCount ?? 0, pendingApprovalItems.length);
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
   const skillCount = skillRegistry?.count ?? skills.length;
@@ -145,6 +165,10 @@ export default function App() {
   useEffect(() => {
     void startRuntime();
   }, []);
+
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [conversation.length]);
 
   useEffect(() => {
     if (!apiConfig) {
@@ -361,6 +385,48 @@ export default function App() {
     }
   }
 
+  async function openSettings() {
+    setActiveView("settings");
+    setError("");
+    setNotesMessage("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const notes = await fetchAgentNotes(targetEndpoint);
+      setAgentNotes(notes.content);
+      setAgentNotesPath(notes.path);
+      setAgentNotesLoaded(true);
+    } catch (cause) {
+      setAgentNotesLoaded(false);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function saveNotes(event?: FormEvent) {
+    event?.preventDefault();
+    if (savingNotes) {
+      return;
+    }
+    setSavingNotes(true);
+    setNotesMessage("");
+    setError("");
+    try {
+      const payload = await saveAgentNotes(endpoint, agentNotes);
+      setAgentNotesPath(payload.path);
+      setNotesMessage("已保存");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingNotes(false);
+    }
+  }
+
   function selectSkill(skill: AgentSkill) {
     setSelectedSkillName(skill.name);
     setSkillDraft({ ...skill });
@@ -463,9 +529,6 @@ export default function App() {
       });
       setApiKey("");
       await refresh(targetEndpoint);
-      if (activeView === "settings") {
-        setActiveView("chat");
-      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -531,7 +594,7 @@ export default function App() {
 
           <div className="mt-auto">
             <button
-              onClick={() => setActiveView("settings")}
+              onClick={() => void openSettings()}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "settings"
@@ -558,8 +621,10 @@ export default function App() {
               {permission?.roslynFullAuto ? (
                 <Badge tone="danger">
                   <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
-                  高级自动
+                  完全权限
                 </Badge>
+              ) : permission?.executionMode === "auto" ? (
+                <Badge tone="warn">自动审批</Badge>
               ) : null}
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? "核心在线" : "核心离线"} />
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} 待确认</Badge>
@@ -601,8 +666,50 @@ export default function App() {
               onDelete={removeSelectedSkill}
             />
           ) : activeView === "settings" ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-              <div className="w-full max-w-4xl">
+            <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+              <div className="mx-auto grid w-full max-w-4xl gap-6">
+                <section className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Shield className="h-4 w-4 shrink-0 text-primary" />
+                    <div className="truncate text-sm font-semibold">权限模式</div>
+                    <Badge tone={permission?.roslynFullAuto ? "danger" : permission?.autoApprove ? "warn" : "muted"} className="ml-auto shrink-0">
+                      {executionModeLabel(permission?.executionMode)}
+                    </Badge>
+                  </div>
+                  <div className="grid gap-3">
+                    {EXECUTION_MODES.map((mode) => (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        disabled={loading || !runtimeConnected}
+                        onClick={() => void switchMode(mode.value)}
+                        className={cn(
+                          "grid min-w-0 gap-1 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60",
+                          permission?.executionMode === mode.value
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-primary/40 hover:bg-muted/60",
+                        )}
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-medium">{mode.label}</span>
+                          {mode.value === "roslyn_full_auto" ? (
+                            <Badge tone="danger" className="shrink-0">
+                              高风险
+                            </Badge>
+                          ) : null}
+                          {permission?.executionMode === mode.value ? (
+                            <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />
+                          ) : null}
+                        </div>
+                        <div className="text-xs text-muted-foreground">{mode.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {permission?.roslynRiskAcknowledged ? (
+                    <div className="mt-3 text-xs text-muted-foreground">完全权限风险确认：已确认（仅首次开启时弹出）</div>
+                  ) : null}
+                </section>
+
                 <ProviderSetup
                   provider={apiProvider}
                   apiKey={apiKey}
@@ -619,6 +726,35 @@ export default function App() {
                   onModelChange={setApiModel}
                   onSubmit={saveApiProvider}
                 />
+
+                <form onSubmit={saveNotes} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+                  <div className="mb-4 flex min-w-0 items-center gap-2">
+                    <History className="h-4 w-4 shrink-0 text-primary" />
+                    <div className="truncate text-sm font-semibold">AGENTS.md（全局智能体约束）</div>
+                    {notesMessage ? (
+                      <Badge tone="ok" className="ml-auto shrink-0">
+                        {notesMessage}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  {agentNotesPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{agentNotesPath}</div> : null}
+                  <textarea
+                    value={agentNotes}
+                    onChange={(event) => {
+                      setAgentNotes(event.target.value);
+                      setNotesMessage("");
+                    }}
+                    disabled={!agentNotesLoaded}
+                    placeholder={agentNotesLoaded ? "写给智能体的全局规则与偏好，会注入每次审批与执行……" : "核心未连接，无法加载 AGENTS.md"}
+                    className="min-h-48 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:border-primary disabled:bg-muted"
+                  />
+                  <div className="mt-4 flex justify-end">
+                    <Button type="submit" disabled={savingNotes || !agentNotesLoaded}>
+                      {savingNotes ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      保存
+                    </Button>
+                  </div>
+                </form>
               </div>
             </div>
           ) : needsApiSetup ? (
@@ -663,16 +799,26 @@ export default function App() {
               <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
                 <div className="mx-auto max-w-4xl space-y-5">
                   {conversation.map((item) => (
-                    <ConversationCard
-                      key={item.id}
-                      item={item}
-                      loading={loading}
-                      onApprove={approveShell}
-                      onReject={rejectShell}
-                    />
+                    <ConversationCard key={item.id} item={item} />
                   ))}
+                  <div ref={conversationEndRef} />
                 </div>
               </div>
+              {pendingApprovalItems.length > 0 ? (
+                <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
+                  <div className="mx-auto max-w-4xl space-y-3">
+                    {pendingApprovalItems.map((approval) => (
+                      <ApprovalCard
+                        key={approval.id}
+                        approval={approval}
+                        loading={loading}
+                        onApprove={approveShell}
+                        onReject={rejectShell}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="shrink-0 border-t border-border bg-workspace/95 px-6 py-4">
                 <div className="mx-auto max-w-4xl">
                   <Composer
@@ -698,18 +844,21 @@ export default function App() {
           <section className="w-full max-w-lg rounded-lg border border-destructive/40 bg-card p-6 shadow-panel">
             <div className="flex min-w-0 items-center gap-3 text-destructive">
               <AlertTriangle className="h-5 w-5 shrink-0" />
-              <h2 className="truncate text-lg font-semibold">Roslyn 高级自动</h2>
+              <h2 className="truncate text-lg font-semibold">开启完全权限</h2>
             </div>
+            <p className="mt-4 text-sm text-muted-foreground">
+              完全权限会自动通过所有审批，并启用 Roslyn 全自动写入能力。代理可以在不经确认的情况下修改 Unity 工程文件，存在不可逆风险。此确认仅在首次开启时出现。
+            </p>
             <div className="mt-5 grid gap-3 text-sm">
               <DataLine label="风险确认" value={permission?.roslynRiskAcknowledged ? "已确认" : "未确认"} />
-              <DataLine label="模式" value="高级自动" />
+              <DataLine label="目标模式" value="完全权限（Roslyn 全自动）" />
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setShowRoslynWarning(false)}>
                 取消
               </Button>
               <Button variant="danger" onClick={confirmRoslynWarning} disabled={loading}>
-                确认
+                我已知风险，开启完全权限
               </Button>
             </div>
           </section>
@@ -740,6 +889,8 @@ function Composer({
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   compact?: boolean;
 }) {
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   return (
     <form onSubmit={onSubmit} className="overflow-hidden rounded-3xl bg-muted/70 shadow-composer">
       <div className={cn("rounded-3xl border border-border bg-card", compact ? "p-3" : "p-4")}>
@@ -756,15 +907,45 @@ function Composer({
         />
         <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm text-amber-700 transition-colors hover:bg-amber-500/10"
-              onClick={() => onSwitchMode(permission?.roslynFullAuto ? "approval" : "roslyn_full_auto")}
-            >
-              <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">{permission?.roslynFullAuto ? "高级自动" : "逐项确认"}</span>
-              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm text-amber-700 transition-colors hover:bg-amber-500/10"
+                onClick={() => setModeMenuOpen((open) => !open)}
+              >
+                <Shield className="h-4 w-4 shrink-0" />
+                <span className="truncate">{executionModeLabel(currentMode)}</span>
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              </button>
+              {modeMenuOpen ? (
+                <div className="absolute bottom-10 left-0 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
+                  {EXECUTION_MODES.map((mode) => (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      className={cn(
+                        "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted",
+                        currentMode === mode.value ? "bg-muted" : "",
+                      )}
+                      onClick={() => {
+                        setModeMenuOpen(false);
+                        if (mode.value !== currentMode) {
+                          onSwitchMode(mode.value);
+                        }
+                      }}
+                    >
+                      <Check className={cn("mt-0.5 h-4 w-4 shrink-0", currentMode === mode.value ? "text-primary" : "opacity-0")} />
+                      <span className="min-w-0">
+                        <span className={cn("block font-medium", mode.value === "roslyn_full_auto" ? "text-destructive" : "")}>
+                          {mode.label}
+                        </span>
+                        <span className="block text-xs text-muted-foreground">{mode.description}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <Badge tone="muted" className="max-w-[220px] truncate">
               {statusLabel}
             </Badge>
@@ -1225,17 +1406,7 @@ function FieldLabel({ label, children }: { label: string; children: ReactNode })
   );
 }
 
-function ConversationCard({
-  item,
-  loading,
-  onApprove,
-  onReject,
-}: {
-  item: ConversationItem;
-  loading: boolean;
-  onApprove: (approvalId: string) => void;
-  onReject: (approvalId: string) => void;
-}) {
+function ConversationCard({ item }: { item: ConversationItem }) {
   if (item.type === "user") {
     return (
       <div className="flex justify-end">
@@ -1261,7 +1432,7 @@ function ConversationCard({
   const response = item.response;
   const shell = response.shell;
   const skill = response.skill;
-  const approval = shell?.approval;
+  const awaitingApproval = shell?.status === "pending_approval";
 
   return (
     <div className="space-y-3">
@@ -1308,7 +1479,12 @@ function ConversationCard({
 
       {skill ? <SkillResultCard skill={skill} /> : null}
       {shell?.result ? <ShellResultCard title="执行结果" result={shell.result} /> : null}
-      {approval ? <ApprovalCard approval={approval} loading={loading} onApprove={onApprove} onReject={onReject} /> : null}
+      {awaitingApproval ? (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>等待确认 — 请在下方输入框上方的审批区处理</span>
+        </div>
+      ) : null}
       {shell?.error ? <ShellResultCard title="执行错误" error={shell.error} /> : null}
     </div>
   );

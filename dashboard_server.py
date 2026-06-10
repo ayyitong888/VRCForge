@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -408,6 +409,10 @@ class AgentPermissionRequest(BaseModel):
     acknowledge_roslyn_risk: bool = Field(default=False)
 
 
+class AgentNotesRequest(BaseModel):
+    content: str = Field(default="", max_length=262144)
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -502,6 +507,21 @@ class AgentMcpMount:
 
 
 app = FastAPI(title="VRCForge Dashboard", version="0.3.1-alpha")
+# The Tauri desktop webview runs on a different origin (tauri://localhost /
+# http://tauri.localhost in production, http://127.0.0.1:1420 in dev), so
+# without CORS headers every fetch() to this loopback server is blocked by
+# the webview and the app shows "核心未连接" with zero skills/projects.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 
@@ -732,6 +752,30 @@ async def app_agent_reject(approval_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
+
+
+@app.get("/api/app/agent-notes")
+def read_agent_notes() -> dict[str, Any]:
+    path = AGENT_GATEWAY.user_constraints_path
+    content = ""
+    if path.exists():
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"无法读取 AGENTS.md: {exc}") from exc
+    return {"ok": True, "path": str(path), "exists": path.exists(), "content": content}
+
+
+@app.post("/api/app/agent-notes")
+async def write_agent_notes(request: AgentNotesRequest) -> dict[str, Any]:
+    path = AGENT_GATEWAY.user_constraints_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(request.content, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法写入 AGENTS.md: {exc}") from exc
+    await EVENT_BUS.broadcast("agentNotesUpdated", {"path": str(path), "bytes": len(request.content.encode("utf-8"))})
+    return {"ok": True, "path": str(path), "bytes": len(request.content.encode("utf-8"))}
 
 
 @app.get("/api/app/skills")
