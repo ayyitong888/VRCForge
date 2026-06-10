@@ -9,6 +9,8 @@ import math
 import mimetypes
 import os
 import subprocess
+import re
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -121,6 +123,8 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_scan_animation_bindings",
     "vrc_create_safe_backup",
     "vrc_restore_safe_backup",
+    "vrc_setup_outfit",
+    "vrc_scan_avatar_performance",
 ]
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -6015,6 +6019,329 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
     }
 
 
+
+def run_unity_artifact_scan_sync(
+    params: dict[str, Any],
+    tool_name: str,
+    prefix: str,
+    unity_params: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    output_path = build_dashboard_artifact_path(prefix, avatar_path, "json")
+    merged: dict[str, Any] = {"avatarPath": avatar_path, "outputPath": str(output_path)}
+    merged.update(unity_params)
+    result = invoke_unity_mcp(settings, tool_name, merged)
+    if output_path.exists():
+        payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
+        payload.setdefault("jsonPath", str(output_path))
+    else:
+        payload = extract_tool_result_payload(result)
+    payload = ensure_dict_payload(payload, label)
+    payload.setdefault("ok", True)
+    return payload
+
+
+def scan_avatar_items_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_avatar_items",
+        "avatar_items",
+        {
+            "maxItems": int(params.get("max_items") or params.get("maxItems") or 2000),
+            "refreshAssets": False,
+        },
+        "avatar item scan",
+    )
+
+
+def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_fx_animator",
+        "fx_animator",
+        {
+            "controllerPath": str(params.get("controller_path") or params.get("controllerPath") or "").strip(),
+            "refreshAssets": False,
+        },
+        "FX animator scan",
+    )
+
+
+def scan_animation_bindings_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    clip_paths = params.get("clip_paths") or params.get("clipPaths") or []
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_animation_bindings",
+        "animation_bindings",
+        {
+            "controllerPath": str(params.get("controller_path") or params.get("controllerPath") or "").strip(),
+            "clipPaths": [str(item) for item in clip_paths if str(item).strip()],
+            "includeAllProjectClips": bool(params.get("include_all_project_clips") or params.get("includeAllProjectClips") or False),
+            "maxClips": int(params.get("max_clips") or params.get("maxClips") or 300),
+            "refreshAssets": False,
+        },
+        "animation binding scan",
+    )
+
+
+def scan_avatar_controls_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    payload = scan_avatar_controls_direct(settings, avatar_path)
+    payload.setdefault("ok", True)
+    return payload
+
+
+def scan_avatar_parameters_gateway_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    payload = scan_avatar_parameters_direct(settings, avatar_path)
+    payload.setdefault("ok", True)
+    return payload
+
+
+def create_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    asset_paths = params.get("asset_paths") or params.get("assetPaths") or []
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "assetPaths": [str(item) for item in asset_paths if str(item).strip()],
+        "includeOpenScenes": bool(params.get("include_open_scenes", params.get("includeOpenScenes", True))),
+        "refreshAssets": False,
+    }
+    backup_root = str(params.get("backup_root") or params.get("backupRoot") or "").strip()
+    if backup_root:
+        request["backupRoot"] = backup_root
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_create_safe_backup", request)),
+        "safe backup",
+    )
+    payload.setdefault("ok", True)
+    emit_log("info", "backup", "Safe backup snapshot created.", {"backupPath": payload.get("backup_path")})
+    return payload
+
+
+def build_safe_backup_restore_request(params: dict[str, Any], confirm: bool) -> dict[str, Any]:
+    asset_paths = params.get("asset_paths") or params.get("assetPaths") or []
+    request: dict[str, Any] = {
+        "backupPath": str(params.get("backup_path") or params.get("backupPath") or "").strip(),
+        "backupId": str(params.get("backup_id") or params.get("backupId") or "").strip(),
+        "assetPaths": [str(item) for item in asset_paths if str(item).strip()],
+        "confirmRestore": confirm,
+        "allowProjectMismatch": bool(params.get("allow_project_mismatch") or params.get("allowProjectMismatch") or False),
+        "allowOverwriteChanged": bool(params.get("allow_overwrite_changed") or params.get("allowOverwriteChanged") or False),
+        "refreshAssets": confirm,
+    }
+    backup_root = str(params.get("backup_root") or params.get("backupRoot") or "").strip()
+    if backup_root:
+        request["backupRoot"] = backup_root
+    return request
+
+
+def preview_safe_backup_restore_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(settings, "vrc_restore_safe_backup", build_safe_backup_restore_request(params, False))
+        ),
+        "safe backup restore preview",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def restore_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(settings, "vrc_restore_safe_backup", build_safe_backup_restore_request(params, True))
+        ),
+        "safe backup restore",
+    )
+    payload.setdefault("ok", True)
+    emit_log("info", "backup", "Safe backup restore executed.", {"backupId": params.get("backupId") or params.get("backup_id")})
+    return payload
+
+
+def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    object_path = str(params.get("object_path") or params.get("objectPath") or "").strip()
+    if not object_path:
+        return {"ok": False, "error": "objectPath is required."}
+    if "active" not in params:
+        return {"ok": False, "error": "active (true/false) is required."}
+    active = bool(params.get("active"))
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = toggle_scene_object_direct(settings, object_path, active)
+    emit_log("info", "wardrobe", "Scene object toggled.", {"objectPath": object_path, "active": active})
+    return {"ok": True, "objectPath": object_path, "active": active, "result": payload}
+
+
+VPM_PACKAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,100}$")
+KNOWN_VPM_CLI_NAMES = ("vrc-get", "vpm")
+
+
+def locate_vpm_package_managers() -> list[dict[str, str]]:
+    managers: list[dict[str, str]] = []
+    for name in ("vrc-get", "alcom", "vpm"):
+        path = shutil.which(name)
+        if path:
+            managers.append({"name": name, "path": path.replace("\\", "/")})
+    return managers
+
+
+def resolve_addon_project_path(params: dict[str, Any]) -> str:
+    return str(
+        params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or ""
+    ).strip()
+
+
+def package_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_value = resolve_addon_project_path(params)
+    project_path = Path(project_value) if project_value else None
+    managers = locate_vpm_package_managers()
+    packages = {
+        framework: detect_addon_package(project_path, list(spec["packageIds"]))
+        for framework, spec in ADDON_FRAMEWORKS.items()
+    }
+    usable = [manager for manager in managers if manager["name"] in KNOWN_VPM_CLI_NAMES]
+    return {
+        "ok": True,
+        "projectPath": project_value,
+        "managers": managers,
+        "preferredCli": usable[0] if usable else None,
+        "canInstall": bool(usable) and bool(project_value),
+        "packages": packages,
+        "hint": (
+            "vrc-get or the VCC vpm CLI can add VPM packages from the command line. "
+            "ALCOM is detected for diagnostics only; use its UI or install vrc-get for CLI installs."
+        ),
+    }
+
+
+def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    package_id = str(params.get("package_id") or params.get("packageId") or "").strip().lower()
+    if not VPM_PACKAGE_ID_RE.match(package_id):
+        return {"ok": False, "error": "packageId must be a valid VPM package id, for example nadena.dev.modular-avatar."}
+    project_value = resolve_addon_project_path(params)
+    if not project_value or not Path(project_value).is_dir():
+        return {"ok": False, "error": "A valid Unity projectPath is required."}
+
+    managers = locate_vpm_package_managers()
+    cli = next((manager for manager in managers if manager["name"] in KNOWN_VPM_CLI_NAMES), None)
+    if cli is None:
+        return {
+            "ok": False,
+            "error": "No VPM CLI was found. Install vrc-get (or the VCC vpm CLI), or add the package from the ALCOM UI.",
+            "managers": managers,
+        }
+
+    if cli["name"] == "vrc-get":
+        command = [cli["path"], "add", package_id, "-y"]
+    else:
+        command = [cli["path"], "add", "package", package_id, "-p", project_value]
+
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=project_value,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"Package install command failed to run: {exc}"[:300], "command": command}
+
+    package_state = None
+    for spec in ADDON_FRAMEWORKS.values():
+        if package_id in [str(item).lower() for item in spec["packageIds"]]:
+            package_state = detect_addon_package(Path(project_value), list(spec["packageIds"]))
+            break
+    if package_state is None:
+        package_state = detect_addon_package(Path(project_value), [package_id])
+
+    result = {
+        "ok": proc.returncode == 0,
+        "manager": cli,
+        "command": command,
+        "exitCode": proc.returncode,
+        "stdoutSummary": (proc.stdout or "")[-1500:],
+        "stderrSummary": (proc.stderr or "")[-1500:],
+        "projectPath": project_value,
+        "packageId": package_id,
+        "package": package_state,
+        "hint": "Unity must refresh/resolve packages before new components are usable; reopen or focus the Unity project.",
+    }
+    emit_log(
+        "info" if result["ok"] else "error",
+        "addon",
+        f"VPM package install {'succeeded' if result['ok'] else 'failed'}: {package_id}",
+        {"manager": cli["name"], "exitCode": proc.returncode},
+    )
+    return result
+
+
+def build_setup_outfit_request(params: dict[str, Any], confirm: bool) -> dict[str, Any]:
+    return {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "outfitPath": str(params.get("outfit_path") or params.get("outfitPath") or "").strip(),
+        "confirmSetup": confirm,
+        "saveScene": bool(params.get("save_scene", params.get("saveScene", True))),
+    }
+
+
+def preview_setup_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_setup_outfit_request(params, False)
+    if not request["outfitPath"]:
+        return {"ok": False, "error": "outfitPath is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_setup_outfit", request)),
+        "setup outfit preview",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def setup_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_setup_outfit_request(params, True)
+    if not request["outfitPath"]:
+        return {"ok": False, "error": "outfitPath is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_setup_outfit", request)),
+        "setup outfit",
+    )
+    payload.setdefault("ok", True)
+    emit_log("info", "wardrobe", "Modular Avatar Setup Outfit executed.", {"outfitPath": request["outfitPath"]})
+    return payload
+
+
+def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_avatar_performance",
+        "avatar_performance",
+        {"isMobile": bool(params.get("is_mobile") or params.get("isMobile") or False)},
+        "avatar performance scan",
+    )
+
+
 def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
@@ -6041,6 +6368,16 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", scan_avatar_items_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "Scan animation clip bindings for an avatar or animator controller.", "read/debug", scan_animation_bindings_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_create_safe_backup", "Create a safe backup snapshot of avatar assets and open scenes.", "plan/preview", create_safe_backup_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
@@ -6102,6 +6439,30 @@ def register_agent_gateway_tools() -> None:
         "Rollback avatar parameter optimization through VRCForge.",
         "medium",
         lambda params: rollback_parameter_optimization_sync(ParameterRollbackRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_setup_outfit",
+        "Run Modular Avatar Setup Outfit on an outfit object through VRCForge.",
+        "high",
+        setup_outfit_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_install_vpm_package",
+        "Install a VPM package (for example Modular Avatar or VRCFury) through vrc-get or the vpm CLI.",
+        "medium",
+        install_vpm_package_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_restore_safe_backup",
+        "Restore files from a safe backup snapshot through VRCForge.",
+        "high",
+        restore_safe_backup_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_toggle_scene_object",
+        "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
+        "medium",
+        toggle_scene_object_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_roslyn_advanced",
