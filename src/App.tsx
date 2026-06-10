@@ -4,13 +4,11 @@ import {
   Bot,
   Check,
   ChevronDown,
-  Clock3,
   Folder,
   History,
   Loader2,
   Moon,
   Plus,
-  Search,
   Send,
   Settings,
   Shield,
@@ -62,22 +60,19 @@ type ConversationItem =
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string };
 
-type ActiveView = "chat" | "skills";
+type ActiveView = "chat" | "skills" | "settings";
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
 const navItems = [
   { id: "new", label: "新对话", icon: Plus },
-  { id: "search", label: "搜索", icon: Search },
   { id: "skills", label: "能力库", icon: Wrench },
-  { id: "automation", label: "自动化", icon: Clock3 },
-  { id: "approvals", label: "审批", icon: Shield },
-  { id: "logs", label: "日志", icon: TerminalSquare },
 ];
 
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
+
 
 export default function App() {
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
@@ -468,6 +463,9 @@ export default function App() {
       });
       setApiKey("");
       await refresh(targetEndpoint);
+      if (activeView === "settings") {
+        setActiveView("chat");
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -485,13 +483,13 @@ export default function App() {
           </div>
 
           <nav className="mt-5 space-y-1">
-            {navItems.map(({ id, label, icon: Icon }, index) => (
+            {navItems.map(({ id, label, icon: Icon }) => (
               <button
                 key={label}
-                onClick={id === "new" ? newConversation : id === "skills" ? () => void openSkills() : undefined}
+                onClick={id === "new" ? newConversation : () => void openSkills()}
                 className={cn(
                   "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-                  (activeView === "chat" && index === 0) || (activeView === "skills" && id === "skills")
+                  (activeView === "chat" && id === "new") || (activeView === "skills" && id === "skills")
                     ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
@@ -532,7 +530,15 @@ export default function App() {
           </SidebarSection>
 
           <div className="mt-auto">
-            <button className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground">
+            <button
+              onClick={() => setActiveView("settings")}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "settings"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
               <Settings className="h-4 w-4 shrink-0" />
               <span className="truncate">设置</span>
             </button>
@@ -544,9 +550,17 @@ export default function App() {
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
               <span className="text-muted-foreground">/</span>
-              <span className="truncate font-medium">{activeView === "skills" ? "能力库" : sessionId ? "当前会话" : "新任务"}</span>
+              <span className="truncate font-medium">
+                {activeView === "skills" ? "能力库" : activeView === "settings" ? "设置" : sessionId ? "当前会话" : "新任务"}
+              </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {permission?.roslynFullAuto ? (
+                <Badge tone="danger">
+                  <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
+                  高级自动
+                </Badge>
+              ) : null}
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? "核心在线" : "核心离线"} />
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} 待确认</Badge>
               <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
@@ -586,6 +600,27 @@ export default function App() {
               onSave={saveSkill}
               onDelete={removeSelectedSkill}
             />
+          ) : activeView === "settings" ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+              <div className="w-full max-w-4xl">
+                <ProviderSetup
+                  provider={apiProvider}
+                  apiKey={apiKey}
+                  baseUrl={apiBaseUrl}
+                  model={apiModel}
+                  saving={savingApiConfig}
+                  onProviderChange={(provider) => {
+                    setApiProvider(provider);
+                    setApiModel(defaultModelForProvider(provider));
+                    setApiBaseUrl(defaultBaseUrlForProvider(provider));
+                  }}
+                  onApiKeyChange={setApiKey}
+                  onBaseUrlChange={setApiBaseUrl}
+                  onModelChange={setApiModel}
+                  onSubmit={saveApiProvider}
+                />
+              </div>
+            </div>
           ) : needsApiSetup ? (
             <div className="flex min-h-0 flex-1 items-center justify-center p-8">
               <div className="w-full max-w-4xl">
