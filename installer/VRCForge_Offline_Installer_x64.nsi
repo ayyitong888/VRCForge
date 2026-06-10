@@ -15,8 +15,16 @@ InstallDir "$PROGRAMFILES64\VRCForge"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
+!macro StopVRCForgeProcesses
+  nsExec::ExecToLog 'taskkill /F /IM VRCForge.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM vrcforge_backend.exe /T'
+  Sleep 800
+!macroend
+
 Section "Install"
   SetRegView 64
+  ; Repair-friendly: stop the running tray app and backend before overwriting payload.
+  !insertmacro StopVRCForgeProcesses
   SetOutPath "$INSTDIR"
   RMDir /r "$INSTDIR\backend"
   RMDir /r "$INSTDIR\dashboard"
@@ -41,10 +49,15 @@ Section "Install"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "Publisher" "VRCForge"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "DisplayIcon" "$INSTDIR\VRCForge.exe"
+  ; Repair = re-run this offline installer; it stops processes, clears stale payload dirs, and recopies.
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "NoModify" 1
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
   SetRegView 64
+  !insertmacro StopVRCForgeProcesses
   Delete "$DESKTOP\VRCForge.lnk"
   Delete "$SMPROGRAMS\VRCForge\VRCForge.lnk"
   Delete "$SMPROGRAMS\VRCForge\Uninstall VRCForge.lnk"
