@@ -5886,6 +5886,135 @@ def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "result": serialize_result(result)}
 
 
+ADDON_FRAMEWORKS: dict[str, dict[str, Any]] = {
+    "modular_avatar": {
+        "label": "Modular Avatar",
+        "packageIds": ["nadena.dev.modular-avatar"],
+        "componentPrefixes": ["ModularAvatar"],
+        "hint": (
+            "Modular Avatar merges armatures, animators, menus, and parameters non-destructively "
+            "at avatar build time. Treat its components as the source of truth and avoid editing "
+            "merged FX output directly."
+        ),
+    },
+    "vrcfury": {
+        "label": "VRCFury",
+        "packageIds": ["com.vrcfury.vrcfury"],
+        "componentPrefixes": ["VRCFury"],
+        "hint": (
+            "VRCFury features are stored as build-time components on the avatar and are applied "
+            "non-destructively on upload or play. Plan edits against the components, not against "
+            "generated controllers."
+        ),
+    },
+}
+
+
+def detect_addon_package(project_path: Path | None, package_ids: list[str]) -> dict[str, Any]:
+    info: dict[str, Any] = {"installed": False, "packageId": "", "version": "", "source": ""}
+    if project_path is None:
+        info["warning"] = "No Unity project selected; package detection skipped."
+        return info
+    packages_dir = project_path / "Packages"
+    for package_id in package_ids:
+        embedded = packages_dir / package_id / "package.json"
+        if embedded.exists():
+            try:
+                data = json.loads(embedded.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            info.update({"installed": True, "packageId": package_id, "version": str(data.get("version") or ""), "source": "embedded"})
+            return info
+    for manifest_name, source in (("vpm-manifest.json", "vpm"), ("manifest.json", "upm")):
+        manifest_path = packages_dir / manifest_name
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        sections = [manifest.get("locked"), manifest.get("dependencies")] if source == "vpm" else [manifest.get("dependencies")]
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            for package_id in package_ids:
+                entry = section.get(package_id)
+                if entry is None:
+                    continue
+                version = entry.get("version") if isinstance(entry, dict) else entry
+                info.update({"installed": True, "packageId": package_id, "version": str(version or ""), "source": source})
+                return info
+    return info
+
+
+def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[str, Any]:
+    spec = ADDON_FRAMEWORKS[framework]
+    prefixes = [str(prefix).lower() for prefix in spec["componentPrefixes"]]
+    project_value = str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
+    project_path = Path(project_value) if project_value else None
+    package_info = detect_addon_package(project_path, list(spec["packageIds"]))
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+
+    unity_state: dict[str, Any] = {"scanned": False}
+    matches: list[dict[str, Any]] = []
+    if params.get("skip_unity") is not True and params.get("skipUnity") is not True:
+        try:
+            settings = load_dashboard_settings(build_agent_connection_request(params))
+            payload = extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_scan_avatar_items",
+                    {"avatarPath": avatar_path, "outputPath": "", "maxItems": 2000, "refreshAssets": False},
+                )
+            )
+            items = payload.get("items") if isinstance(payload, dict) else None
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                component_types = [str(value) for value in (item.get("component_types") or [])]
+                hits = sorted({ctype for ctype in component_types if any(ctype.lower().startswith(prefix) for prefix in prefixes)})
+                if hits:
+                    matches.append(
+                        {
+                            "avatarPath": item.get("avatar_path") or "",
+                            "objectPath": item.get("object_path") or "",
+                            "components": hits,
+                            "activeInHierarchy": item.get("active_in_hierarchy"),
+                        }
+                    )
+            unity_state = {"scanned": True, "itemCount": len(items or []), "matchCount": len(matches)}
+        except (RuntimeError, UnityMcpError) as exc:
+            unity_state = {"scanned": False, "error": str(exc)[:240]}
+
+    if package_info.get("installed"):
+        package_text = "installed" + (f" {package_info['version']}" if package_info.get("version") else "")
+    else:
+        package_text = "not detected"
+    if unity_state.get("scanned"):
+        component_text = f"{len(matches)} component carrier(s) found on scanned avatars"
+    else:
+        component_text = "Unity component scan unavailable"
+    summary = f"{spec['label']}: package {package_text}; {component_text}."
+    emit_log(
+        "info",
+        "addon",
+        f"{spec['label']} scan finished.",
+        {"framework": framework, "installed": package_info.get("installed"), "matchCount": len(matches), "scanned": unity_state.get("scanned")},
+    )
+    return {
+        "ok": True,
+        "framework": framework,
+        "label": spec["label"],
+        "projectPath": project_value,
+        "package": package_info,
+        "components": matches,
+        "componentCount": len(matches),
+        "unity": unity_state,
+        "summary": summary,
+        "hint": spec["hint"],
+    }
+
+
 def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
@@ -5910,6 +6039,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: read_avatars_sync(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: read_avatar_blendshapes_sync(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
