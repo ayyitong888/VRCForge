@@ -2763,7 +2763,7 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
     <div className="flex justify-start">
       <div className="w-full max-w-[85%] space-y-2">
         <div className="rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
-          <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.summary}</p>
+          <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.reply || response.plan.summary}</p>
           {showIntent ? (
             <p className="mt-2 flex items-center gap-1.5 text-xs text-primary">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
@@ -2774,7 +2774,7 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
             </p>
           ) : null}
           <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>{displayPlanner(response.plan.planner)}</span>
+            <span>{response.plan.plannerLabel || displayPlanner(response.plan.planner)}</span>
             {item.elapsedSeconds ? <span>· 已运行 {formatDuration(item.elapsedSeconds)}</span> : null}
           </div>
         </div>

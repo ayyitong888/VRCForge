@@ -617,6 +617,9 @@ class AgentGateway:
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
         self.llm_plan_fn: Callable[[str], str] | None = None
+        # 由宿主在配置/调用 LLM 时更新，例如 "DeepSeek · deepseek-chat"。
+        # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
+        self.llm_planner_label: str = ""
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -2252,7 +2255,9 @@ class AgentGateway:
             summary = "Observed runtime health. No shell step is required."
         return {
             "summary": summary,
+            "reply": "",
             "planner": "deterministic-local",
+            "plannerLabel": "",
             "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
             "shellNeeded": bool(command),
             "shellCommand": command,
@@ -2292,6 +2297,8 @@ class AgentGateway:
 
         base = {
             "planner": "llm",
+            "plannerLabel": self.llm_planner_label,
+            "reply": reply,
             "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
             "shellNeeded": False,
             "shellCommand": "",
@@ -2333,6 +2340,7 @@ class AgentGateway:
         return {
             **base,
             "summary": reply_text,
+            "reply": reply_text,
             "expectedResult": "Conversational reply.",
             "nextStep": "done",
         }
@@ -2357,11 +2365,12 @@ class AgentGateway:
         return (
             "你是 VRCForge 桌面智能体的规划器，负责把用户的中文/英文请求转换成下一步动作。\n"
             "可选动作：\n"
-            '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>"}\n'
-            '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>"}\n'
+            '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
+            '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
             '3. 直接回答（闲聊、解释、当前信息已足够）：{"action": "reply", "reply": "<中文回答>"}\n'
             "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
-            "写操作类工具会进入审批流程，可以放心规划；拿不准时选 reply 并说明你需要什么信息。\n\n"
+            "写操作类工具会进入审批流程，可以放心规划；拿不准时选 reply 并说明你需要什么信息。\n"
+            "reply 字段是直接展示给用户的对话内容：用第一人称中文，自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」），不要复述 JSON 或工具名。\n\n"
             f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
             f"最近对话：\n{history_block}\n\n"
             f"用户最新消息：{message}"

@@ -172,7 +172,9 @@ export type AgentRuntimeResponse = {
   observe: Record<string, unknown>;
   plan: {
     summary: string;
+    reply?: string;
     planner: string;
+    plannerLabel?: string;
     shellNeeded: boolean;
     shellCommand?: string;
     skillNeeded?: boolean;

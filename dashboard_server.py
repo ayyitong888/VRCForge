@@ -3641,6 +3641,8 @@ def _agent_gateway_llm_plan(prompt: str) -> str:
     settings = load_dashboard_settings(ConnectionRequest())
     if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
         raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
+    label_parts = [provider_display_name(settings.llm_provider), str(settings.llm_model or "").strip()]
+    AGENT_GATEWAY.llm_planner_label = " · ".join(part for part in label_parts if part)
     return request_llm_plan(settings, prompt)
 
 
