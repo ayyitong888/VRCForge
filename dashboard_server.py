@@ -1002,7 +1002,17 @@ def read_api_config() -> dict[str, Any]:
 async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     global DASHBOARD_API_CONFIG
 
-    DASHBOARD_API_CONFIG = normalize_api_config_request(request)
+    config = normalize_api_config_request(request)
+    if not config.api_key.strip():
+        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+        if saved and saved.provider == config.provider and saved.api_key.strip():
+            config = DashboardApiConfig(
+                provider=config.provider,
+                api_key=saved.api_key,
+                base_url=config.base_url,
+                model=config.model,
+            )
+    DASHBOARD_API_CONFIG = config
     save_dashboard_api_config(DASHBOARD_API_CONFIG)
     payload = {
         "configPath": str(CONFIG_PATH),
@@ -1026,6 +1036,15 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
 @app.post("/api/models")
 async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
     config = normalize_api_config_request(request)
+    if not config.api_key.strip():
+        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+        if saved and saved.provider == config.provider and saved.api_key.strip():
+            config = DashboardApiConfig(
+                provider=config.provider,
+                api_key=saved.api_key,
+                base_url=config.base_url,
+                model=config.model,
+            )
     provider_label = provider_display_name(config.provider)
 
     try:

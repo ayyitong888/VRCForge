@@ -275,6 +275,26 @@ export async function updateApiConfig(endpoint: string, config: { provider: stri
   });
 }
 
+export type ProviderModelList = {
+  provider: string;
+  providerLabel?: string;
+  baseUrl?: string;
+  models: Array<{ id: string; label: string }>;
+  modelCount: number;
+  selectedModel?: string;
+};
+
+export async function fetchProviderModels(
+  endpoint: string,
+  config: { provider: string; api_key?: string; base_url?: string; model?: string },
+): Promise<ProviderModelList> {
+  return requestJson(`${endpoint}/api/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
 export async function fetchAgentNotes(endpoint: string): Promise<AgentNotes> {
   return requestJson<AgentNotes>(`${endpoint}/api/app/agent-notes`);
 }

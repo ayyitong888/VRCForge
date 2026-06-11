@@ -5,10 +5,11 @@ import {
   Check,
   ChevronDown,
   Folder,
-  History,
   Loader2,
+  MessageSquare,
   Moon,
   Plus,
+  RefreshCw,
   Send,
   Settings,
   Shield,
@@ -40,6 +41,7 @@ import {
   ExecutionMode,
   PermissionState,
   fetchAgentNotes,
+  fetchProviderModels,
   rejectAgentApproval,
   saveAgentNotes,
   sendAgentMessage,
@@ -65,12 +67,15 @@ type ConversationItem =
 
 type ActiveView = "chat" | "skills" | "settings";
 
-const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
+type ChatThread = {
+  id: string;
+  sessionId: string;
+  title: string;
+  projectPath: string;
+  items: ConversationItem[];
+};
 
-const navItems = [
-  { id: "new", label: "新对话", icon: Plus },
-  { id: "skills", label: "能力库", icon: Wrench },
-];
+const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
 const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
   { value: "approval", label: "受限模式", description: "沙箱模式：高风险命令与写操作逐项审批，最安全。" },
@@ -98,14 +103,18 @@ export default function App() {
   const [showRoslynWarning, setShowRoslynWarning] = useState(false);
   const [pendingMode, setPendingMode] = useState<PermissionState["executionMode"] | null>(null);
   const [input, setInput] = useState("");
-  const [sessionId, setSessionId] = useState("");
-  const [conversation, setConversation] = useState<ConversationItem[]>([]);
+  const [chats, setChats] = useState<ChatThread[]>([]);
+  const [activeChatId, setActiveChatId] = useState("");
+  const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [apiProvider, setApiProvider] = useState("gemini");
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
+  const [modelOptions, setModelOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
   const [skillCheck, setSkillCheck] = useState<AgentSkillCheck | null>(null);
   const [selectedSkillName, setSelectedSkillName] = useState("");
@@ -117,6 +126,7 @@ export default function App() {
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesMessage, setNotesMessage] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
+  const projectInitRef = useRef(false);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -138,10 +148,17 @@ export default function App() {
       ? `头像能力 ${vrcForgeToolsCount}`
       : "基础模式";
   const needsApiSetup = runtimeConnected && Boolean(apiConfig?.apiKeyRequired && !apiConfig.apiKeyPresent);
+  const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
 
   const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
-  const activeProject = bootstrap?.health.projects?.selectedProjectPath || projectItems[0]?.path || projectItems[0]?.name || "Unity Projects";
-  const projectPromptTitle = projectItems[0]?.name ? `需要在 ${projectItems[0].name} 里面构建什么？` : "";
+  const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
+  const conversation = activeChat?.items ?? [];
+  const sessionId = activeChat?.sessionId ?? "";
+  const activeProjectName =
+    projectItems.find((project) => projectKey(project) === activeProjectPath)?.name ||
+    (activeProjectPath ? shortPath(activeProjectPath) : "");
+  const temporaryChats = chats.filter((chat) => !chat.projectPath);
+  const projectPromptTitle = activeProjectPath && activeProjectName ? `我们应该在 ${activeProjectName} 中构建什么？` : "随心聊点什么？";
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
       return null;
@@ -169,6 +186,15 @@ export default function App() {
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [conversation.length]);
+
+  useEffect(() => {
+    if (!projectInitRef.current && projectItems.length > 0) {
+      projectInitRef.current = true;
+      if (!activeProjectPath) {
+        setActiveProjectPath(projectKey(projectItems[0]));
+      }
+    }
+  }, [projectItems]);
 
   useEffect(() => {
     if (!apiConfig) {
@@ -276,6 +302,24 @@ export default function App() {
     await switchMode(pendingMode, true);
   }
 
+  function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
+    setChats((list) => list.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
+  }
+
+  function appendToChat(chatId: string, item: ConversationItem) {
+    updateChat(chatId, (chat) => ({ ...chat, items: [...chat.items, item] }));
+  }
+
+  function ensureActiveChat(): string {
+    if (activeChat) {
+      return activeChat.id;
+    }
+    const id = `chat-${Date.now()}`;
+    setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, items: [] }, ...list]);
+    setActiveChatId(id);
+    return id;
+  }
+
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
     const message = input.trim();
@@ -284,6 +328,8 @@ export default function App() {
     }
     setError("");
     setSending(true);
+    const chatId = ensureActiveChat();
+    const chatSessionId = activeChat?.sessionId || "";
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -295,14 +341,21 @@ export default function App() {
       }
       setInput("");
       const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
-      setConversation((items) => [...items, userItem]);
-      const response = await sendAgentMessage(targetEndpoint, message, sessionId || undefined);
-      setSessionId(response.sessionId || response.session_id);
-      setConversation((items) => [...items, { id: response.turnId || response.turn_id, type: "agent", response }]);
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        title: chat.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
+        items: [...chat.items, userItem],
+      }));
+      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined);
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        sessionId: response.sessionId || response.session_id || chat.sessionId,
+        items: [...chat.items, { id: response.turnId || response.turn_id, type: "agent", response }],
+      }));
       await refresh(targetEndpoint);
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
-      setConversation((items) => [...items, { id: `error-${Date.now()}`, type: "error", text }]);
+      appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       setError(text);
     } finally {
       setSending(false);
@@ -314,16 +367,15 @@ export default function App() {
     setError("");
     try {
       const payload = await approveAgentApproval(endpoint, approvalId);
-      setConversation((items) => [
-        ...items,
-        {
+      if (activeChatId) {
+        appendToChat(activeChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,
           result: payload.execution?.result,
           error: payload.execution?.error,
-        },
-      ]);
+        });
+      }
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -337,15 +389,14 @@ export default function App() {
     setError("");
     try {
       await rejectAgentApproval(endpoint, approvalId);
-      setConversation((items) => [
-        ...items,
-        {
+      if (activeChatId) {
+        appendToChat(activeChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,
           error: "rejected",
-        },
-      ]);
+        });
+      }
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -354,10 +405,27 @@ export default function App() {
     }
   }
 
-  function newConversation() {
+  function newConversation(projectPath?: string) {
     setActiveView("chat");
-    setConversation([]);
-    setSessionId("");
+    if (projectPath !== undefined) {
+      setActiveProjectPath(projectPath);
+    }
+    setActiveChatId("");
+    setError("");
+  }
+
+  function openChat(chat: ChatThread) {
+    setActiveView("chat");
+    setActiveChatId(chat.id);
+    setActiveProjectPath(chat.projectPath);
+    setError("");
+  }
+
+  function selectProject(projectPath: string) {
+    setActiveView("chat");
+    setActiveProjectPath(projectPath);
+    const latest = chats.find((chat) => chat.projectPath === projectPath);
+    setActiveChatId(latest ? latest.id : "");
     setError("");
   }
 
@@ -507,7 +575,7 @@ export default function App() {
 
   async function saveApiProvider(event?: FormEvent) {
     event?.preventDefault();
-    if (!apiProvider || !apiModel || (providerNeedsApiKey(apiProvider) && !apiKey.trim())) {
+    if (!apiProvider || !apiModel || (providerNeedsApiKey(apiProvider) && !apiKey.trim() && !apiKeySaved)) {
       return;
     }
     setSavingApiConfig(true);
@@ -536,59 +604,136 @@ export default function App() {
     }
   }
 
+  function handleProviderChange(provider: string) {
+    setApiProvider(provider);
+    setApiModel(defaultModelForProvider(provider));
+    setApiBaseUrl(defaultBaseUrlForProvider(provider));
+    setModelOptions([]);
+    setModelsError("");
+  }
+
+  async function loadModels() {
+    if (loadingModels) {
+      return;
+    }
+    setLoadingModels(true);
+    setModelsError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setModelsError("核心未连接，无法获取模型列表");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchProviderModels(targetEndpoint, {
+        provider: apiProvider,
+        api_key: apiKey.trim(),
+        base_url: apiBaseUrl.trim(),
+        model: apiModel.trim(),
+      });
+      const models = payload.models || [];
+      setModelOptions(models);
+      if (models.length === 0) {
+        setModelsError("该供应商未返回模型列表，可手动填写模型名");
+      } else if (!models.some((item) => item.id === apiModel)) {
+        setApiModel(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
+      }
+    } catch (cause) {
+      setModelOptions([]);
+      setModelsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="flex min-w-0 flex-col border-r border-border bg-sidebar px-4 py-4">
+        <aside className="flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-4 py-4">
           <div className="flex h-10 items-center gap-3 px-2">
             <Bot className="h-5 w-5 shrink-0 text-primary" />
             <div className="truncate text-base font-semibold">VRCForge</div>
           </div>
 
           <nav className="mt-5 space-y-1">
-            {navItems.map(({ id, label, icon: Icon }) => (
-              <button
-                key={label}
-                onClick={id === "new" ? newConversation : () => void openSkills()}
-                className={cn(
-                  "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-                  (activeView === "chat" && id === "new") || (activeView === "skills" && id === "skills")
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="truncate">{label}</span>
-              </button>
-            ))}
+            <button
+              onClick={() => newConversation()}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "chat" && !activeChatId
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <Plus className="h-4 w-4 shrink-0" />
+              <span className="truncate">新对话</span>
+            </button>
+            <button
+              onClick={() => newConversation("")}
+              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <MessageSquare className="h-4 w-4 shrink-0" />
+              <span className="truncate">临时对话</span>
+            </button>
+            <button
+              onClick={() => void openSkills()}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "skills"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <Wrench className="h-4 w-4 shrink-0" />
+              <span className="truncate">能力库</span>
+            </button>
           </nav>
 
           <SidebarSection title="项目">
             {projectItems.length > 0 ? (
-              projectItems.map((project, index) => (
-                <SidebarProject
-                  key={`${project.path || project.name || index}`}
-                  name={project.name || project.path || "Unity Project"}
-                  meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
-                  active={index === 0}
-                />
-              ))
+              projectItems.map((project, index) => {
+                const key = projectKey(project) || `project-${index}`;
+                const projectChats = chats.filter((chat) => chat.projectPath === key);
+                return (
+                  <div key={key} className="min-w-0">
+                    <SidebarProject
+                      name={project.name || project.path || "Unity Project"}
+                      meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
+                      active={activeView === "chat" && key === activeProjectPath}
+                      onClick={() => selectProject(key)}
+                    />
+                    {projectChats.map((chat) => (
+                      <SidebarChat
+                        key={chat.id}
+                        title={chat.title || "新对话"}
+                        active={activeView === "chat" && chat.id === activeChatId}
+                        indent
+                        onClick={() => openChat(chat)}
+                      />
+                    ))}
+                  </div>
+                );
+              })
             ) : (
               <SidebarProject name={emptyProjectState?.name || "未发现 Unity 项目"} meta={emptyProjectState?.meta} active />
             )}
           </SidebarSection>
 
           <SidebarSection title="对话">
-            {conversation.length > 0 ? (
-              <button className="flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm text-foreground">
-                <History className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="truncate">{conversation.find((item) => item.type === "user")?.type === "user" ? conversation.find((item) => item.type === "user")?.text : "当前会话"}</span>
-              </button>
+            {temporaryChats.length > 0 ? (
+              temporaryChats.map((chat) => (
+                <SidebarChat
+                  key={chat.id}
+                  title={chat.title || "新对话"}
+                  active={activeView === "chat" && chat.id === activeChatId}
+                  onClick={() => openChat(chat)}
+                />
+              ))
             ) : (
-              <button className="flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground">
-                <History className="h-4 w-4 shrink-0" />
-                <span className="truncate">空会话</span>
-              </button>
+              <div className="px-3 py-1 text-xs text-muted-foreground/70">暂无临时对话</div>
             )}
           </SidebarSection>
 
@@ -608,13 +753,13 @@ export default function App() {
           </div>
         </aside>
 
-        <section className="flex min-w-0 flex-col bg-workspace">
+        <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
           <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
             <div className="flex min-w-0 items-center gap-2 text-sm">
-              <span className="truncate text-muted-foreground">{projectItems[0]?.name || shortPath(activeProject)}</span>
+              <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : "临时对话"}</span>
               <span className="text-muted-foreground">/</span>
               <span className="truncate font-medium">
-                {activeView === "skills" ? "能力库" : activeView === "settings" ? "设置" : sessionId ? "当前会话" : "新任务"}
+                {activeView === "skills" ? "能力库" : activeView === "settings" ? "设置" : activeChat ? activeChat.title || "当前会话" : "新任务"}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -666,17 +811,20 @@ export default function App() {
               onDelete={removeSelectedSkill}
             />
           ) : activeView === "settings" ? (
-            <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
-              <div className="mx-auto grid w-full max-w-4xl gap-6">
-                <section className="rounded-2xl border border-border bg-card p-5 shadow-composer">
-                  <div className="mb-4 flex items-center gap-2">
-                    <Shield className="h-4 w-4 shrink-0 text-primary" />
-                    <div className="truncate text-sm font-semibold">权限模式</div>
-                    <Badge tone={permission?.roslynFullAuto ? "danger" : permission?.autoApprove ? "warn" : "muted"} className="ml-auto shrink-0">
-                      {executionModeLabel(permission?.executionMode)}
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-10">
+              <div className="mx-auto w-full max-w-3xl">
+                <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
+                <p className="mt-1 text-sm text-muted-foreground">配置权限模式、模型供应商与全局自定义指令。</p>
+
+                <section className="mt-10">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h2 className="truncate text-base font-semibold">权限模式</h2>
+                    <Badge tone={permission?.roslynFullAuto ? "danger" : permission?.autoApprove ? "warn" : "muted"} className="shrink-0">
+                      当前：{executionModeLabel(permission?.executionMode)}
                     </Badge>
                   </div>
-                  <div className="grid gap-3">
+                  <p className="mt-1 text-sm text-muted-foreground">控制智能体执行命令与写操作时的审批策略，随时可切换。</p>
+                  <div className="mt-4 grid gap-3">
                     {EXECUTION_MODES.map((mode) => (
                       <button
                         key={mode.value}
@@ -710,67 +858,81 @@ export default function App() {
                   ) : null}
                 </section>
 
-                <ProviderSetup
-                  provider={apiProvider}
-                  apiKey={apiKey}
-                  baseUrl={apiBaseUrl}
-                  model={apiModel}
-                  saving={savingApiConfig}
-                  onProviderChange={(provider) => {
-                    setApiProvider(provider);
-                    setApiModel(defaultModelForProvider(provider));
-                    setApiBaseUrl(defaultBaseUrlForProvider(provider));
-                  }}
-                  onApiKeyChange={setApiKey}
-                  onBaseUrlChange={setApiBaseUrl}
-                  onModelChange={setApiModel}
-                  onSubmit={saveApiProvider}
-                />
+                <section className="mt-12">
+                  <h2 className="text-base font-semibold">模型供应商</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">连接供应商后点击「刷新模型列表」，即可从该账号可用的模型中选择。</p>
+                  <div className="mt-4">
+                    <ProviderSetup
+                      provider={apiProvider}
+                      apiKey={apiKey}
+                      baseUrl={apiBaseUrl}
+                      model={apiModel}
+                      saving={savingApiConfig}
+                      models={modelOptions}
+                      loadingModels={loadingModels}
+                      modelsError={modelsError}
+                      keySaved={apiKeySaved}
+                      onLoadModels={() => void loadModels()}
+                      onProviderChange={handleProviderChange}
+                      onApiKeyChange={setApiKey}
+                      onBaseUrlChange={setApiBaseUrl}
+                      onModelChange={setApiModel}
+                      onSubmit={saveApiProvider}
+                    />
+                  </div>
+                </section>
 
-                <form onSubmit={saveNotes} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
-                  <div className="mb-4 flex min-w-0 items-center gap-2">
-                    <History className="h-4 w-4 shrink-0 text-primary" />
-                    <div className="truncate text-sm font-semibold">AGENTS.md（全局智能体约束）</div>
+                <section className="mt-12 pb-6">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h2 className="truncate text-base font-semibold">自定义指令</h2>
                     {notesMessage ? (
-                      <Badge tone="ok" className="ml-auto shrink-0">
+                      <Badge tone="ok" className="shrink-0">
                         {notesMessage}
                       </Badge>
                     ) : null}
                   </div>
-                  {agentNotesPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{agentNotesPath}</div> : null}
-                  <textarea
-                    value={agentNotes}
-                    onChange={(event) => {
-                      setAgentNotes(event.target.value);
-                      setNotesMessage("");
-                    }}
-                    disabled={!agentNotesLoaded}
-                    placeholder={agentNotesLoaded ? "写给智能体的全局规则与偏好，会注入每次审批与执行……" : "核心未连接，无法加载 AGENTS.md"}
-                    className="min-h-48 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:border-primary disabled:bg-muted"
-                  />
-                  <div className="mt-4 flex justify-end">
-                    <Button type="submit" disabled={savingNotes || !agentNotesLoaded}>
-                      {savingNotes ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                      保存
-                    </Button>
-                  </div>
-                </form>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    写给智能体的全局规则与偏好（AGENTS.md），会注入每一次规划、审批与执行。
+                  </p>
+                  {agentNotesPath ? <p className="mt-1 truncate text-xs text-muted-foreground/70">{agentNotesPath}</p> : null}
+                  <form onSubmit={saveNotes} className="mt-4">
+                    <textarea
+                      value={agentNotes}
+                      onChange={(event) => {
+                        setAgentNotes(event.target.value);
+                        setNotesMessage("");
+                      }}
+                      disabled={!agentNotesLoaded}
+                      placeholder={agentNotesLoaded ? "例如：回复使用中文；改动 Unity 工程前先列出计划；禁止删除任何资源文件……" : "核心未连接，无法加载 AGENTS.md"}
+                      className="min-h-56 w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm leading-relaxed outline-none focus:border-primary disabled:bg-muted"
+                    />
+                    <div className="mt-3 flex justify-end">
+                      <Button type="submit" disabled={savingNotes || !agentNotesLoaded}>
+                        {savingNotes ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                        保存
+                      </Button>
+                    </div>
+                  </form>
+                </section>
               </div>
             </div>
           ) : needsApiSetup ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-              <div className="w-full max-w-4xl">
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-8">
+              <div className="w-full max-w-2xl">
+                <h1 className="text-2xl font-semibold tracking-tight">连接模型供应商</h1>
+                <p className="mt-1 mb-6 text-sm text-muted-foreground">首次使用需要配置 API 供应商与模型，保存后即可开始对话。</p>
                 <ProviderSetup
                   provider={apiProvider}
                   apiKey={apiKey}
                   baseUrl={apiBaseUrl}
                   model={apiModel}
                   saving={savingApiConfig}
-                  onProviderChange={(provider) => {
-                    setApiProvider(provider);
-                    setApiModel(defaultModelForProvider(provider));
-                    setApiBaseUrl(defaultBaseUrlForProvider(provider));
-                  }}
+                  models={modelOptions}
+                  loadingModels={loadingModels}
+                  modelsError={modelsError}
+                  keySaved={apiKeySaved}
+                  onLoadModels={() => void loadModels()}
+                  onProviderChange={handleProviderChange}
                   onApiKeyChange={setApiKey}
                   onBaseUrlChange={setApiBaseUrl}
                   onModelChange={setApiModel}
@@ -788,7 +950,7 @@ export default function App() {
                   sending={sending}
                   permission={permission}
                   statusLabel={agentModeLabel}
-                  projectLabel={projectItems[0]?.name || ""}
+                  projectLabel={activeProjectPath ? activeProjectName : ""}
                   onSubmit={submitMessage}
                   onSwitchMode={switchMode}
                 />
@@ -827,7 +989,7 @@ export default function App() {
                     sending={sending}
                     permission={permission}
                     statusLabel={agentModeLabel}
-                    projectLabel={projectItems[0]?.name || ""}
+                    projectLabel={activeProjectPath ? activeProjectName : ""}
                     onSubmit={submitMessage}
                     onSwitchMode={switchMode}
                     compact
@@ -892,13 +1054,13 @@ function Composer({
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   return (
-    <form onSubmit={onSubmit} className="overflow-hidden rounded-3xl bg-muted/70 shadow-composer">
+    <form onSubmit={onSubmit} className="rounded-3xl bg-muted/70 shadow-composer">
       <div className={cn("rounded-3xl border border-border bg-card", compact ? "p-3" : "p-4")}>
         <textarea
           value={input}
           onChange={(event) => setInput(event.target.value)}
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-          placeholder="尽管问"
+          placeholder="随心输入"
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
               onSubmit();
@@ -917,6 +1079,7 @@ function Composer({
                 <span className="truncate">{executionModeLabel(currentMode)}</span>
                 <ChevronDown className="h-3.5 w-3.5 shrink-0" />
               </button>
+              {modeMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setModeMenuOpen(false)} /> : null}
               {modeMenuOpen ? (
                 <div className="absolute bottom-10 left-0 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
                   {EXECUTION_MODES.map((mode) => (
@@ -956,9 +1119,8 @@ function Composer({
         </div>
       </div>
       <div className="flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
-        <Folder className="h-4 w-4 shrink-0" />
-        <span className="truncate">{projectLabel ? `进入 ${projectLabel} 工作` : "进入项目工作"}</span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
+        <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : "临时对话 · 不绑定项目"}</span>
       </div>
     </form>
   );
@@ -970,6 +1132,11 @@ function ProviderSetup({
   baseUrl,
   model,
   saving,
+  models,
+  loadingModels,
+  modelsError,
+  keySaved = false,
+  onLoadModels,
   onProviderChange,
   onApiKeyChange,
   onBaseUrlChange,
@@ -981,6 +1148,11 @@ function ProviderSetup({
   baseUrl: string;
   model: string;
   saving: boolean;
+  models: Array<{ id: string; label: string }>;
+  loadingModels: boolean;
+  modelsError: string;
+  keySaved?: boolean;
+  onLoadModels: () => void;
   onProviderChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
@@ -988,6 +1160,7 @@ function ProviderSetup({
   onSubmit: (event?: FormEvent) => void;
 }) {
   const requiresBaseUrl = provider === "openai" || provider === "openai-compatible" || provider === "ollama" || provider === "vertexai";
+  const hasModelList = models.length > 0;
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -1011,12 +1184,13 @@ function ProviderSetup({
               value={apiKey}
               onChange={(event) => onApiKeyChange(event.target.value)}
               type="password"
-              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              placeholder={keySaved ? "已保存密钥，留空即沿用" : "输入供应商 API Key"}
+              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
               autoComplete="off"
             />
           ) : (
             <input
-              value=""
+              value="无需密钥"
               readOnly
               className="h-10 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground outline-none"
             />
@@ -1032,15 +1206,51 @@ function ProviderSetup({
           </FieldLabel>
         ) : null}
         <FieldLabel label="模型">
-          <input
-            value={model}
-            onChange={(event) => onModelChange(event.target.value)}
-            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
-          />
+          <div className="flex min-w-0 items-center gap-2">
+            {hasModelList ? (
+              <select
+                value={models.some((item) => item.id === model) ? model : ""}
+                onChange={(event) => onModelChange(event.target.value)}
+                className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              >
+                {!models.some((item) => item.id === model) ? (
+                  <option value="" disabled>
+                    请选择模型
+                  </option>
+                ) : null}
+                {models.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label || item.id}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={model}
+                onChange={(event) => onModelChange(event.target.value)}
+                placeholder="点击右侧刷新拉取模型列表，或手动填写"
+                className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+              />
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 shrink-0 gap-2 px-3 text-sm"
+              onClick={onLoadModels}
+              disabled={loadingModels || saving}
+            >
+              {loadingModels ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              刷新模型列表
+            </Button>
+          </div>
+          {modelsError ? <div className="mt-1.5 text-xs text-destructive/80">{modelsError}</div> : null}
+          {hasModelList && !modelsError ? (
+            <div className="mt-1.5 text-xs text-muted-foreground">已拉取 {models.length} 个可用模型</div>
+          ) : null}
         </FieldLabel>
       </div>
       <div className="mt-5 flex justify-end">
-        <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim()) || !model.trim()} type="submit">
+        <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           保存
         </Button>
@@ -1607,12 +1817,25 @@ function SidebarSection({ title, children }: { title: string; children: ReactNod
   );
 }
 
-function SidebarProject({ name, meta, active = false }: { name: string; meta?: string; active?: boolean }) {
+function SidebarProject({
+  name,
+  meta,
+  active = false,
+  onClick,
+}: {
+  name: string;
+  meta?: string;
+  active?: boolean;
+  onClick?: () => void;
+}) {
   return (
     <button
+      onClick={onClick}
+      disabled={!onClick}
       className={cn(
         "flex h-11 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-        active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        active ? "bg-muted text-foreground" : "text-muted-foreground",
+        onClick ? "hover:bg-muted hover:text-foreground" : "cursor-default",
       )}
     >
       <Folder className="h-4 w-4 shrink-0" />
@@ -1620,6 +1843,36 @@ function SidebarProject({ name, meta, active = false }: { name: string; meta?: s
       {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
     </button>
   );
+}
+
+function SidebarChat({
+  title,
+  active = false,
+  indent = false,
+  onClick,
+}: {
+  title: string;
+  active?: boolean;
+  indent?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex h-9 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+        indent ? "pl-9" : "",
+        active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
+      <span className="truncate">{title}</span>
+    </button>
+  );
+}
+
+function projectKey(project: { path?: string; name?: string }): string {
+  return project.path || project.name || "";
 }
 
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {
