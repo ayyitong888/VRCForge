@@ -34,6 +34,7 @@ import {
   ChatHistoryEntry,
   approveAgentApproval,
   checkSkills,
+  compactAgentHistory,
   createSkill,
   deleteSkill,
   fetchBootstrap,
@@ -370,13 +371,37 @@ export default function App() {
     return id;
   }
 
-  function compactChat() {
+  async function compactChat() {
     if (!activeChat || activeChat.items.length === 0) {
       setError("当前会话还没有可压缩的内容。");
       return;
     }
-    const summary = buildCompactSummary(activeChat.items);
-    updateChat(activeChat.id, (chat) => ({
+    const chatId = activeChat.id;
+    const items = activeChat.items;
+    setSending(true);
+    let summary = "";
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (readyEndpoint) {
+          targetEndpoint = readyEndpoint;
+        }
+      }
+      const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items));
+      summary = (payload.summary || "").trim();
+      if (summary) {
+        summary = `（模型压缩摘要，共 ${payload.entryCount ?? items.length} 条消息）\n${summary}`;
+      }
+    } catch {
+      summary = "";
+    } finally {
+      setSending(false);
+    }
+    if (!summary) {
+      summary = buildCompactSummary(items);
+    }
+    updateChat(chatId, (chat) => ({
       ...chat,
       sessionId: "",
       items: [{ id: `compact-${Date.now()}`, type: "compact", text: summary }],
@@ -391,7 +416,7 @@ export default function App() {
     }
     setError("");
     if (message === "/compact" || message.startsWith("/compact ")) {
-      compactChat();
+      void compactChat();
       setInput("");
       return;
     }

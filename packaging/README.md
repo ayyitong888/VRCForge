@@ -73,7 +73,7 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.3.1-alpha/VRCForge_Windows_x64_0.3.1-alpha.zip
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.4.0-beta/VRCForge_Windows_x64_0.4.0-beta.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1
 ```

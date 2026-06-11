@@ -17,6 +17,10 @@ This manual explains the public workflow and feature status without project-spec
 | AI face tuning history | AI 捏脸历史 | 已可用 / Available |
 | Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
+| Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
+| Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |
+| `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
+| Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Before/after screenshot comparison | 执行前后截图对比 | 开发中 / In development |
 | Wardrobe FX scanning and generation | 衣柜 FX 扫描与生成 | 开发中 / In development |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 开发中 / In development |
@@ -105,6 +109,18 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
 | Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |
+
+## Agent Workspace / Agent 工作台
+
+The desktop app provides a Codex-style agent workspace with a project sidebar and multiple chat sessions. Chats are saved locally and survive restarts; when you continue an old chat, the full transcript is replayed to the backend so context is preserved.
+
+桌面应用提供 Codex 风格的 Agent 工作台：侧栏按项目/临时对话分组，支持多会话切换。会话保存在本地，重启后仍在；继续旧会话时会把完整前文回放给后端，上下文不丢失。
+
+Composer commands / 输入框命令：
+
+- Type `/` to open the command autocomplete menu. 输入 `/` 弹出命令补全菜单。
+- `/compact` compresses the current chat history into a summary to free context. It prefers an LLM-generated summary and falls back to a local digest when the model is unavailable. `/compact` 会把当前会话历史压缩成摘要以释放上下文；优先使用模型生成摘要，模型不可用时回退本地摘要。
+- `/<skill-name> [args]` invokes an enabled skill directly. `/<skill名> [参数]` 可直接调用已启用的 skill。
 
 ## Provider Notes / 模型服务说明
 

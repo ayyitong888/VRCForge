@@ -379,6 +379,17 @@ export async function sendAgentMessage(
   });
 }
 
+export async function compactAgentHistory(
+  endpoint: string,
+  history: ChatHistoryEntry[],
+): Promise<{ ok: boolean; summary: string; provider?: string; model?: string; entryCount?: number }> {
+  return requestJson(`${endpoint}/api/app/agent/compact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ history }),
+  });
+}
+
 export async function approveAgentApproval(
   endpoint: string,
   approvalId: string,

@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.3.1--alpha-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.3.1-alpha)
+[![Version](https://img.shields.io/badge/version-v0.4.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.4.0-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.3.1-alpha
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.4.0-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.3.1-alpha.zip`
+- `VRCForge_Windows_x64_0.4.0-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -97,6 +97,11 @@ The launcher also includes uninstall buttons:
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available / 可用 |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
+| Agent workspace (Codex-style multi-chat UI) | Agent 工作台（Codex 风格多会话界面） | Available / 可用 |
+| Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
+| Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
+| `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
+| Slash-command skill invocation with autocomplete | 斜杠命令直接调用 skill（带补全菜单） | Available / 可用 |
 | Wardrobe FX authoring | 衣柜 FX 生成 | In development / 开发中 |
 | MA / VRCFury integration reading | MA / VRCFury 集成读取 | Planned / 计划中 |
 

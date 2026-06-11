@@ -34,3 +34,4 @@ Assets/VRCForge/*.log
 launcher/**/bin/
 launcher/**/obj/
 installer/out/
+tools/uv/

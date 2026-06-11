@@ -418,6 +418,10 @@ class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AgentCompactRequest(BaseModel):
+    history: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -511,7 +515,7 @@ class AgentMcpMount:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="VRCForge Dashboard", version="0.3.1-alpha")
+app = FastAPI(title="VRCForge Dashboard", version="0.4.0-beta")
 # The Tauri desktop webview runs on a different origin (tauri://localhost /
 # http://tauri.localhost in production, http://127.0.0.1:1420 in dev), so
 # without CORS headers every fetch() to this loopback server is blocked by
@@ -719,6 +723,67 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
+
+
+AGENT_COMPACT_TRANSCRIPT_MAX_CHARS = 60000
+
+
+@app.post("/api/app/agent/compact")
+def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
+    entries: list[str] = []
+    for item in request.history:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        role = "用户" if str(item.get("role") or "user").strip().lower() == "user" else "助手"
+        entries.append(f"{role}: {text}")
+    if not entries:
+        raise HTTPException(status_code=400, detail="history is empty; nothing to compact.")
+
+    settings = load_dashboard_settings(ConnectionRequest())
+    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider_display_name(settings.llm_provider)} API key is not configured; LLM compaction is unavailable.",
+        )
+
+    transcript = "\n".join(entries)
+    if len(transcript) > AGENT_COMPACT_TRANSCRIPT_MAX_CHARS:
+        transcript = transcript[-AGENT_COMPACT_TRANSCRIPT_MAX_CHARS:]
+    prompt = (
+        "你是会话压缩助手。请把下面这段用户与助手的对话历史压缩成一份中文摘要，"
+        "保留：用户的目标和需求、已经完成的事情和结果、做出的关键决定（含具体文件名/对象名/参数值）、"
+        "尚未完成或待确认的事项。省略寒暄与重复内容。摘要控制在 500 字以内。\n"
+        '只返回 JSON，格式为 {"summary": "<中文摘要>"}，不要 Markdown，不要其他文字。\n'
+        "对话历史：\n"
+        f"{transcript}"
+    )
+    try:
+        raw_response = request_llm_plan(settings, prompt)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"LLM compaction failed: {exc}") from exc
+
+    summary = ""
+    try:
+        raw_json = extract_json_block(raw_response)
+        payload = json.loads(raw_json) if raw_json else {}
+        if isinstance(payload, dict):
+            summary = str(payload.get("summary") or "").strip()
+    except Exception:  # noqa: BLE001
+        summary = ""
+    if not summary:
+        summary = str(raw_response or "").strip()
+    if not summary:
+        raise HTTPException(status_code=502, detail="LLM returned an empty summary.")
+    return {
+        "ok": True,
+        "summary": summary,
+        "provider": settings.llm_provider,
+        "model": settings.llm_model,
+        "entryCount": len(entries),
+    }
 
 
 @app.get("/api/app/agent/session/{session_id}")
