@@ -327,6 +327,30 @@ export async function saveChats<T>(endpoint: string, chats: T[]): Promise<{ ok: 
   });
 }
 
+export type ProjectPrefs = {
+  customPaths: string[];
+  hiddenPaths: string[];
+};
+
+export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs> {
+  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
+    `${endpoint}/api/app/projects/prefs`,
+  );
+  return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+}
+
+export async function saveProjectPrefs(endpoint: string, prefs: ProjectPrefs): Promise<ProjectPrefs> {
+  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
+    `${endpoint}/api/app/projects/prefs`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customPaths: prefs.customPaths, hiddenPaths: prefs.hiddenPaths }),
+    },
+  );
+  return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+}
+
 export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
   return requestJson<AgentSkillRegistry>(`${endpoint}/api/app/skills`);
 }

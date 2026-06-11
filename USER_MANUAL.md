@@ -116,6 +116,14 @@ The desktop app provides an agent workspace with a project sidebar and multiple 
 
 桌面应用提供完整的 Agent 工作台：侧栏按项目/临时对话分组，支持多会话切换。会话保存在本地，重启后仍在；继续旧会话时会把完整前文回放给后端，上下文不丢失。
 
+First launch shows a step-by-step setup wizard (core connection → model provider → Unity project) with a progress bar; each step is detected automatically and can be skipped. The sidebar offers a temporary chat and a new-project picker; a project can be chosen from the scanned list or added by typing its folder path, and project rows support right-click collapse, hide, and remove.
+
+首次启动会出现分步设置向导（核心连接 → 模型供应商 → Unity 项目），带进度条；每一步自动检测完成状态，也可以随时跳过。侧栏顶部提供「临时对话」和「新项目」；项目可以从扫描列表选择，也可以手动填入文件夹路径添加；项目行支持右键折叠、隐藏或移除。
+
+Agent replies are chat bubbles that state explicitly what the agent will do next. Command and skill executions appear as collapsed rows that expand to show the full command, output, and duration, and each turn shows its total running time. Messages typed while the agent is busy are queued and sent in order, so an ongoing task can be steered. Selecting text in a reply shows a floating toolbar to copy it, quote it into the composer, or ask about it in a new session.
+
+Agent 回复以对话气泡呈现，并显式说明接下来要做什么；命令与能力执行显示为可展开的折叠行（完整命令、输出、耗时），每轮对话都显示总运行时长。Agent 执行中输入的消息会自动排队、按顺序发送，可用来中途引导任务。选中回复中的文字会弹出浮动工具条：复制、引用到输入框，或在新会话中提问。
+
 Composer commands / 输入框命令：
 
 - Type `/` to open the command autocomplete menu. 输入 `/` 弹出命令补全菜单。

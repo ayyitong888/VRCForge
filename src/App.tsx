@@ -4,7 +4,12 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronRight,
+  Copy,
+  Eye,
+  EyeOff,
   Folder,
+  FolderPlus,
   Loader2,
   MessageSquare,
   Moon,
@@ -48,9 +53,12 @@ import {
   PermissionState,
   fetchAgentNotes,
   fetchChats,
+  fetchProjectPrefs,
   fetchProviderModels,
+  ProjectPrefs,
   rejectAgentApproval,
   saveChats,
+  saveProjectPrefs,
   saveAgentNotes,
   sendAgentMessage,
   updateApiConfig,
@@ -69,7 +77,7 @@ type BackendStartResult = {
 
 type ConversationItem =
   | { id: string; type: "user"; text: string }
-  | { id: string; type: "agent"; response: AgentRuntimeResponse }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
   | { id: string; type: "compact"; text: string };
@@ -86,6 +94,7 @@ type ChatThread = {
 };
 
 const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
+const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
@@ -130,6 +139,26 @@ export default function App() {
       return false;
     }
   });
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [onboardingMinimized, setOnboardingMinimized] = useState(false);
+  const [showProjectModal, setShowProjectModal] = useState(false);
+  const [newProjectPath, setNewProjectPath] = useState("");
+  const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
+  const [projectModalError, setProjectModalError] = useState("");
+  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
+  const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
+  const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [queued, setQueued] = useState<string[]>([]);
+  const [currentTurn, setCurrentTurn] = useState<{ text: string; startedAt: number } | null>(null);
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [apiProvider, setApiProvider] = useState("gemini");
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
@@ -151,6 +180,10 @@ export default function App() {
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const chatsLoadedRef = useRef(false);
+  const projectPrefsLoadedRef = useRef(false);
+  const chatsRef = useRef<ChatThread[]>([]);
+  const queueRef = useRef<string[]>([]);
+  const sendingRef = useRef(false);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -184,7 +217,22 @@ export default function App() {
   const needsApiSetup = runtimeConnected && Boolean(apiConfig?.apiKeyRequired && !apiConfig.apiKeyPresent);
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
 
-  const projectItems = useMemo(() => projects.slice(0, 6), [projects]);
+  const hiddenPathSet = useMemo(
+    () => new Set(projectPrefs.hiddenPaths.map((path) => path.toLowerCase())),
+    [projectPrefs.hiddenPaths],
+  );
+  const customPathSet = useMemo(
+    () => new Set(projectPrefs.customPaths.map((path) => path.toLowerCase())),
+    [projectPrefs.customPaths],
+  );
+  const projectItems = useMemo(
+    () => projects.filter((project) => !hiddenPathSet.has((project.path || "").toLowerCase())).slice(0, 24),
+    [projects, hiddenPathSet],
+  );
+  const hiddenProjects = useMemo(
+    () => projects.filter((project) => hiddenPathSet.has((project.path || "").toLowerCase())),
+    [projects, hiddenPathSet],
+  );
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
@@ -212,6 +260,54 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  useEffect(() => {
+    // 屏蔽 WebView 默认右键菜单（返回/刷新/另存为等）；输入框保留原生菜单以便粘贴。
+    const handler = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && target.closest("input, textarea, [contenteditable='true']")) {
+        return;
+      }
+      event.preventDefault();
+    };
+    window.addEventListener("contextmenu", handler);
+    return () => window.removeEventListener("contextmenu", handler);
+  }, []);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects));
+    } catch {
+      // 忽略持久化失败
+    }
+  }, [collapsedProjects]);
+
+  useEffect(() => {
+    if (!runtimeConnected || projectPrefsLoadedRef.current) {
+      return;
+    }
+    projectPrefsLoadedRef.current = true;
+    void fetchProjectPrefs(endpoint)
+      .then(setProjectPrefs)
+      .catch(() => {
+        projectPrefsLoadedRef.current = false;
+      });
+  }, [runtimeConnected, endpoint]);
+
+  useEffect(() => {
+    // 引导最小化期间，当前步骤完成后自动弹回向导。
+    if (!showOnboarding || !onboardingMinimized) {
+      return;
+    }
+    const stepStates = [runtimeConnected, Boolean(apiConfig?.apiKeyPresent), projectItems.length > 0];
+    if (stepStates[Math.min(onboardingStep, stepStates.length - 1)]) {
+      setOnboardingMinimized(false);
+    }
+  }, [showOnboarding, onboardingMinimized, onboardingStep, runtimeConnected, apiConfig?.apiKeyPresent, projectItems.length]);
 
   useEffect(() => {
     void startRuntime();
@@ -430,7 +526,7 @@ export default function App() {
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
     const message = input.trim();
-    if (!message || sending) {
+    if (!message) {
       return;
     }
     setError("");
@@ -439,31 +535,58 @@ export default function App() {
       setInput("");
       return;
     }
-    setSending(true);
+    setInput("");
+    if (sendingRef.current) {
+      // 正在执行时继续输入：进入队列，当前任务结束后按顺序自动发送（引导对话）。
+      queueRef.current.push(message);
+      setQueued([...queueRef.current]);
+      return;
+    }
     const chatId = ensureActiveChat();
-    const chatSessionId = activeChat?.sessionId || "";
-    const history = activeChat && activeChat.items.length > 0 ? buildChatHistory(activeChat.items) : [];
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      let next: string | undefined = message;
+      while (next !== undefined) {
+        await runSingleTurn(chatId, next);
+        next = queueRef.current.shift();
+        setQueued([...queueRef.current]);
+      }
+    } finally {
+      queueRef.current = [];
+      setQueued([]);
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }
+
+  async function runSingleTurn(chatId: string, message: string) {
+    const chat = chatsRef.current.find((item) => item.id === chatId);
+    const chatSessionId = chat?.sessionId || "";
+    const history = chat && chat.items.length > 0 ? buildChatHistory(chat.items) : [];
+    const startedAt = Date.now();
+    setCurrentTurn({ text: message, startedAt });
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
-          return;
+          throw new Error("核心未连接，消息未发送。");
         }
         targetEndpoint = readyEndpoint;
       }
-      setInput("");
       const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
-      updateChat(chatId, (chat) => ({
-        ...chat,
-        title: chat.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
-        items: [...chat.items, userItem],
+      updateChat(chatId, (current) => ({
+        ...current,
+        title: current.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
+        items: [...current.items, userItem],
       }));
       const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined, history);
-      updateChat(chatId, (chat) => ({
-        ...chat,
-        sessionId: response.sessionId || response.session_id || chat.sessionId,
-        items: [...chat.items, { id: response.turnId || response.turn_id, type: "agent", response }],
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      updateChat(chatId, (current) => ({
+        ...current,
+        sessionId: response.sessionId || response.session_id || current.sessionId,
+        items: [...current.items, { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds }],
       }));
       await refresh(targetEndpoint);
     } catch (cause) {
@@ -471,7 +594,7 @@ export default function App() {
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       setError(text);
     } finally {
-      setSending(false);
+      setCurrentTurn(null);
     }
   }
 
@@ -563,6 +686,134 @@ export default function App() {
     }
   }
 
+  function newTemporaryChat() {
+    setActiveView("chat");
+    setActiveProjectPath("");
+    setError("");
+    const existingEmpty = chats.find((chat) => !chat.projectPath && chat.items.length === 0);
+    if (existingEmpty) {
+      setActiveChatId(existingEmpty.id);
+      return;
+    }
+    const id = `chat-${Date.now()}`;
+    setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", items: [] }, ...list]);
+    setActiveChatId(id);
+  }
+
+  function handleConversationMouseUp() {
+    window.setTimeout(() => {
+      const selection = window.getSelection();
+      const text = selection?.toString().trim() ?? "";
+      if (!text || !selection || selection.rangeCount === 0) {
+        setSelectionMenu(null);
+        return;
+      }
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      setSelectionMenu({ x: rect.left + rect.width / 2, y: rect.top, text });
+    }, 0);
+  }
+
+  function clearSelectionMenu() {
+    setSelectionMenu(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function copySelection(text: string) {
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+    clearSelectionMenu();
+  }
+
+  function addSelectionToComposer(text: string) {
+    const quoted = quoteLines(text);
+    setInput((current) => (current.trim() ? `${current.trimEnd()}\n\n${quoted}\n` : `${quoted}\n`));
+    clearSelectionMenu();
+  }
+
+  function askInNewSession(text: string) {
+    // 基于选中内容开新会话提问——后续多 agent 的入口。
+    const projectPath = activeChat?.projectPath ?? activeProjectPath;
+    const id = `chat-${Date.now()}`;
+    setChats((list) => [{ id, sessionId: "", title: "", projectPath, items: [] }, ...list]);
+    setActiveChatId(id);
+    setActiveView("chat");
+    setInput(`${quoteLines(text)}\n`);
+    clearSelectionMenu();
+  }
+
+  async function persistProjectPrefs(next: ProjectPrefs): Promise<ProjectPrefs | null> {
+    setSavingProjectPrefs(true);
+    try {
+      const saved = await saveProjectPrefs(endpoint, next);
+      setProjectPrefs(saved);
+      await refreshSilently();
+      return saved;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    } finally {
+      setSavingProjectPrefs(false);
+    }
+  }
+
+  async function addProjectPath() {
+    const path = newProjectPath.trim();
+    if (!path || savingProjectPrefs) {
+      return;
+    }
+    setProjectModalError("");
+    const saved = await persistProjectPrefs({
+      ...projectPrefs,
+      customPaths: [...projectPrefs.customPaths, path],
+    });
+    if (!saved) {
+      return;
+    }
+    const accepted = saved.customPaths.some((item) => item.replace(/\//g, "\\").toLowerCase() === path.replace(/\//g, "\\").toLowerCase());
+    if (!accepted) {
+      setProjectModalError("路径不存在或不可访问，请确认这是一个文件夹路径。");
+      return;
+    }
+    setNewProjectPath("");
+    setShowProjectModal(false);
+    try {
+      await refresh();
+    } catch {
+      // 列表会随下一次轮询更新
+    }
+    selectProject(path);
+  }
+
+  function removeCustomProject(path: string) {
+    void persistProjectPrefs({
+      ...projectPrefs,
+      customPaths: projectPrefs.customPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()),
+    });
+  }
+
+  function hideProject(path: string) {
+    if (!path) {
+      return;
+    }
+    void persistProjectPrefs({
+      ...projectPrefs,
+      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()), path],
+    });
+    if (activeProjectPath.toLowerCase() === path.toLowerCase()) {
+      newConversation("");
+    }
+  }
+
+  function unhideProject(path: string) {
+    void persistProjectPrefs({
+      ...projectPrefs,
+      hiddenPaths: projectPrefs.hiddenPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()),
+    });
+  }
+
+  function toggleProjectCollapse(key: string) {
+    setCollapsedProjects((current) => ({ ...current, [key]: !current[key] }));
+  }
+
   function finishOnboarding() {
     try {
       window.localStorage.setItem(ONBOARDING_FLAG_KEY, "true");
@@ -570,6 +821,7 @@ export default function App() {
       // 忽略持久化失败，仅本次会话关闭引导。
     }
     setShowOnboarding(false);
+    setOnboardingMinimized(false);
   }
 
   function restartOnboarding() {
@@ -579,6 +831,8 @@ export default function App() {
       // 忽略
     }
     setActiveView("chat");
+    setOnboardingStep(0);
+    setOnboardingMinimized(false);
     setShowOnboarding(true);
   }
 
@@ -828,23 +1082,26 @@ export default function App() {
 
           <nav className="mt-5 space-y-1">
             <button
-              onClick={() => newConversation()}
+              onClick={newTemporaryChat}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-                activeView === "chat" && !activeChatId
+                activeView === "chat" && !activeProjectPath && !activeChat
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
               )}
             >
-              <Plus className="h-4 w-4 shrink-0" />
-              <span className="truncate">新对话</span>
-            </button>
-            <button
-              onClick={() => newConversation("")}
-              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
               <MessageSquare className="h-4 w-4 shrink-0" />
               <span className="truncate">临时对话</span>
+            </button>
+            <button
+              onClick={() => {
+                setProjectModalError("");
+                setShowProjectModal(true);
+              }}
+              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <FolderPlus className="h-4 w-4 shrink-0" />
+              <span className="truncate">新项目</span>
             </button>
             <button
               onClick={() => void openSkills()}
@@ -865,15 +1122,25 @@ export default function App() {
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
                 const projectChats = sortChatsByPin(chats.filter((chat) => chat.projectPath === key));
+                const collapsed = Boolean(collapsedProjects[key]);
                 return (
                   <div key={key} className="min-w-0">
                     <SidebarProject
                       name={project.name || project.path || "Unity Project"}
                       meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
                       active={activeView === "chat" && key === activeProjectPath}
+                      collapsed={collapsed}
+                      hasChats={projectChats.length > 0}
+                      onToggleCollapse={() => toggleProjectCollapse(key)}
                       onClick={() => selectProject(key)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setProjectMenu({ projectPath: key, x: event.clientX, y: event.clientY });
+                      }}
                     />
-                    {projectChats.map((chat) => (
+                    {collapsed
+                      ? null
+                      : projectChats.map((chat) => (
                       <SidebarChat
                         key={chat.id}
                         title={chat.title || "新对话"}
@@ -1160,15 +1427,32 @@ export default function App() {
                     name: project.name || shortPath(project.path || ""),
                   }))}
                   onBindProject={bindProject}
+                  queuedCount={queued.length}
                 />
               </div>
             </div>
           ) : (
             <>
-              <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+              <div
+                className="min-h-0 flex-1 overflow-auto px-6 py-8"
+                onMouseUp={handleConversationMouseUp}
+                onScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
+              >
                 <div className="mx-auto max-w-4xl space-y-5">
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
+                  ))}
+                  {sending && currentTurn ? <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} /> : null}
+                  {queued.map((text, index) => (
+                    <div key={`queued-${index}`} className="flex justify-end opacity-60">
+                      <div className="max-w-[78%] rounded-2xl bg-primary/80 px-4 py-3 text-sm text-primary-foreground">
+                        <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          已排队 · 当前任务结束后自动发送
+                        </div>
+                        <p className="whitespace-pre-wrap break-words">{text}</p>
+                      </div>
+                    </div>
                   ))}
                   <div ref={conversationEndRef} />
                 </div>
@@ -1206,6 +1490,7 @@ export default function App() {
                       name: project.name || shortPath(project.path || ""),
                     }))}
                     onBindProject={bindProject}
+                    queuedCount={queued.length}
                   />
                 </div>
               </div>
@@ -1214,61 +1499,365 @@ export default function App() {
         </section>
       </div>
 
-      {showOnboarding ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-          <section className="w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-panel">
-            <div className="flex min-w-0 items-center gap-3">
-              <Sparkles className="h-5 w-5 shrink-0 text-primary" />
-              <h2 className="truncate text-lg font-semibold">欢迎使用 VRCForge</h2>
-            </div>
-            <p className="mt-3 text-sm text-muted-foreground">
-              三步就能开始：下面会实时显示每一步的完成状态，之后也可以在「设置 → 重新引导」再看一次。
-            </p>
-            <div className="mt-5 grid gap-3">
-              {[
-                {
-                  done: runtimeConnected,
-                  title: "1. 连接核心与 Unity",
-                  desc: runtimeConnected ? "核心已在线。" : "等待核心启动；若长时间离线，点右上角「重连」。",
-                },
-                {
-                  done: Boolean(apiConfig?.apiKeyPresent),
-                  title: "2. 绑定模型供应商",
-                  desc: apiConfig?.apiKeyPresent
-                    ? "模型密钥已配置，可以自然语言对话。"
-                    : "在设置里填入供应商密钥，否则只能用本地关键词指令。",
-                },
-                {
-                  done: projectItems.length > 0,
-                  title: "3. 选择 Unity 项目",
-                  desc:
-                    projectItems.length > 0
-                      ? "已发现 Unity 项目，左侧边栏可直接进入。"
-                      : "暂未发现项目；也可以先用临时对话，它同样有完整智能体能力。",
-                },
-              ].map((step) => (
-                <div key={step.title} className="flex min-w-0 items-start gap-3 rounded-xl border border-border px-4 py-3">
-                  <Check className={cn("mt-0.5 h-4 w-4 shrink-0", step.done ? "text-primary" : "opacity-20")} />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">{step.title}</div>
-                    <div className="text-xs text-muted-foreground">{step.desc}</div>
+      {showOnboarding && !onboardingMinimized
+        ? (() => {
+            const steps = [
+              {
+                title: "连接核心与 Unity",
+                done: runtimeConnected,
+                doneDesc: "核心已在线，连接正常。",
+                todoDesc: "正在等待核心启动，连上后这一步会自动完成；若长时间离线，点下方「重试连接」。",
+                action: (
+                  <Button variant="outline" disabled={loading} onClick={() => void startRuntime()}>
+                    <RefreshCw className="mr-1 h-4 w-4" />
+                    {loading ? "连接中…" : "重试连接"}
+                  </Button>
+                ),
+              },
+              {
+                title: "绑定模型供应商",
+                done: Boolean(apiConfig?.apiKeyPresent),
+                doneDesc: "模型密钥已配置，可以用自然语言对话了。",
+                todoDesc: "去设置里选择供应商并填入密钥，保存成功后这一步会自动完成，引导会自己回来。",
+                action: (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setOnboardingMinimized(true);
+                      void openSettings();
+                    }}
+                  >
+                    <Settings className="mr-1 h-4 w-4" />
+                    去设置
+                  </Button>
+                ),
+              },
+              {
+                title: "选择 Unity 项目",
+                done: projectItems.length > 0,
+                doneDesc: "已发现 Unity 项目，左侧边栏可直接进入。",
+                todoDesc: "扫描到项目后这一步自动完成；也可以用「新项目」手动填路径，或先跳过用临时对话。",
+                action: (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setOnboardingMinimized(true);
+                      setProjectModalError("");
+                      setShowProjectModal(true);
+                    }}
+                  >
+                    <FolderPlus className="mr-1 h-4 w-4" />
+                    新项目
+                  </Button>
+                ),
+              },
+            ];
+            const step = steps[Math.min(onboardingStep, steps.length - 1)];
+            const isLast = onboardingStep >= steps.length - 1;
+            return (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
+                <section className="w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-panel">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <Sparkles className="h-5 w-5 shrink-0 text-primary" />
+                    <h2 className="truncate text-lg font-semibold">欢迎使用 VRCForge</h2>
+                    <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                      第 {onboardingStep + 1} / {steps.length} 步
+                    </span>
                   </div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <Button
-                variant="outline"
+                  <div className="mt-4 flex items-center gap-2">
+                    {steps.map((item, index) => (
+                      <div
+                        key={item.title}
+                        className={cn(
+                          "h-1.5 flex-1 rounded-full transition-colors",
+                          index < onboardingStep || item.done
+                            ? "bg-primary"
+                            : index === onboardingStep
+                              ? "bg-primary/40"
+                              : "bg-muted",
+                        )}
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-5 rounded-xl border border-border px-5 py-4">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {step.done ? (
+                        <Check className="h-4 w-4 shrink-0 text-primary" />
+                      ) : (
+                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+                      )}
+                      <div className="truncate text-sm font-medium">{step.title}</div>
+                      <Badge tone={step.done ? "ok" : "muted"} className="ml-auto shrink-0">
+                        {step.done ? "已完成" : "检测中"}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>
+                    {!step.done ? <div className="mt-4">{step.action}</div> : null}
+                  </div>
+                  <div className="mt-6 flex items-center gap-3">
+                    <Button variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>
+                      跳过引导
+                    </Button>
+                    <div className="ml-auto flex gap-3">
+                      {onboardingStep > 0 ? (
+                        <Button variant="outline" onClick={() => setOnboardingStep((value) => Math.max(0, value - 1))}>
+                          上一步
+                        </Button>
+                      ) : null}
+                      <Button
+                        disabled={!step.done}
+                        onClick={() => {
+                          if (isLast) {
+                            finishOnboarding();
+                          } else {
+                            setOnboardingStep((value) => value + 1);
+                          }
+                        }}
+                      >
+                        {isLast ? "开始使用" : "下一步"}
+                      </Button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            );
+          })()
+        : null}
+
+      {showOnboarding && onboardingMinimized ? (
+        <button
+          type="button"
+          onClick={() => setOnboardingMinimized(false)}
+          className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm shadow-panel transition-colors hover:bg-muted"
+        >
+          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+          <span>继续新手引导（第 {onboardingStep + 1} / 3 步）</span>
+        </button>
+      ) : null}
+
+      {showProjectModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
+          <section className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
+            <div className="flex min-w-0 items-center gap-2">
+              <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
+              <h2 className="truncate text-lg font-semibold">选择 Unity 项目</h2>
+              <button
+                type="button"
+                className="ml-auto shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => {
-                  finishOnboarding();
-                  void openSettings();
+                  setShowProjectModal(false);
+                  setProjectModalError("");
                 }}
               >
-                去设置
-              </Button>
-              <Button onClick={finishOnboarding}>开始使用</Button>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+              <div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">已扫描到的项目</div>
+                {projectItems.length > 0 ? (
+                  <div className="space-y-1">
+                    {projectItems.map((project) => {
+                      const key = projectKey(project);
+                      const isCustom = customPathSet.has((project.path || "").toLowerCase());
+                      return (
+                        <div key={key} className="group flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-muted">
+                          <button
+                            type="button"
+                            className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm"
+                            onClick={() => {
+                              selectProject(key);
+                              setShowProjectModal(false);
+                              setProjectModalError("");
+                            }}
+                          >
+                            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                            <span className="min-w-0 truncate">{project.name || shortPath(project.path || "")}</span>
+                            <span className="min-w-0 truncate text-xs text-muted-foreground">{project.path}</span>
+                          </button>
+                          {isCustom ? (
+                            <button
+                              type="button"
+                              title="从列表移除（不删除文件）"
+                              disabled={savingProjectPrefs}
+                              className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-background hover:text-destructive group-hover:opacity-100"
+                              onClick={() => removeCustomProject(project.path || "")}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                    暂未扫描到项目，可以在下方手动填入 Unity 工程文件夹路径。
+                  </p>
+                )}
+              </div>
+              {hiddenProjects.length > 0 ? (
+                <div>
+                  <div className="mb-2 text-xs font-medium text-muted-foreground">已隐藏的项目</div>
+                  <div className="space-y-1">
+                    {hiddenProjects.map((project) => (
+                      <div key={project.path} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
+                        <EyeOff className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{project.name || shortPath(project.path || "")}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-7 shrink-0 px-2 text-xs"
+                          disabled={savingProjectPrefs}
+                          onClick={() => unhideProject(project.path || "")}
+                        >
+                          <Eye className="mr-1 h-3.5 w-3.5" />
+                          恢复
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">手动添加项目文件夹</div>
+                <div className="flex gap-2">
+                  <input
+                    value={newProjectPath}
+                    onChange={(event) => {
+                      setNewProjectPath(event.target.value);
+                      setProjectModalError("");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void addProjectPath();
+                      }
+                    }}
+                    placeholder="例如 D:\Unity\MyAvatarProject"
+                    className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+                  />
+                  <Button type="button" disabled={savingProjectPrefs || !newProjectPath.trim()} onClick={() => void addProjectPath()}>
+                    {savingProjectPrefs ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    添加
+                  </Button>
+                </div>
+                {projectModalError ? <p className="mt-2 text-xs text-destructive">{projectModalError}</p> : null}
+                <p className="mt-2 text-xs text-muted-foreground">填入 Unity 工程根目录的完整路径，添加后会保存到本地，下次启动仍然可见。</p>
+              </div>
             </div>
           </section>
+        </div>
+      ) : null}
+
+      {projectMenu
+        ? (() => {
+            const menuPath = projectMenu.projectPath;
+            const menuKey = menuPath.toLowerCase();
+            const isCustom = customPathSet.has(menuKey);
+            const collapsed = Boolean(collapsedProjects[menuPath]);
+            return (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setProjectMenu(null)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setProjectMenu(null);
+                  }}
+                />
+                <div
+                  className="fixed z-50 w-44 rounded-lg border border-border bg-card p-1.5 shadow-panel"
+                  style={{
+                    left: Math.min(projectMenu.x, window.innerWidth - 190),
+                    top: Math.min(projectMenu.y, window.innerHeight - 190),
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      newConversation(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    <Plus className="h-4 w-4 shrink-0" />
+                    在此项目新对话
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      toggleProjectCollapse(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    {collapsed ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                    {collapsed ? "展开对话" : "折叠对话"}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      hideProject(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    <EyeOff className="h-4 w-4 shrink-0" />
+                    隐藏项目
+                  </button>
+                  {isCustom ? (
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+                      onClick={() => {
+                        removeCustomProject(menuPath);
+                        setProjectMenu(null);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4 shrink-0" />
+                      移除项目
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            );
+          })()
+        : null}
+
+      {selectionMenu ? (
+        <div
+          className="fixed z-50 flex items-center gap-0.5 rounded-lg border border-border bg-card p-1 shadow-panel"
+          style={{
+            left: Math.max(8, Math.min(selectionMenu.x - 130, window.innerWidth - 270)),
+            top: Math.max(8, selectionMenu.y - 44),
+          }}
+          onMouseUp={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            onClick={() => copySelection(selectionMenu.text)}
+          >
+            <Copy className="h-3.5 w-3.5" />
+            复制
+          </button>
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            onClick={() => addSelectionToComposer(selectionMenu.text)}
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            添加到对话
+          </button>
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            onClick={() => askInNewSession(selectionMenu.text)}
+          >
+            <Bot className="h-3.5 w-3.5" />
+            新会话提问
+          </button>
         </div>
       ) : null}
 
@@ -1398,6 +1987,7 @@ function Composer({
   compact = false,
   projects = [],
   onBindProject,
+  queuedCount = 0,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -1411,6 +2001,7 @@ function Composer({
   compact?: boolean;
   projects?: Array<{ key: string; name: string }>;
   onBindProject?: (path: string) => void;
+  queuedCount?: number;
 }) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [bindMenuOpen, setBindMenuOpen] = useState(false);
@@ -1495,9 +2086,15 @@ function Composer({
             <Badge tone="muted" className="max-w-[220px] truncate">
               {statusLabel}
             </Badge>
+            {sending ? (
+              <Badge tone="warn" className="max-w-[240px] truncate">
+                <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
+                执行中 · 继续输入可排队引导{queuedCount > 0 ? `（${queuedCount} 条待发）` : ""}
+              </Badge>
+            ) : null}
           </div>
-          <Button className="h-10 w-10 rounded-full px-0" disabled={sending || !input.trim()} type="submit">
-            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          <Button className="h-10 w-10 rounded-full px-0" disabled={!input.trim()} type="submit">
+            <Send className="h-4 w-4" />
           </Button>
         </div>
       </div>
@@ -2140,95 +2737,162 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
     response.plan.nextStep === "await_user_instruction" &&
     !response.plan.skillTool &&
     !response.plan.shellCommand;
+  const nextStep = response.plan.nextStep || "";
+  const showIntent = Boolean(nextStep) && nextStep !== "await_user_instruction" && nextStep !== "done";
+
+  if (localIdle) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[85%] space-y-3 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+          <p className="text-muted-foreground">
+            这句话我还没办法直接理解——当前在用本地关键词规划，只认识「日志、截图、表情、材质、健康检查」这类固定指令。
+          </p>
+          <p className="text-muted-foreground">
+            在设置里绑定模型供应商后，就能用自然语言交流并自动规划工具调用；如果已绑定密钥，说明 AI 规划还没启用，重启核心或检查供应商配置即可。
+          </p>
+          <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenSettings?.()}>
+            <Settings className="mr-1 h-3.5 w-3.5" />
+            打开设置
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-3">
-      <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
-        <div className="flex min-w-0 items-center gap-2">
-          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-          <div className="truncate text-sm font-semibold">方案</div>
-          <Badge tone="muted" className="ml-auto shrink-0">
-            {displayPlanner(response.plan.planner)}
-          </Badge>
-        </div>
-        {localIdle ? (
-          <div className="mt-4 space-y-3 text-sm">
-            <p className="text-muted-foreground">
-              这句话我还没办法直接理解——当前在用本地关键词规划，只认识「日志、截图、表情、材质、健康检查」这类固定指令。
+    <div className="flex justify-start">
+      <div className="w-full max-w-[85%] space-y-2">
+        <div className="rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+          <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.summary}</p>
+          {showIntent ? (
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-primary">
+              <Sparkles className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                我接下来会{displayStep(nextStep)}
+                {response.plan.skillTool ? `：${response.plan.skillTool}` : ""}
+              </span>
             </p>
-            <p className="text-muted-foreground">
-              在设置里绑定模型供应商后，就能用自然语言交流并自动规划工具调用；如果已绑定密钥，说明 AI 规划还没启用，重启核心或检查供应商配置即可。
-            </p>
-            <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenSettings?.()}>
-              <Settings className="mr-1 h-3.5 w-3.5" />
-              打开设置
-            </Button>
-          </div>
-        ) : (
-          <div className="mt-4 grid gap-3">
-            <DataLine label="摘要" value={response.plan.summary} />
-            <DataLine label="下一步" value={displayStep(response.plan.nextStep || "-")} />
-            {response.plan.skillTool ? <DataLine label="能力" value={response.plan.skillTool} mono /> : null}
-            {response.plan.shellCommand ? <DataLine label="命令" value={response.plan.shellCommand} mono /> : null}
-          </div>
-        )}
-      </section>
-
-      {shell?.classification ? (
-        <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
-          <div className="mb-3 flex items-center gap-2">
-            <TerminalSquare className="h-4 w-4 text-primary" />
-            <div className="truncate text-sm font-semibold">命令</div>
-            <Badge tone={riskTone(shell.classification.risk)} className="ml-auto shrink-0">
-              {shell.classification.risk}
-            </Badge>
-          </div>
-          <DataLine label="目录" value={shell.classification.cwd} />
-          <div className="mt-3 overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
-            <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
-          </div>
-          {shell.classification.reasons.length ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {shell.classification.reasons.map((reason) => (
-                <Badge key={reason} tone="muted" className="max-w-full">
-                  <span className="truncate">{reason}</span>
-                </Badge>
-              ))}
-            </div>
           ) : null}
-        </section>
-      ) : null}
-
-      {skill ? <SkillResultCard skill={skill} /> : null}
-      {shell?.result ? <ShellResultCard title="执行结果" result={shell.result} /> : null}
-      {awaitingApproval ? (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          <span>等待确认 — 请在下方输入框上方的审批区处理</span>
+          <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+            <span>{displayPlanner(response.plan.planner)}</span>
+            {item.elapsedSeconds ? <span>· 已运行 {formatDuration(item.elapsedSeconds)}</span> : null}
+          </div>
         </div>
-      ) : null}
-      {shell?.error ? <ShellResultCard title="执行错误" error={shell.error} /> : null}
+
+        {shell?.classification ? (
+          <RunRow
+            icon="shell"
+            title={shell.classification.command}
+            statusTone={shell.result ? (shell.result.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
+            statusLabel={
+              shell.result
+                ? `退出码 ${shell.result.exitCode} · ${formatDuration(shell.result.durationSeconds)}`
+                : awaitingApproval
+                  ? "等待确认"
+                  : `风险 ${shell.classification.risk}`
+            }
+          >
+            <DataLine label="目录" value={shell.classification.cwd} />
+            <div className="overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
+              <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
+            </div>
+            {shell.classification.reasons.length ? (
+              <div className="flex flex-wrap gap-2">
+                {shell.classification.reasons.map((reason) => (
+                  <Badge key={reason} tone="muted" className="max-w-full">
+                    <span className="truncate">{reason}</span>
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
+            {shell.result ? (
+              <>
+                <DataLine label="耗时" value={formatDuration(shell.result.durationSeconds)} />
+                <OutputBlock label="输出" value={shell.result.stdout} />
+                {shell.result.stderr ? <OutputBlock label="错误输出" value={shell.result.stderr} danger /> : null}
+              </>
+            ) : null}
+          </RunRow>
+        ) : null}
+
+        {skill ? (
+          <RunRow icon="skill" title={skill.tool || "能力调用"} statusTone={skillTone(skill)} statusLabel={displaySkillStatus(skill.status)}>
+            <DataLine label="工具" value={skill.tool || "-"} mono />
+            {skill.category ? <DataLine label="类别" value={skill.category} /> : null}
+            {skill.error ? <DataLine label="错误" value={skill.error} /> : null}
+            {skill.result !== undefined ? <OutputBlock label="数据" value={formatPayload(skill.result)} /> : null}
+          </RunRow>
+        ) : null}
+
+        {awaitingApproval ? (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span>等待确认 — 请在下方输入框上方的审批区处理</span>
+          </div>
+        ) : null}
+        {shell?.error ? (
+          <RunRow icon="shell" title="执行错误" statusTone="danger" statusLabel="失败">
+            <DataLine label="错误" value={shell.error} />
+          </RunRow>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function SkillResultCard({ skill }: { skill: AgentSkillResult }) {
+function RunRow({
+  icon,
+  title,
+  statusTone,
+  statusLabel,
+  children,
+}: {
+  icon: "shell" | "skill";
+  title: string;
+  statusTone: "ok" | "warn" | "danger" | "muted";
+  statusLabel: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const Icon = icon === "shell" ? TerminalSquare : Wrench;
   return (
-    <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
-      <div className="mb-3 flex min-w-0 items-center gap-2">
-        <Wrench className="h-4 w-4 shrink-0 text-primary" />
-        <div className="truncate text-sm font-semibold">能力结果</div>
-        <Badge tone={skillTone(skill)} className="ml-auto shrink-0">
-          {displaySkillStatus(skill.status)}
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <Icon className="h-3.5 w-3.5 shrink-0 text-primary" />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">{title}</span>
+        <Badge tone={statusTone} className="shrink-0">
+          {statusLabel}
         </Badge>
+      </button>
+      {open ? <div className="space-y-3 border-t border-border px-3 py-3">{children}</div> : null}
+    </div>
+  );
+}
+
+function RunningIndicator({ startedAt, text }: { startedAt: number; text: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return (
+    <div className="flex justify-start">
+      <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-panel">
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+        <span className="min-w-0 truncate">正在处理「{text}」</span>
+        <span className="shrink-0 font-mono text-xs">已运行 {formatDuration(seconds)}</span>
       </div>
-      <div className="grid gap-3">
-        <DataLine label="工具" value={skill.tool || "-"} mono />
-        {skill.category ? <DataLine label="类别" value={skill.category} /> : null}
-        {skill.error ? <DataLine label="错误" value={skill.error} /> : null}
-        {skill.result !== undefined ? <OutputBlock label="数据" value={formatPayload(skill.result)} /> : null}
-      </div>
-    </section>
+    </div>
   );
 }
 
@@ -2333,27 +2997,52 @@ function SidebarProject({
   name,
   meta,
   active = false,
+  collapsed = false,
+  hasChats = false,
   onClick,
+  onToggleCollapse,
+  onContextMenu,
 }: {
   name: string;
   meta?: string;
   active?: boolean;
+  collapsed?: boolean;
+  hasChats?: boolean;
   onClick?: () => void;
+  onToggleCollapse?: () => void;
+  onContextMenu?: (event: ReactMouseEvent) => void;
 }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={!onClick}
+    <div
+      onContextMenu={onContextMenu}
       className={cn(
-        "flex h-11 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+        "group flex h-11 w-full min-w-0 items-center rounded-md pr-1 text-sm transition-colors",
         active ? "bg-muted text-foreground" : "text-muted-foreground",
         onClick ? "hover:bg-muted hover:text-foreground" : "cursor-default",
       )}
     >
-      <Folder className="h-4 w-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{name}</span>
-      {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
-    </button>
+      <button onClick={onClick} disabled={!onClick} className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left">
+        <Folder className="h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
+      </button>
+      {onToggleCollapse ? (
+        <button
+          type="button"
+          title={collapsed ? "展开对话" : "折叠对话"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleCollapse();
+          }}
+          className={cn(
+            "shrink-0 rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground",
+            collapsed || hasChats ? "" : "opacity-0 group-hover:opacity-100",
+          )}
+        >
+          {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -2650,6 +3339,28 @@ function formatPayload(value: unknown): string {
 function shortPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).slice(-1)[0] || path;
+}
+
+function quoteLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+}
+
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds < 60) {
+    return `${seconds}秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) {
+    return rest > 0 ? `${minutes}分${rest}秒` : `${minutes}分钟`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes > 0 ? `${hours}小时${restMinutes}分` : `${hours}小时`;
 }
 
 const HISTORY_ENTRY_MAX_CHARS = 2000;

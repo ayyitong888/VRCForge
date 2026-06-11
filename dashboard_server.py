@@ -418,6 +418,13 @@ class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ProjectPrefsRequest(BaseModel):
+    custom_paths: list[str] = Field(default_factory=list, alias="customPaths")
+    hidden_paths: list[str] = Field(default_factory=list, alias="hiddenPaths")
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentCompactRequest(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -884,6 +891,68 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
     return {"ok": True, "path": str(path), "count": len(chats)}
+
+
+PROJECT_PREFS_MAX_PATHS = 64
+
+
+def project_prefs_path() -> Path:
+    return AGENT_GATEWAY.user_constraints_path.parent / "custom-projects.json"
+
+
+def load_project_prefs() -> dict[str, list[str]]:
+    path = project_prefs_path()
+    custom_paths: list[str] = []
+    hidden_paths: list[str] = []
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                custom_paths = [item for item in payload.get("customPaths") or [] if isinstance(item, str) and item.strip()]
+                hidden_paths = [item for item in payload.get("hiddenPaths") or [] if isinstance(item, str) and item.strip()]
+        except (OSError, ValueError):
+            # 配置损坏时退回空配置，不阻断主流程；下次保存会覆盖修复。
+            pass
+    return {"customPaths": custom_paths, "hiddenPaths": hidden_paths}
+
+
+@app.get("/api/app/projects/prefs")
+def read_project_prefs() -> dict[str, Any]:
+    prefs = load_project_prefs()
+    return {"ok": True, "path": str(project_prefs_path()), **prefs}
+
+
+@app.post("/api/app/projects/prefs")
+async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
+    custom_paths: list[str] = []
+    seen: set[str] = set()
+    for raw in request.custom_paths[:PROJECT_PREFS_MAX_PATHS]:
+        normalized = normalize_path_string(raw)
+        if not normalized or normalized.casefold() in seen:
+            continue
+        if not Path(normalized).is_dir():
+            continue
+        seen.add(normalized.casefold())
+        custom_paths.append(normalized)
+    hidden_paths: list[str] = []
+    hidden_seen: set[str] = set()
+    for raw in request.hidden_paths[:PROJECT_PREFS_MAX_PATHS]:
+        normalized = normalize_path_string(raw)
+        if not normalized or normalized.casefold() in hidden_seen:
+            continue
+        hidden_seen.add(normalized.casefold())
+        hidden_paths.append(normalized)
+    path = project_prefs_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
+    await EVENT_BUS.broadcast("projects", project_snapshot_payload())
+    return {"ok": True, "path": str(path), "customPaths": custom_paths, "hiddenPaths": hidden_paths}
 
 
 @app.get("/api/app/skills")
@@ -5435,6 +5504,11 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         if DASHBOARD_STATE.selected_project_path:
             selected = Path(DASHBOARD_STATE.selected_project_path)
             upsert_project(name=selected.name, path=str(selected), source="manual")
+
+        for custom_path in load_project_prefs()["customPaths"]:
+            candidate = Path(custom_path)
+            if candidate.is_dir():
+                upsert_project(name=candidate.name, path=str(candidate), source="custom")
 
         status = CURRENT_UNITY_STATUS
         if status is None:
