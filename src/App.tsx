@@ -95,6 +95,8 @@ type ChatThread = {
 
 const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
+// 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
+const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
@@ -690,6 +692,8 @@ export default function App() {
     setActiveView("chat");
     setActiveProjectPath("");
     setError("");
+    // 折叠状态下新建临时对话自动展开，避免「点了没反应」的错觉。
+    setCollapsedProjects((map) => (map[TEMP_CHATS_COLLAPSE_KEY] ? { ...map, [TEMP_CHATS_COLLAPSE_KEY]: false } : map));
     const existingEmpty = chats.find((chat) => !chat.projectPath && chat.items.length === 0);
     if (existingEmpty) {
       setActiveChatId(existingEmpty.id);
@@ -1168,7 +1172,11 @@ export default function App() {
             )}
           </SidebarSection>
 
-          <SidebarSection title="对话">
+          <SidebarSection
+            title="对话"
+            collapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
+            onToggleCollapse={() => toggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}
+          >
             {temporaryChats.length > 0 ? (
               temporaryChats.map((chat) => (
                 <SidebarChat
@@ -2984,11 +2992,35 @@ function DataLine({ label, value, mono = false }: { label: string; value: string
   );
 }
 
-function SidebarSection({ title, children }: { title: string; children: ReactNode }) {
+function SidebarSection({
+  title,
+  children,
+  collapsed = false,
+  onToggleCollapse,
+}: {
+  title: string;
+  children: ReactNode;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
   return (
     <section className="mt-8 min-w-0">
-      <div className="mb-3 px-2 text-xs font-medium text-muted-foreground">{title}</div>
-      <div className="space-y-1">{children}</div>
+      {onToggleCollapse ? (
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          title={collapsed ? "展开" : "折叠"}
+          className="group mb-3 flex w-full items-center gap-1 px-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          <span className="truncate">{title}</span>
+          <span className={cn("shrink-0", collapsed ? "" : "opacity-0 group-hover:opacity-100")}>
+            {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </span>
+        </button>
+      ) : (
+        <div className="mb-3 px-2 text-xs font-medium text-muted-foreground">{title}</div>
+      )}
+      {collapsed ? null : <div className="space-y-1">{children}</div>}
     </section>
   );
 }
