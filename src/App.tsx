@@ -8,18 +8,22 @@ import {
   Loader2,
   MessageSquare,
   Moon,
+  Pencil,
+  Pin,
   Plus,
   RefreshCw,
+  Search,
   Send,
   Settings,
   Shield,
   Sparkles,
   Sun,
   TerminalSquare,
+  Trash2,
   Wrench,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent as ReactMouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
@@ -77,8 +81,11 @@ type ChatThread = {
   sessionId: string;
   title: string;
   projectPath: string;
+  pinned?: boolean;
   items: ConversationItem[];
 };
+
+const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 
@@ -112,6 +119,17 @@ export default function App() {
   const [activeChatId, setActiveChatId] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
+  const [renamingChatId, setRenamingChatId] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deleteTargetId, setDeleteTargetId] = useState("");
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try {
+      return window.localStorage.getItem(ONBOARDING_FLAG_KEY) !== "true";
+    } catch {
+      return false;
+    }
+  });
   const [apiProvider, setApiProvider] = useState("gemini");
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
@@ -173,7 +191,7 @@ export default function App() {
   const activeProjectName =
     projectItems.find((project) => projectKey(project) === activeProjectPath)?.name ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
-  const temporaryChats = chats.filter((chat) => !chat.projectPath);
+  const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath));
   const projectPromptTitle = activeProjectPath && activeProjectName ? `我们应该在 ${activeProjectName} 中构建什么？` : "随心聊点什么？";
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
@@ -225,6 +243,7 @@ export default function App() {
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
           title: typeof chat.title === "string" ? chat.title : "",
           projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+          pinned: chat.pinned === true,
           items: chat.items,
         }));
         if (restored.length > 0) {
@@ -506,6 +525,61 @@ export default function App() {
     }
     setActiveChatId("");
     setError("");
+  }
+
+  function togglePinChat(chatId: string) {
+    updateChat(chatId, (chat) => ({ ...chat, pinned: !chat.pinned }));
+  }
+
+  function startRenameChat(chat: ChatThread) {
+    setRenamingChatId(chat.id);
+    setRenameDraft(chat.title || "");
+  }
+
+  function commitRenameChat(cancel = false) {
+    if (!cancel && renamingChatId) {
+      const title = renameDraft.trim();
+      if (title) {
+        updateChat(renamingChatId, (chat) => ({ ...chat, title }));
+      }
+    }
+    setRenamingChatId("");
+    setRenameDraft("");
+  }
+
+  function deleteChatPermanently(chatId: string) {
+    setChats((list) => list.filter((chat) => chat.id !== chatId));
+    if (activeChatId === chatId) {
+      setActiveChatId("");
+    }
+    setDeleteTargetId("");
+    setChatMenu(null);
+  }
+
+  function bindProject(projectPath: string) {
+    setActiveProjectPath(projectPath);
+    if (activeChatId) {
+      updateChat(activeChatId, (chat) => ({ ...chat, projectPath }));
+    }
+  }
+
+  function finishOnboarding() {
+    try {
+      window.localStorage.setItem(ONBOARDING_FLAG_KEY, "true");
+    } catch {
+      // 忽略持久化失败，仅本次会话关闭引导。
+    }
+    setShowOnboarding(false);
+  }
+
+  function restartOnboarding() {
+    try {
+      window.localStorage.removeItem(ONBOARDING_FLAG_KEY);
+    } catch {
+      // 忽略
+    }
+    setActiveView("chat");
+    setShowOnboarding(true);
   }
 
   function openChat(chat: ChatThread) {
@@ -790,7 +864,7 @@ export default function App() {
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
-                const projectChats = chats.filter((chat) => chat.projectPath === key);
+                const projectChats = sortChatsByPin(chats.filter((chat) => chat.projectPath === key));
                 return (
                   <div key={key} className="min-w-0">
                     <SidebarProject
@@ -805,7 +879,18 @@ export default function App() {
                         title={chat.title || "新对话"}
                         active={activeView === "chat" && chat.id === activeChatId}
                         indent
+                        pinned={chat.pinned}
+                        renaming={renamingChatId === chat.id}
+                        renameDraft={renameDraft}
+                        onRenameChange={setRenameDraft}
+                        onRenameCommit={commitRenameChat}
                         onClick={() => openChat(chat)}
+                        onTogglePin={() => togglePinChat(chat.id)}
+                        onDelete={() => setDeleteTargetId(chat.id)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          setChatMenu({ chatId: chat.id, x: event.clientX, y: event.clientY });
+                        }}
                       />
                     ))}
                   </div>
@@ -823,7 +908,18 @@ export default function App() {
                   key={chat.id}
                   title={chat.title || "新对话"}
                   active={activeView === "chat" && chat.id === activeChatId}
+                  pinned={chat.pinned}
+                  renaming={renamingChatId === chat.id}
+                  renameDraft={renameDraft}
+                  onRenameChange={setRenameDraft}
+                  onRenameCommit={commitRenameChat}
                   onClick={() => openChat(chat)}
+                  onTogglePin={() => togglePinChat(chat.id)}
+                  onDelete={() => setDeleteTargetId(chat.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setChatMenu({ chatId: chat.id, x: event.clientX, y: event.clientY });
+                  }}
                 />
               ))
             ) : (
@@ -953,6 +1049,17 @@ export default function App() {
                 </section>
 
                 <section className="mt-12">
+                  <h2 className="text-base font-semibold">新手引导</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">重新打开首次启动的三步引导（连接核心 / 绑定模型 / 选择项目）。</p>
+                  <div className="mt-4">
+                    <Button type="button" variant="outline" onClick={restartOnboarding}>
+                      <RefreshCw className="mr-1 h-4 w-4" />
+                      重新引导
+                    </Button>
+                  </div>
+                </section>
+
+                <section className="mt-12">
                   <h2 className="text-base font-semibold">模型供应商</h2>
                   <p className="mt-1 text-sm text-muted-foreground">连接供应商后点击「刷新模型列表」，即可从该账号可用的模型中选择。</p>
                   <div className="mt-4">
@@ -1048,6 +1155,11 @@ export default function App() {
                   onSubmit={submitMessage}
                   onSwitchMode={switchMode}
                   commands={slashCommands}
+                  projects={projectItems.map((project) => ({
+                    key: projectKey(project),
+                    name: project.name || shortPath(project.path || ""),
+                  }))}
+                  onBindProject={bindProject}
                 />
               </div>
             </div>
@@ -1056,7 +1168,7 @@ export default function App() {
               <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
                 <div className="mx-auto max-w-4xl space-y-5">
                   {conversation.map((item) => (
-                    <ConversationCard key={item.id} item={item} />
+                    <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
                   ))}
                   <div ref={conversationEndRef} />
                 </div>
@@ -1089,6 +1201,11 @@ export default function App() {
                     onSwitchMode={switchMode}
                     commands={slashCommands}
                     compact
+                    projects={projectItems.map((project) => ({
+                      key: projectKey(project),
+                      name: project.name || shortPath(project.path || ""),
+                    }))}
+                    onBindProject={bindProject}
                   />
                 </div>
               </div>
@@ -1096,6 +1213,148 @@ export default function App() {
           )}
         </section>
       </div>
+
+      {showOnboarding ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
+          <section className="w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-panel">
+            <div className="flex min-w-0 items-center gap-3">
+              <Sparkles className="h-5 w-5 shrink-0 text-primary" />
+              <h2 className="truncate text-lg font-semibold">欢迎使用 VRCForge</h2>
+            </div>
+            <p className="mt-3 text-sm text-muted-foreground">
+              三步就能开始：下面会实时显示每一步的完成状态，之后也可以在「设置 → 重新引导」再看一次。
+            </p>
+            <div className="mt-5 grid gap-3">
+              {[
+                {
+                  done: runtimeConnected,
+                  title: "1. 连接核心与 Unity",
+                  desc: runtimeConnected ? "核心已在线。" : "等待核心启动；若长时间离线，点右上角「重连」。",
+                },
+                {
+                  done: Boolean(apiConfig?.apiKeyPresent),
+                  title: "2. 绑定模型供应商",
+                  desc: apiConfig?.apiKeyPresent
+                    ? "模型密钥已配置，可以自然语言对话。"
+                    : "在设置里填入供应商密钥，否则只能用本地关键词指令。",
+                },
+                {
+                  done: projectItems.length > 0,
+                  title: "3. 选择 Unity 项目",
+                  desc:
+                    projectItems.length > 0
+                      ? "已发现 Unity 项目，左侧边栏可直接进入。"
+                      : "暂未发现项目；也可以先用临时对话，它同样有完整智能体能力。",
+                },
+              ].map((step) => (
+                <div key={step.title} className="flex min-w-0 items-start gap-3 rounded-xl border border-border px-4 py-3">
+                  <Check className={cn("mt-0.5 h-4 w-4 shrink-0", step.done ? "text-primary" : "opacity-20")} />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">{step.title}</div>
+                    <div className="text-xs text-muted-foreground">{step.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  finishOnboarding();
+                  void openSettings();
+                }}
+              >
+                去设置
+              </Button>
+              <Button onClick={finishOnboarding}>开始使用</Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {chatMenu
+        ? (() => {
+            const menuChat = chats.find((chat) => chat.id === chatMenu.chatId);
+            if (!menuChat) {
+              return null;
+            }
+            return (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setChatMenu(null)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setChatMenu(null);
+                  }}
+                />
+                <div
+                  className="fixed z-50 w-44 rounded-lg border border-border bg-card p-1.5 shadow-panel"
+                  style={{
+                    left: Math.min(chatMenu.x, window.innerWidth - 190),
+                    top: Math.min(chatMenu.y, window.innerHeight - 140),
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      togglePinChat(menuChat.id);
+                      setChatMenu(null);
+                    }}
+                  >
+                    <Pin className="h-4 w-4 shrink-0" />
+                    {menuChat.pinned ? "取消置顶" : "置顶对话"}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      startRenameChat(menuChat);
+                      setChatMenu(null);
+                    }}
+                  >
+                    <Pencil className="h-4 w-4 shrink-0" />
+                    重命名对话
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+                    onClick={() => {
+                      setDeleteTargetId(menuChat.id);
+                      setChatMenu(null);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4 shrink-0" />
+                    永久删除
+                  </button>
+                </div>
+              </>
+            );
+          })()
+        : null}
+
+      {deleteTargetId ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
+          <section className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-panel">
+            <div className="flex min-w-0 items-center gap-2 text-destructive">
+              <Trash2 className="h-4 w-4 shrink-0" />
+              <h2 className="truncate text-base font-semibold">永久删除对话</h2>
+            </div>
+            <p className="mt-3 text-sm text-muted-foreground">
+              「{chats.find((chat) => chat.id === deleteTargetId)?.title || "新对话"}」将被永久删除，本地记录一并清除，无法恢复。
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <Button variant="outline" onClick={() => setDeleteTargetId("")}>
+                取消
+              </Button>
+              <Button variant="danger" onClick={() => deleteChatPermanently(deleteTargetId)}>
+                永久删除
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {showRoslynWarning ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
@@ -1137,6 +1396,8 @@ function Composer({
   onSwitchMode,
   commands = [],
   compact = false,
+  projects = [],
+  onBindProject,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -1148,8 +1409,11 @@ function Composer({
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   commands?: Array<{ name: string; title: string }>;
   compact?: boolean;
+  projects?: Array<{ key: string; name: string }>;
+  onBindProject?: (path: string) => void;
 }) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [bindMenuOpen, setBindMenuOpen] = useState(false);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const slashQuery = input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
   const slashMatches =
@@ -1180,7 +1444,8 @@ function Composer({
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
           placeholder="随心输入"
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
               onSubmit();
             }
           }}
@@ -1236,9 +1501,52 @@ function Composer({
           </Button>
         </div>
       </div>
-      <div className="flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
-        {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
-        <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : "临时对话 · 不绑定项目"}</span>
+      <div className="relative flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
+        <button
+          type="button"
+          className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted hover:text-foreground"
+          onClick={() => setBindMenuOpen((open) => !open)}
+          title="切换对话绑定的项目"
+        >
+          {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
+          <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : "临时对话 · 不绑定项目"}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        </button>
+        {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
+        {bindMenuOpen ? (
+          <div className="absolute bottom-11 left-4 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+              onClick={() => {
+                setBindMenuOpen(false);
+                onBindProject?.("");
+              }}
+            >
+              <MessageSquare className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">临时对话 · 不绑定项目</span>
+              <Check className={cn("h-4 w-4 shrink-0 text-primary", projectLabel ? "opacity-0" : "")} />
+            </button>
+            {projects.map((project) => (
+              <button
+                key={project.key}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                onClick={() => {
+                  setBindMenuOpen(false);
+                  onBindProject?.(project.key);
+                }}
+              >
+                <Folder className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                <Check className={cn("h-4 w-4 shrink-0 text-primary", projectLabel === project.name ? "" : "opacity-0")} />
+              </button>
+            ))}
+            <div className="mt-1 border-t border-border px-2.5 py-1.5 text-xs text-muted-foreground/70">
+              临时对话同样拥有完整智能体能力（技能 / Shell / Unity 工具），只是不归档到项目下。
+            </div>
+          </div>
+        ) : null}
       </div>
     </form>
   );
@@ -1408,6 +1716,27 @@ function SkillsWorkspace({
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
   const selectedCheck = skillCheck?.checks.find((item) => item.name === draft.name);
   const checkTone = selectedCheck?.status === "error" ? "danger" : selectedCheck?.status === "warning" ? "warn" : "muted";
+  const [skillQuery, setSkillQuery] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const query = skillQuery.trim().toLowerCase();
+  const visibleSkills = query
+    ? skills.filter((skill) =>
+        `${skill.name} ${skill.title || ""} ${skill.description || ""} ${skill.category || ""}`.toLowerCase().includes(query),
+      )
+    : skills;
+  const groupedSkills = useMemo(() => {
+    const map = new Map<string, AgentSkill[]>();
+    for (const skill of visibleSkills) {
+      const domain = skillDomain(skill);
+      const list = map.get(domain) || [];
+      list.push(skill);
+      map.set(domain, list);
+    }
+    return SKILL_DOMAIN_ORDER.filter((domain) => map.has(domain)).map((domain) => ({
+      domain,
+      items: map.get(domain) || [],
+    }));
+  }, [visibleSkills]);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
@@ -1423,25 +1752,61 @@ function SkillsWorkspace({
               Check
             </Button>
           </div>
-          <div className="max-h-[calc(100vh-180px)] space-y-1 overflow-auto pr-1">
-            {skills.map((skill) => (
-              <button
-                key={`${skill.source}-${skill.name}`}
-                onClick={() => onSelect(skill)}
-                className={cn(
-                  "grid w-full min-w-0 gap-1 rounded-md px-3 py-2 text-left text-sm transition-colors",
-                  selectedSkillName === skill.name ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-medium">{skill.title || skill.name}</span>
-                  <Badge tone={skill.available ? "ok" : "warn"} className="h-6 shrink-0">
-                    {skill.skillType || skill.source}
-                  </Badge>
+          <div className="relative mb-3">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={skillQuery}
+              onChange={(event) => setSkillQuery(event.target.value)}
+              placeholder="搜索能力…"
+              className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
+            />
+          </div>
+          <div className="max-h-[calc(100vh-230px)] space-y-2 overflow-auto pr-1">
+            {groupedSkills.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-muted-foreground">没有匹配的能力。</div>
+            ) : null}
+            {groupedSkills.map((group) => {
+              const collapsed = Boolean(collapsedGroups[group.domain]) && !query;
+              return (
+                <div key={group.domain} className="min-w-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCollapsedGroups((current) => ({ ...current, [group.domain]: !current[group.domain] }))
+                    }
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", collapsed ? "-rotate-90" : "")} />
+                    <span className="min-w-0 flex-1 truncate">{group.domain}</span>
+                    <Badge tone="muted" className="h-5 shrink-0 px-1.5 text-[10px]">
+                      {group.items.length}
+                    </Badge>
+                  </button>
+                  {collapsed
+                    ? null
+                    : group.items.map((skill) => (
+                        <button
+                          key={`${skill.source}-${skill.name}`}
+                          onClick={() => onSelect(skill)}
+                          className={cn(
+                            "grid w-full min-w-0 gap-1 rounded-md px-3 py-2 text-left text-sm transition-colors",
+                            selectedSkillName === skill.name
+                              ? "bg-muted text-foreground"
+                              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate font-medium">{skill.title || skill.name}</span>
+                            <Badge tone={skill.available ? "ok" : "warn"} className="h-6 shrink-0">
+                              {skill.skillType || skill.source}
+                            </Badge>
+                          </div>
+                          <div className="truncate text-xs text-muted-foreground">{skill.permissionMode}</div>
+                        </button>
+                      ))}
                 </div>
-                <div className="truncate text-xs text-muted-foreground">{skill.permissionMode}</div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -1734,7 +2099,7 @@ function FieldLabel({ label, children }: { label: string; children: ReactNode })
   );
 }
 
-function ConversationCard({ item }: { item: ConversationItem }) {
+function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; onOpenSettings?: () => void }) {
   if (item.type === "user") {
     return (
       <div className="flex justify-end">
@@ -1770,6 +2135,11 @@ function ConversationCard({ item }: { item: ConversationItem }) {
   const shell = response.shell;
   const skill = response.skill;
   const awaitingApproval = shell?.status === "pending_approval";
+  const localIdle =
+    response.plan.planner === "deterministic-local" &&
+    response.plan.nextStep === "await_user_instruction" &&
+    !response.plan.skillTool &&
+    !response.plan.shellCommand;
 
   return (
     <div className="space-y-3">
@@ -1781,12 +2151,27 @@ function ConversationCard({ item }: { item: ConversationItem }) {
             {displayPlanner(response.plan.planner)}
           </Badge>
         </div>
-        <div className="mt-4 grid gap-3">
-          <DataLine label="摘要" value={response.plan.summary} />
-          <DataLine label="下一步" value={displayStep(response.plan.nextStep || "-")} />
-          {response.plan.skillTool ? <DataLine label="能力" value={response.plan.skillTool} mono /> : null}
-          {response.plan.shellCommand ? <DataLine label="命令" value={response.plan.shellCommand} mono /> : null}
-        </div>
+        {localIdle ? (
+          <div className="mt-4 space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              这句话我还没办法直接理解——当前在用本地关键词规划，只认识「日志、截图、表情、材质、健康检查」这类固定指令。
+            </p>
+            <p className="text-muted-foreground">
+              在设置里绑定模型供应商后，就能用自然语言交流并自动规划工具调用；如果已绑定密钥，说明 AI 规划还没启用，重启核心或检查供应商配置即可。
+            </p>
+            <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenSettings?.()}>
+              <Settings className="mr-1 h-3.5 w-3.5" />
+              打开设置
+            </Button>
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-3">
+            <DataLine label="摘要" value={response.plan.summary} />
+            <DataLine label="下一步" value={displayStep(response.plan.nextStep || "-")} />
+            {response.plan.skillTool ? <DataLine label="能力" value={response.plan.skillTool} mono /> : null}
+            {response.plan.shellCommand ? <DataLine label="命令" value={response.plan.shellCommand} mono /> : null}
+          </div>
+        )}
       </section>
 
       {shell?.classification ? (
@@ -1976,30 +2361,125 @@ function SidebarChat({
   title,
   active = false,
   indent = false,
+  pinned = false,
+  renaming = false,
+  renameDraft = "",
   onClick,
+  onTogglePin,
+  onDelete,
+  onContextMenu,
+  onRenameChange,
+  onRenameCommit,
 }: {
   title: string;
   active?: boolean;
   indent?: boolean;
+  pinned?: boolean;
+  renaming?: boolean;
+  renameDraft?: string;
   onClick: () => void;
+  onTogglePin?: () => void;
+  onDelete?: () => void;
+  onContextMenu?: (event: ReactMouseEvent) => void;
+  onRenameChange?: (value: string) => void;
+  onRenameCommit?: (cancel?: boolean) => void;
 }) {
+  if (renaming) {
+    return (
+      <div className={cn("flex h-9 w-full min-w-0 items-center rounded-md bg-muted px-2", indent ? "pl-9" : "")}>
+        <input
+          autoFocus
+          value={renameDraft}
+          onChange={(event) => onRenameChange?.(event.target.value)}
+          onBlur={() => onRenameCommit?.()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              onRenameCommit?.();
+            }
+            if (event.key === "Escape") {
+              onRenameCommit?.(true);
+            }
+          }}
+          className="h-7 w-full min-w-0 rounded border border-primary/40 bg-background px-2 text-sm outline-none focus:border-primary"
+        />
+      </div>
+    );
+  }
   return (
-    <button
-      onClick={onClick}
+    <div
+      onContextMenu={onContextMenu}
       className={cn(
-        "flex h-9 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
-        indent ? "pl-9" : "",
+        "group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-sm transition-colors",
+        indent ? "pl-6" : "",
         active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
       )}
     >
-      {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
-      <span className="truncate">{title}</span>
-    </button>
+      <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left">
+        {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+      </button>
+      {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60 group-hover:hidden" /> : null}
+      <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+        <button
+          type="button"
+          title={pinned ? "取消置顶" : "置顶"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onTogglePin?.();
+          }}
+          className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
+        >
+          <Pin className={cn("h-3.5 w-3.5", pinned ? "text-primary" : "")} />
+        </button>
+        <button
+          type="button"
+          title="永久删除"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete?.();
+          }}
+          className="rounded p-1 text-destructive/60 hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
   );
 }
 
 function projectKey(project: { path?: string; name?: string }): string {
   return project.path || project.name || "";
+}
+
+function sortChatsByPin(list: ChatThread[]): ChatThread[] {
+  return [...list].sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false));
+}
+
+const SKILL_DOMAIN_RULES: Array<{ label: string; pattern: RegExp }> = [
+  { label: "Roslyn 高级", pattern: /roslyn/i },
+  { label: "捏脸与表情", pattern: /blendshape|face|expression/i },
+  { label: "材质与外观", pattern: /material|shader|texture/i },
+  { label: "衣柜与 FX", pattern: /clothing|outfit|wardrobe|gesture|\bfx\b|fx_/i },
+  { label: "参数优化", pattern: /parameter|param_/i },
+  { label: "截图与视觉", pattern: /screenshot|capture|scene_view|vision|game_view/i },
+  { label: "包管理", pattern: /package|vpm|addon|modular/i },
+  { label: "审批与备份", pattern: /approval|approve|backup|restore|rollback/i },
+  { label: "Shell 与调试", pattern: /shell|command|console|debug/i },
+  { label: "诊断与状态", pattern: /\blog|health|diagno|status|check/i },
+  { label: "Avatar 扫描", pattern: /scan|avatar|inventory|control|animation|toggle/i },
+];
+const SKILL_DOMAIN_FALLBACK = "其他";
+const SKILL_DOMAIN_ORDER = [...SKILL_DOMAIN_RULES.map((rule) => rule.label), SKILL_DOMAIN_FALLBACK];
+
+function skillDomain(skill: AgentSkill): string {
+  const haystack = `${skill.name} ${skill.title || ""} ${skill.category || ""} ${skill.description || ""}`;
+  for (const rule of SKILL_DOMAIN_RULES) {
+    if (rule.pattern.test(haystack)) {
+      return rule.label;
+    }
+  }
+  return SKILL_DOMAIN_FALLBACK;
 }
 
 function isStoredChat(value: unknown): value is ChatThread {
@@ -2109,6 +2589,9 @@ function splitLines(value: string): string[] {
 function displayPlanner(planner: string): string {
   if (planner === "deterministic-local") {
     return "本地规划";
+  }
+  if (planner === "llm") {
+    return "AI 规划";
   }
   return planner || "规划";
 }

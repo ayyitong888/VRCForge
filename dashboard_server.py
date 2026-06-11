@@ -3563,6 +3563,21 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     return settings
 
 
+def _agent_gateway_llm_plan(prompt: str) -> str:
+    """LLM planner hook for the agent gateway (multi-provider dispatch).
+
+    Raises when no API key is configured so the gateway falls back to the
+    deterministic local planner.
+    """
+    settings = load_dashboard_settings(ConnectionRequest())
+    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
+        raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
+    return request_llm_plan(settings, prompt)
+
+
+AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
+
+
 def load_dashboard_export_payload(
     settings: Settings,
     request: DashboardRequest,

@@ -97,7 +97,7 @@ The launcher also includes uninstall buttons:
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available / 可用 |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
-| Agent workspace (Codex-style multi-chat UI) | Agent 工作台（Codex 风格多会话界面） | Available / 可用 |
+| Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |

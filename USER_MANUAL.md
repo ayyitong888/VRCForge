@@ -112,9 +112,9 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 
 ## Agent Workspace / Agent 工作台
 
-The desktop app provides a Codex-style agent workspace with a project sidebar and multiple chat sessions. Chats are saved locally and survive restarts; when you continue an old chat, the full transcript is replayed to the backend so context is preserved.
+The desktop app provides an agent workspace with a project sidebar and multiple chat sessions. Chats are saved locally and survive restarts; when you continue an old chat, the full transcript is replayed to the backend so context is preserved.
 
-桌面应用提供 Codex 风格的 Agent 工作台：侧栏按项目/临时对话分组，支持多会话切换。会话保存在本地，重启后仍在；继续旧会话时会把完整前文回放给后端，上下文不丢失。
+桌面应用提供完整的 Agent 工作台：侧栏按项目/临时对话分组，支持多会话切换。会话保存在本地，重启后仍在；继续旧会话时会把完整前文回放给后端，上下文不丢失。
 
 Composer commands / 输入框命令：
 

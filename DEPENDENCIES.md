@@ -82,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -Projec
 
 ## External Agent Gateway / 外部 Agent Gateway
 
-The backend includes a local MCP + REST Agent Gateway for Codex, Claude Code, OpenClaw, and similar agents. It uses the official Python MCP SDK through `mcp[cli]` and is disabled by default until enabled in the Launcher.
+The backend includes a local MCP + REST Agent Gateway for external MCP-capable agent clients. It uses the official Python MCP SDK through `mcp[cli]` and is disabled by default until enabled in the Launcher.
 
 外部 Agent Gateway 使用官方 Python MCP SDK（`mcp[cli]`），默认关闭。启用后，外部 agent 只能通过 VRCForge 的受监督工具层读取、预览、请求写入和等待用户 approval，不能直接绕过 VRCForge 调 Unity MCP。approval token 由 Launcher 内部保存，不包含在复制给外部 agent 的 MCP 配置中。
 

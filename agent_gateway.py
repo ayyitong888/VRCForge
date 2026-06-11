@@ -613,6 +613,10 @@ class AgentGateway:
         self._approvals: dict[str, dict[str, Any]] = {}
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        # Optional LLM planner hook injected by the host server. Receives a prompt
+        # string and returns the raw model response text. Any exception falls back
+        # to the deterministic local planner.
+        self.llm_plan_fn: Callable[[str], str] | None = None
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -1027,7 +1031,7 @@ class AgentGateway:
         if history:
             self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
-        plan = self._plan_agent_turn(message, params, observe)
+        plan = self._plan_agent_turn(message, params, observe, history)
 
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
@@ -1111,7 +1115,7 @@ class AgentGateway:
         return payload
 
     def _restore_runtime_session(self, session_id: str, history: list[dict[str, Any]], now: str) -> int:
-        """Rebuild an in-memory session from a client-supplied transcript (OpenClaw-style replay).
+        """Rebuild an in-memory session from a client-supplied transcript (history replay).
 
         The frontend resends the full prior conversation on every continued chat, so a
         restarted backend can recover lost session context. No-op when the session
@@ -1618,7 +1622,7 @@ class AgentGateway:
             "sideEffects": override.get("sideEffects") or "writes Unity project or generated artifacts after approval",
             "backupRestore": override.get("backupRestore") or "requires preview, backup, apply, validate, restore path",
             "tools": ["vrcforge_request_apply", "vrcforge_apply_approved", handler.name],
-            "allowedTools": ["vrcforge_request_apply", "vrcforge_apply_approved"],
+            "allowedTools": ["vrcforge_request_apply", "vrcforge_apply_approved", handler.name],
             "disallowedTools": [],
             "entrypointTool": handler.name,
             "userInvocable": True,
@@ -2219,7 +2223,24 @@ class AgentGateway:
             "stderrTruncated": len(stderr or "") > 12000,
         }
 
-    def _plan_agent_turn(self, message: str, params: dict[str, Any], observe: dict[str, Any]) -> dict[str, Any]:
+    def _plan_agent_turn(
+        self,
+        message: str,
+        params: dict[str, Any],
+        observe: dict[str, Any],
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        local_plan = self._local_plan_agent_turn(message, params, observe)
+        # 关键词命中（明确的技能/命令意图）直接走确定性路径：快、稳定、可测试。
+        if local_plan.get("shellNeeded") or local_plan.get("skillNeeded"):
+            return local_plan
+        # 本地规划没认出意图时，尝试 LLM 规划；失败则回退本地结果。
+        llm_plan = self._llm_plan_agent_turn(message, observe, history or [])
+        if llm_plan is not None:
+            return llm_plan
+        return local_plan
+
+    def _local_plan_agent_turn(self, message: str, params: dict[str, Any], observe: dict[str, Any]) -> dict[str, Any]:
         command = extract_shell_command_candidate(message, params)
         skill_route = self._match_runtime_skill(message, params) if not command else None
         summary = "Observed runtime state and prepared the next action."
@@ -2243,6 +2264,108 @@ class AgentGateway:
             "expectedResult": "Shell output will be returned inline." if command else "Runtime observation is available.",
             "nextStep": "classify_shell" if command else "call_skill" if skill_route else "await_user_instruction",
         }
+
+    def _llm_plan_agent_turn(
+        self,
+        message: str,
+        observe: dict[str, Any],
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        plan_fn = self.llm_plan_fn
+        if plan_fn is None:
+            return None
+        try:
+            prompt = self._build_llm_plan_prompt(message, history)
+            raw_response = plan_fn(prompt)
+            payload = parse_llm_plan_response(raw_response)
+        except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        action = str(payload.get("action") or "").strip().lower()
+        summary = str(payload.get("summary") or "").strip()
+        reply = str(payload.get("reply") or "").strip()
+        skill_tool = str(payload.get("skill_tool") or payload.get("skillTool") or "").strip()
+        skill_params = ensure_dict(payload.get("skill_params") or payload.get("skillParams"))
+        shell_command = str(payload.get("shell_command") or payload.get("shellCommand") or "").strip()
+
+        base = {
+            "planner": "llm",
+            "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
+            "shellNeeded": False,
+            "shellCommand": "",
+            "skillNeeded": False,
+            "skillTool": "",
+            "skillCategory": "",
+            "skillParams": {},
+            "skillReason": "",
+            "expectedResult": "",
+        }
+
+        if action == "skill" and skill_tool:
+            known_tool = skill_tool in self._tools or self._find_registry_skill(skill_tool) is not None
+            if known_tool:
+                route = self._runtime_skill_route(skill_tool, skill_params, "llm planner")
+                return {
+                    **base,
+                    "summary": summary or f"调用 {skill_tool} 处理该请求。",
+                    "skillNeeded": True,
+                    "skillTool": route.get("tool") or skill_tool,
+                    "skillCategory": route.get("category") or "",
+                    "skillParams": route.get("params") or {},
+                    "skillReason": "llm planner",
+                    "expectedResult": "Skill output will be returned inline.",
+                    "nextStep": "call_skill",
+                }
+        if action == "shell" and shell_command:
+            return {
+                **base,
+                "summary": summary or "Prepared a shell step for the requested task.",
+                "shellNeeded": True,
+                "shellCommand": shell_command,
+                "expectedResult": "Shell output will be returned inline.",
+                "nextStep": "classify_shell",
+            }
+        reply_text = reply or summary
+        if not reply_text:
+            return None
+        return {
+            **base,
+            "summary": reply_text,
+            "expectedResult": "Conversational reply.",
+            "nextStep": "done",
+        }
+
+    def _build_llm_plan_prompt(self, message: str, history: list[dict[str, Any]]) -> str:
+        tool_lines: list[str] = []
+        for tool in self._tools.values():
+            flags = []
+            if tool.write:
+                flags.append("write")
+            if tool.advanced:
+                flags.append("advanced")
+            suffix = f"（{','.join(flags)}）" if flags else ""
+            tool_lines.append(f"- {tool.name}{suffix}: {summarize_text(tool.description, 120)}")
+        history_lines: list[str] = []
+        for entry in history[-12:]:
+            role = "用户" if str(entry.get("role") or "user").strip().lower() == "user" else "助手"
+            text = summarize_text(str(entry.get("text") or ""), 500)
+            if text:
+                history_lines.append(f"{role}: {text}")
+        history_block = "\n".join(history_lines) if history_lines else "（无）"
+        return (
+            "你是 VRCForge 桌面智能体的规划器，负责把用户的中文/英文请求转换成下一步动作。\n"
+            "可选动作：\n"
+            '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>"}\n'
+            '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>"}\n'
+            '3. 直接回答（闲聊、解释、当前信息已足够）：{"action": "reply", "reply": "<中文回答>"}\n'
+            "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
+            "写操作类工具会进入审批流程，可以放心规划；拿不准时选 reply 并说明你需要什么信息。\n\n"
+            f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
+            f"最近对话：\n{history_block}\n\n"
+            f"用户最新消息：{message}"
+        )
 
     def _match_runtime_skill(self, message: str, params: dict[str, Any]) -> dict[str, Any] | None:
         explicit_tool = str(
@@ -2756,6 +2879,30 @@ def is_path_within(path: Path, root: Path) -> bool:
 
 def command_hash(command: str) -> str:
     return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+
+
+def parse_llm_plan_response(raw_response: str) -> dict[str, Any] | None:
+    """Extract the first JSON object from an LLM response (tolerates Markdown fences)."""
+    stripped = str(raw_response or "").strip()
+    if not stripped:
+        return None
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped).strip()
+    start = stripped.find("{")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    for index in range(start, len(stripped)):
+        if stripped[index] != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(stripped[index:])
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def summarize_text(text: str, limit: int = 240) -> str:
