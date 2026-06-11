@@ -357,10 +357,16 @@ export async function deleteSkill(endpoint: string, skillId: string): Promise<Ag
   });
 }
 
+export type ChatHistoryEntry = {
+  role: "user" | "agent";
+  text: string;
+};
+
 export async function sendAgentMessage(
   endpoint: string,
   message: string,
   sessionId?: string,
+  history?: ChatHistoryEntry[],
 ): Promise<AgentRuntimeResponse> {
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
@@ -368,6 +374,7 @@ export async function sendAgentMessage(
     body: JSON.stringify({
       session_id: sessionId || null,
       message,
+      history: history ?? [],
     }),
   });
 }

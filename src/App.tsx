@@ -31,6 +31,7 @@ import {
   AgentShellResult,
   ApiError,
   AppBootstrap,
+  ChatHistoryEntry,
   approveAgentApproval,
   checkSkills,
   createSkill,
@@ -65,7 +66,8 @@ type ConversationItem =
   | { id: string; type: "user"; text: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
-  | { id: string; type: "error"; text: string };
+  | { id: string; type: "error"; text: string }
+  | { id: string; type: "compact"; text: string };
 
 type ActiveView = "chat" | "skills" | "settings";
 
@@ -142,6 +144,16 @@ export default function App() {
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
   const skillCount = skillRegistry?.count ?? skills.length;
+  const slashCommands = useMemo(() => {
+    const list: Array<{ name: string; title: string }> = [{ name: "compact", title: "压缩当前会话历史，释放上下文" }];
+    for (const skill of skills) {
+      if (!skill.name || skill.enabled === false || skill.available === false || skill.userInvocable === false) {
+        continue;
+      }
+      list.push({ name: skill.name, title: skill.title || skill.description || "" });
+    }
+    return list;
+  }, [skills]);
   const projects = bootstrap?.health.projects?.projects ?? [];
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
@@ -358,6 +370,19 @@ export default function App() {
     return id;
   }
 
+  function compactChat() {
+    if (!activeChat || activeChat.items.length === 0) {
+      setError("当前会话还没有可压缩的内容。");
+      return;
+    }
+    const summary = buildCompactSummary(activeChat.items);
+    updateChat(activeChat.id, (chat) => ({
+      ...chat,
+      sessionId: "",
+      items: [{ id: `compact-${Date.now()}`, type: "compact", text: summary }],
+    }));
+  }
+
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
     const message = input.trim();
@@ -365,9 +390,15 @@ export default function App() {
       return;
     }
     setError("");
+    if (message === "/compact" || message.startsWith("/compact ")) {
+      compactChat();
+      setInput("");
+      return;
+    }
     setSending(true);
     const chatId = ensureActiveChat();
     const chatSessionId = activeChat?.sessionId || "";
+    const history = activeChat && activeChat.items.length > 0 ? buildChatHistory(activeChat.items) : [];
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -384,7 +415,7 @@ export default function App() {
         title: chat.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
         items: [...chat.items, userItem],
       }));
-      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined);
+      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined, history);
       updateChat(chatId, (chat) => ({
         ...chat,
         sessionId: response.sessionId || response.session_id || chat.sessionId,
@@ -991,6 +1022,7 @@ export default function App() {
                   projectLabel={activeProjectPath ? activeProjectName : ""}
                   onSubmit={submitMessage}
                   onSwitchMode={switchMode}
+                  commands={slashCommands}
                 />
               </div>
             </div>
@@ -1030,6 +1062,7 @@ export default function App() {
                     projectLabel={activeProjectPath ? activeProjectName : ""}
                     onSubmit={submitMessage}
                     onSwitchMode={switchMode}
+                    commands={slashCommands}
                     compact
                   />
                 </div>
@@ -1077,6 +1110,7 @@ function Composer({
   projectLabel,
   onSubmit,
   onSwitchMode,
+  commands = [],
   compact = false,
 }: {
   input: string;
@@ -1087,12 +1121,33 @@ function Composer({
   projectLabel: string;
   onSubmit: (event?: FormEvent) => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
+  commands?: Array<{ name: string; title: string }>;
   compact?: boolean;
 }) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
+  const slashQuery = input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
+  const slashMatches =
+    slashQuery !== null
+      ? commands.filter((command) => command.name.toLowerCase().includes(slashQuery)).slice(0, 8)
+      : [];
   return (
-    <form onSubmit={onSubmit} className="rounded-3xl bg-muted/70 shadow-composer">
+    <form onSubmit={onSubmit} className="relative rounded-3xl bg-muted/70 shadow-composer">
+      {slashMatches.length > 0 ? (
+        <div className="absolute bottom-full left-0 right-0 z-20 mb-2 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+          {slashMatches.map((command) => (
+            <button
+              key={command.name}
+              type="button"
+              className="flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-muted"
+              onClick={() => setInput(`/${command.name} `)}
+            >
+              <span className="shrink-0 font-mono text-xs text-primary">/{command.name}</span>
+              <span className="truncate text-xs text-muted-foreground">{command.title}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className={cn("rounded-3xl border border-border bg-card", compact ? "p-3" : "p-4")}>
         <textarea
           value={input}
@@ -1677,6 +1732,15 @@ function ConversationCard({ item }: { item: ConversationItem }) {
     return <ShellResultCard title={item.error === "rejected" ? "已驳回" : "执行结果"} result={item.result} error={item.error} />;
   }
 
+  if (item.type === "compact") {
+    return (
+      <div className="rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
+        <div className="mb-2 text-xs font-medium text-muted-foreground">已压缩的历史</div>
+        <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
+      </div>
+    );
+  }
+
   const response = item.response;
   const shell = response.shell;
   const skill = response.skill;
@@ -2078,4 +2142,56 @@ function formatPayload(value: unknown): string {
 function shortPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).slice(-1)[0] || path;
+}
+
+const HISTORY_ENTRY_MAX_CHARS = 2000;
+const COMPACT_ENTRY_MAX_CHARS = 400;
+const COMPACT_HEAD_ENTRIES = 2;
+const COMPACT_TAIL_ENTRIES = 8;
+
+function clipText(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
+  const history: ChatHistoryEntry[] = [];
+  for (const item of items) {
+    if (item.type === "user") {
+      history.push({ role: "user", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
+    } else if (item.type === "agent") {
+      const parts = [item.response.plan?.summary || ""];
+      const stdout = item.response.result?.stdout || item.response.shell?.result?.stdout || "";
+      if (stdout.trim()) {
+        parts.push(stdout.trim());
+      }
+      const text = parts.filter(Boolean).join("\n").trim();
+      if (text) {
+        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
+      }
+    } else if (item.type === "result") {
+      const text = (item.result?.stdout || item.error || "").trim();
+      if (text) {
+        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
+      }
+    } else if (item.type === "compact") {
+      history.push({ role: "agent", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
+    }
+  }
+  return history;
+}
+
+function buildCompactSummary(items: ConversationItem[]): string {
+  const entries = buildChatHistory(items).map(
+    (entry) => `${entry.role === "user" ? "用户" : "助手"}: ${clipText(entry.text.replace(/\s+/g, " ").trim(), COMPACT_ENTRY_MAX_CHARS)}`,
+  );
+  let lines = entries;
+  if (entries.length > COMPACT_HEAD_ENTRIES + COMPACT_TAIL_ENTRIES) {
+    const omitted = entries.length - COMPACT_HEAD_ENTRIES - COMPACT_TAIL_ENTRIES;
+    lines = [
+      ...entries.slice(0, COMPACT_HEAD_ENTRIES),
+      `（中间已省略 ${omitted} 条消息）`,
+      ...entries.slice(entries.length - COMPACT_TAIL_ENTRIES),
+    ];
+  }
+  return `（历史压缩摘要，共 ${entries.length} 条消息）\n${lines.join("\n")}`;
 }

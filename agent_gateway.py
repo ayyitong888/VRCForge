@@ -1023,6 +1023,9 @@ class AgentGateway:
         if not session_id:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
+        if history:
+            self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
         plan = self._plan_agent_turn(message, params, observe)
 
@@ -1107,6 +1110,47 @@ class AgentGateway:
             payload["skill"] = skill_payload
         return payload
 
+    def _restore_runtime_session(self, session_id: str, history: list[dict[str, Any]], now: str) -> int:
+        """Rebuild an in-memory session from a client-supplied transcript (OpenClaw-style replay).
+
+        The frontend resends the full prior conversation on every continued chat, so a
+        restarted backend can recover lost session context. No-op when the session
+        already holds live turns.
+        """
+        if not session_id:
+            return 0
+        with self._lock:
+            session = self._runtime_sessions.get(session_id)
+            if session and session.get("turns"):
+                return 0
+            turns: list[dict[str, Any]] = []
+            for index, entry in enumerate(history):
+                text = str(entry.get("text") or entry.get("message") or "").strip()
+                if not text:
+                    continue
+                role = str(entry.get("role") or "user").strip().lower()
+                if role not in ("user", "agent"):
+                    role = "user"
+                turns.append(
+                    {
+                        "id": f"restored_{index:04d}",
+                        "createdAt": str(entry.get("createdAt") or now),
+                        "restored": True,
+                        "role": role,
+                        "message": text,
+                    }
+                )
+            if not turns:
+                return 0
+            self._runtime_sessions[session_id] = {
+                "id": session_id,
+                "createdAt": now,
+                "updatedAt": now,
+                "restoredFromTranscript": True,
+                "turns": turns,
+            }
+            return len(turns)
+
     def runtime_observe(self, session_id: str | None = None) -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
@@ -1139,6 +1183,7 @@ class AgentGateway:
             "session": {
                 "id": session_id or "",
                 "turnCount": len(session.get("turns", [])) if isinstance(session, dict) else 0,
+                "restoredFromTranscript": bool(session.get("restoredFromTranscript")) if isinstance(session, dict) else False,
             },
         }
 

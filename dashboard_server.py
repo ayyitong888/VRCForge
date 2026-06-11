@@ -402,6 +402,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     skill_params: dict[str, Any] = Field(default_factory=dict)
     cwd: str | None = None
     workspace_root: str | None = None
+    history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentPermissionRequest(BaseModel):
@@ -711,6 +712,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "skill_params": runtime_request.skill_params,
             "cwd": runtime_request.cwd,
             "workspace_root": runtime_request.workspace_root,
+            "history": runtime_request.history,
         },
         agent_name=runtime_request.agent_name,
     )
