@@ -307,6 +307,26 @@ export async function saveAgentNotes(endpoint: string, content: string): Promise
   });
 }
 
+export type StoredChats<T> = {
+  ok: boolean;
+  path: string;
+  exists: boolean;
+  chats: T[];
+  count: number;
+};
+
+export async function fetchChats<T>(endpoint: string): Promise<StoredChats<T>> {
+  return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats`);
+}
+
+export async function saveChats<T>(endpoint: string, chats: T[]): Promise<{ ok: boolean; path: string; count: number }> {
+  return requestJson(`${endpoint}/api/app/chats`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chats }),
+  });
+}
+
 export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
   return requestJson<AgentSkillRegistry>(`${endpoint}/api/app/skills`);
 }

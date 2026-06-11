@@ -413,6 +413,10 @@ class AgentNotesRequest(BaseModel):
     content: str = Field(default="", max_length=262144)
 
 
+class ChatTranscriptsRequest(BaseModel):
+    chats: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @dataclass
 class DashboardApiConfig:
     provider: str
@@ -776,6 +780,43 @@ async def write_agent_notes(request: AgentNotesRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"无法写入 AGENTS.md: {exc}") from exc
     await EVENT_BUS.broadcast("agentNotesUpdated", {"path": str(path), "bytes": len(request.content.encode("utf-8"))})
     return {"ok": True, "path": str(path), "bytes": len(request.content.encode("utf-8"))}
+
+
+CHAT_TRANSCRIPTS_MAX_BYTES = 16 * 1024 * 1024
+CHAT_TRANSCRIPTS_MAX_CHATS = 100
+
+
+def chat_transcripts_path() -> Path:
+    return AGENT_GATEWAY.user_constraints_path.parent / "chat-transcripts.json"
+
+
+@app.get("/api/app/chats")
+def read_chat_transcripts() -> dict[str, Any]:
+    path = chat_transcripts_path()
+    chats: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("chats"), list):
+                chats = [item for item in payload["chats"] if isinstance(item, dict)]
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"无法读取会话记录: {exc}") from exc
+    return {"ok": True, "path": str(path), "exists": path.exists(), "chats": chats, "count": len(chats)}
+
+
+@app.post("/api/app/chats")
+async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
+    path = chat_transcripts_path()
+    chats = request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS]
+    serialized = json.dumps({"version": 1, "chats": chats}, ensure_ascii=False)
+    if len(serialized.encode("utf-8")) > CHAT_TRANSCRIPTS_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="会话记录超过 16MB 上限，请删除旧会话后重试。")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialized, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
+    return {"ok": True, "path": str(path), "count": len(chats)}
 
 
 @app.get("/api/app/skills")

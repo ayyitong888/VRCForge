@@ -41,8 +41,10 @@ import {
   ExecutionMode,
   PermissionState,
   fetchAgentNotes,
+  fetchChats,
   fetchProviderModels,
   rejectAgentApproval,
+  saveChats,
   saveAgentNotes,
   sendAgentMessage,
   updateApiConfig,
@@ -127,6 +129,7 @@ export default function App() {
   const [notesMessage, setNotesMessage] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
+  const chatsLoadedRef = useRef(false);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -195,6 +198,41 @@ export default function App() {
       }
     }
   }, [projectItems]);
+
+  useEffect(() => {
+    if (!runtimeConnected || chatsLoadedRef.current) {
+      return;
+    }
+    chatsLoadedRef.current = true;
+    void (async () => {
+      try {
+        const payload = await fetchChats<unknown>(endpoint);
+        const restored = (payload.chats || []).filter(isStoredChat).map((chat) => ({
+          id: chat.id,
+          sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
+          title: typeof chat.title === "string" ? chat.title : "",
+          projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+          items: chat.items,
+        }));
+        if (restored.length > 0) {
+          setChats((current) => (current.length === 0 ? restored : current));
+        }
+      } catch {
+        // 读取失败时保持空列表，不打断使用；下次启动会重试。
+        chatsLoadedRef.current = false;
+      }
+    })();
+  }, [runtimeConnected, endpoint]);
+
+  useEffect(() => {
+    if (!chatsLoadedRef.current || !runtimeConnected) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void saveChats(endpoint, chats).catch(() => undefined);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [chats, runtimeConnected, endpoint]);
 
   useEffect(() => {
     if (!apiConfig) {
@@ -1873,6 +1911,14 @@ function SidebarChat({
 
 function projectKey(project: { path?: string; name?: string }): string {
   return project.path || project.name || "";
+}
+
+function isStoredChat(value: unknown): value is ChatThread {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const chat = value as Partial<ChatThread>;
+  return typeof chat.id === "string" && chat.id.length > 0 && Array.isArray(chat.items);
 }
 
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {
