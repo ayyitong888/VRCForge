@@ -8,10 +8,9 @@ VRCForge keeps `start.cmd`, PowerShell scripts, and `quickstart/` as debug paths
 
 Program files install to `%ProgramFiles%\VRCForge`. User data lives under `%LOCALAPPDATA%\VRCForge` and contains `config/`, `logs/`, `artifacts/`, and `backups/`.
 
-The payload also includes `start_dashboard.cmd` as an automatic Launcher
-fallback. If direct packaged backend startup fails, the Launcher can run this
-command and wait for the same Dashboard URL instead of requiring the user to
-return to a source checkout.
+The payload root `VRCForge.exe` is the Tauri desktop app. Legacy launcher and
+`start_dashboard.cmd` paths remain debug/compatibility surfaces only; they are
+not the primary release entry point.
 
 ## Build Gates
 
@@ -58,8 +57,8 @@ bundled component lacks a recognized redistributable license, required license
 text, or required notice/distribution notes.
 
 Windows x64 payloads bundle the official uv runtime under `tools/uv/` so the
-Launcher can use `uvx --from mcpforunityserver unity-mcp` when Python and uv are
-not installed system-wide. uv is licensed `MIT OR Apache-2.0`; preserve:
+desktop app/backend can use `uvx --from mcpforunityserver unity-mcp` when Python
+and uv are not installed system-wide. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 - `licenses/uv-LICENSE-MIT.txt`
 - `licenses/uv-LICENSE-APACHE-2.0.txt`

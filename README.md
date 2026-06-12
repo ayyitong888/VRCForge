@@ -5,9 +5,9 @@
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-VRCForge is a local AI workbench for VRChat avatar editing. It connects a desktop dashboard, a local backend, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
+VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
-VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接桌面 Dashboard、本地后端和 Unity Editor 工具，让用户可以在明确审查后应用或恢复 Avatar 改动。
+VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 桌面 Agent 工作区、本地 FastAPI 运行时和 Unity Editor 工具，让用户可以在明确审查后应用或恢复 Avatar 改动。
 
 > WIP / 开发中
 >
@@ -29,8 +29,8 @@ Recommended:
 1. Download `VRCForge_Web_Installer_x64.exe`.
 2. Run the installer.
 3. Start `VRCForge.exe` from the desktop or Start Menu.
-4. In the launcher wizard, select a real Unity VRChat Avatar project root.
-5. Let the launcher install or update the Unity plugin, start the backend, and open the dashboard.
+4. In the first-run setup, select a real Unity VRChat Avatar project root.
+5. Let the desktop app install or update the Unity plugin, start the backend, and open the agent workspace.
 
 Offline install:
 
@@ -52,9 +52,9 @@ Portable/debug package:
 
 ## Unity Plugin Flow / Unity 插件流程
 
-The launcher validates that the selected folder is a Unity project with `Assets/`, `Packages/manifest.json`, and `ProjectSettings/ProjectVersion.txt`.
+The desktop app validates that the selected folder is a Unity project with `Assets/`, `Packages/manifest.json`, and `ProjectSettings/ProjectVersion.txt`.
 
-Launcher 会确认所选目录是 Unity 工程，并包含 `Assets/`、`Packages/manifest.json` 和 `ProjectSettings/ProjectVersion.txt`。
+桌面 app 会确认所选目录是 Unity 工程，并包含 `Assets/`、`Packages/manifest.json` 和 `ProjectSettings/ProjectVersion.txt`。
 
 It installs:
 
@@ -64,23 +64,21 @@ It installs:
 - the pinned Unity MCP package to `Packages/com.coplaydev.unity-mcp`
 - a local manifest dependency: `"com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"`
 
-Before changing Unity files, the launcher backs up old plugin folders and `Packages/manifest.json` under project-root `.vrcforge/backups/`.
+Before changing Unity files, VRCForge backs up old plugin folders and `Packages/manifest.json` under project-root `.vrcforge/backups/`.
 
-在修改 Unity 文件前，Launcher 会把旧插件目录和 `Packages/manifest.json` 备份到项目根目录 `.vrcforge/backups/`。
+在修改 Unity 文件前，VRCForge 会把旧插件目录和 `Packages/manifest.json` 备份到项目根目录 `.vrcforge/backups/`。
 
-If automatic install fails, the launcher shows the error and log path, then offers a fallback `VRCForge.unitypackage` manual import flow and a re-check button.
+If automatic install fails, the desktop app shows the error and log path, then offers a fallback `VRCForge.unitypackage` manual import flow and a re-check button.
 
-如果自动安装失败，Launcher 会显示错误原因和日志路径，并提供 `VRCForge.unitypackage` 手动导入 fallback 与重新检测按钮。
+如果自动安装失败，桌面 app 会显示错误原因和日志路径，并提供 `VRCForge.unitypackage` 手动导入 fallback 与重新检测按钮。
 
-Launcher install is idempotent per Unity project. After a successful install it writes `.vrcforge/install_state.json`; the same VRCForge version and payload checksum will not reinstall on the next launch. If the state is partial or failed, the launcher stops and shows repair/uninstall options instead of blindly touching `Assets/` or `Packages/manifest.json` again.
+Unity plugin install is idempotent per Unity project. After a successful install it writes `.vrcforge/install_state.json`; the same VRCForge version and payload checksum will not reinstall on the next launch. If the state is partial or failed, the desktop app stops and shows repair/uninstall options instead of blindly touching `Assets/` or `Packages/manifest.json` again.
 
 The project picker merges manual folders, VCC user projects, Unity Hub recent projects, and active Unity MCP instances. Active MCP instances are shown first so a running project such as `milltina` can be selected even if it was not under the default scan root.
 
-The Dashboard opens inside WebView2 first. If WebView2 Runtime is missing or fails to initialize, the launcher falls back to the system browser and shows the Dashboard URL, HTTP status, and log path. Dashboard startup is allowed as soon as the packaged HTTP page is reachable; Unity MCP, provider-key, or avatar diagnostics are shown as actionable warnings/errors instead of blocking the Dashboard window.
+`VRCForge.exe` opens the Tauri desktop app directly and starts or reconnects to the local FastAPI runtime. The legacy WebView2 launcher and `start_dashboard.cmd` path remain debug/compatibility surfaces only.
 
-If the packaged backend launch path fails, the launcher automatically falls back to the bundled `start_dashboard.cmd` and keeps waiting for the same Dashboard URL. This preserves the old debug startup path as an automatic last resort instead of requiring users to return to a source checkout.
-
-The launcher also includes uninstall buttons:
+The desktop app also includes uninstall actions:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
 - Program uninstall opens the NSIS uninstaller when installed from the x64 installer; user data under `%LOCALAPPDATA%\VRCForge` is preserved unless removed manually.
 
@@ -106,8 +104,10 @@ The launcher also includes uninstall buttons:
 | Roslyn Advanced Power Mode (in-memory compile, zero-install CodeDom fallback) | Roslyn 高级模式（内存编译，免安装 CodeDom 兜底） | Available / 可用 |
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
+| Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
+| Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
+| Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
 | Wardrobe FX authoring | 衣柜 FX 生成 | In development / 开发中 |
-| MA / VRCFury integration reading | MA / VRCFury 集成读取 | Planned / 计划中 |
 
 ## Vision Review / 识图复核
 
@@ -141,9 +141,9 @@ VRCForge includes a local Agent Gateway for MCP-capable external agents. It expo
 
 VRCForge 提供本地 Agent Gateway，可接入支持 MCP 的外部 agent。它会暴露 `http://127.0.0.1:8757/mcp`，并提供 `/api/agent/*` REST 调试接口。
 
-The gateway is disabled by default. Enable it from the Launcher external-agent page, copy the local token/config, then let the agent read logs, capture screenshots, inspect Unity state, generate plans, and request supervised writes. Actual writes still require user approval before `apply`; the approval token is kept inside the Launcher and is not included in copied agent configs.
+The gateway is disabled by default. Enable it from the desktop settings, copy the local token/config, then let the agent read logs, capture screenshots, inspect Unity state, generate plans, and request supervised writes. Actual writes still require user approval before `apply`; the approval token is kept inside VRCForge and is not included in copied agent configs.
 
-Gateway 默认关闭。请在 Launcher 的“外部 Agent 接入”页启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 Launcher 内部使用，不会写进复制给外部 agent 的配置。
+Gateway 默认关闭。请在桌面设置中启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 VRCForge 内部使用，不会写进复制给外部 agent 的配置。
 
 ## Safety / 安全原则
 
@@ -155,9 +155,9 @@ VRCForge 对写入操作采用受监督流程：
 Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 ```
 
-Core dashboard workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode, guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
+Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode, guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
 
-核心 Dashboard 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
+核心 app 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
 
 ## Developer / Debug Start
 

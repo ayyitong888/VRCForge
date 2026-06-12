@@ -1,7 +1,7 @@
 # VRCForge User Manual / 使用手册
 
-VRCForge is a local Unity dashboard for VRChat avatar editing.
-VRCForge 是一个面向 VRChat Avatar 编辑的本地 Unity dashboard。
+VRCForge is a local desktop agent workspace for VRChat avatar editing.
+VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 本手册只说明公开使用流程和功能状态，不包含项目私有路径或本地配置细节。
@@ -21,10 +21,16 @@ This manual explains the public workflow and feature status without project-spec
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |
 | `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
-| Before/after screenshot comparison | 执行前后截图对比 | 开发中 / In development |
-| Wardrobe FX scanning and generation | 衣柜 FX 扫描与生成 | 开发中 / In development |
-| Parameter usage checks and suggestions | 参数占用检查与建议 | 开发中 / In development |
-| Screenshot and multi-view analysis | 截图分析与多视角检查 | 开发中 / In development |
+| Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
+| Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
+| Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
+| Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |
+| Avatar performance scan | Avatar 性能扫描 | 已可用 / Available |
+| Unity compile-error reading | Unity 编译错误读取 | 已可用 / Available |
+| Roslyn Advanced Power Mode | Roslyn 高级模式 | 已可用 / Available |
+| Wardrobe FX generation | 衣柜 FX 生成 | 开发中 / In development |
+| Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
+| Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |
 
 ## Requirements / 运行环境
@@ -32,37 +38,39 @@ This manual explains the public workflow and feature status without project-spec
 - Windows
 - Unity 2022.3 LTS
 - VRChat SDK3 Avatar project
-- Python
-- MCP for Unity
+- Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
+- Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
+- MCP for Unity, installed automatically into the selected Unity project by VRCForge
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
 - Windows
 - Unity 2022.3 LTS
 - VRChat SDK3 Avatar 工程
-- Python
-- MCP for Unity
+- Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
+- 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
+- MCP for Unity，由 VRCForge 自动安装到选中的 Unity 工程
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
 ## Start / 启动
 
-1. Install dependencies with `python -m pip install -r requirements.txt`.
-2. Start the dashboard with `start_dashboard.cmd`.
-3. Open the avatar project in Unity.
-4. Start MCP for Unity inside Unity.
-5. Select an Avatar in VRCForge and load Blendshapes.
+1. Install VRCForge from the Windows x64 installer.
+2. Start `VRCForge.exe` from the desktop or Start Menu.
+3. Complete the first-run setup: core connection, provider/model, and Unity project.
+4. Open the avatar project in Unity and let compilation finish.
+5. Select the project/chat in VRCForge, then use agent messages or slash skills.
 
-1. 使用 `python -m pip install -r requirements.txt` 安装依赖。
-2. 使用 `start_dashboard.cmd` 启动 dashboard。
-3. 在 Unity 中打开 Avatar 工程。
-4. 在 Unity 中启动 MCP for Unity。
-5. 在 VRCForge 中选择 Avatar 并加载 Blendshape。
+1. 使用 Windows x64 安装器安装 VRCForge。
+2. 从桌面或开始菜单启动 `VRCForge.exe`。
+3. 完成首次引导：核心连接、模型/provider、Unity 工程。
+4. 在 Unity 中打开 Avatar 工程并等待编译完成。
+5. 在 VRCForge 中选择项目/会话，然后使用 agent 消息或斜杠 skill。
 
 ## Basic Workflow / 基本流程
 
 1. Open the Unity project and wait for compilation to finish.
-2. Confirm that the dashboard shows Unity as connected.
+2. Confirm that the desktop app shows Unity as connected.
 3. Load the target Avatar.
 4. Load facial Blendshapes.
 5. Make a small manual slider change and verify that undo works.
@@ -75,7 +83,7 @@ This manual explains the public workflow and feature status without project-spec
 12. Lock Blendshapes you want to keep before generating another candidate.
 
 1. 打开 Unity 工程并等待编译完成。
-2. 确认 dashboard 显示 Unity 已连接。
+2. 确认桌面 app 显示 Unity 已连接。
 3. 加载目标 Avatar。
 4. 加载脸部 Blendshape。
 5. 先做一次小幅手动滑块调整，并确认撤销可用。
@@ -97,7 +105,7 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 
 如果想保留某一部分满意结果，可以使用锁定。锁定后的 Blendshape 会从新一轮 AI 规划中排除，并在应用时被拦截，因此后续候选结果只会影响未锁定项目。
 
-## Dashboard Areas / Dashboard 区域
+## Desktop Areas / 桌面区域
 
 | Area | Purpose | 区域 | 作用 |
 | --- | --- | --- | --- |
@@ -135,11 +143,11 @@ Composer commands / 输入框命令：
 VRCForge supports Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints.
 VRCForge 支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。
 
-For face editing, original/current images and target reference images are both optional. Each group supports pasted images, local image selection, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the dashboard. Added images show as removable previews.
-捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持粘贴图片、选择本地图片、手填图片路径、使用最近 Unity 截图，或从 dashboard 直接捕获新的 Unity 截图。加入后的图片会显示为可单独删除的预览。
+For face editing, original/current images and target reference images are both optional. Each group supports pasted images, local image selection, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the desktop app. Added images show as removable previews.
+捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持粘贴图片、选择本地图片、手填图片路径、使用最近 Unity 截图，或从桌面 app 直接捕获新的 Unity 截图。加入后的图片会显示为可单独删除的预览。
 
-Image input depends on the selected provider and model. If image input is not supported, the dashboard reports the provider error.
-图片输入能力取决于所选 provider 和模型。如果模型不支持图片输入，dashboard 会显示对应错误。
+Image input depends on the selected provider and model. If image input is not supported, VRCForge reports the provider error.
+图片输入能力取决于所选 provider 和模型。如果模型不支持图片输入，VRCForge 会显示对应错误。
 
 ## Safety / 安全建议
 
@@ -160,7 +168,9 @@ Image input depends on the selected provider and model. If image input is not su
 ```powershell
 python -m py_compile dashboard_server.py vrchat_blendshape_agent.py
 python -m pytest tests -q
-node --check dashboard/app.js
+npx tsc --noEmit
+npm run build
+npm run smoke:agentic
 ```
 
 ## Troubleshooting / 常见问题
