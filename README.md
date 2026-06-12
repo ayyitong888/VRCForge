@@ -102,6 +102,10 @@ The launcher also includes uninstall buttons:
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
 | Slash-command skill invocation with autocomplete | 斜杠命令直接调用 skill（带补全菜单） | Available / 可用 |
+| Steering queue and per-turn run visualization | 插队队列与每轮运行可视化（运行行/耗时） | Available / 可用 |
+| Roslyn Advanced Power Mode (in-memory compile, zero-install CodeDom fallback) | Roslyn 高级模式（内存编译，免安装 CodeDom 兜底） | Available / 可用 |
+| Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
+| External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
 | Wardrobe FX authoring | 衣柜 FX 生成 | In development / 开发中 |
 | MA / VRCFury integration reading | MA / VRCFury 集成读取 | Planned / 计划中 |
 
@@ -151,9 +155,9 @@ VRCForge 对写入操作采用受监督流程：
 Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 ```
 
-Core dashboard workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode: disabled by default, opt-in via `VRCFORGE_ENABLE_ROSLYN`, and guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog.
+Core dashboard workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode, guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
 
-核心 Dashboard 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留：默认禁用，需要 `VRCFORGE_ENABLE_ROSLYN` 显式开启，并且执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。
+核心 Dashboard 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
 
 ## Developer / Debug Start
 
