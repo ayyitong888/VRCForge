@@ -90,7 +90,7 @@ The backend includes a local MCP + REST Agent Gateway for external MCP-capable a
 
 VRCForge ships predefined Unity tools for normal avatar reads and writes. Dry-run previews show the MCP tool payload that will be sent to Unity, not generated executable code.
 
-Roslyn is preserved only as Advanced Power Mode. It is disabled by default and is not part of the normal Dashboard workflow. To make `vrc_execute_roslyn` available, define `VRCFORGE_ENABLE_ROSLYN` in Unity scripting define symbols and install the DLLs with:
+Roslyn is preserved only as Advanced Power Mode. It is disabled by default and is not part of the normal Dashboard workflow. Snippets are compiled in-memory: the primary backend is Roslyn (only 4 DLLs: Microsoft.CodeAnalysis, Microsoft.CodeAnalysis.CSharp, System.Collections.Immutable, System.Reflection.Metadata), with a zero-install CodeDom fallback when those DLLs are absent. To install the Roslyn backend, define `VRCFORGE_ENABLE_ROSLYN` in Unity scripting define symbols and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/install-roslyn-support.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
@@ -104,7 +104,7 @@ Use the read-only Unity tool `vrc_check_roslyn_status` to verify the installed D
 Unity.exe -batchmode -quit -projectPath "PATH_TO_UNITY_PROJECT" -executeMethod VRCForge.Editor.RoslynStatusTool.BatchStatusSmoke -logFile roslyn-status-smoke.log
 ```
 
-To prove Roslyn can dynamically compile and execute inside Unity, run the fixed safe execution smoke. It evaluates a hardcoded C# snippet through the same `CSharpScript.EvaluateAsync` path and expects `result=42`:
+To prove the snippet pipeline can dynamically compile and execute inside Unity, run the fixed safe execution smoke. It compiles a hardcoded C# snippet through the same in-memory compilation path and expects `result=42` (the log includes which compiler backend was used):
 
 ```powershell
 Unity.exe -batchmode -quit -projectPath "PATH_TO_UNITY_PROJECT" -executeMethod VRCForge.Editor.RoslynStatusTool.BatchExecutionSmoke -logFile roslyn-execution-smoke.log

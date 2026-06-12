@@ -486,6 +486,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_roslyn_status", tool_names)
+        self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_apply_approved", tool_names)
         self.assertIn("vrcforge_read_recent_logs", tool_names)
@@ -576,6 +577,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_roslyn_status", tool_names)
+        self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_apply_approved", tool_names)
 
@@ -619,7 +621,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn('name: "vrc_check_roslyn_status"', source)
         self.assertIn("BatchStatusSmoke", source)
         self.assertIn("BatchExecutionSmoke", source)
-        self.assertIn("EvaluateSnippetWithTimeout", source)
+        self.assertIn("CompileAndInvoke", source)
+        self.assertIn("CSharpCodeProvider", source)
         self.assertIn("Assets/Plugins/Roslyn", bootstrap)
 
         installer = (Path(__file__).resolve().parents[1] / "tools" / "install-roslyn-support.ps1").read_text(
@@ -629,10 +632,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Assets\\csc.rsp", installer)
         self.assertIn("ProjectSettings\\ProjectSettings.asset", installer)
         self.assertIn("scriptingDefineSymbols", installer)
-        self.assertIn("System.Memory.dll", installer)
-        self.assertIn("System.Runtime.CompilerServices.Unsafe.dll", installer)
-        self.assertIn("System.Text.Encoding.CodePages.dll", installer)
-        self.assertIn("System.Numerics.Vectors.dll", installer)
+        self.assertIn("Microsoft.CodeAnalysis.dll", installer)
+        self.assertIn("Microsoft.CodeAnalysis.CSharp.dll", installer)
+        self.assertIn("System.Collections.Immutable.dll", installer)
+        self.assertIn("System.Reflection.Metadata.dll", installer)
+        self.assertNotIn("Microsoft.CodeAnalysis.CSharp.Scripting.dll", installer)
+        self.assertNotIn("System.Memory.dll", installer)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"

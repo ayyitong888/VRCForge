@@ -1,14 +1,16 @@
 using System;
+using System.CodeDom.Compiler;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
+using Microsoft.CSharp;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -80,9 +82,593 @@ namespace VRCForge.Editor
         }
     }
 
+    internal sealed class SnippetCompilationException : Exception
+    {
+        public SnippetCompilationException(string backend, IReadOnlyList<string> errors)
+            : base(string.Join(Environment.NewLine, errors ?? Array.Empty<string>()))
+        {
+            Backend = backend;
+            Errors = errors ?? Array.Empty<string>();
+        }
+
+        public string Backend { get; }
+        public IReadOnlyList<string> Errors { get; }
+    }
+
+    /// <summary>
+    /// Full-compilation snippet backend. Primary path uses Roslyn
+    /// (Microsoft.CodeAnalysis via reflection, no compile-time dependency,
+    /// only 4 DLLs required under Assets/Plugins/Roslyn). Fallback path uses
+    /// Unity's built-in CodeDom CSharpCodeProvider which needs zero install.
+    /// </summary>
+    internal static class VRCForgeSnippetCompiler
+    {
+        private const string WrapperClassName = "VRCForgeDynamicSnippet";
+        private const string WrapperMethodName = "Execute";
+
+        private static readonly string RoslynPluginFolder = Path.Combine(Application.dataPath, "Plugins", "Roslyn");
+
+        private static bool? _roslynAvailable;
+        private static bool? _codeDomAvailable;
+        private static string[] _cachedAssemblyPaths;
+
+        private static Type _syntaxTreeType;
+        private static Type _compilationType;
+        private static Type _compilationOptionsType;
+        private static Type _parseOptionsType;
+        private static Type _metadataReferenceType;
+        private static Type _outputKindEnum;
+        private static Type _languageVersionEnum;
+        private static MethodInfo _parseText;
+        private static MethodInfo _createCompilation;
+        private static MethodInfo _createFromFile;
+        private static MethodInfo _emit;
+        private static object _parseOptions;
+        private static object _compilationOptions;
+
+        public static string LastInitError { get; private set; } = string.Empty;
+
+        public static bool RoslynAvailable
+        {
+            get
+            {
+                if (_roslynAvailable == null)
+                {
+                    _roslynAvailable = InitializeRoslyn();
+                }
+
+                return _roslynAvailable.Value;
+            }
+        }
+
+        public static bool CodeDomAvailable
+        {
+            get
+            {
+                if (_codeDomAvailable == null)
+                {
+                    try
+                    {
+                        using (new CSharpCodeProvider())
+                        {
+                            _codeDomAvailable = true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LastInitError = $"CodeDom unavailable: {ex.Message}";
+                        _codeDomAvailable = false;
+                    }
+                }
+
+                return _codeDomAvailable.Value;
+            }
+        }
+
+        public static string ActiveBackend
+        {
+            get
+            {
+                if (RoslynAvailable)
+                {
+                    return "roslyn";
+                }
+
+                return CodeDomAvailable ? "codedom" : string.Empty;
+            }
+        }
+
+        public static (object result, string backend) CompileAndInvoke(string code)
+        {
+            var wrappedSource = WrapUserCode(code, out var lineOffset);
+            var assemblyPaths = GetAssemblyPaths();
+
+            Assembly compiled;
+            string backend;
+            if (RoslynAvailable)
+            {
+                backend = "roslyn";
+                compiled = CompileWithRoslyn(wrappedSource, assemblyPaths, lineOffset, out var errors);
+                if (compiled == null)
+                {
+                    throw new SnippetCompilationException(backend, errors);
+                }
+            }
+            else if (CodeDomAvailable)
+            {
+                backend = "codedom";
+                compiled = CompileWithCodeDom(wrappedSource, assemblyPaths, lineOffset, out var errors);
+                if (compiled == null)
+                {
+                    throw new SnippetCompilationException(backend, errors);
+                }
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "No C# compiler backend is available. Run tools/install-roslyn-support.ps1 to install Roslyn DLLs. " + LastInitError);
+            }
+
+            return (Invoke(compiled), backend);
+        }
+
+        private static object Invoke(Assembly assembly)
+        {
+            var type = assembly.GetType(WrapperClassName);
+            var method = type?.GetMethod(WrapperMethodName, BindingFlags.Public | BindingFlags.Static);
+            if (method == null)
+            {
+                throw new InvalidOperationException("Internal error: compiled snippet wrapper was not found.");
+            }
+
+            try
+            {
+                return SerializeResult(method.Invoke(null, null));
+            }
+            catch (TargetInvocationException tie)
+            {
+                throw tie.InnerException ?? tie;
+            }
+        }
+
+        private static object SerializeResult(object result)
+        {
+            if (result == null)
+            {
+                return null;
+            }
+
+            var type = result.GetType();
+            if (type.IsPrimitive || result is string || result is decimal)
+            {
+                return result;
+            }
+
+            try
+            {
+                return JToken.FromObject(result);
+            }
+            catch
+            {
+                return result.ToString();
+            }
+        }
+
+        internal static string WrapUserCode(string code, out int lineOffset)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("using System;");
+            sb.AppendLine("using System.Collections.Generic;");
+            sb.AppendLine("using System.IO;");
+            sb.AppendLine("using System.Linq;");
+            sb.AppendLine("using System.Reflection;");
+            sb.AppendLine("using UnityEngine;");
+            sb.AppendLine("using UnityEditor;");
+            sb.AppendLine("using UnityEditor.Animations;");
+            sb.AppendLine("using VRCForge.Editor;");
+
+            if (AppDomain.CurrentDomain.GetAssemblies().Any(assembly =>
+                    assembly.GetName().Name.StartsWith("VRC", StringComparison.OrdinalIgnoreCase)))
+            {
+                sb.AppendLine("using VRC.SDKBase;");
+                sb.AppendLine("using VRC.SDK3.Avatars.Components;");
+                sb.AppendLine("using VRC.SDK3.Avatars.ScriptableObjects;");
+            }
+
+            sb.AppendLine($"public static class {WrapperClassName}");
+            sb.AppendLine("{");
+            sb.AppendLine($"    public static object {WrapperMethodName}()");
+            sb.AppendLine("    {");
+
+            // Number of wrapper lines before the first user-code line.
+            lineOffset = CountLines(sb.ToString());
+
+            var trimmed = (code ?? string.Empty).Trim();
+            var looksLikeStatement = trimmed.Contains(";")
+                || trimmed.StartsWith("return", StringComparison.Ordinal)
+                || trimmed.StartsWith("throw", StringComparison.Ordinal)
+                || trimmed.StartsWith("{", StringComparison.Ordinal);
+            if (!looksLikeStatement)
+            {
+                // Bare expression: auto-return its value.
+                sb.AppendLine($"        return ({trimmed});");
+            }
+            else
+            {
+                sb.AppendLine(trimmed);
+                // Unreachable when the snippet already returns; warning only.
+                sb.AppendLine("        return null;");
+            }
+
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            return sb.ToString();
+        }
+
+        private static int CountLines(string text)
+        {
+            var count = 0;
+            foreach (var ch in text)
+            {
+                if (ch == '\n')
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static bool InitializeRoslyn()
+        {
+            try
+            {
+                _syntaxTreeType = ResolveType("Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree", "Microsoft.CodeAnalysis.CSharp");
+                _compilationType = ResolveType("Microsoft.CodeAnalysis.CSharp.CSharpCompilation", "Microsoft.CodeAnalysis.CSharp");
+                _compilationOptionsType = ResolveType("Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions", "Microsoft.CodeAnalysis.CSharp");
+                _parseOptionsType = ResolveType("Microsoft.CodeAnalysis.CSharp.CSharpParseOptions", "Microsoft.CodeAnalysis.CSharp");
+                _metadataReferenceType = ResolveType("Microsoft.CodeAnalysis.MetadataReference", "Microsoft.CodeAnalysis");
+                _outputKindEnum = ResolveType("Microsoft.CodeAnalysis.OutputKind", "Microsoft.CodeAnalysis");
+                _languageVersionEnum = ResolveType("Microsoft.CodeAnalysis.CSharp.LanguageVersion", "Microsoft.CodeAnalysis.CSharp");
+
+                if (_syntaxTreeType == null || _compilationType == null || _compilationOptionsType == null
+                    || _parseOptionsType == null || _metadataReferenceType == null || _outputKindEnum == null
+                    || _languageVersionEnum == null)
+                {
+                    LastInitError = "Roslyn types could not be resolved (Microsoft.CodeAnalysis DLLs missing or not loadable).";
+                    return false;
+                }
+
+                var syntaxTreeBase = ResolveType("Microsoft.CodeAnalysis.SyntaxTree", "Microsoft.CodeAnalysis");
+                _parseText = _syntaxTreeType.GetMethod(
+                    "ParseText",
+                    new[] { typeof(string), _parseOptionsType, typeof(string), typeof(Encoding), typeof(CancellationToken) });
+
+                var syntaxTreeEnumerable = typeof(IEnumerable<>).MakeGenericType(syntaxTreeBase);
+                var metadataRefEnumerable = typeof(IEnumerable<>).MakeGenericType(_metadataReferenceType);
+                _createCompilation = _compilationType.GetMethod(
+                    "Create",
+                    new[] { typeof(string), syntaxTreeEnumerable, metadataRefEnumerable, _compilationOptionsType });
+
+                _createFromFile = _metadataReferenceType
+                    .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .FirstOrDefault(m => m.Name == "CreateFromFile");
+
+                var compilationBase = ResolveType("Microsoft.CodeAnalysis.Compilation", "Microsoft.CodeAnalysis");
+                _emit = compilationBase?
+                    .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(m => m.Name == "Emit")
+                    .OrderBy(m => m.GetParameters().Length)
+                    .FirstOrDefault();
+
+                if (_parseText == null || _createCompilation == null || _createFromFile == null || _emit == null)
+                {
+                    LastInitError = "Roslyn compile entry points could not be resolved (version mismatch?).";
+                    return false;
+                }
+
+                var latestValue = Enum.Parse(_languageVersionEnum, "Latest");
+                var parseOptionsCtor = _parseOptionsType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)[0];
+                _parseOptions = parseOptionsCtor.Invoke(BuildCtorArgs(parseOptionsCtor, "languageVersion", latestValue));
+
+                var dllKind = Enum.Parse(_outputKindEnum, "DynamicallyLinkedLibrary");
+                var compOptionsCtor = _compilationOptionsType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)[0];
+                _compilationOptions = compOptionsCtor.Invoke(BuildCtorArgs(compOptionsCtor, "outputKind", dllKind));
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastInitError = $"Roslyn initialization failed: {ex.Message}";
+                return false;
+            }
+        }
+
+        private static object[] BuildCtorArgs(ConstructorInfo ctor, string overrideName, object overrideValue)
+        {
+            var ctorParams = ctor.GetParameters();
+            var args = new object[ctorParams.Length];
+            for (var i = 0; i < ctorParams.Length; i++)
+            {
+                if (ctorParams[i].Name == overrideName)
+                {
+                    args[i] = overrideValue;
+                }
+                else if (ctorParams[i].HasDefaultValue)
+                {
+                    args[i] = ctorParams[i].DefaultValue;
+                }
+                else
+                {
+                    args[i] = null;
+                }
+            }
+
+            return args;
+        }
+
+        private static Assembly CompileWithRoslyn(string source, string[] assemblyPaths, int lineOffset, out List<string> errors)
+        {
+            errors = new List<string>();
+
+            try
+            {
+                var syntaxTree = _parseText.Invoke(
+                    null,
+                    new object[] { source, _parseOptions, string.Empty, null, default(CancellationToken) });
+
+                var listType = typeof(List<>).MakeGenericType(_metadataReferenceType);
+                var refs = (System.Collections.IList)Activator.CreateInstance(listType);
+                var createFromFileParams = _createFromFile.GetParameters();
+                foreach (var path in assemblyPaths)
+                {
+                    try
+                    {
+                        var cfArgs = new object[createFromFileParams.Length];
+                        cfArgs[0] = path;
+                        for (var i = 1; i < createFromFileParams.Length; i++)
+                        {
+                            cfArgs[i] = createFromFileParams[i].HasDefaultValue ? createFromFileParams[i].DefaultValue : null;
+                        }
+
+                        refs.Add(_createFromFile.Invoke(null, cfArgs));
+                    }
+                    catch
+                    {
+                        // Skip assemblies that cannot be loaded as metadata references.
+                    }
+                }
+
+                var syntaxTreeBase = ResolveType("Microsoft.CodeAnalysis.SyntaxTree", "Microsoft.CodeAnalysis");
+                var treeArray = Array.CreateInstance(syntaxTreeBase, 1);
+                treeArray.SetValue(syntaxTree, 0);
+
+                var compilation = _createCompilation.Invoke(
+                    null,
+                    new object[] { "VRCForgeDynamic", treeArray, refs, _compilationOptions });
+
+                using (var ms = new MemoryStream())
+                {
+                    var emitParams = _emit.GetParameters();
+                    var emitArgs = new object[emitParams.Length];
+                    emitArgs[0] = ms;
+                    for (var i = 1; i < emitParams.Length; i++)
+                    {
+                        emitArgs[i] = emitParams[i].HasDefaultValue ? emitParams[i].DefaultValue : null;
+                    }
+
+                    var emitResult = _emit.Invoke(compilation, emitArgs);
+                    var success = (bool)emitResult.GetType().GetProperty("Success").GetValue(emitResult);
+
+                    if (!success)
+                    {
+                        CollectErrorDiagnostics(emitResult, lineOffset, errors);
+                        return null;
+                    }
+
+                    ms.Seek(0, SeekOrigin.Begin);
+                    return Assembly.Load(ms.ToArray());
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Roslyn compilation error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void CollectErrorDiagnostics(object emitResult, int lineOffset, List<string> errors)
+        {
+            var diagnostics = (System.Collections.IEnumerable)emitResult.GetType()
+                .GetProperty("Diagnostics")
+                .GetValue(emitResult);
+            var severityEnum = ResolveType("Microsoft.CodeAnalysis.DiagnosticSeverity", "Microsoft.CodeAnalysis");
+            var severityError = Enum.Parse(severityEnum, "Error");
+
+            foreach (var diag in diagnostics)
+            {
+                var severity = diag.GetType().GetProperty("Severity")?.GetValue(diag);
+                if (severity == null || !severity.Equals(severityError))
+                {
+                    continue;
+                }
+
+                var id = diag.GetType().GetProperty("Id")?.GetValue(diag)?.ToString() ?? string.Empty;
+                string message;
+                try
+                {
+                    var msgMethod = diag.GetType().GetMethod("GetMessage", new[] { typeof(System.Globalization.CultureInfo) });
+                    message = (string)msgMethod.Invoke(diag, new object[] { null });
+                }
+                catch
+                {
+                    message = diag.ToString();
+                }
+
+                var userLine = 0;
+                try
+                {
+                    var location = diag.GetType().GetProperty("Location")?.GetValue(diag);
+                    var lineSpan = location?.GetType().GetMethod("GetLineSpan", Type.EmptyTypes)?.Invoke(location, null);
+                    var startPos = lineSpan?.GetType().GetProperty("StartLinePosition")?.GetValue(lineSpan);
+                    if (startPos != null)
+                    {
+                        var line = (int)startPos.GetType().GetProperty("Line").GetValue(startPos);
+                        userLine = Math.Max(1, line + 1 - lineOffset);
+                    }
+                }
+                catch
+                {
+                    // Line info is best-effort only.
+                }
+
+                errors.Add(userLine > 0 ? $"Line {userLine}: {id} {message}" : $"{id} {message}");
+            }
+
+            if (errors.Count == 0)
+            {
+                errors.Add("Compilation failed without error diagnostics.");
+            }
+        }
+
+        // CSharpCodeProvider cannot resolve type forwarding; when netstandard.dll is
+        // referenced alongside these, common types appear twice and compilation fails.
+        private static readonly HashSet<string> CodeDomDuplicateAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "mscorlib",
+            "System.Runtime",
+            "System.Private.CoreLib",
+            "System.Collections",
+        };
+
+        private static Assembly CompileWithCodeDom(string source, string[] assemblyPaths, int lineOffset, out List<string> errors)
+        {
+            errors = new List<string>();
+
+            var hasNetstandard = assemblyPaths.Any(p =>
+                string.Equals(Path.GetFileNameWithoutExtension(p), "netstandard", StringComparison.OrdinalIgnoreCase));
+            var filtered = hasNetstandard
+                ? assemblyPaths.Where(p => !CodeDomDuplicateAssemblies.Contains(Path.GetFileNameWithoutExtension(p))).ToArray()
+                : assemblyPaths;
+
+            using (var provider = new CSharpCodeProvider())
+            {
+                var parameters = new CompilerParameters
+                {
+                    GenerateInMemory = true,
+                    GenerateExecutable = false,
+                    TreatWarningsAsErrors = false,
+                };
+
+                foreach (var path in filtered)
+                {
+                    parameters.ReferencedAssemblies.Add(path);
+                }
+
+                var results = provider.CompileAssemblyFromSource(parameters, source);
+                if (results.Errors.HasErrors)
+                {
+                    foreach (CompilerError error in results.Errors)
+                    {
+                        if (!error.IsWarning)
+                        {
+                            var userLine = Math.Max(1, error.Line - lineOffset);
+                            errors.Add($"Line {userLine}: {error.ErrorNumber} {error.ErrorText}");
+                        }
+                    }
+
+                    return null;
+                }
+
+                return results.CompiledAssembly;
+            }
+        }
+
+        private static string[] GetAssemblyPaths()
+        {
+            if (_cachedAssemblyPaths == null)
+            {
+                var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (assembly.IsDynamic)
+                        {
+                            continue;
+                        }
+
+                        var location = assembly.Location;
+                        if (string.IsNullOrEmpty(location) || !File.Exists(location))
+                        {
+                            continue;
+                        }
+
+                        paths.Add(location);
+                    }
+                    catch (NotSupportedException)
+                    {
+                        // Some assemblies do not support the Location property.
+                    }
+                }
+
+                _cachedAssemblyPaths = paths.ToArray();
+            }
+
+            return _cachedAssemblyPaths;
+        }
+
+        private static Type ResolveType(string fullName, string assemblyName)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    var type = assembly.GetType(fullName, false);
+                    if (type != null)
+                    {
+                        return type;
+                    }
+                }
+                catch
+                {
+                    // Ignore editor reload races.
+                }
+            }
+
+            try
+            {
+                var loadedType = Type.GetType($"{fullName}, {assemblyName}", false);
+                if (loadedType != null)
+                {
+                    return loadedType;
+                }
+            }
+            catch
+            {
+                // Try the conventional plugin folder below.
+            }
+
+            try
+            {
+                var dllPath = Path.Combine(RoslynPluginFolder, $"{assemblyName}.dll");
+                if (File.Exists(dllPath))
+                {
+                    return Assembly.LoadFrom(dllPath).GetType(fullName, false);
+                }
+            }
+            catch
+            {
+                // Leave unresolved; caller treats null as unavailable.
+            }
+
+            return null;
+        }
+    }
+
     [McpForUnityTool(
         name: "vrc_execute_roslyn",
-        Description = "Advanced Power Mode only: execute Roslyn C# snippets after explicit risk confirmation."
+        Description = "Advanced Power Mode only: execute C# snippets (compiled in-memory) after explicit risk confirmation."
     )]
     public static class RoslynExecutor
     {
@@ -93,16 +679,8 @@ namespace VRCForge.Editor
         {
             "Microsoft.CodeAnalysis.dll",
             "Microsoft.CodeAnalysis.CSharp.dll",
-            "Microsoft.CodeAnalysis.Scripting.dll",
-            "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
             "System.Collections.Immutable.dll",
-            "System.Reflection.Metadata.dll",
-            "System.Memory.dll",
-            "System.Runtime.CompilerServices.Unsafe.dll",
-            "System.Buffers.dll",
-            "System.Threading.Tasks.Extensions.dll",
-            "System.Text.Encoding.CodePages.dll",
-            "System.Numerics.Vectors.dll"
+            "System.Reflection.Metadata.dll"
         };
         private static readonly string RoslynPluginFolder = Path.Combine(Application.dataPath, "Plugins", "Roslyn");
 
@@ -113,7 +691,7 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [ToolParameter("C# snippet to execute. Use RoslynExecutor.SetBlendshapeWeight for generated assignments.")]
+            [ToolParameter("C# snippet to execute. A bare expression (no semicolons) is auto-returned; multi-statement snippets should end with 'return <value>;' (a trailing 'return null;' is appended automatically). Helpers like RoslynExecutor.SetBlendshapeWeight are in scope.")]
             public string code { get; set; }
 
             [ToolParameter("Must be true to acknowledge Advanced Power Mode risk before any snippet can run.", Required = false)]
@@ -127,11 +705,6 @@ namespace VRCForge.Editor
 
             [ToolParameter("Optional execution timeout in seconds. Clamped to 1-30 seconds.", Required = false)]
             public int? timeoutSeconds { get; set; } = DefaultExecutionTimeoutSeconds;
-        }
-
-        public sealed class ScriptGlobals
-        {
-            public string ProjectPath => Directory.GetParent(Application.dataPath)?.FullName ?? string.Empty;
         }
 
         public static object HandleCommand(JObject @params)
@@ -167,8 +740,7 @@ namespace VRCForge.Editor
                     () => ExecuteSnippet(
                         parameters.code,
                         parameters.enforceWriteDefaultsOn ?? true,
-                        parameters.targetAvatarPaths,
-                        executionTimeout),
+                        parameters.targetAvatarPaths),
                     executionTimeout + TimeSpan.FromSeconds(2));
 
                 startedAt.Stop();
@@ -179,18 +751,19 @@ namespace VRCForge.Editor
                 }
 
                 return new SuccessResponse(
-                    $"Roslyn snippet executed in {startedAt.Elapsed.TotalMilliseconds:F0} ms.",
+                    $"Snippet executed in {startedAt.Elapsed.TotalMilliseconds:F0} ms via {executionResult.backend}.",
                     new
                     {
                         result = executionResult.result,
                         writeDefaultsUpdated = executionResult.writeDefaultsUpdated,
-                        durationMs = startedAt.Elapsed.TotalMilliseconds
+                        durationMs = startedAt.Elapsed.TotalMilliseconds,
+                        compilerBackend = executionResult.backend
                     });
             }
-            catch (Exception ex) when (IsCompilationErrorException(ex))
+            catch (SnippetCompilationException ex)
             {
-                var diagnostics = FormatCompilationDiagnostics(ex);
-                return new ErrorResponse($"Roslyn compilation failed:{Environment.NewLine}{diagnostics}");
+                return new ErrorResponse(
+                    $"Snippet compilation failed ({ex.Backend}):{Environment.NewLine}{string.Join(Environment.NewLine, ex.Errors)}");
             }
             catch (TimeoutException ex)
             {
@@ -215,33 +788,17 @@ namespace VRCForge.Editor
                 TimeSpan.FromSeconds(30));
         }
 
-        private static (object result, int writeDefaultsUpdated) ExecuteSnippet(
+        private static (object result, int writeDefaultsUpdated, string backend) ExecuteSnippet(
             string code,
             bool enforceWriteDefaultsOn,
-            IEnumerable<string> targetAvatarPaths,
-            TimeSpan executionTimeout)
+            IEnumerable<string> targetAvatarPaths)
         {
-            var result = EvaluateSnippetWithTimeout(code, executionTimeout);
+            var (result, backend) = VRCForgeSnippetCompiler.CompileAndInvoke(code);
             var writeDefaultsUpdated = enforceWriteDefaultsOn ? EnsureWriteDefaultsOn(targetAvatarPaths) : 0;
 
             AssetDatabase.SaveAssets();
             EditorSceneManager.SaveOpenScenes();
-            return (result, writeDefaultsUpdated);
-        }
-
-        private static object EvaluateSnippetWithTimeout(string code, TimeSpan executionTimeout)
-        {
-            var options = BuildScriptOptions();
-            var globals = new ScriptGlobals();
-            var evaluation = EvaluateScriptAsync(code, options, globals);
-            var completed = Task.WhenAny(evaluation, Task.Delay(executionTimeout)).GetAwaiter().GetResult();
-
-            if (completed != evaluation)
-            {
-                throw new TimeoutException($"Snippet did not finish within the {executionTimeout.TotalSeconds:F0} second safety budget.");
-            }
-
-            return evaluation.GetAwaiter().GetResult();
+            return (result, writeDefaultsUpdated, backend);
         }
 
         private static TimeSpan BuildExecutionTimeout(int? requestedSeconds)
@@ -251,137 +808,19 @@ namespace VRCForge.Editor
             return TimeSpan.FromSeconds(seconds);
         }
 
-        private static object BuildScriptOptions()
-        {
-            var scriptOptionsType = ResolveRoslynType(
-                "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
-                "Microsoft.CodeAnalysis.Scripting");
-            var options = scriptOptionsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static)
-                ?.GetValue(null);
-            if (options == null)
-            {
-                throw new InvalidOperationException("Roslyn ScriptOptions.Default was not available.");
-            }
-
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies()
-                .Where(assembly => !assembly.IsDynamic && !string.IsNullOrWhiteSpace(assembly.Location))
-                .GroupBy(assembly => assembly.Location, StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First())
-                .ToArray();
-
-            options = InvokeScriptOptionsMethod(
-                scriptOptionsType,
-                options,
-                "AddReferences",
-                typeof(Assembly[]),
-                assemblies);
-
-            var imports = new List<string>
-            {
-                "System",
-                "System.IO",
-                "System.Linq",
-                "System.Collections.Generic",
-                "UnityEngine",
-                "UnityEditor",
-                "UnityEditor.Animations",
-                "VRCForge.Editor"
-            };
-
-            if (AppDomain.CurrentDomain.GetAssemblies().Any(assembly => assembly.GetName().Name.StartsWith("VRC", StringComparison.OrdinalIgnoreCase)))
-            {
-                imports.Add("VRC.SDKBase");
-                imports.Add("VRC.SDK3.Avatars.Components");
-                imports.Add("VRC.SDK3.Avatars.ScriptableObjects");
-            }
-
-            return InvokeScriptOptionsMethod(
-                scriptOptionsType,
-                options,
-                "AddImports",
-                typeof(string[]),
-                imports.ToArray());
-        }
-
-        private static object InvokeScriptOptionsMethod(
-            Type scriptOptionsType,
-            object options,
-            string methodName,
-            Type parameterType,
-            object argument)
-        {
-            var method = scriptOptionsType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .FirstOrDefault(candidate =>
-                {
-                    if (candidate.Name != methodName)
-                    {
-                        return false;
-                    }
-
-                    var parameters = candidate.GetParameters();
-                    return parameters.Length == 1 && parameters[0].ParameterType == parameterType;
-                });
-
-            if (method == null)
-            {
-                throw new InvalidOperationException($"Roslyn ScriptOptions.{methodName} overload was not available.");
-            }
-
-            return method.Invoke(options, new[] { argument });
-        }
-
-        private static Task<object> EvaluateScriptAsync(string code, object options, ScriptGlobals globals)
-        {
-            var csharpScriptType = ResolveRoslynType(
-                "Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript",
-                "Microsoft.CodeAnalysis.CSharp.Scripting");
-            var scriptOptionsType = ResolveRoslynType(
-                "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
-                "Microsoft.CodeAnalysis.Scripting");
-            var method = csharpScriptType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                .Where(candidate => candidate.Name == "EvaluateAsync" && candidate.IsGenericMethodDefinition)
-                .FirstOrDefault(candidate =>
-                {
-                    var parameters = candidate.GetParameters();
-                    return parameters.Length == 5
-                        && parameters[0].ParameterType == typeof(string)
-                        && parameters[1].ParameterType == scriptOptionsType
-                        && parameters[2].ParameterType == typeof(object)
-                        && parameters[3].ParameterType == typeof(Type)
-                        && parameters[4].ParameterType == typeof(CancellationToken);
-                });
-
-            if (method == null)
-            {
-                throw new InvalidOperationException("Roslyn CSharpScript.EvaluateAsync overload was not available.");
-            }
-
-            var task = method.MakeGenericMethod(typeof(object)).Invoke(
-                null,
-                new object[] { code, options, globals, typeof(ScriptGlobals), CancellationToken.None });
-            return (Task<object>)task;
-        }
-
         internal static bool TryResolveRoslynRuntime(out string error)
         {
             error = string.Empty;
-            try
+            if (VRCForgeSnippetCompiler.RoslynAvailable || VRCForgeSnippetCompiler.CodeDomAvailable)
             {
-                ResolveRoslynType(
-                    "Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript",
-                    "Microsoft.CodeAnalysis.CSharp.Scripting");
-                ResolveRoslynType(
-                    "Microsoft.CodeAnalysis.Scripting.ScriptOptions",
-                    "Microsoft.CodeAnalysis.Scripting");
                 return true;
             }
-            catch (Exception ex)
-            {
-                error =
-                    "Roslyn runtime is unavailable. Install Roslyn DLLs under Assets/Plugins/Roslyn or run tools/install-roslyn-support.ps1. "
-                    + ex.Message;
-                return false;
-            }
+
+            error =
+                "No C# compiler backend is available. Install Roslyn DLLs under Assets/Plugins/Roslyn "
+                + "(run tools/install-roslyn-support.ps1) or ensure the Unity CodeDom fallback works. "
+                + VRCForgeSnippetCompiler.LastInitError;
+            return false;
         }
 
         internal static object BuildStatusPayload()
@@ -407,9 +846,12 @@ namespace VRCForge.Editor
 
             return new
             {
-                ok = missing.Length == 0 && runtimeResolved,
+                ok = runtimeResolved,
                 installed = missing.Length == 0,
                 runtimeResolved,
+                roslynAvailable = VRCForgeSnippetCompiler.RoslynAvailable,
+                codeDomAvailable = VRCForgeSnippetCompiler.CodeDomAvailable,
+                activeBackend = VRCForgeSnippetCompiler.ActiveBackend,
                 defineEnabled,
                 pluginFolder = RoslynPluginFolder.Replace("\\", "/"),
                 requiredDllCount = RequiredRoslynDlls.Length,
@@ -430,31 +872,49 @@ namespace VRCForge.Editor
                     executed = false,
                     expected = 42.0f,
                     result = (object)null,
+                    compilerBackend = "",
                     runtimeError,
                     code = "<fixed-smoke-snippet>"
                 };
             }
 
-            var startedAt = Stopwatch.StartNew();
-            var result = EvaluateSnippetWithTimeout(
-                "new UnityEngine.Vector3(1f, 2f, 3f).x + 41f",
-                TimeSpan.FromSeconds(DefaultExecutionTimeoutSeconds));
-            startedAt.Stop();
-            var numericResult = Convert.ToSingle(result);
-            var ok = Math.Abs(numericResult - 42.0f) < 0.001f;
-
-            return new
+            try
             {
-                ok,
-                compiled = true,
-                executed = true,
-                expected = 42.0f,
-                result = numericResult,
-                resultType = result?.GetType().FullName ?? "",
-                durationMs = startedAt.Elapsed.TotalMilliseconds,
-                runtimeError = "",
-                code = "<fixed-smoke-snippet>"
-            };
+                var startedAt = Stopwatch.StartNew();
+                var (result, backend) = VRCForgeSnippetCompiler.CompileAndInvoke(
+                    "new UnityEngine.Vector3(1f, 2f, 3f).x + 41f");
+                startedAt.Stop();
+                var numericResult = Convert.ToSingle(result);
+                var ok = Math.Abs(numericResult - 42.0f) < 0.001f;
+
+                return new
+                {
+                    ok,
+                    compiled = true,
+                    executed = true,
+                    expected = 42.0f,
+                    result = numericResult,
+                    resultType = result?.GetType().FullName ?? "",
+                    compilerBackend = backend,
+                    durationMs = startedAt.Elapsed.TotalMilliseconds,
+                    runtimeError = "",
+                    code = "<fixed-smoke-snippet>"
+                };
+            }
+            catch (SnippetCompilationException ex)
+            {
+                return new
+                {
+                    ok = false,
+                    compiled = false,
+                    executed = false,
+                    expected = 42.0f,
+                    result = (object)null,
+                    compilerBackend = ex.Backend,
+                    runtimeError = ex.Message,
+                    code = "<fixed-smoke-snippet>"
+                };
+            }
         }
 
         private static bool HasRoslynDefine()
@@ -478,51 +938,6 @@ namespace VRCForge.Editor
             {
                 return false;
             }
-        }
-
-        private static Type ResolveRoslynType(string fullName, string assemblyName)
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    var type = assembly.GetType(fullName, false);
-                    if (type != null)
-                    {
-                        return type;
-                    }
-                }
-                catch
-                {
-                    // Ignore editor reload races.
-                }
-            }
-
-            try
-            {
-                var loadedType = Type.GetType($"{fullName}, {assemblyName}", false);
-                if (loadedType != null)
-                {
-                    return loadedType;
-                }
-            }
-            catch
-            {
-                // Try loading from the conventional project plugin folder below.
-            }
-
-            var dllPath = Path.Combine(RoslynPluginFolder, $"{assemblyName}.dll");
-            if (File.Exists(dllPath))
-            {
-                var assembly = Assembly.LoadFrom(dllPath);
-                var type = assembly.GetType(fullName, false);
-                if (type != null)
-                {
-                    return type;
-                }
-            }
-
-            throw new InvalidOperationException($"Could not load Roslyn type '{fullName}'.");
         }
 
         private static Assembly ResolveRoslynDependency(object sender, ResolveEventArgs args)
@@ -549,62 +964,6 @@ namespace VRCForge.Editor
             catch
             {
                 return null;
-            }
-        }
-
-        private static bool IsCompilationErrorException(Exception ex)
-        {
-            return ex.GetType().FullName == "Microsoft.CodeAnalysis.Scripting.CompilationErrorException";
-        }
-
-        private static string FormatCompilationDiagnostics(Exception ex)
-        {
-            try
-            {
-                var diagnostics = ex.GetType().GetProperty("Diagnostics")?.GetValue(ex) as System.Collections.IEnumerable;
-                if (diagnostics == null)
-                {
-                    return ex.Message;
-                }
-
-                var lines = diagnostics.Cast<object>().Select(FormatDiagnosticObject).ToArray();
-                return lines.Length > 0 ? string.Join(Environment.NewLine, lines) : ex.Message;
-            }
-            catch
-            {
-                return ex.Message;
-            }
-        }
-
-        private static string FormatDiagnosticObject(object diagnostic)
-        {
-            try
-            {
-                var diagnosticType = diagnostic.GetType();
-                var severity = diagnosticType.GetProperty("Severity")?.GetValue(diagnostic)?.ToString() ?? "Diagnostic";
-                var message = diagnosticType.GetMethod("GetMessage", Type.EmptyTypes)?.Invoke(diagnostic, null)?.ToString()
-                    ?? diagnostic.ToString();
-                var location = diagnosticType.GetProperty("Location")?.GetValue(diagnostic);
-                var span = location?.GetType().GetMethod("GetLineSpan", Type.EmptyTypes)?.Invoke(location, null);
-                var isValid = (bool?)span?.GetType().GetProperty("IsValid")?.GetValue(span) ?? false;
-                if (!isValid)
-                {
-                    return diagnostic.ToString();
-                }
-
-                var start = span.GetType().GetProperty("StartLinePosition")?.GetValue(span);
-                if (start == null)
-                {
-                    return diagnostic.ToString();
-                }
-
-                var line = (int)start.GetType().GetProperty("Line").GetValue(start) + 1;
-                var character = (int)start.GetType().GetProperty("Character").GetValue(start) + 1;
-                return $"{severity} L{line}:C{character} {message}";
-            }
-            catch
-            {
-                return diagnostic.ToString();
             }
         }
 
@@ -812,7 +1171,7 @@ namespace VRCForge.Editor
 
     [McpForUnityTool(
         name: "vrc_check_roslyn_status",
-        Description = "Read-only Roslyn Advanced Power Mode diagnostics for installed DLLs, define state, and runtime loadability."
+        Description = "Read-only Roslyn Advanced Power Mode diagnostics for installed DLLs, compiler backends, define state, and runtime loadability."
     )]
     public static class RoslynStatusTool
     {

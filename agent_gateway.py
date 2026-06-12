@@ -2844,6 +2844,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_vision_audit",
         "vrcforge_read_recent_logs",
         "vrcforge_roslyn_status",
+        "vrcforge_get_compile_errors",
         "vrcforge_plan_face_tuning",
         "vrcforge_plan_shader_tuning",
         "vrcforge_preview_blendshape_apply",

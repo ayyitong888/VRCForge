@@ -14,16 +14,8 @@ namespace VRCForge.Editor
         {
             "Microsoft.CodeAnalysis.dll",
             "Microsoft.CodeAnalysis.CSharp.dll",
-            "Microsoft.CodeAnalysis.Scripting.dll",
-            "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
             "System.Collections.Immutable.dll",
-            "System.Reflection.Metadata.dll",
-            "System.Memory.dll",
-            "System.Runtime.CompilerServices.Unsafe.dll",
-            "System.Buffers.dll",
-            "System.Threading.Tasks.Extensions.dll",
-            "System.Text.Encoding.CodePages.dll",
-            "System.Numerics.Vectors.dll"
+            "System.Reflection.Metadata.dll"
         };
 
         static RoslynSupportBootstrap()
@@ -37,8 +29,8 @@ namespace VRCForge.Editor
             {
                 if (!RoslynDllsInstalled())
                 {
-                    UnityEngine.Debug.LogWarning(
-                        $"[VRCForge] Roslyn Advanced Power Mode DLLs were not found under {RoslynPluginPathHint}. vrc_execute_roslyn will report an install hint if called.");
+                    UnityEngine.Debug.Log(
+                        $"[VRCForge] Roslyn Advanced Power Mode DLLs were not found under {RoslynPluginPathHint}. vrc_execute_roslyn will fall back to the built-in CodeDom compiler; run tools/install-roslyn-support.ps1 for the full Roslyn backend.");
                     return;
                 }
 
