@@ -605,6 +605,473 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
 
+    def test_generic_component_crud_tool_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
+        source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
+        for tool_name in (
+            "vrc_get_property",
+            "vrc_add_component",
+            "vrc_remove_component",
+            "vrc_set_property",
+        ):
+            self.assertIn(f'name: "{tool_name}"', source)
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 4)
+        # Write tools must register Undo entries so the checkpoint timeline can roll them back.
+        self.assertIn("Undo.AddComponent", source)
+        self.assertIn("Undo.DestroyObjectImmediate", source)
+        self.assertIn("Undo.RecordObject", source)
+
+    def test_component_crud_tools_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        # Read tool is directly callable.
+        self.assertIn("vrcforge_get_property", tool_names)
+        # Write tools are approval-gated: present as writeTargets, never as direct read tools.
+        self.assertNotIn("vrcforge_add_component", tool_names)
+        self.assertNotIn("vrcforge_remove_component", tool_names)
+        self.assertNotIn("vrcforge_set_property", tool_names)
+        self.assertIn("vrcforge_add_component", write_targets)
+        self.assertIn("vrcforge_remove_component", write_targets)
+        self.assertIn("vrcforge_set_property", write_targets)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_get_property_forwards_to_unity_tool(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {
+                "componentType": "UnityEngine.SkinnedMeshRenderer",
+                "propertyPath": "enabled",
+                "valueType": "System.Boolean",
+                "propertyValue": True,
+            }},
+        )
+        result = dashboard_server.read_component_property_sync({
+            "game_object_path": "Scene/Avatar/Body",
+            "component_type": "SkinnedMeshRenderer",
+            "property_path": "enabled",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_get_property")
+        self.assertEqual(params["gameObjectPath"], "Scene/Avatar/Body")
+        self.assertEqual(params["componentType"], "SkinnedMeshRenderer")
+        self.assertEqual(params["propertyPath"], "enabled")
+
+    def test_get_property_requires_target_fields(self) -> None:
+        self.assertFalse(dashboard_server.read_component_property_sync({})["ok"])
+        self.assertFalse(
+            dashboard_server.read_component_property_sync(
+                {"game_object_path": "A", "component_type": "C"}
+            )["ok"]
+        )
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_component_forwards_with_preview_flag(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "add_component", "preview": True, "componentType": "X"}},
+        )
+        result = dashboard_server.add_component_sync({
+            "game_object_path": "Scene/Avatar/Outfit",
+            "component_type": "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature",
+            "preview": True,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_add_component")
+        self.assertTrue(params["preview"])
+        self.assertEqual(
+            params["componentType"],
+            "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature",
+        )
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_remove_component_forwards_index(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "remove_component"}},
+        )
+        result = dashboard_server.remove_component_sync({
+            "gameObjectPath": "Scene/Avatar/Body",
+            "componentType": "BoxCollider",
+            "componentIndex": 2,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_remove_component")
+        self.assertEqual(params["componentIndex"], 2)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_set_property_requires_value_and_forwards(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "set_property", "newValue": False}},
+        )
+        missing = dashboard_server.set_component_property_sync({
+            "game_object_path": "Scene/Avatar/Body",
+            "component_type": "SkinnedMeshRenderer",
+            "property_path": "enabled",
+        })
+        self.assertFalse(missing["ok"])
+        mock_invoke.assert_not_called()
+        result = dashboard_server.set_component_property_sync({
+            "game_object_path": "Scene/Avatar/Body",
+            "component_type": "SkinnedMeshRenderer",
+            "property_path": "enabled",
+            "value": False,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_set_property")
+        self.assertEqual(params["propertyPath"], "enabled")
+        self.assertIn("value", params)
+        self.assertEqual(params["value"], False)
+
+    def test_generic_gameobject_crud_tool_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
+        source = (editor_dir / "UnityGameObjectCrud.cs").read_text(encoding="utf-8")
+        for tool_name in (
+            "vrc_get_gameobject",
+            "vrc_create_gameobject",
+            "vrc_rename_gameobject",
+            "vrc_reparent_gameobject",
+            "vrc_delete_gameobject",
+            "vrc_set_gameobject_active",
+        ):
+            self.assertIn(f'name: "{tool_name}"', source)
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 6)
+        # Reuses the shared reflection core rather than hard-referencing MA/VRC SDK assemblies.
+        self.assertIn("ComponentCrudCore.ResolveGameObject", source)
+        # Every write tool registers a Unity Undo entry for the checkpoint timeline.
+        self.assertIn("Undo.RegisterCreatedObjectUndo", source)
+        self.assertIn("Undo.SetTransformParent", source)
+        self.assertIn("Undo.DestroyObjectImmediate", source)
+        self.assertIn("Undo.RecordObject", source)
+        # read payload must avoid auto-unwrap keys (data/result/payload/value).
+        self.assertNotIn("value =", source)
+
+    def test_gameobject_crud_tools_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        # Read tool is directly callable.
+        self.assertIn("vrcforge_get_gameobject", tool_names)
+        # Write tools are approval-gated: present as writeTargets, never as direct read tools.
+        for write_name in (
+            "vrcforge_create_gameobject",
+            "vrcforge_rename_gameobject",
+            "vrcforge_reparent_gameobject",
+            "vrcforge_delete_gameobject",
+            "vrcforge_set_gameobject_active",
+        ):
+            self.assertNotIn(write_name, tool_names)
+            self.assertIn(write_name, write_targets)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_get_gameobject_forwards_to_unity_tool(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {
+                "gameObjectPath": "Avatar/Body",
+                "name": "Body",
+                "activeSelf": True,
+                "childCount": 0,
+                "componentCount": 2,
+            }},
+        )
+        result = dashboard_server.get_gameobject_sync({
+            "game_object_path": "Avatar/Body",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_get_gameobject")
+        self.assertEqual(params["gameObjectPath"], "Avatar/Body")
+
+    def test_get_gameobject_requires_path(self) -> None:
+        self.assertFalse(dashboard_server.get_gameobject_sync({})["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_create_gameobject_forwards_with_preview_flag(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "create_gameobject", "preview": True, "name": "Outfit"}},
+        )
+        result = dashboard_server.create_gameobject_sync({
+            "name": "Outfit",
+            "parent_path": "Avatar",
+            "preview": True,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_create_gameobject")
+        self.assertTrue(params["preview"])
+        self.assertEqual(params["name"], "Outfit")
+        self.assertEqual(params["parentPath"], "Avatar")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_rename_gameobject_requires_new_name_and_forwards(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "rename_gameobject", "newName": "Hips"}},
+        )
+        missing = dashboard_server.rename_gameobject_sync({"game_object_path": "Avatar/Armature/Hip"})
+        self.assertFalse(missing["ok"])
+        mock_invoke.assert_not_called()
+        result = dashboard_server.rename_gameobject_sync({
+            "game_object_path": "Avatar/Armature/Hip",
+            "new_name": "Hips",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_rename_gameobject")
+        self.assertEqual(params["newName"], "Hips")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_reparent_gameobject_forwards_world_position_stays(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "reparent_gameobject"}},
+        )
+        result = dashboard_server.reparent_gameobject_sync({
+            "game_object_path": "Avatar/Outfit",
+            "new_parent_path": "Avatar/Armature/Hips",
+            "world_position_stays": False,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_reparent_gameobject")
+        self.assertEqual(params["newParentPath"], "Avatar/Armature/Hips")
+        self.assertFalse(params["worldPositionStays"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_delete_gameobject_forwards(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "delete_gameobject", "preview": True}},
+        )
+        missing = dashboard_server.delete_gameobject_sync({})
+        self.assertFalse(missing["ok"])
+        result = dashboard_server.delete_gameobject_sync({
+            "game_object_path": "Avatar/OldOutfit",
+            "preview": True,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_delete_gameobject")
+        self.assertEqual(params["gameObjectPath"], "Avatar/OldOutfit")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_set_gameobject_active_requires_active_and_forwards(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "set_gameobject_active", "newActive": False}},
+        )
+        missing = dashboard_server.set_gameobject_active_sync({"game_object_path": "Avatar/Hat"})
+        self.assertFalse(missing["ok"])
+        mock_invoke.assert_not_called()
+        result = dashboard_server.set_gameobject_active_sync({
+            "game_object_path": "Avatar/Hat",
+            "active": False,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_set_gameobject_active")
+        self.assertIn("active", params)
+        self.assertFalse(params["active"])
+
+    def test_asset_prefab_crud_tool_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
+        source = (editor_dir / "UnityAssetPrefabCrud.cs").read_text(encoding="utf-8")
+        for tool_name in (
+            "vrc_find_assets",
+            "vrc_get_asset_info",
+            "vrc_instantiate_prefab",
+            "vrc_unpack_prefab",
+        ):
+            self.assertIn(f'name: "{tool_name}"', source)
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 4)
+        # Reuses the shared reflection core rather than hard-referencing MA/VRC SDK assemblies.
+        self.assertIn("ComponentCrudCore.ResolveGameObject", source)
+        # Reads sit on stable AssetDatabase APIs.
+        self.assertIn("AssetDatabase.FindAssets", source)
+        # Both write tools register a Unity Undo entry for the checkpoint timeline.
+        self.assertIn("Undo.RegisterCreatedObjectUndo", source)
+        self.assertIn("PrefabUtility.InstantiatePrefab", source)
+        self.assertIn("PrefabUtility.UnpackPrefabInstance", source)
+        # payload must avoid auto-unwrap keys (data/result/payload/value).
+        self.assertNotIn("value =", source)
+
+    def test_asset_prefab_tools_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        # Read tools are directly callable.
+        self.assertIn("vrcforge_find_assets", tool_names)
+        self.assertIn("vrcforge_get_asset_info", tool_names)
+        # Write tools are approval-gated: present as writeTargets, never as direct read tools.
+        for write_name in (
+            "vrcforge_instantiate_prefab",
+            "vrcforge_unpack_prefab",
+        ):
+            self.assertNotIn(write_name, tool_names)
+            self.assertIn(write_name, write_targets)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_find_assets_forwards_query_and_type(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"filter": "t:Prefab outfit", "count": 1, "assets": []}},
+        )
+        result = dashboard_server.find_assets_sync({
+            "query": "outfit",
+            "type_name": "Prefab",
+            "folder": "Assets/Outfits",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_find_assets")
+        self.assertEqual(params["query"], "outfit")
+        self.assertEqual(params["typeName"], "Prefab")
+        self.assertEqual(params["folder"], "Assets/Outfits")
+
+    def test_get_asset_info_requires_path_or_guid(self) -> None:
+        self.assertFalse(dashboard_server.get_asset_info_sync({})["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_get_asset_info_forwards(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"assetPath": "Assets/Outfits/Dress.prefab", "isPrefab": True}},
+        )
+        result = dashboard_server.get_asset_info_sync({
+            "asset_path": "Assets/Outfits/Dress.prefab",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_get_asset_info")
+        self.assertEqual(params["assetPath"], "Assets/Outfits/Dress.prefab")
+
+    def test_instantiate_prefab_requires_asset(self) -> None:
+        self.assertFalse(dashboard_server.instantiate_prefab_sync({})["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_instantiate_prefab_forwards_with_preview(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "instantiate_prefab", "preview": True, "name": "Dress"}},
+        )
+        result = dashboard_server.instantiate_prefab_sync({
+            "asset_path": "Assets/Outfits/Dress.prefab",
+            "parent_path": "Avatar",
+            "preview": True,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_instantiate_prefab")
+        self.assertTrue(params["preview"])
+        self.assertEqual(params["assetPath"], "Assets/Outfits/Dress.prefab")
+        self.assertEqual(params["parentPath"], "Avatar")
+
+    def test_unpack_prefab_requires_path(self) -> None:
+        self.assertFalse(dashboard_server.unpack_prefab_sync({})["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_unpack_prefab_forwards_mode(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "unpack_prefab", "unpackMode": "completely"}},
+        )
+        result = dashboard_server.unpack_prefab_sync({
+            "game_object_path": "Avatar/Dress",
+            "mode": "completely",
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_unpack_prefab")
+        self.assertEqual(params["gameObjectPath"], "Avatar/Dress")
+        self.assertEqual(params["mode"], "completely")
+
     def test_roslyn_advanced_power_mode_requires_explicit_opt_in(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "RoslynExecutor.cs").read_text(encoding="utf-8")

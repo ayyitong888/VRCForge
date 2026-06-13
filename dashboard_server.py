@@ -6615,6 +6615,338 @@ def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(
+            params.get("game_object_path")
+            or params.get("gameObjectPath")
+            or params.get("object_path")
+            or params.get("objectPath")
+            or ""
+        ).strip(),
+        str(params.get("component_type") or params.get("componentType") or "").strip(),
+    )
+
+
+def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path, comp_type = build_component_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    if not comp_type:
+        return {"ok": False, "error": "componentType is required."}
+    prop = str(params.get("property_path") or params.get("propertyPath") or "").strip()
+    if not prop:
+        return {"ok": False, "error": "propertyPath is required."}
+    request = {
+        "gameObjectPath": go_path,
+        "componentType": comp_type,
+        "propertyPath": prop,
+        "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_property", request)),
+        "get property",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def add_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path, comp_type = build_component_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    if not comp_type:
+        return {"ok": False, "error": "componentType is required."}
+    preview = bool(params.get("preview", False))
+    request = {"gameObjectPath": go_path, "componentType": comp_type, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_component", request)),
+        "add component",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "component", "Component added.", {"gameObjectPath": go_path, "componentType": comp_type})
+    return payload
+
+
+def remove_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path, comp_type = build_component_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    if not comp_type:
+        return {"ok": False, "error": "componentType is required."}
+    preview = bool(params.get("preview", False))
+    request = {
+        "gameObjectPath": go_path,
+        "componentType": comp_type,
+        "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
+        "preview": preview,
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_remove_component", request)),
+        "remove component",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "component", "Component removed.", {"gameObjectPath": go_path, "componentType": comp_type})
+    return payload
+
+
+def set_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path, comp_type = build_component_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    if not comp_type:
+        return {"ok": False, "error": "componentType is required."}
+    prop = str(params.get("property_path") or params.get("propertyPath") or "").strip()
+    if not prop:
+        return {"ok": False, "error": "propertyPath is required."}
+    if "value" not in params:
+        return {"ok": False, "error": "value is required."}
+    preview = bool(params.get("preview", False))
+    request = {
+        "gameObjectPath": go_path,
+        "componentType": comp_type,
+        "propertyPath": prop,
+        "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
+        "preview": preview,
+        "value": params.get("value"),
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_set_property", request)),
+        "set property",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "component", "Component property set.", {"gameObjectPath": go_path, "componentType": comp_type, "propertyPath": prop})
+    return payload
+
+
+
+def build_gameobject_target(params: dict[str, Any]) -> str:
+    return str(
+        params.get("game_object_path")
+        or params.get("gameObjectPath")
+        or params.get("object_path")
+        or params.get("objectPath")
+        or ""
+    ).strip()
+
+
+def get_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    request = {"gameObjectPath": go_path}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_gameobject", request)),
+        "get gameobject",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def create_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    name = str(params.get("name") or "").strip()
+    parent_path = str(params.get("parent_path") or params.get("parentPath") or "").strip()
+    preview = bool(params.get("preview", False))
+    request = {"name": name, "parentPath": parent_path, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_create_gameobject", request)),
+        "create gameobject",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "gameobject", "GameObject created.", {"name": name or "GameObject", "parentPath": parent_path})
+    return payload
+
+
+def rename_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    new_name = str(params.get("new_name") or params.get("newName") or "").strip()
+    if not new_name:
+        return {"ok": False, "error": "newName is required."}
+    preview = bool(params.get("preview", False))
+    request = {"gameObjectPath": go_path, "newName": new_name, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_rename_gameobject", request)),
+        "rename gameobject",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "gameobject", "GameObject renamed.", {"gameObjectPath": go_path, "newName": new_name})
+    return payload
+
+
+def reparent_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    new_parent_path = str(params.get("new_parent_path") or params.get("newParentPath") or "").strip()
+    world_position_stays = bool(params.get("world_position_stays", params.get("worldPositionStays", True)))
+    preview = bool(params.get("preview", False))
+    request = {
+        "gameObjectPath": go_path,
+        "newParentPath": new_parent_path,
+        "worldPositionStays": world_position_stays,
+        "preview": preview,
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_reparent_gameobject", request)),
+        "reparent gameobject",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "gameobject", "GameObject reparented.", {"gameObjectPath": go_path, "newParentPath": new_parent_path})
+    return payload
+
+
+def delete_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    preview = bool(params.get("preview", False))
+    request = {"gameObjectPath": go_path, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_delete_gameobject", request)),
+        "delete gameobject",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "gameobject", "GameObject deleted.", {"gameObjectPath": go_path})
+    return payload
+
+
+def set_gameobject_active_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    if "active" not in params and "isActive" not in params:
+        return {"ok": False, "error": "active is required."}
+    active = bool(params.get("active", params.get("isActive")))
+    preview = bool(params.get("preview", False))
+    request = {"gameObjectPath": go_path, "active": active, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_set_gameobject_active", request)),
+        "set gameobject active",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "gameobject", "GameObject active state set.", {"gameObjectPath": go_path, "active": active})
+    return payload
+
+
+def build_asset_path_target(params: dict[str, Any]) -> str:
+    return str(
+        params.get("asset_path")
+        or params.get("assetPath")
+        or ""
+    ).strip()
+
+
+def find_assets_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = {
+        "query": str(params.get("query") or "").strip(),
+        "typeName": str(params.get("type_name") or params.get("typeName") or "").strip(),
+        "folder": str(params.get("folder") or "").strip(),
+        "limit": int(params.get("limit", 50) or 50),
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_find_assets", request)),
+        "find assets",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def get_asset_info_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    asset_path = build_asset_path_target(params)
+    guid = str(params.get("guid") or "").strip()
+    if not asset_path and not guid:
+        return {"ok": False, "error": "assetPath or guid is required."}
+    request = {"assetPath": asset_path, "guid": guid}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_asset_info", request)),
+        "get asset info",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    asset_path = build_asset_path_target(params)
+    guid = str(params.get("guid") or "").strip()
+    if not asset_path and not guid:
+        return {"ok": False, "error": "assetPath or guid is required."}
+    parent_path = str(params.get("parent_path") or params.get("parentPath") or "").strip()
+    name = str(params.get("name") or "").strip()
+    world_position_stays = bool(params.get("world_position_stays", params.get("worldPositionStays", True)))
+    preview = bool(params.get("preview", False))
+    request = {
+        "assetPath": asset_path,
+        "guid": guid,
+        "parentPath": parent_path,
+        "name": name,
+        "worldPositionStays": world_position_stays,
+        "preview": preview,
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_instantiate_prefab", request)),
+        "instantiate prefab",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "prefab", "Prefab instantiated.", {"assetPath": asset_path or guid, "parentPath": parent_path})
+    return payload
+
+
+def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    go_path = build_gameobject_target(params)
+    if not go_path:
+        return {"ok": False, "error": "gameObjectPath is required."}
+    mode = str(params.get("mode") or "outermost").strip()
+    preview = bool(params.get("preview", False))
+    request = {"gameObjectPath": go_path, "mode": mode, "preview": preview}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_unpack_prefab", request)),
+        "unpack prefab",
+    )
+    payload.setdefault("ok", True)
+    if not preview:
+        emit_log("info", "prefab", "Prefab instance unpacked.", {"gameObjectPath": go_path, "mode": mode})
+    return payload
+
+
 def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
@@ -6657,6 +6989,10 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
     AGENT_GATEWAY.register_tool("vrcforge_roslyn_status", "Read Roslyn Advanced Power Mode diagnostics from Unity.", "read/debug", read_agent_roslyn_status)
     AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)
+    AGENT_GATEWAY.register_tool("vrcforge_get_property", "Read a single field/property value from a component on a scene GameObject.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_find_assets", "Search the project for assets by query/type/folder.", "read/debug", find_assets_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_asset_info", "Describe a project asset: path, GUID, type, importer, and prefab details.", "read/debug", get_asset_info_sync)
     AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: run_dashboard_pipeline_sync(build_agent_dashboard_request(params), False))
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
@@ -6719,6 +7055,66 @@ def register_agent_gateway_tools() -> None:
         "Run Modular Avatar Setup Outfit on an outfit object through VRCForge.",
         "high",
         setup_outfit_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_add_component",
+        "Add a component of a given type to a scene GameObject through VRCForge.",
+        "medium",
+        add_component_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_remove_component",
+        "Remove a component of a given type from a scene GameObject through VRCForge.",
+        "high",
+        remove_component_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_set_property",
+        "Set a single field/property on a component of a scene GameObject through VRCForge.",
+        "medium",
+        set_component_property_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_create_gameobject",
+        "Create a new empty GameObject in the scene through VRCForge.",
+        "medium",
+        create_gameobject_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_rename_gameobject",
+        "Rename a scene GameObject through VRCForge.",
+        "low",
+        rename_gameobject_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_reparent_gameobject",
+        "Move a scene GameObject under a new parent (or to the scene root) through VRCForge.",
+        "medium",
+        reparent_gameobject_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_delete_gameobject",
+        "Delete a scene GameObject and its children through VRCForge.",
+        "high",
+        delete_gameobject_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_set_gameobject_active",
+        "Set a scene GameObject's active-self state through VRCForge.",
+        "low",
+        set_gameobject_active_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_instantiate_prefab",
+        "Instantiate a prefab asset into the active scene (optionally under a parent) through VRCForge.",
+        "medium",
+        instantiate_prefab_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_unpack_prefab",
+        "Unpack a prefab instance in the scene so its contents become plain GameObjects through VRCForge.",
+        "high",
+        unpack_prefab_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_install_vpm_package",
