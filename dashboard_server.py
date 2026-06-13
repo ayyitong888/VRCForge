@@ -6371,6 +6371,17 @@ def scan_avatar_controls_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def scan_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_wardrobe",
+        "wardrobe",
+        {},
+        "wardrobe scan",
+    )
+
+
 def scan_avatar_parameters_gateway_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -6977,6 +6988,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "Scan animation clip bindings for an avatar or animator controller.", "read/debug", scan_animation_bindings_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", scan_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
     AGENT_GATEWAY.register_tool("vrcforge_create_safe_backup", "Create a safe backup snapshot of avatar assets and open scenes.", "plan/preview", create_safe_backup_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)

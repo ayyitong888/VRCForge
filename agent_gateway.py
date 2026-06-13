@@ -163,6 +163,13 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "writes artifact JSON only",
         "tags": ["menu", "scan"],
     },
+    "vrcforge_scan_wardrobe": {
+        "title": "Wardrobe Scan",
+        "inputs": ["Optional avatar path."],
+        "outputs": ["Int-exclusive wardrobe(s): outfit values, menu toggles, FX states, per-clip object on/off toggles, and Write Defaults flags."],
+        "sideEffects": "writes artifact JSON only",
+        "tags": ["wardrobe", "menu", "animator", "scan"],
+    },
     "vrcforge_scan_parameters": {
         "title": "Expression Parameter Scan",
         "inputs": ["Optional avatar path."],
@@ -318,6 +325,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_scan_fx_animator",
             "vrcforge_scan_animation_bindings",
             "vrcforge_scan_avatar_controls",
+            "vrcforge_scan_wardrobe",
             "vrcforge_scan_parameters",
             "vrcforge_scan_avatar_performance",
         ],
@@ -539,6 +547,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "allowedTools": [
             "vrcforge_scan_avatar_items",
             "vrcforge_scan_avatar_controls",
+            "vrcforge_scan_wardrobe",
             "vrcforge_create_safe_backup",
             "vrcforge_request_apply",
             "vrcforge_apply_approved",
@@ -2833,6 +2842,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_scan_fx_animator",
         "vrcforge_scan_animation_bindings",
         "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_wardrobe",
         "vrcforge_scan_parameters",
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",

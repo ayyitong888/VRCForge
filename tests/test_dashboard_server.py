@@ -605,6 +605,62 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
 
+    def test_wardrobe_scanner_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
+        source = (editor_dir / "WardrobeScanner.cs").read_text(encoding="utf-8")
+        # Declares the read-only int-exclusive wardrobe detection tool.
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertIn('name: "vrc_scan_wardrobe"', source)
+        self.assertIn("public static object HandleCommand(JObject @params)", source)
+        # Captures the menu toggle's int value (the gap the older scanners lacked).
+        self.assertIn("control.value", source)
+        # Reads per-state Write Defaults, which exclusivity in this style relies on.
+        self.assertIn("writeDefaultValues", source)
+        # Reconciles the FX layer via Any-State "Equals N" transitions.
+        self.assertIn("AnimatorConditionMode.Equals", source)
+        self.assertIn("anyStateTransitions", source)
+        # Reads which objects each clip turns on vs off.
+        self.assertIn("m_IsActive", source)
+        # Recurses into SubMenus when toggles overflow the 8-control cap.
+        self.assertIn("ControlType.SubMenu", source)
+        # Read-only: must NOT mutate the avatar (no FX/menu/param writes, no Undo).
+        self.assertNotIn("Undo.", source)
+        self.assertNotIn("SetDirty", source)
+        self.assertNotIn(".AddLayer(", source)
+        self.assertNotIn(".AddState(", source)
+        self.assertNotIn("AssetDatabase.CreateAsset", source)
+
+    def test_wardrobe_scan_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        # Read tool is directly callable, never an approval-gated write target.
+        self.assertIn("vrcforge_scan_wardrobe", tool_names)
+        self.assertNotIn("vrcforge_scan_wardrobe", write_targets)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_wardrobe_scan_forwards_to_unity_tool(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"wardrobeCount": 1, "wardrobes": [{"parameterName": "Clothes"}]}},
+        )
+        result = dashboard_server.scan_wardrobe_sync({"avatar_path": "Scene/HeroAvatar"})
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_scan_wardrobe")
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+
     def test_generic_component_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
         source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
