@@ -6615,6 +6615,106 @@ def setup_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _coerce_path_list(params: dict[str, Any], *keys: str) -> list[str]:
+    result: list[str] = []
+    for key in keys:
+        raw = params.get(key)
+        if raw is None:
+            continue
+        items = raw if isinstance(raw, (list, tuple)) else [raw]
+        for item in items:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+    return result
+
+
+def build_add_wardrobe_outfit_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "outfitName": str(
+            params.get("outfit_name")
+            or params.get("outfitName")
+            or params.get("display_name")
+            or params.get("displayName")
+            or ""
+        ).strip(),
+        "objectPaths": _coerce_path_list(
+            params, "object_paths", "objectPaths", "on_object_paths", "onObjectPaths"
+        ),
+        "preview": preview,
+    }
+    off_objects = _coerce_path_list(params, "off_object_paths", "offObjectPaths")
+    if off_objects:
+        request["offObjectPaths"] = off_objects
+    if params.get("add_menu_toggle") is not None or params.get("addMenuToggle") is not None:
+        request["addMenuToggle"] = bool(params.get("add_menu_toggle", params.get("addMenuToggle")))
+    if params.get("set_objects_default_off") is not None or params.get("setObjectsDefaultOff") is not None:
+        request["setObjectsDefaultOff"] = bool(
+            params.get("set_objects_default_off", params.get("setObjectsDefaultOff"))
+        )
+    if params.get("sub_menu_overflow") is not None or params.get("subMenuOverflow") is not None:
+        request["subMenuOverflow"] = bool(params.get("sub_menu_overflow", params.get("subMenuOverflow")))
+    sub_menu_name = str(params.get("sub_menu_name") or params.get("subMenuName") or "").strip()
+    if sub_menu_name:
+        request["subMenuName"] = sub_menu_name
+    clip_dir = str(params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
+    if clip_dir:
+        request["clipOutputDir"] = clip_dir
+    if params.get("value") is not None:
+        request["value"] = int(params.get("value"))
+    if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
+        request["writeDefaults"] = bool(params.get("write_defaults", params.get("writeDefaults")))
+    return request
+
+
+def _validate_add_wardrobe_outfit_request(request: dict[str, Any]) -> dict[str, Any] | None:
+    if not request["parameterName"]:
+        return {"ok": False, "error": "parameterName is required (the existing int wardrobe parameter)."}
+    if not request["outfitName"]:
+        return {"ok": False, "error": "outfitName is required (display name for the new outfit)."}
+    if not request["objectPaths"]:
+        return {"ok": False, "error": "objectPaths is required (the new outfit's scene objects to turn on)."}
+    return None
+
+
+def preview_add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_wardrobe_outfit_request(params, True)
+    invalid = _validate_add_wardrobe_outfit_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", request)),
+        "add wardrobe outfit preview",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_wardrobe_outfit_request(params, False)
+    invalid = _validate_add_wardrobe_outfit_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", request)),
+        "add wardrobe outfit",
+    )
+    payload.setdefault("ok", True)
+    emit_log(
+        "info",
+        "wardrobe",
+        "Wardrobe outfit added.",
+        {"parameterName": request["parameterName"], "outfitName": request["outfitName"]},
+    )
+    return payload
+
+
 def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     return run_unity_artifact_scan_sync(
@@ -6995,6 +7095,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
@@ -7067,6 +7168,12 @@ def register_agent_gateway_tools() -> None:
         "Run Modular Avatar Setup Outfit on an outfit object through VRCForge.",
         "high",
         setup_outfit_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_add_wardrobe_outfit",
+        "Add one outfit to an existing int-exclusive wardrobe (assign next int value, set new objects scene-default off, author an on/off clip, add an FX Any-State Equals state, and a menu toggle) through VRCForge.",
+        "high",
+        add_wardrobe_outfit_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_component",

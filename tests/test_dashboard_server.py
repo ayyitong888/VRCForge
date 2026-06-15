@@ -661,6 +661,106 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(tool_name, "vrc_scan_wardrobe")
         self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
 
+    def test_wardrobe_outfit_writer_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
+        source = (editor_dir / "WardrobeOutfitWriter.cs").read_text(encoding="utf-8")
+        # Declares the int-exclusive add-outfit write tool.
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertIn('name: "vrc_add_wardrobe_outfit"', source)
+        self.assertIn("public static object HandleCommand(JObject @params)", source)
+        # Assigns the next free int value and gates an Any-State Equals N transition.
+        self.assertIn("AnimatorConditionMode.Equals", source)
+        self.assertIn("AddAnyStateTransition", source)
+        self.assertIn("AddState", source)
+        # Matches the wardrobe's Write Defaults convention, which exclusivity relies on.
+        self.assertIn("writeDefaultValues", source)
+        # Authors a clip toggling objects on/off and adds a menu toggle (SubMenu overflow).
+        self.assertIn("m_IsActive", source)
+        self.assertIn("AssetDatabase.CreateAsset", source)
+        self.assertIn("ControlType.Toggle", source)
+        self.assertIn("VRCExpressionsMenu.MAX_CONTROLS", source)
+        # Write tool: must register Undo entries so the checkpoint timeline can roll it back.
+        self.assertIn("Undo.", source)
+        # Supports a non-mutating preview path.
+        self.assertIn("preview", source)
+
+    def test_add_wardrobe_outfit_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        # Preview is a directly callable read/plan tool, never an approval-gated write target.
+        self.assertIn("vrcforge_preview_add_wardrobe_outfit", tool_names)
+        self.assertNotIn("vrcforge_preview_add_wardrobe_outfit", write_targets)
+        # The write is approval-gated: a writeTarget, never a direct read tool.
+        self.assertIn("vrcforge_add_wardrobe_outfit", write_targets)
+        self.assertNotIn("vrcforge_add_wardrobe_outfit", tool_names)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_wardrobe_outfit_preview_forwards_with_flag(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"preview": True, "plan": {"value": 3}}},
+        )
+        result = dashboard_server.preview_add_wardrobe_outfit_sync({
+            "avatar_path": "Scene/HeroAvatar",
+            "parameter_name": "Clothes",
+            "outfit_name": "Hoodie",
+            "object_paths": ["Outfits/Hoodie"],
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_add_wardrobe_outfit")
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+        self.assertEqual(params["parameterName"], "Clothes")
+        self.assertEqual(params["outfitName"], "Hoodie")
+        self.assertEqual(params["objectPaths"], ["Outfits/Hoodie"])
+        self.assertTrue(params["preview"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_wardrobe_outfit_apply_forwards_without_preview(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "assignedValue": 3, "fxStateName": "Hoodie"}},
+        )
+        result = dashboard_server.add_wardrobe_outfit_sync({
+            "avatarPath": "Scene/HeroAvatar",
+            "parameterName": "Clothes",
+            "outfitName": "Hoodie",
+            "objectPaths": ["Outfits/Hoodie"],
+        })
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["assignedValue"], 3)
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_add_wardrobe_outfit")
+        self.assertFalse(params["preview"])
+
+    def test_add_wardrobe_outfit_requires_parameter_and_objects(self) -> None:
+        missing_param = dashboard_server.add_wardrobe_outfit_sync({
+            "outfit_name": "Hoodie",
+            "object_paths": ["Outfits/Hoodie"],
+        })
+        self.assertFalse(missing_param["ok"])
+        missing_objects = dashboard_server.add_wardrobe_outfit_sync({
+            "parameter_name": "Clothes",
+            "outfit_name": "Hoodie",
+        })
+        self.assertFalse(missing_objects["ok"])
+
     def test_generic_component_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
         source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
