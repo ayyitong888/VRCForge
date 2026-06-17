@@ -83,3 +83,10 @@ The web installer also requires the payload zip on the same release:
 ```text
 VRCForge_Windows_x64_<VERSION>.zip
 ```
+
+Do not upload artifacts built from a newer commit into an older existing tag.
+If release contents change after `v<VERSION>` was already created, bump
+`VERSION`, push that version commit, build with the matching
+`-PayloadDownloadUrl`, then publish the new tag/release. The web installer
+downloads exactly the URL passed at build time, so that URL must point to the
+payload zip generated from the same commit.
