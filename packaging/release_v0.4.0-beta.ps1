@@ -5,6 +5,7 @@
 # Any failure aborts immediately; validation failures commit nothing.
 
 $ErrorActionPreference = "Stop"
+throw "This one-shot release script is archived because it mutates git history. Use packaging/build_release.ps1 and packaging/publish_release.ps1 instead."
 $repo = Split-Path $PSScriptRoot -Parent
 Set-Location $repo
 

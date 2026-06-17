@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -7,7 +8,7 @@ namespace VRCForge.Launcher;
 
 internal sealed class LauncherPaths
 {
-    public string Version { get; } = "0.3.1-alpha";
+    public string Version { get; } = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.4.0";
     public DirectoryInfo ProgramDir { get; }
     public DirectoryInfo UserDataDir { get; }
     public DirectoryInfo ConfigDir { get; }
@@ -22,6 +23,7 @@ internal sealed class LauncherPaths
     public FileInfo BackendExe { get; }
     public FileInfo StartDashboardCmdPath { get; }
     public FileInfo SettingsPath { get; }
+    public FileInfo AppSessionTokenPath { get; }
     public FileInfo AgentGatewayConfigPath { get; }
     public FileInfo BackendLogPath { get; }
     public FileInfo RuntimeDependencyLogPath { get; }
@@ -47,6 +49,7 @@ internal sealed class LauncherPaths
         BackendExe = new FileInfo(Path.Combine(ProgramDir.FullName, "backend", "vrcforge_backend.exe"));
         StartDashboardCmdPath = new FileInfo(Path.Combine(ProgramDir.FullName, "start_dashboard.cmd"));
         SettingsPath = new FileInfo(Path.Combine(ConfigDir.FullName, "settings.json"));
+        AppSessionTokenPath = new FileInfo(Path.Combine(ConfigDir.FullName, "app-session-token"));
         AgentGatewayConfigPath = new FileInfo(Path.Combine(ConfigDir.FullName, "agent_gateway.json"));
         BackendLogPath = new FileInfo(Path.Combine(LogsDir.FullName, "backend.log"));
         RuntimeDependencyLogPath = new FileInfo(Path.Combine(LogsDir.FullName, "runtime-dependencies.log"));
@@ -139,6 +142,22 @@ internal sealed class LauncherPaths
     {
         JsonObject config = EnsureAgentGatewayConfig();
         return config["approval_token"]?.GetValue<string>() ?? "";
+    }
+
+    public string AppSessionToken()
+    {
+        ConfigDir.Create();
+        if (AppSessionTokenPath.Exists)
+        {
+            string existing = File.ReadAllText(AppSessionTokenPath.FullName).Trim();
+            if (existing.Length >= 32)
+            {
+                return existing;
+            }
+        }
+        string token = GenerateToken();
+        File.WriteAllText(AppSessionTokenPath.FullName, token);
+        return token;
     }
 
     public bool AgentGatewayEnabled()

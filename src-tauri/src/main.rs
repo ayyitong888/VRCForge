@@ -43,6 +43,7 @@ impl Drop for BackendState {
 #[derive(Serialize)]
 struct BackendStartResult {
     endpoint: String,
+    app_session_token: String,
     started: bool,
     already_running: bool,
     mode: String,
@@ -56,9 +57,12 @@ fn backend_endpoint() -> String {
 
 #[tauri::command]
 fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, String> {
+    let user_data = user_data_dir()?;
+    let app_session_token = ensure_app_session_token(&user_data)?;
     if backend_port_open() {
         return Ok(BackendStartResult {
             endpoint: BACKEND_ENDPOINT.to_string(),
+            app_session_token,
             started: false,
             already_running: true,
             mode: "existing".to_string(),
@@ -67,7 +71,6 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
     }
 
     let root = repo_root()?;
-    let user_data = user_data_dir()?;
     prepare_runtime_files(&root, &user_data)?;
 
     let mut command = backend_command(&root)?;
@@ -80,6 +83,7 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         .env("VRCFORGE_ARTIFACTS_DIR", user_data.join("artifacts"))
         .env("VRCFORGE_DASHBOARD_DIR", root.join("dashboard"))
         .env("VRCFORGE_SETTINGS_PATH", user_data.join("config").join("settings.json"))
+        .env("VRCFORGE_APP_SESSION_TOKEN", &app_session_token)
         .arg("--host")
         .arg(BACKEND_HOST)
         .arg("--port")
@@ -108,6 +112,7 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
 
     Ok(BackendStartResult {
         endpoint: BACKEND_ENDPOINT.to_string(),
+        app_session_token,
         started: true,
         already_running: false,
         mode: "managed".to_string(),
@@ -232,6 +237,40 @@ fn user_data_dir() -> Result<PathBuf, String> {
         .or_else(|_| env::var("APPDATA"))
         .map_err(|_| "无法解析 Windows 用户数据目录".to_string())?;
     Ok(PathBuf::from(base).join("VRCForge").join("agentic-app"))
+}
+
+fn ensure_app_session_token(user_data: &Path) -> Result<String, String> {
+    let config_dir = user_data.join("config");
+    fs::create_dir_all(&config_dir).map_err(|error| format!("无法创建用户配置目录: {error}"))?;
+    let token_path = config_dir.join("app-session-token");
+    if let Ok(existing) = fs::read_to_string(&token_path) {
+        let token = existing.trim().to_string();
+        if token.len() >= 32 {
+            return Ok(token);
+        }
+    }
+    let token = generate_session_token();
+    fs::write(&token_path, &token).map_err(|error| format!("无法写入 app session token: {error}"))?;
+    Ok(token)
+}
+
+fn generate_session_token() -> String {
+    let mut bytes = [0u8; 32];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut file| {
+            use std::io::Read;
+            file.read_exact(&mut bytes)
+        })
+        .is_ok()
+    {
+        return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{:x}{:x}", nanos, std::process::id())
 }
 
 fn backend_port_open() -> bool {

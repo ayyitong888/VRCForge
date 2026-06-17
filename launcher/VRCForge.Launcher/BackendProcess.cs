@@ -49,6 +49,7 @@ internal sealed class BackendProcess : IDisposable
         info.Environment["VRCFORGE_ARTIFACTS_DIR"] = paths.ArtifactsDir.FullName;
         info.Environment["VRCFORGE_DASHBOARD_DIR"] = paths.DashboardDir.FullName;
         info.Environment["VRCFORGE_SETTINGS_PATH"] = paths.SettingsPath.FullName;
+        info.Environment["VRCFORGE_APP_SESSION_TOKEN"] = paths.AppSessionToken();
         info.Environment["UV_PYTHON_INSTALL_DIR"] = Path.Combine(paths.ToolsDir.FullName, "python");
         info.Environment["UV_TOOL_DIR"] = Path.Combine(paths.ToolsDir.FullName, "uv-tools");
         info.Environment["UV_CACHE_DIR"] = Path.Combine(paths.ToolsDir.FullName, "uv-cache");
@@ -206,6 +207,7 @@ internal sealed class BackendProcess : IDisposable
         info.Environment["VRCFORGE_ARTIFACTS_DIR"] = paths.ArtifactsDir.FullName;
         info.Environment["VRCFORGE_DASHBOARD_DIR"] = paths.DashboardDir.FullName;
         info.Environment["VRCFORGE_SETTINGS_PATH"] = paths.SettingsPath.FullName;
+        info.Environment["VRCFORGE_APP_SESSION_TOKEN"] = paths.AppSessionToken();
         info.Environment["VRCFORGE_SELECTED_UNITY_PROJECT"] = unityProjectPath;
         info.Environment["UV_PYTHON_INSTALL_DIR"] = Path.Combine(paths.ToolsDir.FullName, "python");
         info.Environment["UV_TOOL_DIR"] = Path.Combine(paths.ToolsDir.FullName, "uv-tools");

@@ -784,7 +784,7 @@ class AgentGateway:
             "execution_mode": normalize_execution_mode(config.execution_mode),
             "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
         }
-        self.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(self.config_path, payload)
 
     def authenticate(
         self,
@@ -1375,13 +1375,39 @@ class AgentGateway:
             raise AgentGatewayError("Stored shell approval command hash does not match.")
         workspace_root = self._resolve_workspace_root(params)
         cwd = self._resolve_cwd(params, workspace_root)
-        result = self._run_shell_command(command, cwd, timeout_seconds=int(params.get("timeout_seconds") or 120))
+        timeout_seconds = int(params.get("timeout_seconds") or params.get("timeoutSeconds") or 120)
+        expected_cwd_hash = str(params.get("cwd_hash") or params.get("cwdHash") or "")
+        expected_workspace_hash = str(params.get("workspace_root_hash") or params.get("workspaceRootHash") or "")
+        expected_timeout_hash = str(params.get("timeout_hash") or params.get("timeoutHash") or "")
+        if expected_cwd_hash and expected_cwd_hash != stable_hash(str(cwd)):
+            raise AgentGatewayError("Stored shell approval cwd hash does not match.")
+        if expected_workspace_hash and expected_workspace_hash != stable_hash(str(workspace_root)):
+            raise AgentGatewayError("Stored shell approval workspace root hash does not match.")
+        if expected_timeout_hash and expected_timeout_hash != stable_hash(str(timeout_seconds)):
+            raise AgentGatewayError("Stored shell approval timeout hash does not match.")
+
+        classification = self.classify_shell(
+            {
+                "command": command,
+                "cwd": str(cwd),
+                "workspace_root": str(workspace_root),
+            }
+        )
+        if classification.get("risk") == "reject":
+            raise AgentGatewayError("Approved shell command is no longer executable: " + "; ".join(classification.get("reasons") or []))
+        if classification.get("commandHash") != expected_hash:
+            raise AgentGatewayError("Reclassified shell command hash does not match approval.")
+
+        result = self._run_shell_command(command, cwd, timeout_seconds=timeout_seconds)
         self.append_audit(
             {
                 "event": "shell_approved_executed",
                 "sessionId": params.get("session_id") or params.get("sessionId") or "",
                 "turnId": params.get("turn_id") or params.get("turnId") or "",
                 "commandHash": command_hash(command),
+                "cwdHash": stable_hash(str(cwd)),
+                "workspaceRootHash": stable_hash(str(workspace_root)),
+                "timeoutHash": stable_hash(str(timeout_seconds)),
                 "cwd": str(cwd),
                 "workspaceRoot": str(workspace_root),
                 "result": summarize_shell_result(result),
@@ -2492,11 +2518,15 @@ class AgentGateway:
         arguments = {
             "command": classification["command"],
             "command_hash": classification["commandHash"],
+            "cwd_hash": stable_hash(classification["cwd"]),
+            "workspace_root_hash": stable_hash(classification["workspaceRoot"]),
             "cwd": classification["cwd"],
             "workspace_root": classification["workspaceRoot"],
             "session_id": session_id,
             "turn_id": turn_id,
             "timeout_seconds": int(params.get("timeout_seconds") or 120),
+            "timeout_hash": stable_hash(str(int(params.get("timeout_seconds") or 120))),
+            "classification_snapshot": classification,
         }
         approval = self._new_approval(
             agent_name=agent_name,
@@ -2518,6 +2548,8 @@ class AgentGateway:
                 stored["sessionId"] = session_id
                 stored["turnId"] = turn_id
                 stored["commandHash"] = classification["commandHash"]
+                stored["cwdHash"] = stable_hash(classification["cwd"])
+                stored["workspaceRootHash"] = stable_hash(classification["workspaceRoot"])
         self.append_audit(
             {
                 "event": "shell_approval_requested",
@@ -3262,6 +3294,17 @@ def is_path_within(path: Path, root: Path) -> bool:
 
 def command_hash(command: str) -> str:
     return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+
+
+def stable_hash(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
 
 
 def parse_llm_plan_response(raw_response: str) -> dict[str, Any] | None:

@@ -705,6 +705,12 @@ namespace VRCForge.Editor
 
             [ToolParameter("Optional execution timeout in seconds. Clamped to 1-30 seconds.", Required = false)]
             public int? timeoutSeconds { get; set; } = DefaultExecutionTimeoutSeconds;
+
+            [ToolParameter("If true, save dirty assets after execution. Defaults to false because Roslyn is an advanced repair path.", Required = false)]
+            public bool? saveAssets { get; set; } = false;
+
+            [ToolParameter("If true, save open scenes after execution. Defaults to false because Roslyn is an advanced repair path.", Required = false)]
+            public bool? saveScenes { get; set; } = false;
         }
 
         public static object HandleCommand(JObject @params)
@@ -740,7 +746,9 @@ namespace VRCForge.Editor
                     () => ExecuteSnippet(
                         parameters.code,
                         parameters.enforceWriteDefaultsOn ?? true,
-                        parameters.targetAvatarPaths),
+                        parameters.targetAvatarPaths,
+                        parameters.saveAssets == true,
+                        parameters.saveScenes == true),
                     executionTimeout + TimeSpan.FromSeconds(2));
 
                 startedAt.Stop();
@@ -791,13 +799,21 @@ namespace VRCForge.Editor
         private static (object result, int writeDefaultsUpdated, string backend) ExecuteSnippet(
             string code,
             bool enforceWriteDefaultsOn,
-            IEnumerable<string> targetAvatarPaths)
+            IEnumerable<string> targetAvatarPaths,
+            bool saveAssets,
+            bool saveScenes)
         {
             var (result, backend) = VRCForgeSnippetCompiler.CompileAndInvoke(code);
             var writeDefaultsUpdated = enforceWriteDefaultsOn ? EnsureWriteDefaultsOn(targetAvatarPaths) : 0;
 
-            AssetDatabase.SaveAssets();
-            EditorSceneManager.SaveOpenScenes();
+            if (saveAssets)
+            {
+                AssetDatabase.SaveAssets();
+            }
+            if (saveScenes)
+            {
+                EditorSceneManager.SaveOpenScenes();
+            }
             return (result, writeDefaultsUpdated, backend);
         }
 

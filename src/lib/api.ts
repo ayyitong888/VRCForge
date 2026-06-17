@@ -285,6 +285,12 @@ export class ApiError extends Error {
   }
 }
 
+let appSessionToken = "";
+
+export function setAppSessionToken(token: string) {
+  appSessionToken = token.trim();
+}
+
 export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
   return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
 }
@@ -496,10 +502,35 @@ export async function requestRestoreCheckpoint(
   });
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const controller = new AbortController();
+  const timeoutMs = 30000;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const headers = new Headers(init.headers);
+  if (appSessionToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${appSessionToken}`);
+  }
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers, signal: init.signal ?? controller.signal });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") {
+      throw new ApiError(`Request timed out after ${timeoutMs / 1000}s`, 0);
+    }
+    throw cause;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  let payload: unknown = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      const excerpt = text.slice(0, 300);
+      throw new ApiError(`HTTP ${response.status}: response was not JSON`, response.status, excerpt);
+    }
+  }
   if (!response.ok) {
     const detail = typeof payload === "object" && payload ? (payload as { detail?: unknown }).detail : payload;
     throw new ApiError(typeof detail === "string" ? detail : `HTTP ${response.status}`, response.status, detail);

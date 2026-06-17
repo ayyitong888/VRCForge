@@ -68,6 +68,7 @@ import {
   saveProjectPrefs,
   saveAgentNotes,
   sendAgentMessage,
+  setAppSessionToken,
   updateApiConfig,
   updatePermission,
   updateSkill,
@@ -76,6 +77,8 @@ import { cn, formatCount } from "./lib/utils";
 
 type BackendStartResult = {
   endpoint: string;
+  app_session_token?: string;
+  appSessionToken?: string;
   started: boolean;
   already_running: boolean;
   mode: string;
@@ -198,6 +201,7 @@ export default function App() {
   const chatsRef = useRef<ChatThread[]>([]);
   const queueRef = useRef<string[]>([]);
   const sendingRef = useRef(false);
+  const runtimeStartingRef = useRef(false);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -399,6 +403,10 @@ export default function App() {
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
   async function startRuntime(): Promise<string | null> {
+    if (runtimeStartingRef.current) {
+      return endpoint;
+    }
+    runtimeStartingRef.current = true;
     setLoading(true);
     setError("");
     let targetEndpoint = endpoint;
@@ -407,6 +415,7 @@ export default function App() {
         await invoke("ensure_agent_notes_file");
         const result = await invoke<BackendStartResult>("start_backend");
         targetEndpoint = result.endpoint;
+        setAppSessionToken(result.appSessionToken || result.app_session_token || "");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
         await refreshWithRetry(targetEndpoint);
@@ -419,6 +428,7 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
       return null;
     } finally {
+      runtimeStartingRef.current = false;
       setLoading(false);
     }
   }

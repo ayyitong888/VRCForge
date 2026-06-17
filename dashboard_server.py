@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import base64
 import copy
+import hmac
 import json
 import math
 import mimetypes
 import os
 import subprocess
 import re
+import secrets
 import shutil
 import time
 import urllib.error
@@ -113,6 +115,35 @@ LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
+def resolve_app_session_token() -> str:
+    token = os.environ.get("VRCFORGE_APP_SESSION_TOKEN", "").strip()
+    if token:
+        return token
+    if not PORTABLE_MODE:
+        return ""
+    token_path = CONFIG_DIR / "app-session-token"
+    try:
+        if token_path.exists():
+            existing = token_path.read_text(encoding="utf-8").strip()
+            if len(existing) >= 32:
+                return existing
+        generated = secrets.token_urlsafe(32)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(generated, encoding="utf-8")
+        return generated
+    except OSError:
+        return secrets.token_urlsafe(32)
+
+
+APP_SESSION_TOKEN = resolve_app_session_token()
+APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN)
+APP_ALLOWED_ORIGINS = {
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+}
 REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_export_blendshapes",
     "vrc_apply_blendshapes",
@@ -533,13 +564,14 @@ app.add_middleware(
         "tauri://localhost",
         "http://tauri.localhost",
         "https://tauri.localhost",
+        "http://127.0.0.1:1420",
+        "http://localhost:1420",
     ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
-app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
+app.mount("/artifacts", StaticFiles(directory=str(DASHBOARD_ARTIFACTS_DIR)), name="artifacts")
 
 EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
@@ -562,10 +594,15 @@ AGENT_MCP_CONTEXT = None
 
 
 @app.middleware("http")
-async def authorize_agent_mcp(request: Request, call_next):
+async def authorize_local_requests(request: Request, call_next):
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
         try:
             authenticate_agent_request(request, allow_disabled=False)
+        except HTTPException as exc:
+            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+    if app_route_requires_auth(request):
+        try:
+            authenticate_app_request(request)
         except HTTPException as exc:
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
@@ -898,6 +935,17 @@ def chat_transcripts_path() -> Path:
     return AGENT_GATEWAY.user_constraints_path.parent / "chat-transcripts.json"
 
 
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 @app.get("/api/app/chats")
 def read_chat_transcripts() -> dict[str, Any]:
     path = chat_transcripts_path()
@@ -920,8 +968,7 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
     if len(serialized.encode("utf-8")) > CHAT_TRANSCRIPTS_MAX_BYTES:
         raise HTTPException(status_code=413, detail="会话记录超过 16MB 上限，请删除旧会话后重试。")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(serialized, encoding="utf-8")
+        atomic_write_text(path, serialized)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
     return {"ok": True, "path": str(path), "count": len(chats)}
@@ -978,11 +1025,7 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         hidden_paths.append(normalized)
     path = project_prefs_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        atomic_write_json(path, {"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths})
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
     await EVENT_BUS.broadcast("projects", project_snapshot_payload())
@@ -4503,7 +4546,7 @@ def build_parameter_rollback_preview(avatar_path: str | None, snapshot_payload: 
 def to_artifact_url(path_value: str) -> str:
     try:
         path = resolve_local_path(path_value)
-        relative = path.relative_to(ARTIFACTS_DIR).as_posix()
+        relative = path.relative_to(DASHBOARD_ARTIFACTS_DIR).as_posix()
         return f"/artifacts/{relative}"
     except Exception:
         return ""
@@ -4609,13 +4652,41 @@ def resolve_reference_image_path_value(path_value: str | None) -> Path | None:
         return None
 
     if path_value.startswith("/artifacts/"):
-        image_path = (ARTIFACTS_DIR / path_value[len("/artifacts/"):]).resolve()
+        image_path = resolve_under(DASHBOARD_ARTIFACTS_DIR, path_value[len("/artifacts/"):])
     else:
         image_path = resolve_local_path(path_value)
 
     if not image_path.exists() or not image_path.is_file():
         raise RuntimeError(f"Reference image file does not exist: {image_path}")
+    validate_reference_image_file(image_path)
     return image_path
+
+
+def resolve_under(root: Path, value: str) -> Path:
+    root_path = root.resolve()
+    candidate = (root_path / value).resolve()
+    try:
+        candidate.relative_to(root_path)
+    except ValueError as exc:
+        raise RuntimeError(f"Path escapes allowed root: {value}") from exc
+    return candidate
+
+
+def validate_reference_image_file(image_path: Path) -> None:
+    suffix = image_path.suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        raise RuntimeError(f"Reference file is not a supported image type: {image_path}")
+    with image_path.open("rb") as handle:
+        header = handle.read(16)
+    known_magic = (
+        header.startswith(b"\x89PNG\r\n\x1a\n")
+        or header.startswith(b"\xff\xd8\xff")
+        or header.startswith(b"GIF87a")
+        or header.startswith(b"GIF89a")
+        or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+    )
+    if not known_magic:
+        raise RuntimeError(f"Reference file content is not a supported image: {image_path}")
 
 
 def save_reference_image_data_url(data_url: str, role: str = "target", index: int = 1) -> Path:
@@ -5963,7 +6034,7 @@ def save_dashboard_api_config(config: DashboardApiConfig) -> None:
             "model": config.model,
         }
     }
-    CONFIG_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(CONFIG_PATH, payload)
 
 
 def serialize_api_config(include_secret: bool) -> dict[str, Any]:
@@ -6060,6 +6131,46 @@ def authenticate_agent_approval_request(request: Request):
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+APP_AUTH_PREFIXES = (
+    "/api/app",
+    "/api/config",
+    "/api/models",
+)
+
+
+def app_route_requires_auth(request: Request) -> bool:
+    path = request.url.path
+    if not any(path == prefix or path.startswith(prefix + "/") for prefix in APP_AUTH_PREFIXES):
+        return False
+    if not APP_AUTH_REQUIRED and request.method.upper() == "GET":
+        return False
+    return True
+
+
+def authenticate_app_request(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(status_code=403, detail="App API only accepts loopback clients.")
+
+    origin = request.headers.get("origin", "").strip()
+    if origin and origin not in APP_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="App API origin is not allowed.")
+
+    if not APP_AUTH_REQUIRED:
+        return
+
+    supplied = extract_bearer_token(request)
+    if not supplied or not hmac.compare_digest(supplied, APP_SESSION_TOKEN):
+        raise HTTPException(status_code=401, detail="App session token is missing or invalid.")
+
+
+def extract_bearer_token(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(request.query_params.get("app_token") or "")
 
 
 def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:
