@@ -24,6 +24,14 @@ python -m pip install -r requirements.txt
 | `httpx` | FastAPI test client support | FastAPI 测试客户端支持 |
 | `pytest` | Local test runner | 本地测试运行器 |
 
+## Optional local tools / 可选本地工具
+
+| Tool | Used for | 用途 |
+| --- | --- | --- |
+| `git` | Development-branch checkpoint timeline for Unity project writes | Unity 工程写入前 checkpoint 时间线 |
+
+The checkpoint timeline only becomes restorable when the selected Unity project is a git worktree and `git` is available. If not, VRCForge records checkpointing as unavailable and continues to use the normal approval model.
+
 ## Unity / Unity 侧
 
 VRCForge does not require one single `.unitypackage` file. Use a normal VRChat Avatar project and add the packages below.

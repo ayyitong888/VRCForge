@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -760,6 +761,231 @@ class DashboardServerTests(unittest.TestCase):
             "outfit_name": "Hoodie",
         })
         self.assertFalse(missing_objects["ok"])
+
+    def test_checkpoint_timeline_wraps_approved_write_and_restores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "existing.txt").write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            for args in (
+                ["init"],
+                ["config", "user.email", "test@example.invalid"],
+                ["config", "user.name", "Test User"],
+                ["add", "-A"],
+                ["commit", "-m", "initial"],
+            ):
+                proc = subprocess.run(["git", *args], cwd=str(project), capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            def write_handler(args: dict) -> dict:
+                (Path(args["projectRoot"]) / "Assets" / "generated.txt").write_text("after", encoding="utf-8")
+                return {"ok": True, "wrote": "Assets/generated.txt"}
+
+            original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+            try:
+                dashboard_server.AGENT_GATEWAY.register_write_handler(
+                    "vrcforge_test_checkpoint_write",
+                    "Test checkpoint write.",
+                    "high",
+                    write_handler,
+                )
+                request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+                    "target_tool": "vrcforge_test_checkpoint_write",
+                    "arguments": {"projectRoot": str(project)},
+                })
+                approval_id = request["approval"]["id"]
+                dashboard_server.AGENT_GATEWAY.approve(approval_id)
+                applied = dashboard_server.AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+
+                self.assertTrue(applied["ok"])
+                self.assertTrue(applied["checkpoint"]["ok"])
+                self.assertTrue((project / "Assets" / "generated.txt").exists())
+
+                listed = dashboard_server.AGENT_GATEWAY.list_checkpoints({"projectRoot": str(project)})
+                self.assertEqual(listed["count"], 1)
+                checkpoint_id = listed["checkpoints"][0]["id"]
+                preview = dashboard_server.AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+                self.assertTrue(preview["ok"])
+                self.assertTrue(any("generated.txt" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
+
+                restored = dashboard_server.AGENT_GATEWAY.restore_checkpoint({
+                    "checkpointId": checkpoint_id,
+                    "confirmRestore": True,
+                })
+                self.assertTrue(restored["ok"])
+                self.assertFalse((project / "Assets" / "generated.txt").exists())
+            finally:
+                dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+
+    def test_checkpoint_tools_registered_with_restore_as_write_target(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        self.assertIn("vrcforge_list_checkpoints", tool_names)
+        self.assertIn("vrcforge_preview_restore_checkpoint", tool_names)
+        self.assertNotIn("vrcforge_restore_checkpoint", tool_names)
+        self.assertIn("vrcforge_restore_checkpoint", write_targets)
+
+    def test_app_approval_executes_non_shell_write_handler(self) -> None:
+        original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+        calls: list[dict] = []
+
+        def write_handler(args: dict) -> dict:
+            calls.append(args)
+            return {"ok": True, "wrote": args.get("name")}
+
+        try:
+            dashboard_server.AGENT_GATEWAY.register_write_handler(
+                "vrcforge_test_app_write",
+                "Test app write.",
+                "high",
+                write_handler,
+            )
+            request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+                "target_tool": "vrcforge_test_app_write",
+                "arguments": {"name": "value"},
+            })
+            approval_id = request["approval"]["id"]
+
+            with TestClient(dashboard_server.app) as client:
+                payload = client.post(f"/api/app/agent/approvals/{approval_id}/approve").json()
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["execution"]["status"], "applied")
+            self.assertEqual(payload["execution"]["result"]["wrote"], "value")
+            self.assertEqual(calls, [{"name": "value"}])
+        finally:
+            dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+
+    def test_app_checkpoint_restore_request_uses_approval_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "existing.txt").write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            for args in (
+                ["init"],
+                ["config", "user.email", "test@example.invalid"],
+                ["config", "user.name", "Test User"],
+                ["add", "-A"],
+                ["commit", "-m", "initial"],
+            ):
+                proc = subprocess.run(["git", *args], cwd=str(project), capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+
+            def write_handler(args: dict) -> dict:
+                (Path(args["projectRoot"]) / "Assets" / "generated.txt").write_text("after", encoding="utf-8")
+                return {"ok": True}
+
+            try:
+                dashboard_server.AGENT_GATEWAY.register_write_handler(
+                    "vrcforge_test_checkpoint_write",
+                    "Test checkpoint write.",
+                    "high",
+                    write_handler,
+                )
+                request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+                    "target_tool": "vrcforge_test_checkpoint_write",
+                    "arguments": {"projectRoot": str(project)},
+                })
+                approval_id = request["approval"]["id"]
+                dashboard_server.AGENT_GATEWAY.approve(approval_id)
+                dashboard_server.AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+
+                with TestClient(dashboard_server.app) as client:
+                    listed = client.get("/api/app/checkpoints", params={"projectRoot": str(project)}).json()
+                    checkpoint_id = listed["checkpoints"][0]["id"]
+                    preview = client.post(f"/api/app/checkpoints/{checkpoint_id}/preview").json()
+                    restore_request = client.post(f"/api/app/checkpoints/{checkpoint_id}/restore").json()
+                    restore_approval_id = restore_request["approval"]["id"]
+                    applied = client.post(f"/api/app/agent/approvals/{restore_approval_id}/approve").json()
+
+                self.assertTrue(preview["ok"])
+                self.assertEqual(restore_request["status"], "pending")
+                self.assertEqual(restore_request["approval"]["targetTool"], "vrcforge_restore_checkpoint")
+                self.assertTrue(applied["execution"]["ok"])
+                self.assertFalse((project / "Assets" / "generated.txt").exists())
+            finally:
+                dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+
+    def test_add_outfit_workflow_registered_in_gateway(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        self.assertIn("vrcforge_preview_add_outfit", tool_names)
+        self.assertNotIn("vrcforge_add_outfit", tool_names)
+        self.assertIn("vrcforge_add_outfit", write_targets)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_outfit_workflow_resolves_prefab_and_runs_ordered_steps(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+
+        def fake_invoke(_settings, tool_name, params):
+            if tool_name == "vrc_find_assets":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "assets": [{"assetPath": "Assets/Outfits/Hoodie.prefab", "guid": "abc", "name": "Hoodie"}]}},
+                )
+            if tool_name == "vrc_instantiate_prefab":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "gameObjectPath": "Avatar/Hoodie"}},
+                )
+            if tool_name == "vrc_setup_outfit":
+                return dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"data": {"ok": True, "confirmed": True}})
+            if tool_name == "vrc_add_wardrobe_outfit":
+                return dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"data": {"ok": True, "assignedValue": 4}})
+            raise AssertionError(tool_name)
+
+        mock_invoke.side_effect = fake_invoke
+        result = dashboard_server.add_outfit_workflow_sync({
+            "avatarPath": "Avatar",
+            "assetQuery": "hoodie",
+            "outfitName": "Hoodie",
+            "parameterName": "Clothes",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outfitPath"], "Avatar/Hoodie")
+        self.assertEqual([call.args[1] for call in mock_invoke.call_args_list], [
+            "vrc_find_assets",
+            "vrc_instantiate_prefab",
+            "vrc_setup_outfit",
+            "vrc_add_wardrobe_outfit",
+        ])
+        wardrobe_params = mock_invoke.call_args_list[-1].args[2]
+        self.assertEqual(wardrobe_params["objectPaths"], ["Avatar/Hoodie"])
+        self.assertEqual(wardrobe_params["parameterName"], "Clothes")
 
     def test_generic_component_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"

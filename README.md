@@ -109,6 +109,8 @@ The desktop app also includes uninstall actions:
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
 | Int-exclusive wardrobe scan and existing-wardrobe add-outfit tools | int 互斥衣柜扫描与已有衣柜加衣工具 | Development branch, Unity live validation pending / 开发分支，Unity 活体验证待跑 |
+| Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> optional wardrobe binding | Development branch, Unity live validation pending |
+| Pre-write checkpoint timeline | Git checkpoint before gateway writes, plus checkpoint list/preview/restore UI | Development branch, local tests pass; Unity live validation pending |
 
 ## Vision Review / 识图复核
 
@@ -157,6 +159,8 @@ Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 ```
 
 Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode, guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
+
+Development-branch gateway writes create a pre-write checkpoint when the selected Unity project is a git worktree. The desktop Checkpoints view can list, preview, and request restore for those checkpoints through the same approval path as other writes. If the project is not a git worktree, checkpoint creation is recorded as unavailable instead of pretending rollback is possible.
 
 核心 app 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
 

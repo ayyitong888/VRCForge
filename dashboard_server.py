@@ -807,14 +807,48 @@ def app_agent_approvals() -> dict[str, Any]:
     return {"ok": True, "approvals": approvals, "count": len(approvals)}
 
 
+@app.get("/api/app/checkpoints")
+def app_list_checkpoints(projectRoot: str = "", limit: int = 50) -> dict[str, Any]:
+    return AGENT_GATEWAY.list_checkpoints({"projectRoot": projectRoot, "limit": limit})
+
+
+@app.post("/api/app/checkpoints/{checkpoint_id}/preview")
+def app_preview_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
+    return AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+
+
+@app.post("/api/app/checkpoints/{checkpoint_id}/restore")
+async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
+    preview = AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+    if not preview.get("ok"):
+        raise HTTPException(status_code=400, detail=preview.get("error") or "Checkpoint is not restorable.")
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_restore_checkpoint",
+                "arguments": {"checkpointId": checkpoint_id, "confirmRestore": True},
+                "reason": "Restore Unity project files from a VRCForge checkpoint.",
+                "preview": preview,
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
 @app.post("/api/app/agent/approvals/{approval_id}/approve")
 async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
     try:
         approved = AGENT_GATEWAY.approve(approval_id)
         execution = None
         approval = approved.get("approval") if isinstance(approved, dict) else None
-        if isinstance(approval, dict) and approval.get("targetTool") == "vrcforge_shell_execute" and approved.get("ok"):
-            execution = AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
+        if isinstance(approval, dict) and approved.get("ok"):
+            if approval.get("targetTool") == "vrcforge_shell_execute":
+                execution = AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
+            else:
+                execution = AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
         payload = {"ok": bool(approved.get("ok")), "approval": approved.get("approval"), "execution": execution}
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -7058,6 +7092,143 @@ def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _workflow_project_params(params: dict[str, Any]) -> dict[str, Any]:
+    project_value = str(params.get("project_path") or params.get("projectPath") or "").strip()
+    return {"projectPath": project_value} if project_value else {}
+
+
+def _resolve_workflow_asset(params: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    asset_path = build_asset_path_target(params)
+    guid = str(params.get("guid") or "").strip()
+    if asset_path or guid:
+        return {"assetPath": asset_path, "guid": guid, "source": "explicit"}, None
+    query = str(params.get("query") or params.get("asset_query") or params.get("assetQuery") or "").strip()
+    if not query:
+        return None, {"ok": False, "error": "assetPath, guid, or assetQuery/query is required."}
+    search = find_assets_sync({
+        **_workflow_project_params(params),
+        "query": query,
+        "typeName": str(params.get("type_name") or params.get("typeName") or "Prefab").strip() or "Prefab",
+        "folder": str(params.get("folder") or "").strip(),
+        "limit": 1,
+    })
+    if not search.get("ok"):
+        return None, search
+    assets = search.get("assets") if isinstance(search.get("assets"), list) else []
+    if not assets:
+        return None, {"ok": False, "error": f"No prefab asset matched query '{query}'."}
+    first = ensure_dict_payload(assets[0], "workflow asset")
+    return {
+        "assetPath": str(first.get("assetPath") or ""),
+        "guid": str(first.get("guid") or ""),
+        "name": str(first.get("name") or ""),
+        "source": "query",
+        "query": query,
+    }, None
+
+
+def preview_add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    outfit_name = str(params.get("outfit_name") or params.get("outfitName") or params.get("name") or "").strip()
+    parent_path = str(params.get("parent_path") or params.get("parentPath") or avatar_path).strip()
+    parameter_name = str(params.get("parameter_name") or params.get("parameterName") or "").strip()
+    asset, error = _resolve_workflow_asset(params)
+    if error:
+        return error
+    assert asset is not None
+    if not outfit_name:
+        outfit_name = str(asset.get("name") or "Outfit")
+    steps = [
+        {"tool": "vrc_find_assets" if asset.get("source") == "query" else "vrc_get_asset_info", "write": False},
+        {"tool": "vrc_instantiate_prefab", "write": True, "parentPath": parent_path, "name": outfit_name},
+    ]
+    if params.get("unpack_prefab") is True or params.get("unpackPrefab") is True:
+        steps.append({"tool": "vrc_unpack_prefab", "write": True, "mode": str(params.get("unpack_mode") or params.get("unpackMode") or "outermost")})
+    if params.get("setup_outfit", params.get("setupOutfit", True)) is not False:
+        steps.append({"tool": "vrc_setup_outfit", "write": True, "avatarPath": avatar_path})
+    if parameter_name:
+        steps.append({"tool": "vrc_add_wardrobe_outfit", "write": True, "parameterName": parameter_name})
+    return {
+        "ok": True,
+        "preview": True,
+        "plan": {
+            "action": "add_outfit_workflow",
+            "avatarPath": avatar_path,
+            "parentPath": parent_path,
+            "outfitName": outfit_name,
+            "asset": asset,
+            "parameterName": parameter_name or None,
+            "steps": steps,
+        },
+    }
+
+
+def add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    plan = preview_add_outfit_workflow_sync(params)
+    if not plan.get("ok"):
+        return plan
+    plan_payload = ensure_dict_payload(plan.get("plan"), "add outfit workflow plan")
+    asset = ensure_dict_payload(plan_payload.get("asset"), "add outfit workflow asset")
+    avatar_path = str(plan_payload.get("avatarPath") or "")
+    parent_path = str(plan_payload.get("parentPath") or "")
+    outfit_name = str(plan_payload.get("outfitName") or "Outfit")
+    parameter_name = str(plan_payload.get("parameterName") or "")
+    project_params = _workflow_project_params(params)
+    steps: list[dict[str, Any]] = []
+
+    instantiate = instantiate_prefab_sync({
+        **project_params,
+        "assetPath": asset.get("assetPath"),
+        "guid": asset.get("guid"),
+        "parentPath": parent_path,
+        "name": outfit_name,
+        "preview": False,
+    })
+    steps.append({"tool": "vrc_instantiate_prefab", "ok": bool(instantiate.get("ok")), "result": instantiate})
+    if not instantiate.get("ok"):
+        return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "error": instantiate.get("error") or "Prefab instantiate failed."}
+
+    outfit_path = str(
+        instantiate.get("gameObjectPath")
+        or instantiate.get("outfitPath")
+        or (f"{parent_path.rstrip('/')}/{outfit_name}" if parent_path else outfit_name)
+    )
+    if params.get("unpack_prefab") is True or params.get("unpackPrefab") is True:
+        unpack = unpack_prefab_sync({
+            **project_params,
+            "gameObjectPath": outfit_path,
+            "mode": str(params.get("unpack_mode") or params.get("unpackMode") or "outermost"),
+            "preview": False,
+        })
+        steps.append({"tool": "vrc_unpack_prefab", "ok": bool(unpack.get("ok")), "result": unpack})
+        if not unpack.get("ok"):
+            return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "outfitPath": outfit_path, "error": unpack.get("error") or "Prefab unpack failed."}
+
+    if params.get("setup_outfit", params.get("setupOutfit", True)) is not False:
+        setup = setup_outfit_sync({**project_params, "avatarPath": avatar_path, "outfitPath": outfit_path, "saveScene": params.get("saveScene", params.get("save_scene", True))})
+        steps.append({"tool": "vrc_setup_outfit", "ok": bool(setup.get("ok")), "result": setup})
+        if not setup.get("ok"):
+            return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "outfitPath": outfit_path, "error": setup.get("error") or "Setup Outfit failed."}
+
+    if parameter_name:
+        wardrobe = add_wardrobe_outfit_sync({
+            **project_params,
+            "avatarPath": avatar_path,
+            "parameterName": parameter_name,
+            "outfitName": outfit_name,
+            "objectPaths": [outfit_path],
+            "offObjectPaths": _coerce_path_list(params, "off_object_paths", "offObjectPaths"),
+        })
+        steps.append({"tool": "vrc_add_wardrobe_outfit", "ok": bool(wardrobe.get("ok")), "result": wardrobe})
+        if not wardrobe.get("ok"):
+            return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "outfitPath": outfit_path, "error": wardrobe.get("error") or "Add wardrobe outfit failed."}
+
+    emit_log("info", "wardrobe", "Add outfit workflow executed.", {"outfitPath": outfit_path, "parameterName": parameter_name})
+    return {"ok": True, "preview": False, "plan": plan_payload, "outfitPath": outfit_path, "steps": steps}
+
+
 def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
@@ -7096,6 +7267,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, and optionally add to an existing int wardrobe.", "plan/preview", preview_add_outfit_workflow_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.list_checkpoints(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.preview_restore_checkpoint(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
@@ -7176,6 +7350,12 @@ def register_agent_gateway_tools() -> None:
         add_wardrobe_outfit_sync,
     )
     AGENT_GATEWAY.register_write_handler(
+        "vrcforge_add_outfit",
+        "Run the semantic add-outfit workflow: instantiate a prefab under the avatar, run Modular Avatar Setup Outfit, and optionally add it to an existing int-exclusive wardrobe.",
+        "high",
+        add_outfit_workflow_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_component",
         "Add a component of a given type to a scene GameObject through VRCForge.",
         "medium",
@@ -7248,6 +7428,12 @@ def register_agent_gateway_tools() -> None:
         restore_safe_backup_sync,
     )
     AGENT_GATEWAY.register_write_handler(
+        "vrcforge_restore_checkpoint",
+        "Restore Unity project files from a pre-write VRCForge checkpoint.",
+        "high",
+        lambda params: AGENT_GATEWAY.restore_checkpoint(params or {}),
+    )
+    AGENT_GATEWAY.register_write_handler(
         "vrcforge_toggle_scene_object",
         "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
         "medium",
@@ -7275,6 +7461,7 @@ if DASHBOARD_API_CONFIG is None:
 if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
 
+AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
 
 register_agent_gateway_tools()
 app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")

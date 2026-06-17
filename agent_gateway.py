@@ -226,6 +226,20 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "adds an FX state, animation clip, and menu toggle to an existing int-exclusive wardrobe after approval",
         "tags": ["wardrobe", "menu", "animator", "write"],
     },
+    "vrcforge_preview_add_outfit": {
+        "title": "Add Outfit Workflow Preview",
+        "inputs": ["Avatar path, prefab asset path/guid or asset query, optional wardrobe int parameter."],
+        "outputs": ["Resolved prefab and ordered workflow steps; no writes."],
+        "sideEffects": "none",
+        "tags": ["wardrobe", "modular-avatar", "preview"],
+    },
+    "vrcforge_add_outfit": {
+        "title": "Add Outfit Workflow",
+        "inputs": ["Avatar path, prefab asset path/guid or asset query, optional wardrobe int parameter."],
+        "outputs": ["Instantiated outfit path plus setup and wardrobe write results."],
+        "sideEffects": "instantiates a prefab, runs Modular Avatar Setup Outfit, and can add the object to an existing int-exclusive wardrobe after approval",
+        "tags": ["wardrobe", "modular-avatar", "write"],
+    },
     "vrcforge_install_vpm_package": {
         "title": "VPM Package Install",
         "inputs": ["VPM package id and Unity project path."],
@@ -239,6 +253,27 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "outputs": ["Planned overwrites, changed files, and mismatch warnings."],
         "sideEffects": "none",
         "tags": ["backup", "restore", "preview"],
+    },
+    "vrcforge_list_checkpoints": {
+        "title": "Checkpoint Timeline",
+        "inputs": ["Optional project root and limit."],
+        "outputs": ["Recent pre-write checkpoints with git refs and target tools."],
+        "sideEffects": "none",
+        "tags": ["checkpoint", "restore", "timeline"],
+    },
+    "vrcforge_preview_restore_checkpoint": {
+        "title": "Checkpoint Restore Preview",
+        "inputs": ["Checkpoint id."],
+        "outputs": ["Files that differ from the checkpoint and current working tree status."],
+        "sideEffects": "none",
+        "tags": ["checkpoint", "restore", "preview"],
+    },
+    "vrcforge_restore_checkpoint": {
+        "title": "Checkpoint Restore",
+        "inputs": ["Checkpoint id and confirmRestore=true."],
+        "outputs": ["Restore result, cleaned files, and checkpoint metadata."],
+        "sideEffects": "restores Assets/Packages/ProjectSettings from a pre-write git checkpoint after approval",
+        "tags": ["checkpoint", "restore", "write"],
     },
     "vrcforge_restore_safe_backup": {
         "title": "Safe Backup Restore",
@@ -439,6 +474,9 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_create_safe_backup",
             "vrcforge_preview_restore_backup",
             "vrcforge_restore_safe_backup",
+            "vrcforge_list_checkpoints",
+            "vrcforge_preview_restore_checkpoint",
+            "vrcforge_restore_checkpoint",
         ],
         "entrypointTool": "vrcforge_request_apply",
         "tags": ["builtin", "group", "approval", "restore"],
@@ -564,10 +602,12 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_scan_wardrobe",
             "vrcforge_create_safe_backup",
             "vrcforge_preview_add_wardrobe_outfit",
+            "vrcforge_preview_add_outfit",
             "vrcforge_request_apply",
             "vrcforge_apply_approved",
             "vrcforge_toggle_scene_object",
             "vrcforge_add_wardrobe_outfit",
+            "vrcforge_add_outfit",
         ],
         "entrypointTool": "vrcforge_scan_avatar_items",
         "tags": ["builtin", "group", "wardrobe", "write"],
@@ -589,9 +629,11 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_scan_avatar_items",
             "vrcforge_create_safe_backup",
             "vrcforge_preview_setup_outfit",
+            "vrcforge_preview_add_outfit",
             "vrcforge_request_apply",
             "vrcforge_apply_approved",
             "vrcforge_setup_outfit",
+            "vrcforge_add_outfit",
             "vrcforge_restore_safe_backup",
         ],
         "entrypointTool": "vrcforge_preview_setup_outfit",
@@ -638,6 +680,7 @@ class AgentGateway:
         self._approvals: dict[str, dict[str, Any]] = {}
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self.checkpoint_project_root_resolver: Callable[[], str] | None = None
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1462,6 +1505,11 @@ class AgentGateway:
                 ensure_dict(approval.get("arguments") or {}),
                 user_constraints,
             )
+            checkpoint = self._create_pre_write_checkpoint(approval, arguments)
+            if checkpoint:
+                approval["checkpoint"] = checkpoint
+                if checkpoint.get("blocking"):
+                    raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
             result = write_handler.handler(arguments)
             with self._lock:
                 approval["status"] = "applied"
@@ -1469,7 +1517,10 @@ class AgentGateway:
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
                 self._approvals[approval_id] = approval
                 self.append_audit({"event": "approval_applied", "approval": approval})
-            return {"ok": True, "status": "applied", "approval": approval, "result": result}
+            payload = {"ok": True, "status": "applied", "approval": approval, "result": result}
+            if checkpoint:
+                payload["checkpoint"] = checkpoint
+            return payload
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 approval["status"] = "failed"
@@ -1510,6 +1561,282 @@ class AgentGateway:
             except json.JSONDecodeError:
                 continue
         return entries
+
+    def list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        limit = max(1, min(int(params.get("limit") or 50), 500))
+        project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
+        entries = self._read_checkpoint_entries(limit=500)
+        if project_filter:
+            normalized = normalize_filesystem_path(project_filter)
+            entries = [entry for entry in entries if normalize_filesystem_path(str(entry.get("projectRoot") or "")) == normalized]
+        entries = entries[:limit]
+        return {"ok": True, "checkpoints": entries, "count": len(entries)}
+
+    def preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
+        if not checkpoint:
+            return {"ok": False, "error": "checkpoint_id was not found."}
+        available = self._checkpoint_available(checkpoint)
+        if not available.get("ok"):
+            return available
+        git_root = Path(str(checkpoint["gitRoot"]))
+        ref = str(checkpoint["checkpointRef"])
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        diff = self._run_git(git_root, ["diff", "--name-status", ref, "--", *pathspecs])
+        status = self._run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
+        return {
+            "ok": diff["ok"] and status["ok"],
+            "checkpoint": checkpoint,
+            "changedFiles": [line for line in diff["stdout"].splitlines() if line.strip()],
+            "workingTreeStatus": [line for line in status["stdout"].splitlines() if line.strip()],
+            "error": diff.get("error") or status.get("error") or "",
+        }
+
+    def restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
+        if not checkpoint:
+            return {"ok": False, "error": "checkpoint_id was not found."}
+        if params.get("confirm_restore") is not True and params.get("confirmRestore") is not True:
+            return {"ok": False, "error": "confirmRestore=true is required to restore a checkpoint."}
+        available = self._checkpoint_available(checkpoint)
+        if not available.get("ok"):
+            return available
+        git_root = Path(str(checkpoint["gitRoot"]))
+        ref = str(checkpoint["checkpointRef"])
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        restore = self._run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
+        if not restore["ok"]:
+            return {"ok": False, "checkpoint": checkpoint, "error": restore["error"], "stdout": restore["stdout"], "stderr": restore["stderr"]}
+        clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
+        payload = {
+            "ok": clean["ok"],
+            "checkpoint": checkpoint,
+            "restoredRef": ref,
+            "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
+            "error": clean.get("error") or "",
+        }
+        self.append_audit({"event": "checkpoint_restored", **payload})
+        return payload
+
+    def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
+        target_tool = str(approval.get("targetTool") or "")
+        if not target_tool or target_tool == "vrcforge_restore_checkpoint":
+            return None
+        project_root = self._resolve_checkpoint_project_root(arguments)
+        checkpoint_id = f"ckpt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        base_record = {
+            "id": checkpoint_id,
+            "createdAt": utc_now_iso(),
+            "approvalId": str(approval.get("id") or ""),
+            "targetTool": target_tool,
+            "status": "unavailable",
+        }
+        if project_root is None:
+            record = {**base_record, "ok": False, "error": "No Unity project root was available for checkpointing."}
+            self._append_checkpoint(record)
+            return record
+        project_root = project_root.resolve()
+        record = {**base_record, "projectRoot": str(project_root)}
+        if not self._is_unity_project_root(project_root):
+            record.update({"ok": False, "error": "Resolved checkpoint root is not a Unity project."})
+            self._append_checkpoint(record)
+            return record
+
+        git_root_result = self._run_git(project_root, ["rev-parse", "--show-toplevel"])
+        if not git_root_result["ok"]:
+            record.update({"ok": False, "error": "Unity project is not inside a git worktree.", "gitError": git_root_result["stderr"]})
+            self._append_checkpoint(record)
+            return record
+        git_root = Path(git_root_result["stdout"].strip()).resolve()
+        pathspecs = self._checkpoint_pathspecs(git_root, project_root)
+        base_commit_result = self._run_git(git_root, ["rev-parse", "HEAD"])
+        base_commit = base_commit_result["stdout"].strip() if base_commit_result["ok"] else ""
+
+        status_before = self._run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
+        add_result = self._run_git(git_root, ["add", "-A", "--", *pathspecs], timeout_seconds=120)
+        if not add_result["ok"]:
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "gitRoot": str(git_root),
+                    "pathspecs": pathspecs,
+                    "baseCommit": base_commit,
+                    "error": add_result["error"] or "git add failed while creating checkpoint.",
+                }
+            )
+            self._append_checkpoint(record)
+            return record
+
+        staged_diff = self._run_git(git_root, ["diff", "--cached", "--quiet", "--", *pathspecs])
+        created_commit = False
+        checkpoint_ref = base_commit
+        if staged_diff["returncode"] == 1:
+            message = f"chore(vrcforge): checkpoint before {target_tool} {checkpoint_id}"
+            commit_result = self._run_git(
+                git_root,
+                [
+                    "-c",
+                    "user.name=VRCForge",
+                    "-c",
+                    "user.email=vrcforge@example.invalid",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    message,
+                ],
+                timeout_seconds=120,
+            )
+            if not commit_result["ok"]:
+                record.update(
+                    {
+                        "ok": False,
+                        "blocking": True,
+                        "status": "failed",
+                        "gitRoot": str(git_root),
+                        "pathspecs": pathspecs,
+                        "baseCommit": base_commit,
+                        "error": commit_result["error"] or "git commit failed while creating checkpoint.",
+                        "stdout": commit_result["stdout"],
+                        "stderr": commit_result["stderr"],
+                    }
+                )
+                self._append_checkpoint(record)
+                return record
+            created_commit = True
+            head_result = self._run_git(git_root, ["rev-parse", "HEAD"])
+            checkpoint_ref = head_result["stdout"].strip() if head_result["ok"] else base_commit
+        elif staged_diff["returncode"] not in {0, 1}:
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "gitRoot": str(git_root),
+                    "pathspecs": pathspecs,
+                    "baseCommit": base_commit,
+                    "error": staged_diff["error"] or "git diff failed while creating checkpoint.",
+                }
+            )
+            self._append_checkpoint(record)
+            return record
+
+        record.update(
+            {
+                "ok": True,
+                "status": "ready",
+                "gitRoot": str(git_root),
+                "pathspecs": pathspecs,
+                "baseCommit": base_commit,
+                "checkpointRef": checkpoint_ref,
+                "createdCommit": created_commit,
+                "statusBefore": [line for line in status_before["stdout"].splitlines() if line.strip()] if status_before["ok"] else [],
+            }
+        )
+        self._append_checkpoint(record)
+        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        return record
+
+    def _resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
+        for key in (
+            "project_root",
+            "projectRoot",
+            "project_path",
+            "projectPath",
+            "unity_project",
+            "unityProject",
+            "workspace_root",
+            "workspaceRoot",
+            "cwd",
+        ):
+            value = str(arguments.get(key) or "").strip()
+            if value:
+                return Path(value)
+        checkpoint_id = str(arguments.get("checkpoint_id") or arguments.get("checkpointId") or "").strip()
+        if checkpoint_id:
+            checkpoint = self._load_checkpoint(checkpoint_id)
+            if checkpoint and checkpoint.get("projectRoot"):
+                return Path(str(checkpoint["projectRoot"]))
+        if self.checkpoint_project_root_resolver is not None:
+            value = str(self.checkpoint_project_root_resolver() or "").strip()
+            if value:
+                return Path(value)
+        return None
+
+    def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        if not checkpoint.get("ok"):
+            return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
+        git_root = Path(str(checkpoint.get("gitRoot") or ""))
+        ref = str(checkpoint.get("checkpointRef") or "")
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        if not git_root.exists() or not ref or not pathspecs:
+            return {"ok": False, "checkpoint": checkpoint, "error": "Checkpoint metadata is incomplete."}
+        verify = self._run_git(git_root, ["cat-file", "-e", f"{ref}^{{commit}}"])
+        if not verify["ok"]:
+            return {"ok": False, "checkpoint": checkpoint, "error": "Checkpoint git ref is no longer available."}
+        return {"ok": True}
+
+    def _append_checkpoint(self, record: dict[str, Any]) -> None:
+        self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
+        if not self.checkpoint_log_path.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for line in self.checkpoint_log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+        return list(reversed(entries[-max(1, min(limit, 1000)) :]))
+
+    def _load_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        if not checkpoint_id:
+            return None
+        for entry in self._read_checkpoint_entries(limit=1000):
+            if entry.get("id") == checkpoint_id:
+                return entry
+        return None
+
+    def _checkpoint_pathspecs(self, git_root: Path, project_root: Path) -> list[str]:
+        try:
+            relative_project = project_root.resolve().relative_to(git_root.resolve())
+            prefix = "" if str(relative_project) == "." else relative_project.as_posix().rstrip("/") + "/"
+        except ValueError:
+            prefix = ""
+        names = ["Assets", "Packages", "ProjectSettings"]
+        return [prefix + name for name in names if (project_root / name).exists()] or [prefix + name for name in names]
+
+    def _is_unity_project_root(self, path: Path) -> bool:
+        return (path / "Assets").is_dir() and (path / "Packages").is_dir() and (path / "ProjectSettings").is_dir()
+
+    def _run_git(self, cwd: Path, args: list[str], timeout_seconds: int = 30) -> dict[str, Any]:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+            )
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout or "",
+                "stderr": proc.stderr or "",
+                "error": "" if proc.returncode == 0 else (proc.stderr or proc.stdout or f"git exited {proc.returncode}").strip(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "returncode": -1, "stdout": "", "stderr": "", "error": str(exc)}
 
     def read_user_constraints(self) -> UserConstraintsSnapshot:
         path = self.user_constraints_path
@@ -1689,6 +2016,10 @@ class AgentGateway:
     @property
     def audit_log_path(self) -> Path:
         return self.audit_dir / "approvals.jsonl"
+
+    @property
+    def checkpoint_log_path(self) -> Path:
+        return self.audit_dir / "checkpoints.jsonl"
 
     @property
     def user_constraints_path(self) -> Path:
@@ -2862,10 +3193,13 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_scan_parameters",
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
+        "vrcforge_list_checkpoints",
+        "vrcforge_preview_restore_checkpoint",
         "vrcforge_scan_avatar_performance",
         "vrcforge_package_manager_status",
         "vrcforge_preview_setup_outfit",
         "vrcforge_preview_add_wardrobe_outfit",
+        "vrcforge_preview_add_outfit",
         "vrcforge_capture_status",
         "vrcforge_capture_screenshot",
         "vrcforge_vision_audit",
@@ -2908,6 +3242,14 @@ def strip_quotes(value: str) -> str:
 
 def looks_like_absolute_path(value: str) -> bool:
     return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|\\\\)", value))
+
+
+def normalize_filesystem_path(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    try:
+        return Path(text).resolve().as_posix().lower()
+    except (OSError, RuntimeError):
+        return text.rstrip("/").lower()
 
 
 def is_path_within(path: Path, root: Path) -> bool:

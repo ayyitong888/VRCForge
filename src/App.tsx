@@ -10,6 +10,7 @@ import {
   EyeOff,
   Folder,
   FolderPlus,
+  History,
   Loader2,
   MessageSquare,
   Moon,
@@ -17,6 +18,7 @@ import {
   Pin,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Settings,
@@ -33,6 +35,8 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
   AgentApproval,
+  AgentCheckpoint,
+  AgentCheckpointPreview,
   AgentRuntimeResponse,
   AgentSkill,
   AgentSkillRegistry,
@@ -46,6 +50,7 @@ import {
   compactAgentHistory,
   createSkill,
   deleteSkill,
+  fetchCheckpoints,
   fetchBootstrap,
   fetchSkills,
   AgentSkillCheck,
@@ -56,7 +61,9 @@ import {
   fetchProjectPrefs,
   fetchProviderModels,
   ProjectPrefs,
+  previewRestoreCheckpoint,
   rejectAgentApproval,
+  requestRestoreCheckpoint,
   saveChats,
   saveProjectPrefs,
   saveAgentNotes,
@@ -82,7 +89,7 @@ type ConversationItem =
   | { id: string; type: "error"; text: string }
   | { id: string; type: "compact"; text: string };
 
-type ActiveView = "chat" | "skills" | "settings";
+type ActiveView = "chat" | "skills" | "checkpoints" | "settings";
 
 type ChatThread = {
   id: string;
@@ -174,6 +181,11 @@ export default function App() {
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
   const [savingSkill, setSavingSkill] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
+  const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
+  const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
+  const [restoringCheckpointId, setRestoringCheckpointId] = useState("");
+  const [checkpointMessage, setCheckpointMessage] = useState("");
   const [agentNotes, setAgentNotes] = useState("");
   const [agentNotesPath, setAgentNotesPath] = useState("");
   const [agentNotesLoaded, setAgentNotesLoaded] = useState(false);
@@ -379,6 +391,12 @@ export default function App() {
     }, 5000);
     return () => window.clearInterval(timer);
   }, [endpoint]);
+
+  useEffect(() => {
+    if (activeView === "checkpoints" && runtimeConnected) {
+      void loadCheckpoints();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
   async function startRuntime(): Promise<string | null> {
     setLoading(true);
@@ -605,12 +623,14 @@ export default function App() {
     setError("");
     try {
       const payload = await approveAgentApproval(endpoint, approvalId);
-      if (activeChatId) {
+      const executionResult = payload.execution?.result;
+      const shellResult = isAgentShellResult(executionResult) ? executionResult : undefined;
+      if (activeChatId && (shellResult || payload.execution?.error)) {
         appendToChat(activeChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,
-          result: payload.execution?.result,
+          result: shellResult,
           error: payload.execution?.error,
         });
       }
@@ -948,6 +968,72 @@ export default function App() {
     }
   }
 
+  async function openCheckpoints() {
+    setActiveView("checkpoints");
+    await loadCheckpoints();
+  }
+
+  async function loadCheckpoints(target = endpoint) {
+    setLoadingCheckpoints(true);
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchCheckpoints(targetEndpoint, activeProjectPath || undefined);
+      setCheckpoints(payload.checkpoints || []);
+      if (checkpointPreview?.checkpoint?.id && !payload.checkpoints?.some((item) => item.id === checkpointPreview.checkpoint?.id)) {
+        setCheckpointPreview(null);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingCheckpoints(false);
+    }
+  }
+
+  async function previewCheckpoint(checkpointId: string) {
+    setLoadingCheckpoints(true);
+    setCheckpointMessage("");
+    try {
+      const payload = await previewRestoreCheckpoint(endpoint, checkpointId);
+      setCheckpointPreview(payload);
+      if (!payload.ok) {
+        setError(payload.error || "Checkpoint preview failed.");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingCheckpoints(false);
+    }
+  }
+
+  async function restoreCheckpoint(checkpointId: string) {
+    setRestoringCheckpointId(checkpointId);
+    setCheckpointMessage("");
+    setError("");
+    try {
+      const payload = await requestRestoreCheckpoint(endpoint, checkpointId);
+      if (payload.status === "pending") {
+        setCheckpointMessage("Restore approval is pending.");
+      } else if (payload.ok) {
+        setCheckpointMessage("Checkpoint restored.");
+      } else {
+        setCheckpointMessage(String(payload.error || "Restore request failed."));
+      }
+      await refresh();
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRestoringCheckpointId("");
+    }
+  }
+
   async function saveSkill(event?: FormEvent) {
     event?.preventDefault();
     if (!skillDraft.name || savingSkill) {
@@ -1119,6 +1205,18 @@ export default function App() {
               <Wrench className="h-4 w-4 shrink-0" />
               <span className="truncate">能力库</span>
             </button>
+            <button
+              onClick={() => void openCheckpoints()}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "checkpoints"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <History className="h-4 w-4 shrink-0" />
+              <span className="truncate">Checkpoints</span>
+            </button>
           </nav>
 
           <SidebarSection title="项目">
@@ -1274,6 +1372,18 @@ export default function App() {
               onDraftChange={setSkillDraft}
               onSave={saveSkill}
               onDelete={removeSelectedSkill}
+            />
+          ) : activeView === "checkpoints" ? (
+            <CheckpointWorkspace
+              checkpoints={checkpoints}
+              selectedProjectPath={activeProjectPath}
+              preview={checkpointPreview}
+              loading={loadingCheckpoints}
+              restoringId={restoringCheckpointId}
+              message={checkpointMessage}
+              onRefresh={() => void loadCheckpoints()}
+              onPreview={previewCheckpoint}
+              onRestore={restoreCheckpoint}
             />
           ) : activeView === "settings" ? (
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-10">
@@ -2287,6 +2397,122 @@ function ProviderSetup({
         </Button>
       </div>
     </form>
+  );
+}
+
+function CheckpointWorkspace({
+  checkpoints,
+  selectedProjectPath,
+  preview,
+  loading,
+  restoringId,
+  message,
+  onRefresh,
+  onPreview,
+  onRestore,
+}: {
+  checkpoints: AgentCheckpoint[];
+  selectedProjectPath: string;
+  preview: AgentCheckpointPreview | null;
+  loading: boolean;
+  restoringId: string;
+  message: string;
+  onRefresh: () => void;
+  onPreview: (checkpointId: string) => void;
+  onRestore: (checkpointId: string) => void;
+}) {
+  const selectedId = preview?.checkpoint?.id || "";
+  const changedFiles = preview?.changedFiles || [];
+  const workingTreeStatus = preview?.workingTreeStatus || [];
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+        <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+          <div className="mb-4 flex items-center gap-2">
+            <History className="h-4 w-4 shrink-0 text-primary" />
+            <div className="truncate text-sm font-semibold">Checkpoints</div>
+            <Badge tone="muted" className="ml-auto shrink-0">
+              {checkpoints.length}
+            </Badge>
+            <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
+          {selectedProjectPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{selectedProjectPath}</div> : null}
+          <div className="max-h-[calc(100vh-220px)] space-y-2 overflow-auto pr-1">
+            {checkpoints.length === 0 ? (
+              <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+                No pre-write checkpoints yet.
+              </div>
+            ) : null}
+            {checkpoints.map((checkpoint) => (
+              <button
+                key={checkpoint.id}
+                type="button"
+                onClick={() => onPreview(checkpoint.id)}
+                className={cn(
+                  "grid w-full min-w-0 gap-1 rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                  selectedId === checkpoint.id
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/40 hover:bg-muted/60",
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{checkpoint.id}</span>
+                  <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
+                    {checkpoint.status || (checkpoint.ok ? "ready" : "unavailable")}
+                  </Badge>
+                </div>
+                <div className="truncate text-xs text-muted-foreground">{checkpoint.targetTool || "-"}</div>
+                <div className="truncate text-xs text-muted-foreground">{formatCheckpointTime(checkpoint.createdAt)}</div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+          <div className="mb-5 flex items-center gap-2">
+            <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
+            <div className="truncate text-sm font-semibold">Restore Preview</div>
+            {preview ? (
+              <Badge tone={preview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
+                {preview.ok ? "ready" : "blocked"}
+              </Badge>
+            ) : null}
+          </div>
+
+          {!preview ? (
+            <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+              Select a checkpoint to inspect the rollback.
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              <div className="grid gap-3">
+                <DataLine label="Checkpoint" value={preview.checkpoint?.id || "-"} mono />
+                <DataLine label="Target" value={preview.checkpoint?.targetTool || "-"} />
+                <DataLine label="Project" value={preview.checkpoint?.projectRoot || "-"} />
+                <DataLine label="Git ref" value={shortRef(preview.checkpoint?.checkpointRef)} mono />
+                {preview.error ? <DataLine label="Error" value={preview.error} /> : null}
+              </div>
+              <OutputBlock label="Changed files" value={changedFiles.join("\n")} />
+              <OutputBlock label="Working tree" value={workingTreeStatus.join("\n")} />
+              {message ? <div className="text-sm text-muted-foreground">{message}</div> : null}
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant="danger"
+                  disabled={!preview.ok || !preview.checkpoint?.id || Boolean(restoringId)}
+                  onClick={() => preview.checkpoint?.id && onRestore(preview.checkpoint.id)}
+                >
+                  {restoringId ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  Restore
+                </Button>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -3368,9 +3594,32 @@ function formatPayload(value: unknown): string {
   }
 }
 
+function isAgentShellResult(value: unknown): value is AgentShellResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<AgentShellResult>;
+  return typeof payload.command === "string" && typeof payload.exitCode === "number";
+}
+
 function shortPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).slice(-1)[0] || path;
+}
+
+function shortRef(ref?: string) {
+  return ref ? ref.slice(0, 12) : "-";
+}
+
+function formatCheckpointTime(value?: string) {
+  if (!value) {
+    return "-";
+  }
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) {
+    return value;
+  }
+  return time.toLocaleString();
 }
 
 function quoteLines(text: string): string {

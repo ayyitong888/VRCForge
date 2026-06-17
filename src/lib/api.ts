@@ -129,12 +129,47 @@ export type AgentApproval = {
   riskLevel?: string;
   reason?: string;
   createdAt?: string;
+  arguments?: Record<string, unknown>;
+  paramsSummary?: Record<string, unknown>;
   preview?: {
     command?: string;
     cwd?: string;
     workspaceRoot?: string;
     riskReasons?: string[];
-  };
+  } & Record<string, unknown>;
+  checkpoint?: AgentCheckpoint;
+};
+
+export type AgentCheckpoint = {
+  id: string;
+  createdAt?: string;
+  approvalId?: string;
+  targetTool?: string;
+  status?: string;
+  ok?: boolean;
+  error?: string;
+  projectRoot?: string;
+  gitRoot?: string;
+  checkpointRef?: string;
+  baseCommit?: string;
+  createdCommit?: boolean;
+  pathspecs?: string[];
+  statusBefore?: string[];
+};
+
+export type AgentCheckpointPreview = {
+  ok: boolean;
+  checkpoint?: AgentCheckpoint;
+  changedFiles?: string[];
+  workingTreeStatus?: string[];
+  error?: string;
+};
+
+export type AgentApprovalExecution = {
+  status?: string;
+  result?: AgentShellResult | Record<string, unknown>;
+  error?: string;
+  checkpoint?: AgentCheckpoint;
 };
 
 export type AgentShellResult = {
@@ -419,7 +454,7 @@ export async function compactAgentHistory(
 export async function approveAgentApproval(
   endpoint: string,
   approvalId: string,
-): Promise<{ ok: boolean; approval?: AgentApproval; execution?: { status?: string; result?: AgentShellResult; error?: string } }> {
+): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
     method: "POST",
   });
@@ -430,6 +465,33 @@ export async function rejectAgentApproval(
   approvalId: string,
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
+    method: "POST",
+  });
+}
+
+export async function fetchCheckpoints(
+  endpoint: string,
+  projectRoot?: string,
+): Promise<{ ok: boolean; checkpoints: AgentCheckpoint[]; count: number }> {
+  const params = new URLSearchParams();
+  if (projectRoot) {
+    params.set("projectRoot", projectRoot);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/checkpoints${suffix}`);
+}
+
+export async function previewRestoreCheckpoint(endpoint: string, checkpointId: string): Promise<AgentCheckpointPreview> {
+  return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/preview`, {
+    method: "POST",
+  });
+}
+
+export async function requestRestoreCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/restore`, {
     method: "POST",
   });
 }

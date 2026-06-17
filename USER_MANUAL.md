@@ -30,6 +30,8 @@ This manual explains the public workflow and feature status without project-spec
 | Roslyn Advanced Power Mode | Roslyn 高级模式 | 已可用 / Available |
 | Generic Unity CRUD tools | 通用 Unity CRUD 工具 | 开发分支 / Development branch |
 | Int-exclusive wardrobe scan and existing-wardrobe add-outfit tools | int 互斥衣柜扫描与已有衣柜加衣工具 | 开发分支，Unity 活体验证待跑 / Development branch, Unity live validation pending |
+| Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> optional wardrobe binding | 开发分支，Unity 活体验证待跑 / Development branch, Unity live validation pending |
+| Pre-write checkpoint timeline | Git checkpoint before gateway writes, checkpoint list/preview/restore UI | 开发分支，本地测试通过，Unity 活体验证待跑 / Development branch, local tests pass; Unity live validation pending |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |
@@ -117,6 +119,7 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 | Wardrobe FX | Builds wardrobe toggle assets | 衣柜 FX | 生成衣柜开关相关资产 |
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
+| Checkpoints | Lists pre-write checkpoints and requests restore | Checkpoints | 查看写入前快照并申请回退 |
 | Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |
 
 ## Agent Workspace / Agent 工作台
@@ -157,6 +160,7 @@ Image input depends on the selected provider and model. If image input is not su
 - Use dry-run or preview modes when available.
 - Stop and check Unity Console if Unity reports compile errors.
 - Review generated changes before applying them to important projects.
+- The checkpoint timeline requires the selected Unity project to be a git worktree. If it is not, VRCForge records checkpointing as unavailable and does not claim rollback is possible.
 
 - 写入 Unity 资产前先备份 Avatar 工程。
 - 第一次调整使用小幅 Blendshape 改动。
