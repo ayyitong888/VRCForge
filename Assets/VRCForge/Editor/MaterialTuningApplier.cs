@@ -59,6 +59,7 @@ namespace VRCForge.Editor
                         continue;
                     }
 
+                    Undo.RecordObject(target.material, "Apply VRCForge material tuning");
                     if (!adapter.TryApplyChange(target.material, semanticProperty, ExtractValue(valueToken), out var previousValue, out var appliedValue, out var warning))
                     {
                         skipped.Add(new { materialId, semanticProperty, warning });

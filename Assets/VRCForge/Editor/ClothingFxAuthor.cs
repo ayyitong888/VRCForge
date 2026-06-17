@@ -53,7 +53,7 @@ namespace VRCForge.Editor
                     return new ErrorResponse("No VRCExpressionsMenu found on the avatar.");
                 }
 
-                Directory.CreateDirectory(AssetDir);
+                EnsureAssetFolder(AssetDir);
                 var created = new List<object>();
                 var skipped = new List<object>();
                 foreach (var item in items.OfType<JObject>())
@@ -130,6 +130,27 @@ namespace VRCForge.Editor
             }
 
             return clip;
+        }
+
+        private static void EnsureAssetFolder(string assetPath)
+        {
+            var normalized = assetPath.Replace("\\", "/").Trim('/');
+            var parts = normalized.Split('/');
+            if (parts.Length == 0 || parts[0] != "Assets")
+            {
+                throw new InvalidOperationException($"Generated asset folder must be under Assets: {assetPath}");
+            }
+
+            var current = "Assets";
+            for (var index = 1; index < parts.Length; index++)
+            {
+                var next = $"{current}/{parts[index]}";
+                if (!AssetDatabase.IsValidFolder(next))
+                {
+                    AssetDatabase.CreateFolder(current, parts[index]);
+                }
+                current = next;
+            }
         }
 
         private static void EnsureFxLayer(AnimatorController controller, string displayName, string paramName, AnimationClip clipOn, AnimationClip clipOff)

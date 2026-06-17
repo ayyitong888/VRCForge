@@ -5,6 +5,8 @@ param(
     [string]$UvRuntimeLicensePath = "third_party\uv-runtime",
     [string]$UnityPackagePath = "",
     [string]$PayloadDownloadUrl = "",
+    [string]$UvDownloadUrl = "https://github.com/astral-sh/uv/releases/download/0.9.17/uv-x86_64-pc-windows-msvc.zip",
+    [string]$UvDownloadSha256 = "",
     [switch]$AllowDirty,
     [switch]$AllowUnpushed
 )
@@ -13,7 +15,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$uvDownloadUrl = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+$uvDownloadUrl = $UvDownloadUrl
 
 function Resolve-DotNetExe {
     $command = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -133,6 +135,14 @@ function Install-UvRuntime {
         $zipPath = Join-Path $tempRoot "uv-x86_64-pc-windows-msvc.zip"
         Write-Host "Downloading uv Windows x64 runtime: $uvDownloadUrl"
         Invoke-WebRequest -Uri $uvDownloadUrl -OutFile $zipPath
+        if (-not [string]::IsNullOrWhiteSpace($UvDownloadSha256)) {
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+            if ($actualHash -ne $UvDownloadSha256.ToLowerInvariant()) {
+                throw "uv runtime SHA256 mismatch. expected=$UvDownloadSha256 actual=$actualHash"
+            }
+        } else {
+            Write-Warning "UvDownloadSha256 was not provided; uv archive integrity is not pinned."
+        }
         Expand-Archive -LiteralPath $zipPath -DestinationPath $tempRoot -Force
 
         $extractedUv = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter uv.exe | Select-Object -First 1
@@ -258,6 +268,7 @@ try {
     $payloadZip = Join-Path $releaseRoot "VRCForge_Windows_x64_$Version.zip"
     Remove-Item -LiteralPath $payloadZip -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
+    $payloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadZip).Hash.ToLowerInvariant()
 
     $offlineInstaller = Join-Path $releaseRoot "VRCForge_Offline_Installer_x64.exe"
     $webInstaller = Join-Path $releaseRoot "VRCForge_Web_Installer_x64.exe"
@@ -267,10 +278,23 @@ try {
         throw "Offline NSIS build failed."
     }
 
-    & $nsisExe "/DVERSION=$Version" "/DDOWNLOAD_URL=$PayloadDownloadUrl" "/DOUTFILE=$webInstaller" .\installer\VRCForge_Web_Installer_x64.nsi
+    & $nsisExe "/DVERSION=$Version" "/DDOWNLOAD_URL=$PayloadDownloadUrl" "/DPAYLOAD_SHA256=$payloadSha256" "/DOUTFILE=$webInstaller" .\installer\VRCForge_Web_Installer_x64.nsi
     if ($LASTEXITCODE -ne 0) {
         throw "Web NSIS build failed."
     }
+
+    $manifest = [ordered]@{
+        version = $Version
+        commit = (git rev-parse HEAD).Trim()
+        uvDownloadUrl = $uvDownloadUrl
+        uvDownloadSha256 = $UvDownloadSha256
+        artifacts = @(
+            @{ name = [System.IO.Path]::GetFileName($payloadZip); sha256 = $payloadSha256 },
+            @{ name = [System.IO.Path]::GetFileName($offlineInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $offlineInstaller).Hash.ToLowerInvariant() },
+            @{ name = [System.IO.Path]::GetFileName($webInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $webInstaller).Hash.ToLowerInvariant() }
+        )
+    }
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
 
     Write-Host "Release payload built: $payloadRoot"
     Write-Host "Release artifacts: $releaseRoot"

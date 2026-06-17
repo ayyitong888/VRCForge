@@ -56,6 +56,7 @@ namespace VRCForge.Editor
 
                     var previousWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
                     var clampedWeight = Mathf.Clamp(targetWeight, 0f, 100f);
+                    Undo.RecordObject(renderer, "Apply VRCForge blendshape weight");
                     renderer.SetBlendShapeWeight(blendshapeIndex, clampedWeight);
                     EditorUtility.SetDirty(renderer);
                     EditorUtility.SetDirty(renderer.gameObject);

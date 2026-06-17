@@ -4,6 +4,9 @@
 !ifndef DOWNLOAD_URL
   !error "DOWNLOAD_URL is required"
 !endif
+!ifndef PAYLOAD_SHA256
+  !error "PAYLOAD_SHA256 is required"
+!endif
 !ifndef OUTFILE
   !define OUTFILE "VRCForge_Web_Installer_x64.exe"
 !endif
@@ -47,6 +50,12 @@ LangString WelcomeText ${LANG_ENGLISH} "VRCForge is a local AI workbench for VRC
 LangString RunText ${LANG_SIMPCHINESE} "安装完成后启动 VRCForge"
 LangString RunText ${LANG_ENGLISH} "Launch VRCForge after install"
 
+!macro StopVRCForgeProcesses
+  nsExec::ExecToLog 'taskkill /F /IM VRCForge.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM vrcforge_backend.exe /T'
+  Sleep 800
+!macroend
+
 Section "Install"
   SetRegView 64
   DetailPrint "Downloading VRCForge Windows x64 payload..."
@@ -57,6 +66,15 @@ Section "Install"
     Abort
   ${EndIf}
 
+  DetailPrint "Verifying payload SHA256..."
+  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath ''$TEMP\VRCForge\payload.zip'').Hash.ToLowerInvariant(); if ($$actual -ne ''${PAYLOAD_SHA256}''.ToLowerInvariant()) { Write-Error \"Payload SHA256 mismatch. expected=${PAYLOAD_SHA256} actual=$$actual\"; exit 1 }"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "Downloaded VRCForge payload failed SHA256 verification. Error code: $0"
+    Abort
+  ${EndIf}
+
+  !insertmacro StopVRCForgeProcesses
   RMDir /r "$INSTDIR\backend"
   RMDir /r "$INSTDIR\dashboard"
   RMDir /r "$INSTDIR\unity_plugin"
@@ -95,6 +113,7 @@ SectionEnd
 
 Section "Uninstall"
   SetRegView 64
+  !insertmacro StopVRCForgeProcesses
   Delete "$DESKTOP\VRCForge.lnk"
   Delete "$SMPROGRAMS\VRCForge\VRCForge.lnk"
   Delete "$SMPROGRAMS\VRCForge\Uninstall VRCForge.lnk"
