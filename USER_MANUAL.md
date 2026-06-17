@@ -28,7 +28,8 @@ This manual explains the public workflow and feature status without project-spec
 | Avatar performance scan | Avatar 性能扫描 | 已可用 / Available |
 | Unity compile-error reading | Unity 编译错误读取 | 已可用 / Available |
 | Roslyn Advanced Power Mode | Roslyn 高级模式 | 已可用 / Available |
-| Wardrobe FX generation | 衣柜 FX 生成 | 开发中 / In development |
+| Generic Unity CRUD tools | 通用 Unity CRUD 工具 | 开发分支 / Development branch |
+| Int-exclusive wardrobe scan and existing-wardrobe add-outfit tools | int 互斥衣柜扫描与已有衣柜加衣工具 | 开发分支，Unity 活体验证待跑 / Development branch, Unity live validation pending |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |

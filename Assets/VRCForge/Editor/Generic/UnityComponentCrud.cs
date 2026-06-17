@@ -743,4 +743,6 @@ namespace VRCForge.Editor
             {
                 return new ErrorResponse($"Set property failed: {ex.Message}");
             }
-  
+        }
+    }
+}
