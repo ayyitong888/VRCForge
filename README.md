@@ -109,7 +109,7 @@ The desktop app also includes uninstall actions:
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
-| Int-exclusive wardrobe scan/create/add-outfit tools | int wardrobe scan/create/add outfit | Beta, local tests pass; Unity live validation pending |
+| Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live validation pending |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; Unity live validation pending |
 | Pre-write checkpoint timeline | Git checkpoint before gateway writes, plus checkpoint list/preview/restore UI | Development branch, local tests pass; Unity live validation pending |
 

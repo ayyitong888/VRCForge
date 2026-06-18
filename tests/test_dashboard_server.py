@@ -613,10 +613,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_preview_ensure_expression_menu_control", tool_names)
         self.assertIn("vrcforge_preview_ensure_animator_state", tool_names)
         self.assertIn("vrcforge_preview_create_wardrobe", tool_names)
+        self.assertIn("vrcforge_preview_manage_wardrobe", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_parameter", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_menu_control", tool_names)
         self.assertNotIn("vrcforge_ensure_animator_state", tool_names)
         self.assertNotIn("vrcforge_create_wardrobe", tool_names)
+        self.assertNotIn("vrcforge_manage_wardrobe", tool_names)
 
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -726,6 +728,34 @@ class DashboardServerTests(unittest.TestCase):
         # Supports a non-mutating preview path.
         self.assertIn("preview", source)
 
+    def test_wardrobe_manager_writer_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
+        source = (editor_dir / "WardrobeManagerWriter.cs").read_text(encoding="utf-8")
+        self.assertIn("[McpForUnityTool(", source)
+        self.assertIn('name: "vrc_manage_wardrobe"', source)
+        self.assertIn("public static object HandleCommand(JObject @params)", source)
+        for action in (
+            "remove_outfit",
+            "rename_outfit",
+            "reorder_outfits",
+            "set_default",
+            "delete_wardrobe",
+        ):
+            self.assertIn(action, source)
+        # WD-style wardrobe management must edit the same triangle the scanner reads.
+        self.assertIn("RemoveAnyStateTransition", source)
+        self.assertIn("RemoveState", source)
+        self.assertIn("RemoveLayer", source)
+        self.assertIn("VRCExpressionParameters.ValueType.Int", source)
+        self.assertIn("ControlType.SubMenu", source)
+        self.assertIn("m_IsActive", source)
+        # Destructive object/asset removal is supported but opt-in and Undo/checkpoint friendly.
+        self.assertIn("deleteObjects", source)
+        self.assertIn("DestroyObjectImmediate", source)
+        self.assertIn("DeleteAsset", source)
+        self.assertIn("Undo.", source)
+        self.assertIn("preview", source)
+
     def test_avatar_authoring_primitives_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
         source = (editor_dir / "UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8")
@@ -765,6 +795,8 @@ class DashboardServerTests(unittest.TestCase):
         # Preview is a directly callable read/plan tool, never an approval-gated write target.
         self.assertIn("vrcforge_preview_add_wardrobe_outfit", tool_names)
         self.assertNotIn("vrcforge_preview_add_wardrobe_outfit", write_targets)
+        self.assertIn("vrcforge_preview_manage_wardrobe", tool_names)
+        self.assertNotIn("vrcforge_preview_manage_wardrobe", write_targets)
         self.assertIn("vrcforge_preview_ensure_expression_parameter", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_menu_control", tool_names)
         self.assertIn("vrcforge_preview_ensure_animator_state", tool_names)
@@ -776,6 +808,8 @@ class DashboardServerTests(unittest.TestCase):
         # The write is approval-gated: a writeTarget, never a direct read tool.
         self.assertIn("vrcforge_add_wardrobe_outfit", write_targets)
         self.assertNotIn("vrcforge_add_wardrobe_outfit", tool_names)
+        self.assertIn("vrcforge_manage_wardrobe", write_targets)
+        self.assertNotIn("vrcforge_manage_wardrobe", tool_names)
         self.assertIn("vrcforge_ensure_expression_parameter", write_targets)
         self.assertIn("vrcforge_ensure_expression_menu_control", write_targets)
         self.assertIn("vrcforge_ensure_animator_state", write_targets)
@@ -914,6 +948,84 @@ class DashboardServerTests(unittest.TestCase):
             "outfit_name": "Hoodie",
         })
         self.assertFalse(missing_objects["ok"])
+
+    def test_manage_wardrobe_request_parses_actions_values_and_flags(self) -> None:
+        request = dashboard_server.build_manage_wardrobe_request(
+            {
+                "action": "reorder_outfits",
+                "avatarPath": "Scene/HeroAvatar",
+                "parameterName": "Clothes",
+                "orderValues": "3, 1, 2",
+                "deleteObjects": "true",
+                "deleteGeneratedAssets": "false",
+                "confirmDeleteWardrobe": "true",
+            },
+            preview=False,
+        )
+        self.assertEqual(request["action"], "reorder_outfits")
+        self.assertEqual(request["avatarPath"], "Scene/HeroAvatar")
+        self.assertEqual(request["parameterName"], "Clothes")
+        self.assertEqual(request["orderValues"], [3, 1, 2])
+        self.assertTrue(request["deleteObjects"])
+        self.assertFalse(request["deleteGeneratedAssets"])
+        self.assertTrue(request["confirmDeleteWardrobe"])
+        self.assertFalse(request["preview"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_manage_wardrobe_preview_forwards_with_flag(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"preview": True, "plan": {"action": "remove_outfit", "targetValues": [3]}}},
+        )
+        result = dashboard_server.preview_manage_wardrobe_sync({
+            "avatar_path": "Scene/HeroAvatar",
+            "parameter_name": "Clothes",
+            "action": "remove_outfit",
+            "target_value": 3,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_manage_wardrobe")
+        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+        self.assertEqual(params["parameterName"], "Clothes")
+        self.assertEqual(params["action"], "remove_outfit")
+        self.assertEqual(params["targetValue"], 3)
+        self.assertTrue(params["preview"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_manage_wardrobe_apply_forwards_without_preview(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "action": "rename_outfit", "targetValues": [3], "newName": "Coat"}},
+        )
+        result = dashboard_server.manage_wardrobe_sync({
+            "avatarPath": "Scene/HeroAvatar",
+            "parameterName": "Clothes",
+            "action": "rename_outfit",
+            "value": 3,
+            "newName": "Coat",
+        })
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "rename_outfit")
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_manage_wardrobe")
+        self.assertFalse(params["preview"])
+        self.assertEqual(params["value"], 3)
+        self.assertEqual(params["newName"], "Coat")
+
+    def test_manage_wardrobe_requires_action_and_parameter(self) -> None:
+        missing_action = dashboard_server.manage_wardrobe_sync({"parameterName": "Clothes"})
+        self.assertFalse(missing_action["ok"])
+        missing_parameter = dashboard_server.manage_wardrobe_sync({"action": "remove_outfit", "targetValue": 3})
+        self.assertFalse(missing_parameter["ok"])
 
     def test_checkpoint_timeline_wraps_approved_write_and_restores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

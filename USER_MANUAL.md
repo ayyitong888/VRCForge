@@ -30,7 +30,7 @@ This manual explains the public workflow and feature status without project-spec
 | Roslyn Advanced Power Mode | Roslyn 高级模式 | 已可用 / Available |
 | Generic Unity CRUD tools | 通用 Unity CRUD 工具 | Beta, local tests pass; Unity live validation pending |
 | Generic avatar authoring primitives | Expression parameters / menu controls / FX animator states | Beta, local tests pass; Unity live validation pending |
-| Int-exclusive wardrobe scan/create/add-outfit tools | int wardrobe scan/create/add outfit | Beta, local tests pass; Unity live validation pending |
+| Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live validation pending |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; Unity live validation pending |
 | Pre-write checkpoint timeline | Git checkpoint before gateway writes, checkpoint list/preview/restore UI | 开发分支，本地测试通过，Unity 活体验证待跑 / Development branch, local tests pass; Unity live validation pending |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
