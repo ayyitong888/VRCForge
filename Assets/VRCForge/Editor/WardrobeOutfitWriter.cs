@@ -24,13 +24,13 @@ namespace VRCForge.Editor
     //   - adds an FX state (Write Defaults matched to the wardrobe convention) to
     //     the wardrobe layer with an Any State -> state transition gated Equals N,
     //   - adds a menu Toggle control bound to the int with value N (overflowing to
-    //     a SubMenu when the home menu is full).
+    //     a nested SubMenu under the wardrobe menu when the home menu is full).
     // It NEVER rewrites existing clips/states (per-clip author choices are
     // intentional). Exclusivity for previously-authored outfits is preserved by the
     // wardrobe's Write Defaults + scene-default-off convention. Supports preview.
     [McpForUnityTool(
         name: "vrc_add_wardrobe_outfit",
-        Description = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
+        Description = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
     )]
     public static class WardrobeOutfitWriter
     {
@@ -319,7 +319,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(wardrobeMachine);
                 EditorUtility.SetDirty(newState);
 
-                // d. Add the menu toggle (overflow into a SubMenu when needed).
+                // d. Add the menu toggle (overflow into a nested SubMenu when needed).
                 string appliedMenuPath = "";
                 bool menuToggleAdded = false;
                 if (addMenuToggle)
@@ -555,7 +555,7 @@ namespace VRCForge.Editor
                 var path = string.IsNullOrWhiteSpace(parentPath) ? name : $"{parentPath}/{name}";
                 if (control.parameter != null && string.Equals(control.parameter.name, parameterName, StringComparison.Ordinal))
                 {
-                    sink.Add(new MenuToggleRef { menu = menu, value = Mathf.RoundToInt(control.value), menuPath = path });
+                    sink.Add(new MenuToggleRef { menu = menu, value = Mathf.RoundToInt(control.value), menuPath = path, depth = depth });
                 }
                 if (control.type == VRCExpressionsMenu.Control.ControlType.SubMenu && control.subMenu != null)
                 {
@@ -575,10 +575,17 @@ namespace VRCForge.Editor
             {
                 return new MenuPlan { menu = null, menuPathDisplay = "", createsSubMenu = false };
             }
-            var home = menuToggles.Select(m => m.menu).FirstOrDefault(m => m != null);
-            if (home != null && (home.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS)
+            var existingWithRoom = FindBestMenuRef(menuToggles, true);
+            if (existingWithRoom != null)
             {
-                return new MenuPlan { menu = home, menuPathDisplay = "(existing wardrobe menu)", createsSubMenu = false };
+                return new MenuPlan { menu = existingWithRoom.menu, menuPathDisplay = "(existing wardrobe menu)", createsSubMenu = false };
+            }
+            var existingHome = FindBestMenuRef(menuToggles, false);
+            if (existingHome != null)
+            {
+                return subMenuOverflow
+                    ? new MenuPlan { menu = existingHome.menu, menuPathDisplay = subMenuName + " (nested SubMenu)", createsSubMenu = true }
+                    : new MenuPlan { menu = null, menuPathDisplay = "", createsSubMenu = false };
             }
             if ((rootMenu.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS)
             {
@@ -605,11 +612,20 @@ namespace VRCForge.Editor
             {
                 return null;
             }
-            var home = menuToggles.Select(m => m.menu).FirstOrDefault(m => m != null);
-            if (home != null && (home.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS)
+            var existingWithRoom = FindBestMenuRef(menuToggles, true);
+            if (existingWithRoom != null)
             {
                 appliedMenuPath = "(existing wardrobe menu)";
-                return home;
+                return existingWithRoom.menu;
+            }
+            var existingHome = FindBestMenuRef(menuToggles, false);
+            if (existingHome != null)
+            {
+                if (!subMenuOverflow)
+                {
+                    return null;
+                }
+                return CreateOverflowSubMenu(existingHome.menu, parameterName, subMenuName, assetDir, true, out appliedMenuPath);
             }
             if ((rootMenu.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS)
             {
@@ -621,26 +637,88 @@ namespace VRCForge.Editor
                 return null;
             }
 
+            return CreateOverflowSubMenu(rootMenu, parameterName, subMenuName, assetDir, true, out appliedMenuPath);
+        }
+
+        private static MenuToggleRef FindBestMenuRef(List<MenuToggleRef> menuToggles, bool requireCapacity)
+        {
+            MenuToggleRef best = null;
+            foreach (var toggle in menuToggles)
+            {
+                if (toggle?.menu == null)
+                {
+                    continue;
+                }
+                if (requireCapacity && (toggle.menu.controls?.Count ?? 0) >= VRCExpressionsMenu.MAX_CONTROLS)
+                {
+                    continue;
+                }
+                if (best == null || toggle.depth >= best.depth)
+                {
+                    best = toggle;
+                }
+            }
+            return best;
+        }
+
+        private static VRCExpressionsMenu CreateOverflowSubMenu(
+            VRCExpressionsMenu owner,
+            string parameterName,
+            string subMenuName,
+            string assetDir,
+            bool splitFullOwner,
+            out string appliedMenuPath)
+        {
+            appliedMenuPath = "";
+            if (owner == null)
+            {
+                return null;
+            }
+
             Directory.CreateDirectory(assetDir);
             var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
             subMenu.controls = new List<VRCExpressionsMenu.Control>();
             var subPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(subMenuName, "Wardrobe")}_SubMenu.asset");
             AssetDatabase.CreateAsset(subMenu, subPath);
 
-            Undo.RegisterCompleteObjectUndo(rootMenu, "Add wardrobe submenu");
-            if (rootMenu.controls == null)
+            Undo.RegisterCompleteObjectUndo(owner, "Add wardrobe submenu");
+            if (owner.controls == null)
             {
-                rootMenu.controls = new List<VRCExpressionsMenu.Control>();
+                owner.controls = new List<VRCExpressionsMenu.Control>();
             }
-            rootMenu.controls.Add(new VRCExpressionsMenu.Control
+            if (splitFullOwner)
+            {
+                while (owner.controls.Count >= VRCExpressionsMenu.MAX_CONTROLS && owner.controls.Count > 0)
+                {
+                    var moveIndex = FindLastControlIndex(owner.controls, parameterName);
+                    var moved = owner.controls[moveIndex];
+                    owner.controls.RemoveAt(moveIndex);
+                    subMenu.controls.Insert(0, moved);
+                }
+            }
+            owner.controls.Add(new VRCExpressionsMenu.Control
             {
                 name = subMenuName,
                 type = VRCExpressionsMenu.Control.ControlType.SubMenu,
                 subMenu = subMenu
             });
-            EditorUtility.SetDirty(rootMenu);
+            EditorUtility.SetDirty(owner);
+            EditorUtility.SetDirty(subMenu);
             appliedMenuPath = subMenuName;
             return subMenu;
+        }
+
+        private static int FindLastControlIndex(List<VRCExpressionsMenu.Control> controls, string parameterName)
+        {
+            for (var i = controls.Count - 1; i >= 0; i--)
+            {
+                var control = controls[i];
+                if (control?.parameter != null && string.Equals(control.parameter.name, parameterName, StringComparison.Ordinal))
+                {
+                    return i;
+                }
+            }
+            return controls.Count - 1;
         }
 
         // --- Path / naming helpers ---------------------------------------------------
@@ -820,6 +898,7 @@ namespace VRCForge.Editor
             public VRCExpressionsMenu menu;
             public int value;
             public string menuPath;
+            public int depth;
         }
 
         private class MenuPlan

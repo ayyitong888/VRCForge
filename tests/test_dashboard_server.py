@@ -708,6 +708,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("AssetDatabase.CreateAsset", source)
         self.assertIn("ControlType.Toggle", source)
         self.assertIn("VRCExpressionsMenu.MAX_CONTROLS", source)
+        # Full wardrobe menus overflow inside the existing wardrobe menu tree,
+        # not onto the avatar root menu.
+        self.assertIn("FindBestMenuRef", source)
+        self.assertIn("CreateOverflowSubMenu(existingHome.menu", source)
+        self.assertIn("FindLastControlIndex", source)
         # Write tool: must register Undo entries so the checkpoint timeline can roll it back.
         self.assertIn("Undo.", source)
         # Supports a non-mutating preview path.
