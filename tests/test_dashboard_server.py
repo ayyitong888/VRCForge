@@ -723,6 +723,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("FindBestMenuRef", source)
         self.assertIn("CreateOverflowSubMenu(existingHome.menu", source)
         self.assertIn("FindLastControlIndex", source)
+        self.assertIn("var existingClip = st.motion as AnimationClip", source)
+        self.assertNotIn("var clip = st.motion as AnimationClip", source)
         # Write tool: must register Undo entries so the checkpoint timeline can roll it back.
         self.assertIn("Undo.", source)
         # Supports a non-mutating preview path.
@@ -755,6 +757,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("DeleteAsset", source)
         self.assertIn("Undo.", source)
         self.assertIn("preview", source)
+        self.assertIn("private static WardrobeManagePlan BuildPlan", source)
+        self.assertIn("private class WardrobeManagePlan", source)
+        self.assertNotIn("private static object BuildPlan", source)
 
     def test_avatar_authoring_primitives_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"

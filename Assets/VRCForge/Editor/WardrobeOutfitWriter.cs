@@ -119,8 +119,8 @@ namespace VRCForge.Editor
                     if (stateByName.TryGetValue(eq.stateName, out var st) && st != null)
                     {
                         wdFlags.Add(st.writeDefaultValues);
-                        var clip = st.motion as AnimationClip;
-                        foreach (var on in ReadClipOnObjects(clip))
+                        var existingClip = st.motion as AnimationClip;
+                        foreach (var on in ReadClipOnObjects(existingClip))
                         {
                             siblingOnObjects.Add(on);
                         }

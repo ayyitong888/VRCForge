@@ -172,7 +172,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static object BuildPlan(
+        private static WardrobeManagePlan BuildPlan(
             string action,
             VRCAvatarDescriptor descriptor,
             WardrobeContext context,
@@ -213,22 +213,22 @@ namespace VRCForge.Editor
                 warnings.Add("Generated animation clip assets referenced by removed states may be deleted.");
             }
 
-            return new
+            return new WardrobeManagePlan
             {
-                action,
+                action = action,
                 avatarPath = GetTransformPath(descriptor.transform),
                 avatarName = descriptor.name,
                 parameterName = context.parameterName,
-                targetValues,
-                newName,
-                deleteObjects,
-                deactivateObjects,
-                deleteGeneratedAssets,
-                affectedMenuControls = menuTargets.Select(item => new { item.menuPath, item.value, name = item.control.name ?? "" }).ToList(),
+                targetValues = targetValues,
+                newName = newName,
+                deleteObjects = deleteObjects,
+                deactivateObjects = deactivateObjects,
+                deleteGeneratedAssets = deleteGeneratedAssets,
+                affectedMenuControls = menuTargets.Select(item => new MenuControlPlan { menuPath = item.menuPath, value = item.value, name = item.control.name ?? "" }).ToList(),
                 affectedFxStates = stateTargets,
                 affectedObjects = objectTargets,
                 affectedFxLayers = context.layersWithWardrobeEquals.Select(item => item.name).ToList(),
-                warnings
+                warnings = warnings
             };
         }
 
@@ -1050,6 +1050,31 @@ namespace VRCForge.Editor
                 }
             }
             return result.Distinct().ToList();
+        }
+
+        private class WardrobeManagePlan
+        {
+            public string action;
+            public string avatarPath;
+            public string avatarName;
+            public string parameterName;
+            public List<int> targetValues;
+            public string newName;
+            public bool deleteObjects;
+            public bool deactivateObjects;
+            public bool deleteGeneratedAssets;
+            public List<MenuControlPlan> affectedMenuControls;
+            public List<string> affectedFxStates;
+            public List<string> affectedObjects;
+            public List<string> affectedFxLayers;
+            public List<string> warnings;
+        }
+
+        private class MenuControlPlan
+        {
+            public string menuPath;
+            public int value;
+            public string name;
         }
 
         private class WardrobeContext
