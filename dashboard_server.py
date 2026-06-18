@@ -1188,9 +1188,18 @@ def read_agent_logs(request: Request, limit: int = 100) -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def dashboard_socket(websocket: WebSocket) -> None:
+    client_host = websocket.client.host if websocket.client else ""
+    origin = websocket.headers.get("origin", "").strip()
+    supplied = extract_bearer_token_from_values(websocket.headers, websocket.query_params)
+    try:
+        validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
+    except HTTPException as exc:
+        await websocket.close(code=1008, reason=str(exc.detail))
+        return
+
     await EVENT_BUS.connect(websocket)
     try:
-        await EVENT_BUS.send_to_client(websocket, "hello", await asyncio.to_thread(build_bootstrap_payload))
+        await EVENT_BUS.send_to_client(websocket, "hello", await asyncio.to_thread(build_dashboard_socket_payload))
         while True:
             await websocket.receive_text()
     except (WebSocketDisconnect, RuntimeError):
@@ -3856,7 +3865,7 @@ def ensure_dict_payload(payload: Any, scope: str) -> dict[str, Any]:
 
 
 def build_dashboard_artifact_path(prefix: str, avatar_path: str | None, suffix: str) -> Path:
-    latest_dir = ARTIFACTS_DIR / "latest"
+    latest_dir = DASHBOARD_ARTIFACTS_DIR / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
     safe_avatar = sanitize_artifact_name(str(avatar_path or "avatar"))
     return latest_dir / f"{prefix}_{safe_avatar}.{suffix.lstrip('.')}"
@@ -5476,17 +5485,28 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
 
 
 def build_bootstrap_payload() -> dict[str, Any]:
+    return build_dashboard_socket_payload(include_secret=True)
+
+
+def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, Any]:
     if CURRENT_UNITY_STATUS is None:
         status = build_unity_status_snapshot()
     else:
         status = CURRENT_UNITY_STATUS
+    health = read_health()
+    api_config = serialize_api_config(include_secret=include_secret)
+    if not include_secret:
+        health_api_config = health.get("apiConfig")
+        if isinstance(health_api_config, dict):
+            health_api_config.pop("api_key", None)
+        api_config.pop("api_key", None)
 
     return {
-        "health": read_health(),
+        "health": health,
         "state": serialize_dashboard_state(),
         "config": {
             "configPath": str(CONFIG_PATH),
-            "apiConfig": serialize_api_config(include_secret=True),
+            "apiConfig": api_config,
             "effective": build_effective_model_summary(),
         },
         "projects": project_snapshot_payload(),
@@ -6138,6 +6158,7 @@ APP_AUTH_PREFIXES = (
     "/api/config",
     "/api/models",
 )
+APP_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 def app_route_requires_auth(request: Request) -> bool:
@@ -6151,26 +6172,31 @@ def app_route_requires_auth(request: Request) -> bool:
 
 def authenticate_app_request(request: Request) -> None:
     client_host = request.client.host if request.client else ""
-    if client_host not in {"127.0.0.1", "::1", "localhost"}:
-        raise HTTPException(status_code=403, detail="App API only accepts loopback clients.")
-
     origin = request.headers.get("origin", "").strip()
+    supplied = extract_bearer_token(request)
+    validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
+
+
+def validate_app_request_auth(client_host: str, origin: str, supplied_token: str) -> None:
+    if client_host not in APP_LOOPBACK_CLIENT_HOSTS:
+        raise HTTPException(status_code=403, detail="App API only accepts loopback clients.")
     if origin and origin not in APP_ALLOWED_ORIGINS:
         raise HTTPException(status_code=403, detail="App API origin is not allowed.")
-
     if not APP_AUTH_REQUIRED:
         return
-
-    supplied = extract_bearer_token(request)
-    if not supplied or not hmac.compare_digest(supplied, APP_SESSION_TOKEN):
+    if not supplied_token or not hmac.compare_digest(supplied_token, APP_SESSION_TOKEN):
         raise HTTPException(status_code=401, detail="App session token is missing or invalid.")
 
 
 def extract_bearer_token(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
+    return extract_bearer_token_from_values(request.headers, request.query_params)
+
+
+def extract_bearer_token_from_values(headers: Any, query_params: Any) -> str:
+    auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return str(request.query_params.get("app_token") or "")
+    return str(query_params.get("app_token") or "")
 
 
 def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:

@@ -1,9 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
-    env,
-    fs,
+    env, fs,
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -11,8 +12,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -82,7 +81,10 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         .env("VRCFORGE_LOG_DIR", user_data.join("logs"))
         .env("VRCFORGE_ARTIFACTS_DIR", user_data.join("artifacts"))
         .env("VRCFORGE_DASHBOARD_DIR", root.join("dashboard"))
-        .env("VRCFORGE_SETTINGS_PATH", user_data.join("config").join("settings.json"))
+        .env(
+            "VRCFORGE_SETTINGS_PATH",
+            user_data.join("config").join("settings.json"),
+        )
         .env("VRCFORGE_APP_SESSION_TOKEN", &app_session_token)
         .arg("--host")
         .arg(BACKEND_HOST)
@@ -99,7 +101,10 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         .map_err(|error| format!("无法启动本地 runtime: {error}"))?;
 
     {
-        let mut guard = state.child.lock().map_err(|_| "backend state lock poisoned".to_string())?;
+        let mut guard = state
+            .child
+            .lock()
+            .map_err(|_| "backend state lock poisoned".to_string())?;
         *guard = Some(child);
     }
 
@@ -122,7 +127,10 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
 
 #[tauri::command]
 fn stop_backend(state: State<'_, BackendState>) -> Result<(), String> {
-    let mut guard = state.child.lock().map_err(|_| "backend state lock poisoned".to_string())?;
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "backend state lock poisoned".to_string())?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -157,7 +165,8 @@ fn backend_command(root: &Path) -> Result<Command, String> {
 
 fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
     for dir in ["config", "logs", "artifacts", "backups", "skills"] {
-        fs::create_dir_all(user_data.join(dir)).map_err(|error| format!("无法创建用户数据目录: {error}"))?;
+        fs::create_dir_all(user_data.join(dir))
+            .map_err(|error| format!("无法创建用户数据目录: {error}"))?;
     }
     let settings_path = user_data.join("config").join("settings.json");
     if !settings_path.exists() {
@@ -249,28 +258,17 @@ fn ensure_app_session_token(user_data: &Path) -> Result<String, String> {
             return Ok(token);
         }
     }
-    let token = generate_session_token();
-    fs::write(&token_path, &token).map_err(|error| format!("无法写入 app session token: {error}"))?;
+    let token = generate_session_token()?;
+    fs::write(&token_path, &token)
+        .map_err(|error| format!("无法写入 app session token: {error}"))?;
     Ok(token)
 }
 
-fn generate_session_token() -> String {
+fn generate_session_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
-    if fs::File::open("/dev/urandom")
-        .and_then(|mut file| {
-            use std::io::Read;
-            file.read_exact(&mut bytes)
-        })
-        .is_ok()
-    {
-        return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    }
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{:x}{:x}", nanos, std::process::id())
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Unable to generate app session token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn backend_port_open() -> bool {

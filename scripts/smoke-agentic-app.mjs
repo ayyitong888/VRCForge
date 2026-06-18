@@ -10,6 +10,7 @@ const logsDir = path.join(smokeRoot, "logs");
 const artifactsDir = path.join(smokeRoot, "artifacts");
 const port = Number(process.env.VRCFORGE_SMOKE_PORT || 8769);
 const endpoint = `http://127.0.0.1:${port}`;
+const appSessionToken = "vrcforge-smoke-session-token";
 
 fs.rmSync(smokeRoot, { recursive: true, force: true });
 for (const dir of [configDir, logsDir, artifactsDir]) {
@@ -72,6 +73,7 @@ const child = spawn(python, ["dashboard_server.py", "--host", "127.0.0.1", "--po
     VRCFORGE_ARTIFACTS_DIR: artifactsDir,
     VRCFORGE_DASHBOARD_DIR: path.join(root, "dashboard"),
     VRCFORGE_SETTINGS_PATH: settingsPath,
+    VRCFORGE_APP_SESSION_TOKEN: appSessionToken,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -207,7 +209,7 @@ async function waitForJson(url, timeoutMs) {
   let lastError;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { headers: appAuthHeaders() });
       if (response.ok) {
         return await response.json();
       }
@@ -227,7 +229,7 @@ async function postJson(url, body) {
 async function requestJson(url, method, body) {
   const response = await fetch(url, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...appAuthHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let json = {};
@@ -237,4 +239,8 @@ async function requestJson(url, method, body) {
     json = {};
   }
   return { status: response.status, json };
+}
+
+function appAuthHeaders() {
+  return { Authorization: `Bearer ${appSessionToken}` };
 }

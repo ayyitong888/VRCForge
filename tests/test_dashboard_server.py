@@ -117,6 +117,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(message["type"], "hello")
                 self.assertIn("projects", message["payload"])
                 self.assertIn("unityStatus", message["payload"])
+                self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
 
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -163,6 +164,33 @@ class DashboardServerTests(unittest.TestCase):
         serialized = json.dumps(payload).lower()
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn("api_key", serialized)
+
+    def test_app_auth_validation_checks_loopback_origin_and_token(self) -> None:
+        original_required = dashboard_server.APP_AUTH_REQUIRED
+        original_token = dashboard_server.APP_SESSION_TOKEN
+        dashboard_server.APP_AUTH_REQUIRED = True
+        dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
+        try:
+            with self.assertRaises(dashboard_server.HTTPException) as non_loopback:
+                dashboard_server.validate_app_request_auth("192.0.2.10", "", "test-app-session-token")
+            self.assertEqual(non_loopback.exception.status_code, 403)
+
+            with self.assertRaises(dashboard_server.HTTPException) as bad_origin:
+                dashboard_server.validate_app_request_auth(
+                    "127.0.0.1",
+                    "https://example.invalid",
+                    "test-app-session-token",
+                )
+            self.assertEqual(bad_origin.exception.status_code, 403)
+
+            with self.assertRaises(dashboard_server.HTTPException) as bad_token:
+                dashboard_server.validate_app_request_auth("127.0.0.1", "", "wrong-token")
+            self.assertEqual(bad_token.exception.status_code, 401)
+
+            dashboard_server.validate_app_request_auth("127.0.0.1", "tauri://localhost", "test-app-session-token")
+        finally:
+            dashboard_server.APP_AUTH_REQUIRED = original_required
+            dashboard_server.APP_SESSION_TOKEN = original_token
 
     def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -2094,7 +2122,7 @@ class DashboardServerTests(unittest.TestCase):
             proof = dict(current_proof or {})
             proof[stage] = {
                 "imagePath": f"artifacts/dashboard/latest/blendshape_{stage}.png",
-                "imageUrl": f"/artifacts/dashboard/latest/blendshape_{stage}.png",
+                "imageUrl": f"/artifacts/latest/blendshape_{stage}.png",
             }
             return proof
 
@@ -2663,7 +2691,7 @@ class DashboardServerTests(unittest.TestCase):
             response = client.post("/api/vision/capture", json={"avatar_path": "Scene/HeroAvatar"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["imageUrl"], "/artifacts/dashboard/latest/vision_capture.png")
+        self.assertEqual(response.json()["imageUrl"], "/artifacts/latest/vision_capture.png")
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_capture_scene_view")
         self.assertFalse(params["setRotation"])
@@ -2892,7 +2920,7 @@ class DashboardServerTests(unittest.TestCase):
     def test_to_artifact_url_maps_local_artifacts_path(self) -> None:
         path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
         url = dashboard_server.to_artifact_url(path)
-        self.assertEqual(url, "/artifacts/dashboard/latest/vision_capture.png")
+        self.assertEqual(url, "/artifacts/latest/vision_capture.png")
 
     # ------------------------------------------------------------------
     # /api/clothes/apply-fx (dry_run=True — no Unity needed)
