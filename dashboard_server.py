@@ -553,7 +553,7 @@ class AgentMcpMount:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="VRCForge Dashboard", version="0.4.0-beta")
+app = FastAPI(title="VRCForge Dashboard", version="0.5.0-beta")
 # The Tauri desktop webview runs on a different origin (tauri://localhost /
 # http://tauri.localhost in production, http://127.0.0.1:1420 in dev), so
 # without CORS headers every fetch() to this loopback server is blocked by
@@ -6553,6 +6553,246 @@ def scan_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _coerce_gateway_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def build_create_wardrobe_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "parameterName": str(
+            params.get("parameter_name")
+            or params.get("parameterName")
+            or params.get("wardrobe_parameter")
+            or params.get("wardrobeParameter")
+            or "Clothes"
+        ).strip(),
+        "preview": preview,
+    }
+    menu_name = str(params.get("menu_name") or params.get("menuName") or params.get("sub_menu_name") or params.get("subMenuName") or "").strip()
+    if menu_name:
+        request["menuName"] = menu_name
+    default_control_name = str(params.get("default_control_name") or params.get("defaultControlName") or "").strip()
+    if default_control_name:
+        request["defaultControlName"] = default_control_name
+    layer_name = str(params.get("layer_name") or params.get("layerName") or "").strip()
+    if layer_name:
+        request["layerName"] = layer_name
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
+        request["writeDefaults"] = _coerce_gateway_bool(params.get("write_defaults", params.get("writeDefaults")), True)
+    if params.get("saved") is not None:
+        request["saved"] = _coerce_gateway_bool(params.get("saved"), True)
+    if params.get("network_synced") is not None or params.get("networkSynced") is not None:
+        request["networkSynced"] = _coerce_gateway_bool(params.get("network_synced", params.get("networkSynced")), True)
+    return request
+
+
+def build_ensure_expression_parameter_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "valueType": str(params.get("value_type") or params.get("valueType") or "Int").strip() or "Int",
+        "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0),
+        "saved": _coerce_gateway_bool(params.get("saved"), True),
+        "networkSynced": _coerce_gateway_bool(params.get("network_synced", params.get("networkSynced")), True),
+        "preview": preview,
+    }
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    return request
+
+
+def ensure_expression_parameter_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = build_ensure_expression_parameter_request(params, preview)
+    if not request["parameterName"]:
+        return {"ok": False, "error": "parameterName is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_expression_parameter", request)),
+        "ensure expression parameter",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def build_ensure_expression_menu_control_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "menuPath": str(params.get("menu_path") or params.get("menuPath") or "").strip(),
+        "controlName": str(params.get("control_name") or params.get("controlName") or "").strip(),
+        "controlType": str(params.get("control_type") or params.get("controlType") or "Toggle").strip() or "Toggle",
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "controlValue": float(params.get("control_value", params.get("controlValue", 0)) or 0),
+        "preview": preview,
+    }
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    return request
+
+
+def ensure_expression_menu_control_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = build_ensure_expression_menu_control_request(params, preview)
+    if not request["controlName"]:
+        return {"ok": False, "error": "controlName is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_expression_menu_control", request)),
+        "ensure expression menu control",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "layerName": str(params.get("layer_name") or params.get("layerName") or "").strip(),
+        "stateName": str(params.get("state_name") or params.get("stateName") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "parameterType": str(params.get("parameter_type") or params.get("parameterType") or "Int").strip() or "Int",
+        "conditionMode": str(params.get("condition_mode") or params.get("conditionMode") or "Equals").strip() or "Equals",
+        "threshold": float(params.get("threshold", 0) or 0),
+        "writeDefaults": _coerce_gateway_bool(params.get("write_defaults", params.get("writeDefaults")), True),
+        "preview": preview,
+    }
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    return request
+
+
+def ensure_animator_state_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = build_ensure_animator_state_request(params, preview)
+    if not request["layerName"]:
+        return {"ok": False, "error": "layerName is required."}
+    if not request["stateName"]:
+        return {"ok": False, "error": "stateName is required."}
+    if not request["parameterName"]:
+        return {"ok": False, "error": "parameterName is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_animator_state", request)),
+        "ensure animator state",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def _validate_create_wardrobe_request(request: dict[str, Any]) -> dict[str, Any] | None:
+    if not request["parameterName"]:
+        return {"ok": False, "error": "parameterName is required for wardrobe creation."}
+    return None
+
+
+def _create_wardrobe_primitive_args(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    common = {
+        "avatarPath": request["avatarPath"],
+        "assetDir": request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe"),
+    }
+    parameter_name = request["parameterName"]
+    menu_name = str(request.get("menuName") or request.get("subMenuName") or "Wardrobe").strip() or "Wardrobe"
+    default_control_name = str(request.get("defaultControlName") or "Default").strip() or "Default"
+    layer_name = str(request.get("layerName") or parameter_name).strip() or parameter_name
+    return (
+        {
+            **common,
+            "parameterName": parameter_name,
+            "valueType": "Int",
+            "defaultValue": 0,
+            "saved": bool(request.get("saved", True)),
+            "networkSynced": bool(request.get("networkSynced", True)),
+        },
+        {
+            **common,
+            "layerName": layer_name,
+            "stateName": default_control_name,
+            "parameterName": parameter_name,
+            "parameterType": "Int",
+            "conditionMode": "Equals",
+            "threshold": 0,
+            "writeDefaults": bool(request.get("writeDefaults", True)),
+        },
+        {
+            **common,
+            "menuPath": menu_name,
+            "controlName": default_control_name,
+            "controlType": "Toggle",
+            "parameterName": parameter_name,
+            "controlValue": 0,
+        },
+    )
+
+
+def preview_create_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_create_wardrobe_request(params, True)
+    invalid = _validate_create_wardrobe_request(request)
+    if invalid is not None:
+        return invalid
+    parameter_args, animator_args, menu_args = _create_wardrobe_primitive_args(request)
+    steps = [
+        {"tool": "vrc_ensure_expression_parameter", "result": ensure_expression_parameter_sync(parameter_args, preview=True)},
+        {"tool": "vrc_ensure_animator_state", "result": ensure_animator_state_sync(animator_args, preview=True)},
+        {"tool": "vrc_ensure_expression_menu_control", "result": ensure_expression_menu_control_sync(menu_args, preview=True)},
+    ]
+    ok = all(bool(step["result"].get("ok")) for step in steps)
+    return {
+        "ok": ok,
+        "preview": True,
+        "action": "create_wardrobe",
+        "parameterName": request["parameterName"],
+        "steps": steps,
+        "error": next((step["result"].get("error") for step in steps if not step["result"].get("ok")), None),
+    }
+
+
+def create_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_create_wardrobe_request(params, False)
+    invalid = _validate_create_wardrobe_request(request)
+    if invalid is not None:
+        return invalid
+    parameter_args, animator_args, menu_args = _create_wardrobe_primitive_args(request)
+    steps = [
+        {"tool": "vrc_ensure_expression_parameter", "result": ensure_expression_parameter_sync(parameter_args, preview=False)},
+    ]
+    if not steps[-1]["result"].get("ok"):
+        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
+    steps.append({"tool": "vrc_ensure_animator_state", "result": ensure_animator_state_sync(animator_args, preview=False)})
+    if not steps[-1]["result"].get("ok"):
+        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
+    steps.append({"tool": "vrc_ensure_expression_menu_control", "result": ensure_expression_menu_control_sync(menu_args, preview=False)})
+    if not steps[-1]["result"].get("ok"):
+        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
+    emit_log("info", "wardrobe", "Wardrobe skeleton created.", {"parameterName": request["parameterName"]})
+    return {
+        "ok": True,
+        "preview": False,
+        "action": "create_wardrobe",
+        "parameterName": request["parameterName"],
+        "steps": steps,
+    }
+
+
 def scan_avatar_parameters_gateway_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -7234,6 +7474,78 @@ def _workflow_project_params(params: dict[str, Any]) -> dict[str, Any]:
     return {"projectPath": project_value} if project_value else {}
 
 
+def _workflow_bool(params: dict[str, Any], keys: tuple[str, ...], default: bool) -> bool:
+    for key in keys:
+        if key not in params or params.get(key) is None:
+            continue
+        raw = params.get(key)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return raw != 0
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _workflow_parameter_name(params: dict[str, Any]) -> tuple[str, bool]:
+    for key in ("parameter_name", "parameterName", "wardrobe_parameter", "wardrobeParameter"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value, True
+    return "Clothes", False
+
+
+def _wardrobe_parameter_names(scan_payload: dict[str, Any]) -> list[str]:
+    wardrobes = scan_payload.get("wardrobes") if isinstance(scan_payload.get("wardrobes"), list) else []
+    names: list[str] = []
+    for wardrobe in wardrobes:
+        if not isinstance(wardrobe, dict):
+            continue
+        name = str(wardrobe.get("parameterName") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _workflow_wardrobe_create_args(params: dict[str, Any], avatar_path: str, parameter_name: str) -> dict[str, Any]:
+    result = {
+        **_workflow_project_params(params),
+        "avatarPath": avatar_path,
+        "parameterName": parameter_name,
+    }
+    for src_key, dst_key in (
+        ("menu_name", "menuName"),
+        ("menuName", "menuName"),
+        ("sub_menu_name", "subMenuName"),
+        ("subMenuName", "subMenuName"),
+        ("default_control_name", "defaultControlName"),
+        ("defaultControlName", "defaultControlName"),
+        ("layer_name", "layerName"),
+        ("layerName", "layerName"),
+        ("asset_dir", "assetDir"),
+        ("assetDir", "assetDir"),
+        ("clip_output_dir", "clipOutputDir"),
+        ("clipOutputDir", "clipOutputDir"),
+    ):
+        value = str(params.get(src_key) or "").strip()
+        if value:
+            result[dst_key] = value
+    for src_key, dst_key in (
+        ("write_defaults", "writeDefaults"),
+        ("writeDefaults", "writeDefaults"),
+        ("saved", "saved"),
+        ("network_synced", "networkSynced"),
+        ("networkSynced", "networkSynced"),
+    ):
+        if src_key in params and params.get(src_key) is not None:
+            result[dst_key] = params.get(src_key)
+    return result
+
+
 def _resolve_workflow_asset(params: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     asset_path = build_asset_path_target(params)
     guid = str(params.get("guid") or "").strip()
@@ -7269,7 +7581,13 @@ def preview_add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
     outfit_name = str(params.get("outfit_name") or params.get("outfitName") or params.get("name") or "").strip()
     parent_path = str(params.get("parent_path") or params.get("parentPath") or avatar_path).strip()
-    parameter_name = str(params.get("parameter_name") or params.get("parameterName") or "").strip()
+    manage_wardrobe = _workflow_bool(params, ("manage_wardrobe", "manageWardrobe"), True)
+    create_wardrobe_if_missing = _workflow_bool(
+        params,
+        ("create_wardrobe_if_missing", "createWardrobeIfMissing"),
+        True,
+    )
+    parameter_name, parameter_explicit = _workflow_parameter_name(params)
     asset, error = _resolve_workflow_asset(params)
     if error:
         return error
@@ -7278,13 +7596,17 @@ def preview_add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
         outfit_name = str(asset.get("name") or "Outfit")
     steps = [
         {"tool": "vrc_find_assets" if asset.get("source") == "query" else "vrc_get_asset_info", "write": False},
-        {"tool": "vrc_instantiate_prefab", "write": True, "parentPath": parent_path, "name": outfit_name},
     ]
+    if manage_wardrobe:
+        steps.append({"tool": "vrc_scan_wardrobe", "write": False, "avatarPath": avatar_path})
+        if create_wardrobe_if_missing:
+            steps.append({"tool": "vrc_create_wardrobe", "write": True, "parameterName": parameter_name, "ifMissing": True})
+    steps.append({"tool": "vrc_instantiate_prefab", "write": True, "parentPath": parent_path, "name": outfit_name})
     if params.get("unpack_prefab") is True or params.get("unpackPrefab") is True:
         steps.append({"tool": "vrc_unpack_prefab", "write": True, "mode": str(params.get("unpack_mode") or params.get("unpackMode") or "outermost")})
     if params.get("setup_outfit", params.get("setupOutfit", True)) is not False:
         steps.append({"tool": "vrc_setup_outfit", "write": True, "avatarPath": avatar_path})
-    if parameter_name:
+    if manage_wardrobe:
         steps.append({"tool": "vrc_add_wardrobe_outfit", "write": True, "parameterName": parameter_name})
     return {
         "ok": True,
@@ -7295,7 +7617,10 @@ def preview_add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
             "parentPath": parent_path,
             "outfitName": outfit_name,
             "asset": asset,
-            "parameterName": parameter_name or None,
+            "manageWardrobe": manage_wardrobe,
+            "createWardrobeIfMissing": create_wardrobe_if_missing,
+            "parameterName": parameter_name if manage_wardrobe else None,
+            "parameterExplicit": parameter_explicit,
             "steps": steps,
         },
     }
@@ -7312,8 +7637,34 @@ def add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
     parent_path = str(plan_payload.get("parentPath") or "")
     outfit_name = str(plan_payload.get("outfitName") or "Outfit")
     parameter_name = str(plan_payload.get("parameterName") or "")
+    manage_wardrobe = bool(plan_payload.get("manageWardrobe"))
+    create_wardrobe_if_missing = bool(plan_payload.get("createWardrobeIfMissing"))
+    parameter_explicit = bool(plan_payload.get("parameterExplicit"))
     project_params = _workflow_project_params(params)
     steps: list[dict[str, Any]] = []
+
+    if manage_wardrobe:
+        scan = scan_wardrobe_sync({**project_params, "avatarPath": avatar_path})
+        steps.append({"tool": "vrc_scan_wardrobe", "ok": bool(scan.get("ok")), "result": scan})
+        if not scan.get("ok"):
+            return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "error": scan.get("error") or "Wardrobe scan failed."}
+        wardrobe_names = _wardrobe_parameter_names(scan)
+        if not parameter_explicit and wardrobe_names:
+            parameter_name = wardrobe_names[0]
+            plan_payload["parameterName"] = parameter_name
+        if parameter_name not in wardrobe_names:
+            if not create_wardrobe_if_missing:
+                return {
+                    "ok": False,
+                    "preview": False,
+                    "plan": plan_payload,
+                    "steps": steps,
+                    "error": f"Wardrobe '{parameter_name}' was not found and createWardrobeIfMissing is false.",
+                }
+            created = create_wardrobe_sync(_workflow_wardrobe_create_args(params, avatar_path, parameter_name))
+            steps.append({"tool": "vrc_create_wardrobe", "ok": bool(created.get("ok")), "result": created})
+            if not created.get("ok"):
+                return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "error": created.get("error") or "Create wardrobe failed."}
 
     instantiate = instantiate_prefab_sync({
         **project_params,
@@ -7349,7 +7700,7 @@ def add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
         if not setup.get("ok"):
             return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "outfitPath": outfit_path, "error": setup.get("error") or "Setup Outfit failed."}
 
-    if parameter_name:
+    if manage_wardrobe and parameter_name:
         wardrobe = add_wardrobe_outfit_sync({
             **project_params,
             "avatarPath": avatar_path,
@@ -7398,13 +7749,17 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", scan_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_create_safe_backup", "Create a safe backup snapshot of avatar assets and open scenes.", "plan/preview", create_safe_backup_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, and optionally add to an existing int wardrobe.", "plan/preview", preview_add_outfit_workflow_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", preview_create_wardrobe_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", preview_add_outfit_workflow_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.list_checkpoints(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.preview_restore_checkpoint(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
@@ -7487,8 +7842,32 @@ def register_agent_gateway_tools() -> None:
         add_wardrobe_outfit_sync,
     )
     AGENT_GATEWAY.register_write_handler(
+        "vrcforge_create_wardrobe",
+        "Create an empty int-exclusive wardrobe skeleton (expression Int parameter, FX layer/default state, and wardrobe menu) through VRCForge.",
+        "high",
+        create_wardrobe_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_ensure_expression_parameter",
+        "Create or update an avatar expression parameter through VRCForge.",
+        "medium",
+        lambda params: ensure_expression_parameter_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_ensure_expression_menu_control",
+        "Create or update an avatar expression menu control through VRCForge.",
+        "medium",
+        lambda params: ensure_expression_menu_control_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_ensure_animator_state",
+        "Create or update an FX animator layer/state/transition through VRCForge.",
+        "high",
+        lambda params: ensure_animator_state_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_outfit",
-        "Run the semantic add-outfit workflow: instantiate a prefab under the avatar, run Modular Avatar Setup Outfit, and optionally add it to an existing int-exclusive wardrobe.",
+        "Run the semantic add-outfit workflow: instantiate a prefab under the avatar, run Modular Avatar Setup Outfit, scan/create an int-exclusive wardrobe if needed, and add the outfit to it.",
         "high",
         add_outfit_workflow_sync,
     )

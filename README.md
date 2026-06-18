@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.4.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.4.0-beta)
+[![Version](https://img.shields.io/badge/version-v0.5.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.0-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.4.0-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.0-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.4.0-beta.zip`
+- `VRCForge_Windows_x64_0.5.0-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -104,12 +104,13 @@ The desktop app also includes uninstall actions:
 | Roslyn Advanced Power Mode (in-memory compile, zero-install CodeDom fallback) | Roslyn 高级模式（内存编译，免安装 CodeDom 兜底） | Available / 可用 |
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
-| Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Development branch / 开发分支 |
+| Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Beta, local tests pass; Unity live validation pending |
+| Generic avatar authoring primitives (parameters, menus, FX animator states) | Expression parameters / menu controls / animator states | Beta, local tests pass; Unity live validation pending |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
-| Int-exclusive wardrobe scan and existing-wardrobe add-outfit tools | int 互斥衣柜扫描与已有衣柜加衣工具 | Development branch, Unity live validation pending / 开发分支，Unity 活体验证待跑 |
-| Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> optional wardrobe binding | Development branch, Unity live validation pending |
+| Int-exclusive wardrobe scan/create/add-outfit tools | int wardrobe scan/create/add outfit | Beta, local tests pass; Unity live validation pending |
+| Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; Unity live validation pending |
 | Pre-write checkpoint timeline | Git checkpoint before gateway writes, plus checkpoint list/preview/restore UI | Development branch, local tests pass; Unity live validation pending |
 
 ## Vision Review / 识图复核
