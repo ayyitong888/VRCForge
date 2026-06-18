@@ -660,6 +660,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("anyStateTransitions", source)
         # Reads which objects each clip turns on vs off.
         self.assertIn("m_IsActive", source)
+        # Strict wardrobes must have a selectable outfit object that turns on.
+        # Off-only naked-base toggles stay in wardrobeCandidates, not wardrobes.
+        self.assertIn("hasSelectableOutfitObject", source)
+        self.assertIn("no FX clip turns an outfit object on; off-only toggles are not wardrobes", source)
+        self.assertIn("wardrobeCandidateCount", source)
+        self.assertIn("wardrobeCandidates", source)
+        self.assertIn("looseControlCount", source)
+        self.assertIn("looseControls", source)
+        self.assertIn("LooksLikeDisableOnlyControl", source)
+        self.assertIn("animatorEvidence", source)
+        self.assertIn("fxTransitionCount", source)
+        self.assertIn("clipWithOnObjectCount", source)
+        self.assertIn("menu controls look like disable/off toggles", source)
         # Recurses into SubMenus when toggles overflow the 8-control cap.
         self.assertIn("ControlType.SubMenu", source)
         # Read-only: must NOT mutate the avatar (no FX/menu/param writes, no Undo).
@@ -1310,7 +1323,17 @@ class DashboardServerTests(unittest.TestCase):
                     exit_code=0,
                     stdout="ok",
                     stderr="",
-                    payload={"data": {"ok": True, "wardrobeCount": 0, "wardrobes": []}},
+                    payload={
+                        "data": {
+                            "ok": True,
+                            "wardrobeCount": 0,
+                            "wardrobeCandidateCount": 0,
+                            "wardrobes": [],
+                            "wardrobeCandidates": [],
+                            "looseControlCount": 2,
+                            "looseControls": [{"parameterName": "sock"}, {"parameterName": "hat"}],
+                        }
+                    },
                 )
             if tool_name in {"vrc_ensure_expression_parameter", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control"}:
                 return dashboard_server.McpResult(
@@ -1356,6 +1379,114 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(mock_invoke.call_args_list[3].args[2]["layerName"], "Clothes")
         self.assertEqual(mock_invoke.call_args_list[4].args[2]["menuPath"], "Wardrobe")
         self.assertEqual(wardrobe_params["parameterName"], "Clothes")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_outfit_workflow_does_not_auto_use_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+
+        def fake_invoke(_settings, tool_name, _params):
+            if tool_name == "vrc_find_assets":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "assets": [{"assetPath": "Assets/Outfits/Hoodie.prefab", "guid": "abc", "name": "Hoodie"}]}},
+                )
+            if tool_name == "vrc_scan_wardrobe":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={
+                        "data": {
+                            "ok": True,
+                            "wardrobeCount": 0,
+                            "wardrobeCandidateCount": 1,
+                            "wardrobes": [],
+                            "wardrobeCandidates": [{"parameterName": "MaybeClothes"}],
+                            "looseControlCount": 0,
+                            "looseControls": [],
+                        }
+                    },
+                )
+            raise AssertionError(tool_name)
+
+        mock_invoke.side_effect = fake_invoke
+        result = dashboard_server.add_outfit_workflow_sync({
+            "avatarPath": "Avatar",
+            "assetQuery": "hoodie",
+            "outfitName": "Hoodie",
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertIn("No high-confidence wardrobe was found", result["error"])
+        self.assertEqual(result["wardrobeCandidates"], ["MaybeClothes"])
+        self.assertEqual([call.args[1] for call in mock_invoke.call_args_list], [
+            "vrc_find_assets",
+            "vrc_scan_wardrobe",
+        ])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_outfit_workflow_allows_explicit_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+
+        def fake_invoke(_settings, tool_name, params):
+            if tool_name == "vrc_find_assets":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "assets": [{"assetPath": "Assets/Outfits/Hoodie.prefab", "guid": "abc", "name": "Hoodie"}]}},
+                )
+            if tool_name == "vrc_scan_wardrobe":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={
+                        "data": {
+                            "ok": True,
+                            "wardrobeCount": 0,
+                            "wardrobeCandidateCount": 1,
+                            "wardrobes": [],
+                            "wardrobeCandidates": [{"parameterName": "MaybeClothes"}],
+                            "looseControlCount": 0,
+                            "looseControls": [],
+                        }
+                    },
+                )
+            if tool_name == "vrc_instantiate_prefab":
+                return dashboard_server.McpResult(
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                    payload={"data": {"ok": True, "gameObjectPath": "Avatar/Hoodie"}},
+                )
+            if tool_name == "vrc_setup_outfit":
+                return dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"data": {"ok": True}})
+            if tool_name == "vrc_add_wardrobe_outfit":
+                return dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"data": {"ok": True, "assignedValue": 2}})
+            raise AssertionError(tool_name)
+
+        mock_invoke.side_effect = fake_invoke
+        result = dashboard_server.add_outfit_workflow_sync({
+            "avatarPath": "Avatar",
+            "assetQuery": "hoodie",
+            "outfitName": "Hoodie",
+            "parameterName": "MaybeClothes",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([call.args[1] for call in mock_invoke.call_args_list], [
+            "vrc_find_assets",
+            "vrc_scan_wardrobe",
+            "vrc_instantiate_prefab",
+            "vrc_setup_outfit",
+            "vrc_add_wardrobe_outfit",
+        ])
+        self.assertEqual(mock_invoke.call_args_list[-1].args[2]["parameterName"], "MaybeClothes")
 
     def test_generic_component_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"

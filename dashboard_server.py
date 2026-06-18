@@ -7647,6 +7647,18 @@ def _wardrobe_parameter_names(scan_payload: dict[str, Any]) -> list[str]:
     return names
 
 
+def _wardrobe_candidate_parameter_names(scan_payload: dict[str, Any]) -> list[str]:
+    candidates = scan_payload.get("wardrobeCandidates") if isinstance(scan_payload.get("wardrobeCandidates"), list) else []
+    names: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("parameterName") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _workflow_wardrobe_create_args(params: dict[str, Any], avatar_path: str, parameter_name: str) -> dict[str, Any]:
     result = {
         **_workflow_project_params(params),
@@ -7785,10 +7797,39 @@ def add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
         if not scan.get("ok"):
             return {"ok": False, "preview": False, "plan": plan_payload, "steps": steps, "error": scan.get("error") or "Wardrobe scan failed."}
         wardrobe_names = _wardrobe_parameter_names(scan)
+        candidate_names = _wardrobe_candidate_parameter_names(scan)
         if not parameter_explicit and wardrobe_names:
             parameter_name = wardrobe_names[0]
             plan_payload["parameterName"] = parameter_name
         if parameter_name not in wardrobe_names:
+            if parameter_explicit and parameter_name in candidate_names:
+                steps.append({
+                    "tool": "vrc_scan_wardrobe",
+                    "ok": True,
+                    "candidateSelected": True,
+                    "parameterName": parameter_name,
+                    "warning": "Selected an explicit wardrobe candidate; automatic selection only uses high-confidence wardrobes.",
+                })
+            elif not parameter_explicit and candidate_names:
+                return {
+                    "ok": False,
+                    "preview": False,
+                    "plan": plan_payload,
+                    "steps": steps,
+                    "wardrobeCandidates": candidate_names,
+                    "error": (
+                        "No high-confidence wardrobe was found. Candidate control groups exist: "
+                        + ", ".join(candidate_names)
+                        + ". Specify parameterName to use one, or choose a new wardrobe parameter name."
+                    ),
+                }
+            elif parameter_explicit and parameter_name not in candidate_names:
+                pass
+            else:
+                # No existing wardrobe-like structure was found; fall through to creation.
+                pass
+
+        if parameter_name not in wardrobe_names and not (parameter_explicit and parameter_name in candidate_names):
             if not create_wardrobe_if_missing:
                 return {
                     "ok": False,

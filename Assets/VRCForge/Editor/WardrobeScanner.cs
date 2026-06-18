@@ -49,7 +49,9 @@ namespace VRCForge.Editor
                 var fxControllerPath = fxController != null ? AssetDatabase.GetAssetPath(fxController) : "";
                 var fxLayers = fxController != null ? ReadFxLayers(fxController) : new List<FxLayerInfo>();
 
-                var wardrobes = BuildWardrobes(intParameters, menuToggles, fxLayers);
+                var wardrobeCandidates = new List<object>();
+                var looseControls = new List<object>();
+                var wardrobes = BuildWardrobes(intParameters, menuToggles, fxLayers, wardrobeCandidates, looseControls);
 
                 var payload = new
                 {
@@ -61,13 +63,17 @@ namespace VRCForge.Editor
                     menuToggleCount = menuToggles.Count,
                     fxLayerCount = fxLayers.Count,
                     wardrobeCount = wardrobes.Count,
+                    wardrobeCandidateCount = wardrobeCandidates.Count,
+                    wardrobeCandidates,
+                    looseControlCount = looseControls.Count,
+                    looseControls,
                     wardrobes
                 };
 
                 var jsonPath = WriteJsonIfRequested(outputPath, payload);
 
                 return new SuccessResponse(
-                    $"Detected {wardrobes.Count} wardrobe(s) on '{descriptor.name}'.",
+                    $"Detected {wardrobes.Count} wardrobe(s), {wardrobeCandidates.Count} candidate wardrobe(s), and {looseControls.Count} loose control group(s) on '{descriptor.name}'.",
                     new
                     {
                         ok = true,
@@ -76,6 +82,10 @@ namespace VRCForge.Editor
                         avatarName = descriptor.name,
                         fxControllerPath,
                         wardrobeCount = wardrobes.Count,
+                        wardrobeCandidateCount = wardrobeCandidates.Count,
+                        wardrobeCandidates,
+                        looseControlCount = looseControls.Count,
+                        looseControls,
                         wardrobes
                     });
             }
@@ -339,7 +349,9 @@ namespace VRCForge.Editor
         private static List<object> BuildWardrobes(
             List<ParamInfo> intParameters,
             List<MenuToggle> menuToggles,
-            List<FxLayerInfo> fxLayers)
+            List<FxLayerInfo> fxLayers,
+            List<object> wardrobeCandidates,
+            List<object> looseControls)
         {
             var ranked = new List<KeyValuePair<float, object>>();
 
@@ -412,10 +424,25 @@ namespace VRCForge.Editor
                     .ToList();
                 var writeDefaultsAllOn = wdStates.Count > 0 && wdStates.All(state => state.writeDefaults);
                 var writeDefaultsConsistent = wdStates.Count == 0 || wdStates.All(state => state.writeDefaults == wdStates[0].writeDefaults);
+                var clipWithOnObjectCount = wdStates.Count(state => state.onObjects != null && state.onObjects.Count > 0);
+                var clipWithOffObjectCount = wdStates.Count(state => state.offObjects != null && state.offObjects.Count > 0);
+                var animatedObjects = wdStates
+                    .SelectMany(state => (state.onObjects ?? new List<string>()).Concat(state.offObjects ?? new List<string>()))
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList();
+                var hasSelectableOutfitObject = clipWithOnObjectCount > 0;
+                var namedToggles = togglesForParam
+                    .Where(toggle => !string.IsNullOrWhiteSpace(toggle.menuName))
+                    .ToList();
+                var allNamedTogglesLookDisableOnly = namedToggles.Count > 0
+                    && namedToggles.All(toggle => LooksLikeDisableOnlyControl(toggle.menuName));
 
-                var nameHasKeyword = HasWardrobeKeyword(param.name)
-                    || (layer != null && HasWardrobeKeyword(layer.name))
-                    || togglesForParam.Any(toggle => HasWardrobeKeyword(toggle.menuName) || HasWardrobeKeyword(toggle.menuPath));
+                var strongNameHasKeyword = HasWardrobeKeyword(param.name)
+                    || (layer != null && HasWardrobeKeyword(layer.name));
+                var menuHasKeyword = togglesForParam.Any(toggle => HasWardrobeKeyword(toggle.menuName) || HasWardrobeKeyword(toggle.menuPath));
+                var nameHasKeyword = strongNameHasKeyword || menuHasKeyword;
 
                 var signals = new List<string>();
                 var confidence = 0f;
@@ -440,9 +467,28 @@ namespace VRCForge.Editor
                     signals.Add("name/path contains a wardrobe keyword");
                 }
                 confidence = Mathf.Clamp01(confidence);
-
-                ranked.Add(new KeyValuePair<float, object>(confidence, new
+                var animatorEvidence = new
                 {
+                    fxTransitionCount = equalsForParam.Count,
+                    fxStateCount = wdStates.Count,
+                    clipWithOnObjectCount,
+                    clipWithOffObjectCount,
+                    animatedObjectCount = animatedObjects.Count,
+                    animatedObjects,
+                    hasSelectableOutfitObject
+                };
+                var menuEvidence = new
+                {
+                    menuToggleCount = togglesForParam.Count,
+                    distinctValueCount = values.Count,
+                    allNamedTogglesLookDisableOnly,
+                    strongNameHasKeyword,
+                    menuHasKeyword
+                };
+
+                var scanItem = new
+                {
+                    classification = "wardrobe",
                     parameterName = param.name,
                     parameterDefault = param.defaultValue,
                     parameterSaved = param.saved,
@@ -454,8 +500,89 @@ namespace VRCForge.Editor
                     writeDefaultsConsistent,
                     confidence,
                     signals,
+                    animatorEvidence,
+                    menuEvidence,
                     outfits
-                }));
+                };
+
+                var rejectionReasons = new List<string>();
+                if (!hasToggles)
+                {
+                    rejectionReasons.Add("missing menu toggle bound to this int parameter");
+                }
+                if (!hasFxLayer)
+                {
+                    rejectionReasons.Add("missing FX Any-State Equals binding for this int parameter");
+                }
+                if (values.Count < 2)
+                {
+                    rejectionReasons.Add("fewer than two int values were found");
+                }
+                if (!hasSelectableOutfitObject)
+                {
+                    rejectionReasons.Add("no FX clip turns an outfit object on; off-only toggles are not wardrobes");
+                }
+                if (allNamedTogglesLookDisableOnly)
+                {
+                    rejectionReasons.Add("menu controls look like disable/off toggles, not outfit choices");
+                }
+
+                var isStrictWardrobe = hasToggles
+                    && hasFxLayer
+                    && values.Count >= 2
+                    && hasSelectableOutfitObject
+                    && !allNamedTogglesLookDisableOnly;
+                var isPossibleWardrobeCandidate = hasFxLayer
+                    && values.Count >= 2
+                    && (
+                        hasSelectableOutfitObject
+                        || strongNameHasKeyword
+                        || (hasToggles && !allNamedTogglesLookDisableOnly)
+                    );
+                if (isStrictWardrobe)
+                {
+                    ranked.Add(new KeyValuePair<float, object>(confidence, scanItem));
+                }
+                else if (isPossibleWardrobeCandidate)
+                {
+                    wardrobeCandidates.Add(new
+                    {
+                        classification = "candidate",
+                        parameterName = param.name,
+                        parameterDefault = param.defaultValue,
+                        parameterSaved = param.saved,
+                        parameterNetworkSynced = param.networkSynced,
+                        fxLayerName = layer?.name ?? "",
+                        fxDefaultStateName = layer?.defaultStateName ?? "",
+                        controlCount = outfits.Count,
+                        confidence,
+                        signals,
+                        animatorEvidence,
+                        menuEvidence,
+                        rejectionReasons,
+                        controls = outfits
+                    });
+                }
+                else
+                {
+                    looseControls.Add(new
+                    {
+                        classification = "loose_control",
+                        parameterName = param.name,
+                        parameterDefault = param.defaultValue,
+                        parameterSaved = param.saved,
+                        parameterNetworkSynced = param.networkSynced,
+                        fxLayerName = layer?.name ?? "",
+                        fxDefaultStateName = layer?.defaultStateName ?? "",
+                        controlCount = outfits.Count,
+                        confidence,
+                        signals,
+                        animatorEvidence,
+                        menuEvidence,
+                        rejectionReasons,
+                        controls = outfits
+                    });
+                }
             }
 
             return ranked
@@ -484,6 +611,23 @@ namespace VRCForge.Editor
                 }
             }
             return false;
+        }
+
+        private static bool LooksLikeDisableOnlyControl(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+            var text = value.Trim().ToLowerInvariant();
+            return text == "off"
+                || text.EndsWith(" off", StringComparison.Ordinal)
+                || text.Contains("_off")
+                || text.Contains("-off")
+                || text.Contains(" off ")
+                || text.Contains("hide")
+                || text.Contains("disable")
+                || text.Contains("remove");
         }
 
         // --- Shared helpers ----------------------------------------------------------
