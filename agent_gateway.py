@@ -12,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -219,6 +221,20 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["wardrobe", "menu", "animator", "preview"],
     },
+    "vrcforge_preview_add_outfit_part": {
+        "title": "Add Outfit Part Preview",
+        "inputs": ["Avatar path, wardrobe int parameter/value, part name, object paths, and optional Bool parameter/menu options."],
+        "outputs": ["Planned Bool parameter, FX layer, clips, object bindings, and menu placement; no writes."],
+        "sideEffects": "none",
+        "tags": ["wardrobe", "menu", "animator", "preview"],
+    },
+    "vrcforge_preview_add_modular_avatar_component": {
+        "title": "Add Modular Avatar Component Preview",
+        "inputs": ["Scene object path, Modular Avatar component type, references, and scalar fields."],
+        "outputs": ["Validated component type, resolved references, converted fields, and warnings; no writes."],
+        "sideEffects": "none",
+        "tags": ["modular-avatar", "component", "preview"],
+    },
     "vrcforge_preview_manage_wardrobe": {
         "title": "Manage Wardrobe Preview",
         "inputs": ["Avatar path, wardrobe int parameter name, action, and target value/name/order/default options."],
@@ -289,6 +305,20 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "adds an FX state, animation clip, and menu toggle to an existing int-exclusive wardrobe after approval",
         "tags": ["wardrobe", "menu", "animator", "write"],
     },
+    "vrcforge_add_outfit_part": {
+        "title": "Add Outfit Part",
+        "inputs": ["Avatar path, wardrobe int parameter/value, part name, object paths, and optional Bool parameter/menu options."],
+        "outputs": ["Created Bool parameter, FX layer, clips, object bindings, and menu toggle."],
+        "sideEffects": "adds an int-gated part toggle to an existing wardrobe after approval",
+        "tags": ["wardrobe", "menu", "animator", "write"],
+    },
+    "vrcforge_add_modular_avatar_component": {
+        "title": "Add Modular Avatar Component",
+        "inputs": ["Scene object path, Modular Avatar component type, references, and scalar fields."],
+        "outputs": ["Added and configured Modular Avatar component with resolved references."],
+        "sideEffects": "adds and configures a Modular Avatar component after approval",
+        "tags": ["modular-avatar", "component", "write"],
+    },
     "vrcforge_manage_wardrobe": {
         "title": "Manage Wardrobe",
         "inputs": ["Avatar path, wardrobe int parameter name, action, target value/name, optional order/default/delete flags."],
@@ -344,6 +374,13 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "outputs": ["Restore result, cleaned files, and checkpoint metadata."],
         "sideEffects": "restores Assets/Packages/ProjectSettings from a pre-write git checkpoint after approval",
         "tags": ["checkpoint", "restore", "write"],
+    },
+    "vrcforge_unity_mcp_write": {
+        "title": "Supervised Unity MCP Write",
+        "inputs": ["Unity MCP tool name and argument object."],
+        "outputs": ["Unity MCP execution result plus the automatic pre-write checkpoint."],
+        "sideEffects": "runs an arbitrary Unity MCP write only after approval and rollback checkpoint creation",
+        "tags": ["unity", "mcp", "checkpoint", "write"],
     },
     "vrcforge_restore_safe_backup": {
         "title": "Safe Backup Restore",
@@ -675,6 +712,8 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_preview_ensure_expression_menu_control",
             "vrcforge_preview_ensure_animator_state",
             "vrcforge_preview_add_wardrobe_outfit",
+            "vrcforge_preview_add_outfit_part",
+            "vrcforge_preview_add_modular_avatar_component",
             "vrcforge_preview_manage_wardrobe",
             "vrcforge_preview_create_wardrobe",
             "vrcforge_preview_add_outfit",
@@ -686,6 +725,8 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_ensure_animator_state",
             "vrcforge_create_wardrobe",
             "vrcforge_add_wardrobe_outfit",
+            "vrcforge_add_outfit_part",
+            "vrcforge_add_modular_avatar_component",
             "vrcforge_manage_wardrobe",
             "vrcforge_add_outfit",
         ],
@@ -795,8 +836,10 @@ class AgentGateway:
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         self._approvals: dict[str, dict[str, Any]] = {}
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
-        self._lock = threading.RLock()
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
+        self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
+        self._lock = threading.RLock()
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1722,6 +1765,8 @@ class AgentGateway:
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
+        if checkpoint.get("strategy") == "archive":
+            return self._preview_archive_checkpoint(checkpoint)
         git_root = Path(str(checkpoint["gitRoot"]))
         ref = str(checkpoint["checkpointRef"])
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
@@ -1744,20 +1789,32 @@ class AgentGateway:
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
-        git_root = Path(str(checkpoint["gitRoot"]))
-        ref = str(checkpoint["checkpointRef"])
-        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-        restore = self._run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
-        if not restore["ok"]:
-            return {"ok": False, "checkpoint": checkpoint, "error": restore["error"], "stdout": restore["stdout"], "stderr": restore["stderr"]}
-        clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
-        payload = {
-            "ok": clean["ok"],
-            "checkpoint": checkpoint,
-            "restoredRef": ref,
-            "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
-            "error": clean.get("error") or "",
-        }
+        if checkpoint.get("strategy") == "archive":
+            payload = self._restore_archive_checkpoint(checkpoint)
+        else:
+            git_root = Path(str(checkpoint["gitRoot"]))
+            ref = str(checkpoint["checkpointRef"])
+            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            restore = self._run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
+            if not restore["ok"]:
+                return {"ok": False, "checkpoint": checkpoint, "error": restore["error"], "stdout": restore["stdout"], "stderr": restore["stderr"]}
+            clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
+            payload = {
+                "ok": clean["ok"],
+                "checkpoint": checkpoint,
+                "restoredRef": ref,
+                "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
+                "error": clean.get("error") or "",
+            }
+        if payload.get("ok") and self.checkpoint_restore_handler is not None:
+            try:
+                reload_result = ensure_dict(self.checkpoint_restore_handler(Path(str(checkpoint["projectRoot"]))))
+            except Exception as exc:  # noqa: BLE001
+                reload_result = {"ok": False, "error": str(exc)}
+            payload["unityReload"] = reload_result
+            if not reload_result.get("ok"):
+                payload["ok"] = False
+                payload["error"] = str(reload_result.get("error") or "Unity did not reload after checkpoint restore.")
         self.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 
@@ -1785,11 +1842,27 @@ class AgentGateway:
             self._append_checkpoint(record)
             return record
 
+        if self.checkpoint_prepare_handler is not None:
+            try:
+                prepare_result = ensure_dict(self.checkpoint_prepare_handler(project_root))
+            except Exception as exc:  # noqa: BLE001
+                prepare_result = {"ok": False, "error": str(exc)}
+            record["unityPrepare"] = prepare_result
+            if not prepare_result.get("ok"):
+                record.update(
+                    {
+                        "ok": False,
+                        "blocking": True,
+                        "status": "failed",
+                        "error": str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint."),
+                    }
+                )
+                self._append_checkpoint(record)
+                return record
+
         git_root_result = self._run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:
-            record.update({"ok": False, "error": "Unity project is not inside a git worktree.", "gitError": git_root_result["stderr"]})
-            self._append_checkpoint(record)
-            return record
+            return self._create_archive_checkpoint(project_root, record)
         git_root = Path(git_root_result["stdout"].strip()).resolve()
         pathspecs = self._checkpoint_pathspecs(git_root, project_root)
         base_commit_result = self._run_git(git_root, ["rev-parse", "HEAD"])
@@ -1869,6 +1942,7 @@ class AgentGateway:
             {
                 "ok": True,
                 "status": "ready",
+                "strategy": "git",
                 "gitRoot": str(git_root),
                 "pathspecs": pathspecs,
                 "baseCommit": base_commit,
@@ -1880,6 +1954,167 @@ class AgentGateway:
         self._append_checkpoint(record)
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
         return record
+
+    def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(record["id"])
+        project_key = hashlib.sha256(normalize_filesystem_path(str(project_root)).encode("utf-8")).hexdigest()[:16]
+        archive_dir = self.checkpoint_store_dir / project_key
+        archive_path = archive_dir / f"{checkpoint_id}.zip"
+        temp_path = archive_path.with_suffix(".zip.tmp")
+        pathspecs = [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
+        file_count = 0
+        total_bytes = 0
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if temp_path.exists():
+                temp_path.unlink()
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+                for name in pathspecs:
+                    root = project_root / name
+                    for source in sorted(root.rglob("*")):
+                        if not source.is_file():
+                            continue
+                        relative = source.relative_to(project_root).as_posix()
+                        archive.write(source, relative)
+                        file_count += 1
+                        total_bytes += source.stat().st_size
+            os.replace(temp_path, archive_path)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "strategy": "archive",
+                    "archivePath": str(archive_path),
+                    "pathspecs": pathspecs,
+                    "error": f"Archive checkpoint failed: {exc}",
+                }
+            )
+            self._append_checkpoint(record)
+            return record
+
+        record.update(
+            {
+                "ok": True,
+                "status": "ready",
+                "strategy": "archive",
+                "archivePath": str(archive_path),
+                "pathspecs": pathspecs,
+                "fileCount": file_count,
+                "uncompressedBytes": total_bytes,
+            }
+        )
+        self._append_checkpoint(record)
+        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        return record
+
+    def _preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        project_root = Path(str(checkpoint["projectRoot"])).resolve()
+        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                archived = {
+                    info.filename: (info.file_size, info.CRC)
+                    for info in archive.infolist()
+                    if not info.is_dir()
+                }
+            current: dict[str, tuple[int, int]] = {}
+            for name in pathspecs:
+                root = project_root / name
+                if not root.is_dir():
+                    continue
+                for source in root.rglob("*"):
+                    if not source.is_file():
+                        continue
+                    relative = source.relative_to(project_root).as_posix()
+                    crc = 0
+                    with source.open("rb") as handle:
+                        while chunk := handle.read(1024 * 1024):
+                            crc = zlib.crc32(chunk, crc)
+                    current[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
+            changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
+            changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
+            changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
+            return {"ok": True, "checkpoint": checkpoint, "changedFiles": changed, "workingTreeStatus": changed, "error": ""}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
+
+    def _restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        project_root = Path(str(checkpoint["projectRoot"])).resolve()
+        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        allowed = {"Assets", "Packages", "ProjectSettings"}
+        if not pathspecs or any(name not in allowed for name in pathspecs):
+            return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint pathspecs are unsafe."}
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = [info for info in archive.infolist() if not info.is_dir()]
+                archived = {info.filename: info for info in members}
+                for info in members:
+                    parts = Path(info.filename).parts
+                    if not parts or parts[0] not in allowed or ".." in parts or Path(info.filename).is_absolute():
+                        raise ValueError(f"Unsafe archive member: {info.filename}")
+                current: dict[str, Path] = {}
+                for name in pathspecs:
+                    target = (project_root / name).resolve()
+                    if target.parent != project_root or target.name not in allowed:
+                        raise ValueError(f"Unsafe restore target: {target}")
+                    target.mkdir(parents=True, exist_ok=True)
+                    for source in target.rglob("*"):
+                        if source.is_file():
+                            current[source.relative_to(project_root).as_posix()] = source
+
+                deleted: list[str] = []
+                for relative in sorted(current.keys() - archived.keys()):
+                    current[relative].unlink()
+                    deleted.append(relative)
+
+                restored: list[str] = []
+                for relative, info in archived.items():
+                    target = project_root / Path(relative)
+                    needs_restore = not target.is_file() or target.stat().st_size != info.file_size
+                    if not needs_restore:
+                        crc = 0
+                        with target.open("rb") as handle:
+                            while chunk := handle.read(1024 * 1024):
+                                crc = zlib.crc32(chunk, crc)
+                        needs_restore = (crc & 0xFFFFFFFF) != info.CRC
+                    if not needs_restore:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
+                    with archive.open(info, "r") as source, temp_target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    os.replace(temp_target, target)
+                    restored.append(relative)
+
+                for name in pathspecs:
+                    root = project_root / name
+                    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
+                        try:
+                            directory.rmdir()
+                        except OSError:
+                            pass
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "restoredArchive": str(archive_path),
+                "restoredFileCount": len(restored),
+                "restoredFiles": restored,
+                "deletedFileCount": len(deleted),
+                "deletedFiles": deleted,
+                "cleaned": deleted,
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
 
     def _resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
         for key in (
@@ -1910,6 +2145,18 @@ class AgentGateway:
     def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not checkpoint.get("ok"):
             return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
+        if checkpoint.get("strategy") == "archive":
+            archive_path = Path(str(checkpoint.get("archivePath") or ""))
+            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            if not archive_path.is_file() or not pathspecs:
+                return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint metadata is incomplete."}
+            try:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    if archive.testzip() is not None:
+                        raise ValueError("archive CRC validation failed")
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "checkpoint": checkpoint, "error": f"Archive checkpoint is unreadable: {exc}"}
+            return {"ok": True}
         git_root = Path(str(checkpoint.get("gitRoot") or ""))
         ref = str(checkpoint.get("checkpointRef") or "")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
@@ -2162,6 +2409,10 @@ class AgentGateway:
     @property
     def checkpoint_log_path(self) -> Path:
         return self.audit_dir / "checkpoints.jsonl"
+
+    @property
+    def checkpoint_store_dir(self) -> Path:
+        return self.audit_dir / "checkpoint-archives"
 
     @property
     def user_constraints_path(self) -> Path:
@@ -3347,6 +3598,8 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_package_manager_status",
         "vrcforge_preview_setup_outfit",
         "vrcforge_preview_add_wardrobe_outfit",
+        "vrcforge_preview_add_outfit_part",
+        "vrcforge_preview_add_modular_avatar_component",
         "vrcforge_preview_manage_wardrobe",
         "vrcforge_preview_ensure_expression_parameter",
         "vrcforge_preview_ensure_expression_menu_control",

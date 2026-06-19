@@ -28,9 +28,9 @@ python -m pip install -r requirements.txt
 
 | Tool | Used for | 用途 |
 | --- | --- | --- |
-| `git` | Development-branch checkpoint timeline for Unity project writes | Unity 工程写入前 checkpoint 时间线 |
+| `git` | Preferred checkpoint backend for Unity projects already using Git | 已使用 Git 的 Unity 工程优先 checkpoint 后端 |
 
-The checkpoint timeline only becomes restorable when the selected Unity project is a git worktree and `git` is available. If not, VRCForge records checkpointing as unavailable and continues to use the normal approval model.
+Git is optional at runtime. Git worktrees use git-backed checkpoints; non-git projects use a compressed local baseline and restore only the incremental file diff. Both strategies save open Unity scenes/assets before capture and reload them after restore.
 
 ## Unity / Unity 侧
 
@@ -104,7 +104,7 @@ Roslyn is preserved only as Advanced Power Mode. It is disabled by default and i
 powershell -ExecutionPolicy Bypass -File tools/install-roslyn-support.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
 ```
 
-Every Roslyn call must pass `confirmAdvancedPowerMode=true`, and Unity shows a modal warning dialog before executing the snippet. If the user cancels the dialog, the tool does not run.
+Every Roslyn call must pass `confirmAdvancedPowerMode=true`. The desktop app records the first full-permission risk confirmation permanently and synchronizes it to Unity, so normal app calls do not repeat the modal. Direct calls that bypass the app retain a one-time Unity warning fallback; cancelling it prevents execution.
 
 Use the read-only Unity tool `vrc_get_compile_errors` (gateway name `vrcforge_get_compile_errors`) to read the last Unity compile errors after a failed project compile. It combines `CompilationPipeline` capture with a Unity Console fallback so agent repair loops can see compiler diagnostics.
 

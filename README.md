@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.5.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.0-beta)
+[![Version](https://img.shields.io/badge/version-v0.5.1--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.1-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.0-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.1-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.5.0-beta.zip`
+- `VRCForge_Windows_x64_0.5.1-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -108,10 +108,12 @@ The desktop app also includes uninstall actions:
 | Generic avatar authoring primitives (parameters, menus, FX animator states) | Expression parameters / menu controls / animator states | Beta, local tests pass; preview path covered by wardrobe workflow |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
+| Modular Avatar component writer | MergeArmature / BoneProxy / MenuInstaller / MergeAnimator / Parameters | Beta, Unity live previews pass |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
+| Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
-| Pre-write checkpoint timeline | Git checkpoint before gateway writes, plus checkpoint list/preview/restore UI | Development branch, local tests pass |
+| Pre-write checkpoint timeline | Git or archive checkpoint before gateway writes, plus incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 
 Wardrobe scanning is intentionally conservative. `wardrobes` contains only
 high-confidence int-exclusive wardrobes backed by FX Animator Any-State
@@ -166,11 +168,11 @@ VRCForge 对写入操作采用受监督流程：
 Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 ```
 
-Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode, guarded by `confirmAdvancedPowerMode=true` plus a Unity warning dialog. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
+Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode and every call still requires `confirmAdvancedPowerMode=true`. The first full-permission confirmation is persisted by the desktop app and synchronized to Unity; direct calls that bypass the app retain a one-time Unity warning fallback. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
 
-Development-branch gateway writes create a pre-write checkpoint when the selected Unity project is a git worktree. The desktop Checkpoints view can list, preview, and request restore for those checkpoints through the same approval path as other writes. If the project is not a git worktree, checkpoint creation is recorded as unavailable instead of pretending rollback is possible.
+Gateway writes create a pre-write checkpoint after saving open Unity scenes and dirty assets. Git worktrees use git-backed checkpoints; other projects use a local compressed baseline. Restore previews and applies only the changed, added, or deleted files, then reloads restored scenes and refreshes Unity assets. The desktop Checkpoints view lists, previews, and requests restore through the same approval path as other writes. Generic Unity MCP writes must use the supervised gateway wrapper to receive this checkpoint coverage; raw calls made outside VRCForge cannot be intercepted.
 
-核心 app 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，执行前必须通过 `confirmAdvancedPowerMode=true` 和 Unity 警告弹窗。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
+核心 app 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，每次调用仍必须传 `confirmAdvancedPowerMode=true`。桌面端首次确认完全权限后会把永久确认状态同步到 Unity；绕过桌面端直接调用时，Unity 仍保留一次性警告兜底。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
 
 ## Developer / Debug Start
 

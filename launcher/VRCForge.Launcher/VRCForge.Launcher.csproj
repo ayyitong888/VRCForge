@@ -9,7 +9,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <AssemblyName>VRCForge</AssemblyName>
-    <Version>0.5.0-beta</Version>
+    <Version>0.5.1-beta</Version>
     <ApplicationIcon>Assets\VRCForge.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

@@ -553,7 +553,7 @@ class AgentMcpMount:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="VRCForge Dashboard", version="0.5.0-beta")
+app = FastAPI(title="VRCForge Dashboard", version="0.5.1-beta")
 # The Tauri desktop webview runs on a different origin (tauri://localhost /
 # http://tauri.localhost in production, http://127.0.0.1:1420 in dev), so
 # without CORS headers every fetch() to this loopback server is blocked by
@@ -745,6 +745,14 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if payload["permission"].get("roslynFullAuto") and payload["permission"].get("roslynRiskAcknowledged"):
+        try:
+            payload["unityAcknowledgement"] = acknowledge_unity_roslyn_risk_sync()
+        except Exception as exc:  # noqa: BLE001
+            payload["unityAcknowledgement"] = {
+                "ok": False,
+                "warning": f"Unity acknowledgement sync is pending; Unity will show its fallback dialog: {exc}",
+            }
     await EVENT_BUS.broadcast("agentPermission", payload["permission"])
     return payload
 
@@ -6316,10 +6324,69 @@ def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "result": serialize_result(result)}
 
 
+def acknowledge_unity_roslyn_risk_sync() -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request({}))
+    result = invoke_unity_mcp(settings, "vrc_acknowledge_roslyn_risk", {})
+    return {
+        "ok": result.exit_code == 0,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request({}))
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_prepare_checkpoint",
+        {"projectPath": str(project_root)},
+    )
+    return {
+        "ok": result.exit_code == 0,
+        "projectPath": str(project_root),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def reload_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request({}))
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_reload_after_checkpoint_restore",
+        {"projectPath": str(project_root)},
+    )
+    return {
+        "ok": result.exit_code == 0,
+        "projectPath": str(project_root),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    tool_name = str(params.get("tool_name") or params.get("toolName") or "").strip()
+    if not tool_name:
+        return {"ok": False, "error": "toolName is required."}
+    if tool_name in {"vrc_prepare_checkpoint", "vrc_reload_after_checkpoint_restore"}:
+        return {"ok": False, "error": f"Internal checkpoint tool cannot be invoked through the generic write wrapper: {tool_name}"}
+    if tool_name in {"vrc_execute_roslyn", "execute_code"}:
+        return {"ok": False, "error": f"Advanced code execution must use the dedicated Roslyn permission path: {tool_name}"}
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    result = invoke_unity_mcp(settings, tool_name, arguments)
+    return {"ok": result.exit_code == 0, "toolName": tool_name, "result": serialize_result(result)}
+
+
 def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("confirmAdvancedPowerMode") is not True:
         raise RuntimeError("confirmAdvancedPowerMode=true is required.")
     settings = load_dashboard_settings(ConnectionRequest(**params))
+    snippet_timeout = max(1, min(int(params.get("timeoutSeconds", 10)), 30))
+    settings.unity_mcp_timeout_seconds = max(settings.unity_mcp_timeout_seconds, snippet_timeout + 45, 75)
     result = invoke_unity_mcp(
         settings,
         "vrc_execute_roslyn",
@@ -6328,7 +6395,7 @@ def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
             "confirmAdvancedPowerMode": True,
             "enforceWriteDefaultsOn": params.get("enforceWriteDefaultsOn", True),
             "targetAvatarPaths": params.get("targetAvatarPaths") or [],
-            "timeoutSeconds": params.get("timeoutSeconds", 10),
+            "timeoutSeconds": snippet_timeout,
         },
     )
     return {"ok": True, "result": serialize_result(result)}
@@ -6474,6 +6541,9 @@ def run_unity_artifact_scan_sync(
     settings = load_dashboard_settings(build_agent_connection_request(params))
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
     output_path = build_dashboard_artifact_path(prefix, avatar_path, "json")
+    # Never let a previous scan for the same avatar path masquerade as the
+    # current Unity response when the tool fails to refresh its output file.
+    output_path.unlink(missing_ok=True)
     merged: dict[str, Any] = {"avatarPath": avatar_path, "outputPath": str(output_path)}
     merged.update(unity_params)
     result = invoke_unity_mcp(settings, tool_name, merged)
@@ -7122,6 +7192,173 @@ def add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
         "wardrobe",
         "Wardrobe outfit added.",
         {"parameterName": request["parameterName"], "outfitName": request["outfitName"]},
+    )
+    return payload
+
+
+def build_add_outfit_part_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "partName": str(
+            params.get("part_name")
+            or params.get("partName")
+            or params.get("display_name")
+            or params.get("displayName")
+            or ""
+        ).strip(),
+        "objectPaths": _coerce_path_list(
+            params, "object_paths", "objectPaths", "on_object_paths", "onObjectPaths"
+        ),
+        "preview": preview,
+    }
+    value_raw = params.get("value")
+    if value_raw is None:
+        value_raw = params.get("outfit_value", params.get("outfitValue"))
+    if value_raw is not None:
+        request["value"] = int(value_raw)
+    part_param = str(
+        params.get("part_parameter_name")
+        or params.get("partParameterName")
+        or params.get("bool_parameter_name")
+        or params.get("boolParameterName")
+        or ""
+    ).strip()
+    if part_param:
+        request["partParameterName"] = part_param
+    if params.get("add_menu_toggle") is not None or params.get("addMenuToggle") is not None:
+        request["addMenuToggle"] = bool(params.get("add_menu_toggle", params.get("addMenuToggle")))
+    if params.get("set_objects_default_off") is not None or params.get("setObjectsDefaultOff") is not None:
+        request["setObjectsDefaultOff"] = bool(
+            params.get("set_objects_default_off", params.get("setObjectsDefaultOff"))
+        )
+    if params.get("default_on") is not None or params.get("defaultOn") is not None:
+        request["defaultOn"] = bool(params.get("default_on", params.get("defaultOn")))
+    sub_menu_name = str(params.get("sub_menu_name") or params.get("subMenuName") or "").strip()
+    if sub_menu_name:
+        request["subMenuName"] = sub_menu_name
+    clip_dir = str(params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
+    if clip_dir:
+        request["clipOutputDir"] = clip_dir
+    if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
+        request["writeDefaults"] = bool(params.get("write_defaults", params.get("writeDefaults")))
+    return request
+
+
+def _validate_add_outfit_part_request(request: dict[str, Any]) -> dict[str, Any] | None:
+    if not request["parameterName"]:
+        return {"ok": False, "error": "parameterName is required (the existing int wardrobe parameter the part is gated on)."}
+    if not request["partName"]:
+        return {"ok": False, "error": "partName is required (display name for the new part toggle)."}
+    if "value" not in request:
+        return {"ok": False, "error": "value is required (the wardrobe int value N this part belongs to)."}
+    if not request["objectPaths"]:
+        return {"ok": False, "error": "objectPaths is required (the part's scene objects to toggle on/off)."}
+    return None
+
+
+def preview_add_outfit_part_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_outfit_part_request(params, True)
+    invalid = _validate_add_outfit_part_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_outfit_part", request)),
+        "add outfit part preview",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def add_outfit_part_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_outfit_part_request(params, False)
+    invalid = _validate_add_outfit_part_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_outfit_part", request)),
+        "add outfit part",
+    )
+    payload.setdefault("ok", True)
+    emit_log(
+        "info",
+        "wardrobe",
+        "Outfit part added.",
+        {"parameterName": request["parameterName"], "partName": request["partName"], "value": request.get("value")},
+    )
+    return payload
+
+
+def build_add_modular_avatar_component_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "gameObjectPath": str(
+            params.get("game_object_path")
+            or params.get("gameObjectPath")
+            or params.get("target_path")
+            or params.get("targetPath")
+            or ""
+        ).strip(),
+        "componentType": str(params.get("component_type") or params.get("componentType") or "").strip(),
+        "preview": preview,
+    }
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    if avatar_path:
+        request["avatarPath"] = avatar_path
+    if params.get("allow_duplicate") is not None or params.get("allowDuplicate") is not None:
+        request["allowDuplicate"] = bool(params.get("allow_duplicate", params.get("allowDuplicate")))
+    references = params.get("references")
+    if isinstance(references, dict) and references:
+        request["references"] = references
+    fields = params.get("fields")
+    if isinstance(fields, dict) and fields:
+        request["fields"] = fields
+    return request
+
+
+def _validate_add_modular_avatar_component_request(request: dict[str, Any]) -> dict[str, Any] | None:
+    if not request["gameObjectPath"]:
+        return {"ok": False, "error": "gameObjectPath is required (the scene object to add the Modular Avatar component to)."}
+    if not request["componentType"]:
+        return {"ok": False, "error": "componentType is required (e.g. MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters)."}
+    return None
+
+
+def preview_add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_modular_avatar_component_request(params, True)
+    invalid = _validate_add_modular_avatar_component_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_modular_avatar_component", request)),
+        "add modular avatar component preview",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_add_modular_avatar_component_request(params, False)
+    invalid = _validate_add_modular_avatar_component_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_modular_avatar_component", request)),
+        "add modular avatar component",
+    )
+    payload.setdefault("ok", True)
+    emit_log(
+        "info",
+        "modular_avatar",
+        "Modular Avatar component added.",
+        {"gameObjectPath": request["gameObjectPath"], "componentType": request["componentType"]},
     )
     return payload
 
@@ -7935,6 +8172,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", preview_add_outfit_part_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "Preview adding a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving references and fields, without writing.", "plan/preview", preview_add_modular_avatar_component_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", preview_manage_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", preview_create_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", preview_add_outfit_workflow_sync)
@@ -8024,6 +8263,18 @@ def register_agent_gateway_tools() -> None:
         "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set default value, or delete wardrobe bindings through VRCForge.",
         "high",
         manage_wardrobe_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_add_outfit_part",
+        "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe: create a Bool parameter, author a dedicated FX layer gated on (int Equals N AND bool), set the part scene-default off, and add a menu toggle through VRCForge.",
+        "high",
+        add_outfit_part_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_add_modular_avatar_component",
+        "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving AvatarObjectReference/asset references and scalar fields, through VRCForge.",
+        "high",
+        add_modular_avatar_component_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_create_wardrobe",
@@ -8134,6 +8385,12 @@ def register_agent_gateway_tools() -> None:
         lambda params: AGENT_GATEWAY.restore_checkpoint(params or {}),
     )
     AGENT_GATEWAY.register_write_handler(
+        "vrcforge_unity_mcp_write",
+        "Run a Unity MCP write tool through the VRCForge approval and rollback checkpoint boundary.",
+        "high",
+        unity_mcp_write_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
         "vrcforge_toggle_scene_object",
         "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
         "medium",
@@ -8162,6 +8419,8 @@ if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
 
 AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+AGENT_GATEWAY.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
+AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
 
 register_agent_gateway_tools()
 app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")

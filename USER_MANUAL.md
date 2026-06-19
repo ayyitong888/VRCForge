@@ -30,9 +30,11 @@ This manual explains the public workflow and feature status without project-spec
 | Roslyn Advanced Power Mode | Roslyn 高级模式 | 已可用 / Available |
 | Generic Unity CRUD tools | 通用 Unity CRUD 工具 | Beta, local tests pass |
 | Generic avatar authoring primitives | Expression parameters / menu controls / FX animator states | Beta, local tests pass; preview path covered by wardrobe workflow |
+| Modular Avatar component writer | MergeArmature / BoneProxy / MenuInstaller / MergeAnimator / Parameters | Beta, Unity live previews pass |
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
+| Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
-| Pre-write checkpoint timeline | Git checkpoint before gateway writes, checkpoint list/preview/restore UI | 开发分支，本地测试通过 / Development branch, local tests pass |
+| Pre-write checkpoint timeline | Git or archive checkpoint before gateway writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |
@@ -167,7 +169,8 @@ Image input depends on the selected provider and model. If image input is not su
 - Use dry-run or preview modes when available.
 - Stop and check Unity Console if Unity reports compile errors.
 - Review generated changes before applying them to important projects.
-- The checkpoint timeline requires the selected Unity project to be a git worktree. If it is not, VRCForge records checkpointing as unavailable and does not claim rollback is possible.
+- Gateway writes save Unity state and create a checkpoint first. Git projects use git-backed checkpoints; non-git projects use a compressed local baseline. Restore applies only the incremental file diff and then reloads Unity scenes/assets.
+- Raw Unity MCP writes made outside VRCForge cannot be intercepted. Use the supervised Unity MCP write path when checkpoint rollback is required.
 
 - 写入 Unity 资产前先备份 Avatar 工程。
 - 第一次调整使用小幅 Blendshape 改动。

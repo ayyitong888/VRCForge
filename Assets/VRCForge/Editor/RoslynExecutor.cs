@@ -783,17 +783,82 @@ namespace VRCForge.Editor
             }
         }
 
+        private const string AdvancedPowerModeAckPrefPrefix =
+            "VRCForge.Roslyn.AdvancedPowerModeAcknowledged.";
+
+        private static string AdvancedPowerModeAckPrefKey()
+        {
+            string projectId;
+            try
+            {
+                projectId = PlayerSettings.productGUID.ToString();
+            }
+            catch
+            {
+                projectId = Application.dataPath;
+            }
+            return AdvancedPowerModeAckPrefPrefix + projectId;
+        }
+
+        internal static bool AdvancedPowerModeAcknowledged()
+        {
+            try
+            {
+                return EditorPrefs.GetBool(AdvancedPowerModeAckPrefKey(), false);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static bool AcknowledgeAdvancedPowerMode()
+        {
+            EditorPrefs.SetBool(AdvancedPowerModeAckPrefKey(), true);
+            return AdvancedPowerModeAcknowledged();
+        }
+
         private static bool ConfirmAdvancedPowerModeDialog()
         {
-            return RoslynMainThreadDispatcher.Run(
+            // Already acknowledged once for this project: skip the prompt, but keep a
+            // console record so it stays clear that Advanced Power Mode is active.
+            if (AdvancedPowerModeAcknowledged())
+            {
+                UnityEngine.Debug.Log(
+                    "[VRCForge Roslyn] Advanced Power Mode already acknowledged for this project; "
+                    + "executing without re-prompting.");
+                return true;
+            }
+
+            var accepted = RoslynMainThreadDispatcher.Run(
                 () => EditorUtility.DisplayDialog(
                     "VRCForge Advanced Power Mode",
                     "Roslyn will execute arbitrary C# inside the current Unity project. "
                     + "This can modify scenes, assets, avatar settings, and generated files. "
-                    + "Use only after creating a backup and reviewing the snippet.",
+                    + "Use only after creating a backup and reviewing the snippet.\n\n"
+                    + "You will only be asked once for this project; later runs execute without this prompt.",
                     "I understand, execute",
                     "Cancel"),
                 TimeSpan.FromSeconds(30));
+
+            if (accepted)
+            {
+                try
+                {
+                    EditorPrefs.SetBool(AdvancedPowerModeAckPrefKey(), true);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning(
+                        $"[VRCForge Roslyn] Could not persist Advanced Power Mode acknowledgement: {ex.Message}");
+                }
+
+                UnityEngine.Debug.Log(
+                    "[VRCForge Roslyn] Advanced Power Mode acknowledged and recorded; "
+                    + "future runs for this project will not prompt.");
+            }
+
+            return accepted;
         }
 
         private static (object result, int writeDefaultsUpdated, string backend) ExecuteSnippet(
@@ -869,6 +934,7 @@ namespace VRCForge.Editor
                 codeDomAvailable = VRCForgeSnippetCompiler.CodeDomAvailable,
                 activeBackend = VRCForgeSnippetCompiler.ActiveBackend,
                 defineEnabled,
+                advancedPowerModeAcknowledged = AdvancedPowerModeAcknowledged(),
                 pluginFolder = RoslynPluginFolder.Replace("\\", "/"),
                 requiredDllCount = RequiredRoslynDlls.Length,
                 missingDlls = missing,
@@ -1182,6 +1248,28 @@ namespace VRCForge.Editor
                 && component.gameObject.scene.IsValid()
                 && component.gameObject.scene.isLoaded
                 && !EditorUtility.IsPersistent(component);
+        }
+    }
+
+    [McpForUnityTool(
+        name: "vrc_acknowledge_roslyn_risk",
+        Description = "Record the Roslyn risk acknowledgement already confirmed in the VRCForge desktop permission UI. Internal safety synchronization tool."
+    )]
+    public static class RoslynRiskAcknowledgementTool
+    {
+        public static object HandleCommand(JObject @params)
+        {
+            try
+            {
+                var acknowledged = RoslynExecutor.AcknowledgeAdvancedPowerMode();
+                return new SuccessResponse(
+                    "Roslyn risk acknowledgement synchronized from the VRCForge permission UI.",
+                    new { ok = acknowledged, advancedPowerModeAcknowledged = acknowledged });
+            }
+            catch (Exception ex)
+            {
+                return new ErrorResponse($"Could not persist Roslyn risk acknowledgement: {ex.Message}");
+            }
         }
     }
 
