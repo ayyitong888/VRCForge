@@ -48,7 +48,9 @@ try {
     $webInstaller = Join-Path $resolvedReleaseDir "VRCForge_Web_Installer_x64.exe"
     $offlineInstaller = Join-Path $resolvedReleaseDir "VRCForge_Offline_Installer_x64.exe"
     $payloadZip = Join-Path $resolvedReleaseDir "VRCForge_Windows_x64_$Version.zip"
-    foreach ($artifact in @($webInstaller, $offlineInstaller, $payloadZip)) {
+    $unityPackage = Join-Path $resolvedReleaseDir "VRCForge.unitypackage"
+    $artifacts = @($unityPackage, $webInstaller, $offlineInstaller, $payloadZip)
+    foreach ($artifact in $artifacts) {
         if (-not (Test-Path -LiteralPath $artifact)) {
             throw "Missing release artifact: $artifact"
         }
@@ -65,19 +67,26 @@ try {
     }
 
     if (-not $releaseExists) {
-        gh release create $tag $webInstaller $offlineInstaller $payloadZip `
-            --target $target `
-            --title "VRCForge $Version" `
-            --notes "Windows x64 installer release for VRCForge $Version."
+        $createArgs = @(
+            "release", "create", $tag
+        ) + $artifacts + @(
+            "--target", $target,
+            "--title", "VRCForge $Version",
+            "--notes", "Windows x64 installer release for VRCForge $Version."
+        )
+        if ($Version -match "(?i)(alpha|beta|rc)") {
+            $createArgs += "--prerelease"
+        }
+        & gh @createArgs
     } else {
-        gh release upload $tag $webInstaller $offlineInstaller $payloadZip --clobber
+        & gh release upload $tag @artifacts --clobber
     }
 
     if ($LASTEXITCODE -ne 0) {
         throw "GitHub release upload failed."
     }
 
-    Write-Host "Uploaded installers to GitHub Release $tag."
+    Write-Host "Uploaded Unity package, installers, and payload to GitHub Release $tag."
 } finally {
     Pop-Location
 }
