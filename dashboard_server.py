@@ -787,6 +787,7 @@ def read_agentic_app_bootstrap() -> dict[str, Any]:
         "ok": True,
         "app": {
             "name": "VRCForge",
+            "version": app.version,
             "surface": "tauri-agentic-desktop",
             "browserRequired": False,
             "legacyDashboardDebugOnly": True,
