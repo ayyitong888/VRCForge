@@ -103,6 +103,7 @@ The desktop app also includes uninstall actions:
 | Debug logging + Support Bundle | User-controlled local interaction logs plus redacted Doctor export for startup/runtime troubleshooting | Available / 可用 |
 | Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items are passed through to chat as a default-collapsed row | Available / 可用 |
+| Project memory / incremental scan | Local project index for `Assets`, `Packages`, and `ProjectSettings`, surfaced in the desktop chat as added / modified / deleted deltas | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
@@ -112,7 +113,7 @@ The desktop app also includes uninstall actions:
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
 | Agent Connector Settings | Gateway toggle, token revoke, connector config copy, recent calls, and write-request separation for external agents | Available / 可用 |
-| External agent connector templates and smoke | Codex/Claude Code HTTP + stdio snippets without plaintext tokens, plus supervised write/rollback smoke | Available / 可用 |
+| External agent connector templates and smoke | HTTP + stdio MCP snippets without plaintext tokens, plus supervised write/rollback smoke | Available / 可用 |
 | `.vsk` community skill packages | `.vsk` 社区 skill 包导入/导出/校验 | Available / 可用 |
 | Skill Manager UI for `.vsk` packages | List/import/preflight/export .vsk packages with risk, permissions, signature status, signer fingerprint, and no “verified” label | Available / 可用 |
 | Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Beta, local tests pass |
@@ -172,7 +173,7 @@ The connector generator emits copyable loopback MCP snippets for external coding
 
 External MCP clients can request writes, but VRCForge owns approval and execution. The MCP server advertises read, plan, and request tools; direct apply is kept on the desktop approval path.
 
-Use HTTP config when VRCForge Desktop is already running. Use the stdio bridge config for clients that should start or reconnect to VRCForge automatically, including Codex App, Claude Code, and Claude Cowork-style local MCP clients. Installed builds generate a stdio command that runs `backend/vrcforge_backend.exe --agent-mcp-stdio`; source checkouts use `python tools/vrcforge_agent_mcp_stdio.py`. The stdio bridge reads the gateway token from the VRCForge user-data config or `VRCFORGE_AGENT_TOKEN`; copied configs must not contain plaintext tokens.
+Use HTTP config when VRCForge Desktop is already running. Use the stdio bridge config for local MCP clients that should start or reconnect to VRCForge automatically. Installed builds generate a stdio command that runs `backend/vrcforge_backend.exe --agent-mcp-stdio`; source checkouts use `python tools/vrcforge_agent_mcp_stdio.py`. The stdio bridge reads the gateway token from the VRCForge user-data config or `VRCFORGE_AGENT_TOKEN`; copied configs must not contain plaintext tokens.
 
 Connector success is gated by smoke tests:
 

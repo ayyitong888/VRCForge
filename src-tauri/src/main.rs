@@ -174,6 +174,39 @@ fn ensure_agent_notes_file() -> String {
     path.display().to_string()
 }
 
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let folder = PathBuf::from(path);
+    if !folder.is_dir() {
+        return Err(format!("Folder does not exist: {}", folder.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("explorer.exe");
+        command.arg(folder);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+            .spawn()
+            .map_err(|error| format!("unable to open folder: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        Command::new(opener)
+            .arg(folder)
+            .spawn()
+            .map_err(|error| format!("unable to open folder: {error}"))?;
+        Ok(())
+    }
+}
+
 fn try_ensure_agent_notes_file(user_data: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(user_data).map_err(|error| {
         format!(
@@ -408,7 +441,8 @@ fn main() {
             backend_endpoint,
             start_backend,
             stop_backend,
-            ensure_agent_notes_file
+            ensure_agent_notes_file,
+            open_folder
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

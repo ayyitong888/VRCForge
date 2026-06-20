@@ -25,6 +25,7 @@ This manual explains the public workflow and feature status without project-spec
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |
+| Project memory / incremental scan | Local index shows added, modified, and deleted project files in the desktop workspace | 已可用 / Available |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |
@@ -38,7 +39,7 @@ This manual explains the public workflow and feature status without project-spec
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
-| External agent connector templates and smoke | Codex/Claude Code HTTP + stdio snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
+| External agent connector templates and smoke | HTTP + stdio MCP snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
 | `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
@@ -52,13 +53,13 @@ that are never treated as wardrobes automatically.
 
 ## External Agent Connectors
 
-Settings > Agent Connectors can generate loopback MCP config for Codex-style and
-Claude-style clients. Use the HTTP config when VRCForge Desktop is already
-running. Use the stdio bridge config when the client should start or reconnect
-to VRCForge automatically. Installed builds use the packaged backend exe for
-stdio; source checkouts use the Python bridge script. Copied configs use
-environment variables or the local VRCForge user-data config; plaintext gateway
-tokens are not written into client config.
+Settings > Agent Connectors can generate loopback MCP config for local external
+agent clients. Use the HTTP config when VRCForge Desktop is already running.
+Use the stdio bridge config when the client should start or reconnect to
+VRCForge automatically. Installed builds use the packaged backend exe for stdio;
+source checkouts use the Python bridge script. Copied configs use environment
+variables or the local VRCForge user-data config; plaintext gateway tokens are
+not written into client config.
 
 The external-agent success path is:
 
@@ -177,6 +178,8 @@ First launch shows a step-by-step setup wizard (core connection → model provid
 首次启动会出现分步设置向导（核心连接 → 模型供应商 → Unity 项目），带进度条；每一步自动检测完成状态，也可以随时跳过。侧栏顶部提供「临时对话」和「新项目」；项目可以从扫描列表选择，也可以手动填入文件夹路径添加；项目行支持右键折叠、隐藏或移除。
 
 Agent replies are chat bubbles that state explicitly what the agent will do next. Command and skill executions appear as collapsed rows that expand to show the full command, output, and duration, and each turn shows its total running time. Messages typed while the agent is busy are queued and sent in order, so an ongoing task can be steered. Selecting text in a reply shows a floating toolbar to copy it, quote it into the composer, or ask about it in a new session.
+
+When a Unity project is selected, the workspace can maintain a local project index and show a compact change strip for added, modified, and deleted files. The index covers `Assets`, `Packages`, and `ProjectSettings`; it returns structural paths, sizes, hashes, package fingerprints, and affected scanner-family hints, not paid asset binary contents.
 
 Agent 回复以对话气泡呈现，并显式说明接下来要做什么；命令与能力执行显示为可展开的折叠行（完整命令、输出、耗时），每轮对话都显示总运行时长。Agent 执行中输入的消息会自动排队、按顺序发送，可用来中途引导任务。选中回复中的文字会弹出浮动工具条：复制、引用到输入框，或在新会话中提问。
 

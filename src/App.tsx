@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
+  Archive,
   Bot,
   Check,
   ChevronDown,
@@ -10,10 +11,12 @@ import {
   Eye,
   EyeOff,
   Folder,
+  FolderOpen,
   FolderPlus,
   History,
   Loader2,
   MessageSquare,
+  MoreHorizontal,
   Moon,
   Pencil,
   Pin,
@@ -60,6 +63,7 @@ import {
   DoctorReport,
   DiagnosticsStatus,
   ExternalAgentConnectorStatus,
+  ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
   approveAgentApproval,
@@ -92,6 +96,7 @@ import {
   saveChats,
   saveProjectPrefs,
   saveAgentNotes,
+  scanProjectIndex,
   sendAgentMessage,
   setAppSessionToken,
   testProviderCapability,
@@ -128,11 +133,18 @@ type ChatThread = {
   title: string;
   projectPath: string;
   pinned?: boolean;
+  archived?: boolean;
   items: ConversationItem[];
+};
+
+type ProjectUiPrefs = {
+  pinnedPaths: string[];
+  aliases: Record<string, string>;
 };
 
 const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
+const PROJECT_UI_PREFS_KEY = "vrcforge_project_ui_prefs";
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
@@ -150,6 +162,34 @@ function executionModeLabel(mode?: string): string {
 
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
+}
+
+function normalizeProjectPathKey(path?: string): string {
+  return (path || "").replace(/\//g, "\\").trim().toLowerCase();
+}
+
+function loadProjectUiPrefs(): ProjectUiPrefs {
+  try {
+    const raw = window.localStorage.getItem(PROJECT_UI_PREFS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object") {
+      return { pinnedPaths: [], aliases: {} };
+    }
+    const pinnedPaths = Array.isArray(parsed.pinnedPaths)
+      ? parsed.pinnedPaths.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+    const aliases =
+      parsed.aliases && typeof parsed.aliases === "object"
+        ? Object.fromEntries(
+            Object.entries(parsed.aliases).filter(
+              (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string" && entry[1].trim().length > 0,
+            ),
+          )
+        : {};
+    return { pinnedPaths, aliases };
+  } catch {
+    return { pinnedPaths: [], aliases: {} };
+  }
 }
 
 
@@ -187,6 +227,13 @@ export default function App() {
   const [projectModalError, setProjectModalError] = useState("");
   const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
+  const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
+  const [renamingProjectPath, setRenamingProjectPath] = useState("");
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [projectIndex, setProjectIndex] = useState<ProjectIndexScanResult | null>(null);
+  const [projectIndexProject, setProjectIndexProject] = useState("");
+  const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
+  const [projectIndexError, setProjectIndexError] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
@@ -285,28 +332,36 @@ export default function App() {
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
 
   const hiddenPathSet = useMemo(
-    () => new Set(projectPrefs.hiddenPaths.map((path) => path.toLowerCase())),
+    () => new Set(projectPrefs.hiddenPaths.map(normalizeProjectPathKey)),
     [projectPrefs.hiddenPaths],
   );
   const customPathSet = useMemo(
-    () => new Set(projectPrefs.customPaths.map((path) => path.toLowerCase())),
+    () => new Set(projectPrefs.customPaths.map(normalizeProjectPathKey)),
     [projectPrefs.customPaths],
   );
+  const pinnedProjectSet = useMemo(
+    () => new Set(projectUiPrefs.pinnedPaths.map(normalizeProjectPathKey)),
+    [projectUiPrefs.pinnedPaths],
+  );
   const projectItems = useMemo(
-    () => projects.filter((project) => !hiddenPathSet.has((project.path || "").toLowerCase())).slice(0, 24),
-    [projects, hiddenPathSet],
+    () =>
+      projects
+        .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
+        .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a)))))
+        .slice(0, 24),
+    [projects, hiddenPathSet, pinnedProjectSet],
   );
   const hiddenProjects = useMemo(
-    () => projects.filter((project) => hiddenPathSet.has((project.path || "").toLowerCase())),
+    () => projects.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
     [projects, hiddenPathSet],
   );
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeProjectName =
-    projectItems.find((project) => projectKey(project) === activeProjectPath)?.name ||
+    projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
-  const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath));
+  const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
   const projectPromptTitle = activeProjectPath && activeProjectName ? `我们应该在 ${activeProjectName} 中构建什么？` : "随心聊点什么？";
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
@@ -380,6 +435,14 @@ export default function App() {
   }, [collapsedProjects]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(PROJECT_UI_PREFS_KEY, JSON.stringify(projectUiPrefs));
+    } catch {
+      // Project display preferences are best-effort local UI state.
+    }
+  }, [projectUiPrefs]);
+
+  useEffect(() => {
     if (!runtimeConnected || projectPrefsLoadedRef.current) {
       return;
     }
@@ -433,6 +496,7 @@ export default function App() {
           title: typeof chat.title === "string" ? chat.title : "",
           projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
           pinned: chat.pinned === true,
+          archived: chat.archived === true,
           items: chat.items,
         }));
         if (restored.length > 0) {
@@ -482,6 +546,19 @@ export default function App() {
       void loadDoctor();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (!runtimeConnected || !activeProjectPath) {
+      setProjectIndex(null);
+      setProjectIndexProject("");
+      setProjectIndexError("");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void scanActiveProjectIndex(activeProjectPath, true);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [runtimeConnected, endpoint, activeProjectPath]);
 
   async function startRuntime(): Promise<string | null> {
     if (runtimeStartingRef.current) {
@@ -809,7 +886,7 @@ export default function App() {
     setError("");
     // 折叠状态下新建临时对话自动展开，避免「点了没反应」的错觉。
     setCollapsedProjects((map) => (map[TEMP_CHATS_COLLAPSE_KEY] ? { ...map, [TEMP_CHATS_COLLAPSE_KEY]: false } : map));
-    const existingEmpty = chats.find((chat) => !chat.projectPath && chat.items.length === 0);
+    const existingEmpty = chats.find((chat) => !chat.projectPath && !chat.archived && chat.items.length === 0);
     if (existingEmpty) {
       setActiveChatId(existingEmpty.id);
       return;
@@ -905,7 +982,7 @@ export default function App() {
   function removeCustomProject(path: string) {
     void persistProjectPrefs({
       ...projectPrefs,
-      customPaths: projectPrefs.customPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()),
+      customPaths: projectPrefs.customPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
     });
   }
 
@@ -915,9 +992,9 @@ export default function App() {
     }
     void persistProjectPrefs({
       ...projectPrefs,
-      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()), path],
+      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)), path],
     });
-    if (activeProjectPath.toLowerCase() === path.toLowerCase()) {
+    if (normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(path)) {
       newConversation("");
     }
   }
@@ -925,8 +1002,113 @@ export default function App() {
   function unhideProject(path: string) {
     void persistProjectPrefs({
       ...projectPrefs,
-      hiddenPaths: projectPrefs.hiddenPaths.filter((item) => item.toLowerCase() !== path.toLowerCase()),
+      hiddenPaths: projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
     });
+  }
+
+  function projectDisplayName(project?: { path?: string; name?: string }): string {
+    if (!project) {
+      return "";
+    }
+    const key = projectKey(project);
+    return projectUiPrefs.aliases[normalizeProjectPathKey(key)] || project.name || project.path || "Unity Project";
+  }
+
+  function togglePinProject(path: string) {
+    const key = normalizeProjectPathKey(path);
+    if (!key) {
+      return;
+    }
+    setProjectUiPrefs((current) => {
+      const pinned = new Set(current.pinnedPaths.map(normalizeProjectPathKey));
+      if (pinned.has(key)) {
+        pinned.delete(key);
+      } else {
+        pinned.add(key);
+      }
+      return { ...current, pinnedPaths: Array.from(pinned) };
+    });
+  }
+
+  function startRenameProject(path: string) {
+    setRenamingProjectPath(path);
+    const project = projectItems.find((item) => normalizeProjectPathKey(projectKey(item)) === normalizeProjectPathKey(path));
+    setProjectRenameDraft(projectDisplayName(project) || shortPath(path));
+  }
+
+  function commitRenameProject(cancel = false) {
+    if (!cancel && renamingProjectPath) {
+      const key = normalizeProjectPathKey(renamingProjectPath);
+      const title = projectRenameDraft.trim();
+      setProjectUiPrefs((current) => {
+        const aliases = { ...current.aliases };
+        if (title) {
+          aliases[key] = title;
+        } else {
+          delete aliases[key];
+        }
+        return { ...current, aliases };
+      });
+    }
+    setRenamingProjectPath("");
+    setProjectRenameDraft("");
+  }
+
+  async function openProjectFolder(path: string) {
+    if (!path) {
+      return;
+    }
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("Open folder is available in the desktop app.");
+      }
+      await invoke("open_folder", { path });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function archiveProjectChats(path: string, archived: boolean) {
+    const key = normalizeProjectPathKey(path);
+    if (!key) {
+      return;
+    }
+    setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
+    if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
+      setActiveChatId("");
+    }
+  }
+
+  async function scanActiveProjectIndex(projectPath = activeProjectPath, silent = false) {
+    if (!projectPath) {
+      return;
+    }
+    setLoadingProjectIndex(true);
+    if (!silent) {
+      setProjectIndexError("");
+    }
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await scanProjectIndex(targetEndpoint, { projectPath });
+      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
+        setProjectIndex(payload);
+        setProjectIndexProject(projectPath);
+        setProjectIndexError(payload.ok ? "" : payload.error || "Project index scan failed.");
+      }
+    } catch (cause) {
+      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
+        setProjectIndexError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      setLoadingProjectIndex(false);
+    }
   }
 
   function toggleProjectCollapse(key: string) {
@@ -965,7 +1147,7 @@ export default function App() {
   function selectProject(projectPath: string) {
     setActiveView("chat");
     setActiveProjectPath(projectPath);
-    const latest = chats.find((chat) => chat.projectPath === projectPath);
+    const latest = chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived);
     setActiveChatId(latest ? latest.id : "");
     setError("");
   }
@@ -1574,18 +1756,28 @@ export default function App() {
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
-                const projectChats = sortChatsByPin(chats.filter((chat) => chat.projectPath === key));
+                const projectChats = sortChatsByPin(chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(key) && !chat.archived));
                 const collapsed = Boolean(collapsedProjects[key]);
                 return (
                   <div key={key} className="min-w-0">
                     <SidebarProject
-                      name={project.name || project.path || "Unity Project"}
+                      name={projectDisplayName(project)}
                       meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
-                      active={activeView === "chat" && key === activeProjectPath}
+                      active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
                       collapsed={collapsed}
                       hasChats={projectChats.length > 0}
+                      pinned={pinnedProjectSet.has(normalizeProjectPathKey(key))}
+                      renaming={renamingProjectPath === key}
+                      renameDraft={projectRenameDraft}
+                      onRenameChange={setProjectRenameDraft}
+                      onRenameCommit={commitRenameProject}
                       onToggleCollapse={() => toggleProjectCollapse(key)}
                       onClick={() => selectProject(key)}
+                      onOpenMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setProjectMenu({ projectPath: key, x: event.clientX, y: event.clientY });
+                      }}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setProjectMenu({ projectPath: key, x: event.clientX, y: event.clientY });
@@ -1979,6 +2171,14 @@ export default function App() {
             <div className="flex min-h-0 flex-1 items-center justify-center p-8">
               <div className="w-full max-w-4xl">
                 {projectPromptTitle ? <h1 className="mb-8 text-center text-3xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+                <ProjectIndexPanel
+                  projectPath={activeProjectPath}
+                  projectName={activeProjectName}
+                  result={normalizeProjectPathKey(projectIndexProject) === normalizeProjectPathKey(activeProjectPath) ? projectIndex : null}
+                  loading={loadingProjectIndex}
+                  error={projectIndexError}
+                  onScan={() => void scanActiveProjectIndex(activeProjectPath)}
+                />
                 <Composer
                   input={input}
                   setInput={setInput}
@@ -2006,6 +2206,14 @@ export default function App() {
                 onScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
               >
                 <div className="mx-auto max-w-4xl space-y-5">
+                  <ProjectIndexPanel
+                    projectPath={activeProjectPath}
+                    projectName={activeProjectName}
+                    result={normalizeProjectPathKey(projectIndexProject) === normalizeProjectPathKey(activeProjectPath) ? projectIndex : null}
+                    loading={loadingProjectIndex}
+                    error={projectIndexError}
+                    onScan={() => void scanActiveProjectIndex(activeProjectPath)}
+                  />
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
                   ))}
@@ -2322,9 +2530,12 @@ export default function App() {
       {projectMenu
         ? (() => {
             const menuPath = projectMenu.projectPath;
-            const menuKey = menuPath.toLowerCase();
+            const menuKey = normalizeProjectPathKey(menuPath);
             const isCustom = customPathSet.has(menuKey);
             const collapsed = Boolean(collapsedProjects[menuPath]);
+            const pinned = pinnedProjectSet.has(normalizeProjectPathKey(menuPath));
+            const projectChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(menuPath) && !chat.archived).length;
+            const archivedChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(menuPath) && chat.archived).length;
             return (
               <>
                 <div
@@ -2336,12 +2547,34 @@ export default function App() {
                   }}
                 />
                 <div
-                  className="fixed z-50 w-44 rounded-lg border border-border bg-card p-1.5 shadow-panel"
+                  className="fixed z-50 w-56 rounded-lg border border-border bg-card p-1.5 shadow-panel"
                   style={{
-                    left: Math.min(projectMenu.x, window.innerWidth - 190),
-                    top: Math.min(projectMenu.y, window.innerHeight - 190),
+                    left: Math.min(projectMenu.x, window.innerWidth - 240),
+                    top: Math.min(projectMenu.y, window.innerHeight - 260),
                   }}
                 >
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      togglePinProject(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    <Pin className={cn("h-4 w-4 shrink-0", pinned ? "text-primary" : "")} />
+                    {pinned ? "取消置顶项目" : "置顶项目"}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
+                      void openProjectFolder(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    <FolderOpen className="h-4 w-4 shrink-0" />
+                    在资源管理器中打开
+                  </button>
                   <button
                     type="button"
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
@@ -2357,6 +2590,17 @@ export default function App() {
                     type="button"
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
                     onClick={() => {
+                      startRenameProject(menuPath);
+                      setProjectMenu(null);
+                    }}
+                  >
+                    <Pencil className="h-4 w-4 shrink-0" />
+                    重命名项目
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    onClick={() => {
                       toggleProjectCollapse(menuPath);
                       setProjectMenu(null);
                     }}
@@ -2364,6 +2608,19 @@ export default function App() {
                     {collapsed ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
                     {collapsed ? "展开对话" : "折叠对话"}
                   </button>
+                  {projectChatCount > 0 || archivedChatCount > 0 ? (
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                      onClick={() => {
+                        archiveProjectChats(menuPath, projectChatCount > 0);
+                        setProjectMenu(null);
+                      }}
+                    >
+                      <Archive className="h-4 w-4 shrink-0" />
+                      {projectChatCount > 0 ? "归档项目会话" : "恢复归档会话"}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
@@ -2713,6 +2970,83 @@ function Composer({
         ) : null}
       </div>
     </form>
+  );
+}
+
+function ProjectIndexPanel({
+  projectPath,
+  projectName,
+  result,
+  loading,
+  error,
+  onScan,
+}: {
+  projectPath: string;
+  projectName: string;
+  result: ProjectIndexScanResult | null;
+  loading: boolean;
+  error: string;
+  onScan: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!projectPath) {
+    return null;
+  }
+  const summary = result?.summary || {};
+  const firstScan = Boolean(summary.firstScan);
+  const changed = Boolean(summary.changed);
+  const added = Number(summary.addedFiles || 0);
+  const modified = Number(summary.modifiedFiles || 0);
+  const deleted = Number(summary.deletedFiles || 0);
+  const guidChanges = Number(summary.guidChangeCount || 0);
+  const total = Number(summary.totalFiles || 0);
+  const scannerFamilies = summary.scannerFamilies || [];
+  const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : loading ? "muted" : changed && !firstScan ? "warn" : "ok";
+  const statusLabel = error ? "Scan failed" : loading ? "Indexing" : firstScan ? "Baseline" : changed ? "Changed" : "Clean";
+  const changeText = firstScan
+    ? `${formatCount(total)} indexed`
+    : `+${added} ~${modified} -${deleted}${guidChanges ? ` guid ${guidChanges}` : ""}`;
+  const addedPaths = result?.changes?.added || [];
+  const modifiedPaths = result?.changes?.modified || [];
+  const deletedPaths = result?.changes?.deleted || [];
+  return (
+    <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <Search className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">Project changes · {projectName || shortPath(projectPath)}</span>
+          <Badge tone={statusTone} className="shrink-0">
+            {statusLabel}
+          </Badge>
+          <span className="shrink-0 font-mono text-xs text-muted-foreground">{changeText}</span>
+        </button>
+        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onScan}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+      {open ? (
+        <div className="space-y-3 border-t border-border px-3 py-3">
+          {error ? <DataLine label="Error" value={error} /> : null}
+          <DataLine label="Project" value={projectPath} mono />
+          <DataLine label="Files" value={`${formatCount(total)} total · ${formatCount(Number(summary.unchangedFiles || 0))} unchanged`} />
+          <DataLine label="Hashing" value={`${formatCount(Number(summary.hashesComputed || 0))} computed · ${formatCount(Number(summary.hashesReused || 0))} reused`} />
+          {scannerFamilies.length ? <DataLine label="Affected" value={scannerFamilies.join(", ")} /> : null}
+          {addedPaths.length ? <OutputBlock label="Added" value={formatProjectIndexPaths(addedPaths)} /> : null}
+          {modifiedPaths.length ? <OutputBlock label="Modified" value={formatProjectIndexPaths(modifiedPaths)} /> : null}
+          {deletedPaths.length ? <OutputBlock label="Deleted" value={formatProjectIndexPaths(deletedPaths)} /> : null}
+          {result?.staleDataPolicy ? <DataLine label="Policy" value={result.staleDataPolicy} /> : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -4470,19 +4804,53 @@ function SidebarProject({
   active = false,
   collapsed = false,
   hasChats = false,
+  pinned = false,
+  renaming = false,
+  renameDraft = "",
   onClick,
   onToggleCollapse,
+  onOpenMenu,
   onContextMenu,
+  onRenameChange,
+  onRenameCommit,
 }: {
   name: string;
   meta?: string;
   active?: boolean;
   collapsed?: boolean;
   hasChats?: boolean;
+  pinned?: boolean;
+  renaming?: boolean;
+  renameDraft?: string;
   onClick?: () => void;
   onToggleCollapse?: () => void;
+  onOpenMenu?: (event: ReactMouseEvent) => void;
   onContextMenu?: (event: ReactMouseEvent) => void;
+  onRenameChange?: (value: string) => void;
+  onRenameCommit?: (cancel?: boolean) => void;
 }) {
+  if (renaming) {
+    return (
+      <div className="flex h-11 w-full min-w-0 items-center rounded-md bg-muted px-2">
+        <input
+          autoFocus
+          value={renameDraft}
+          onChange={(event) => onRenameChange?.(event.target.value)}
+          onBlur={() => onRenameCommit?.()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              onRenameCommit?.();
+            }
+            if (event.key === "Escape") {
+              onRenameCommit?.(true);
+            }
+          }}
+          className="h-7 w-full min-w-0 rounded border border-primary/40 bg-background px-2 text-sm outline-none focus:border-primary"
+        />
+      </div>
+    );
+  }
   return (
     <div
       onContextMenu={onContextMenu}
@@ -4495,8 +4863,19 @@ function SidebarProject({
       <button onClick={onClick} disabled={!onClick} className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left">
         <Folder className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{name}</span>
+        {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60" /> : null}
         {meta ? <span className="max-w-[78px] shrink-0 truncate text-xs text-muted-foreground">{meta}</span> : null}
       </button>
+      {onOpenMenu ? (
+        <button
+          type="button"
+          title="项目菜单"
+          onClick={onOpenMenu}
+          className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-background hover:text-foreground group-hover:opacity-100"
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
       {onToggleCollapse ? (
         <button
           type="button"
@@ -4740,7 +5119,7 @@ function thinkingStatusForModel(provider: string, model: string): string {
   if (/(gemini|google|vertex)/.test(key)) {
     return "Thinking";
   }
-  if (/(gpt|openai|codex)/.test(key)) {
+  if (/(gpt|openai)/.test(key)) {
     return "Thinking";
   }
   if (/(deepseek|grok|x-ai|openrouter)/.test(key)) {
@@ -4859,6 +5238,18 @@ function formatPayload(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatProjectIndexPaths(entries: Array<{ path: string; category?: string; size?: number }>): string {
+  const lines = entries.slice(0, 80).map((entry) => {
+    const category = entry.category ? ` [${entry.category}]` : "";
+    const size = typeof entry.size === "number" && entry.size > 0 ? ` ${formatCount(entry.size)}b` : "";
+    return `${entry.path}${category}${size}`;
+  });
+  if (entries.length > lines.length) {
+    lines.push(`... ${entries.length - lines.length} more`);
+  }
+  return lines.join("\n");
 }
 
 function isAgentShellResult(value: unknown): value is AgentShellResult {
