@@ -1159,6 +1159,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_preview_manage_wardrobe", tool_names)
         self.assertIn("vrcforge_preview_add_outfit_part", tool_names)
         self.assertIn("vrcforge_preview_add_modular_avatar_component", tool_names)
+        self.assertIn("vrcforge_scan_project_index", tool_names)
+        self.assertIn("vrcforge_inspect_outfit_package", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_parameter", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_menu_control", tool_names)
         self.assertNotIn("vrcforge_ensure_animator_state", tool_names)

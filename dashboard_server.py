@@ -35,6 +35,8 @@ from pydantic import BaseModel, Field
 
 from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, redact_sensitive
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
+from outfit_package_inspector import inspect_outfit_package
+from project_memory_index import scan_project_memory
 from skill_packages import SkillPackageError, SkillPackageService
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
@@ -139,6 +141,7 @@ AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
 DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
 INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
 SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
+PROJECT_MEMORY_INDEX_DIR = USER_DATA_DIR / "project-indexes"
 
 
 def read_vrcforge_version() -> str:
@@ -541,6 +544,20 @@ class ValidationReportRequest(BaseModel):
     include_quest: bool = Field(default=True, alias="includeQuest")
     include_sources: bool = Field(default=False, alias="includeSources")
     max_errors: int = Field(default=50, alias="maxErrors")
+
+    model_config = {"populate_by_name": True}
+
+
+class ProjectIndexScanRequest(BaseModel):
+    project_path: str = Field(alias="projectPath")
+    max_files: int = Field(default=100000, alias="maxFiles", ge=1, le=250000)
+
+    model_config = {"populate_by_name": True}
+
+
+class OutfitPackageInspectRequest(BaseModel):
+    package_path: str = Field(alias="packagePath")
+    max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
 
     model_config = {"populate_by_name": True}
 
@@ -1387,6 +1404,22 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "exported": exported.as_dict()}
 
 
+def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
+    project_path = str(params.get("projectPath") or params.get("project_path") or "").strip()
+    max_files = int(params.get("maxFiles") or params.get("max_files") or 100000)
+    if not project_path:
+        raise AgentGatewayError("projectPath is required.", status_code=400)
+    return scan_project_memory(project_path, PROJECT_MEMORY_INDEX_DIR, max_files=max_files)
+
+
+def inspect_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    package_path = str(params.get("packagePath") or params.get("package_path") or "").strip()
+    max_entries = int(params.get("maxEntries") or params.get("max_entries") or 5000)
+    if not package_path:
+        raise AgentGatewayError("packagePath is required.", status_code=400)
+    return inspect_outfit_package(package_path, max_entries=max_entries)
+
+
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
     packaged_stdio_command = ROOT_DIR / "backend" / "vrcforge_backend.exe"
@@ -1543,6 +1576,16 @@ def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, An
 @app.post("/api/app/validation/report")
 def app_validation_report(request: ValidationReportRequest) -> dict[str, Any]:
     return build_validation_report_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/project-index/scan")
+def app_project_index_scan(request: ProjectIndexScanRequest) -> dict[str, Any]:
+    return scan_project_index_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/outfit-packages/inspect")
+def app_outfit_package_inspect(request: OutfitPackageInspectRequest) -> dict[str, Any]:
+    return inspect_outfit_package_sync(request.model_dump(by_alias=True))
 
 
 @app.get("/api/agent/external-agent/connectors")
@@ -10234,6 +10277,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", inspect_outfit_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
