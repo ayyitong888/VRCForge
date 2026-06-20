@@ -245,6 +245,50 @@ export type HealthComponent = {
   detail?: unknown;
 };
 
+export type DoctorStatus = "ok" | "warning" | "error" | "unknown";
+
+export type DoctorCheck = {
+  id: string;
+  section?: string;
+  title: string;
+  status: DoctorStatus;
+  message: string;
+  whatFailed?: string;
+  whyItMatters: string;
+  howToFix: string;
+  fixCommand?: string;
+  fixable?: boolean;
+  actions?: string[];
+  detail?: unknown;
+};
+
+export type DoctorSummary = {
+  okCount: number;
+  warningCount: number;
+  errorCount: number;
+  unknownCount: number;
+};
+
+export type DoctorReport = {
+  ok: boolean;
+  schema: "vrcforge.doctor.v1" | string;
+  scope?: string;
+  projectContentInspected?: boolean;
+  generatedAt: string;
+  version: string;
+  selectedUnityEnvironment?: {
+    configured: boolean;
+    label?: string;
+  };
+  summary: DoctorSummary;
+  sections?: Array<{
+    name: string;
+    summary: DoctorSummary;
+    checkIds: string[];
+  }>;
+  checks: DoctorCheck[];
+};
+
 export type AppBootstrap = {
   ok: boolean;
   app: {
@@ -295,6 +339,10 @@ export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
   return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
 }
 
+export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
+  return requestJson<DoctorReport>(`${endpoint}/api/app/doctor`);
+}
+
 export async function updatePermission(
   endpoint: string,
   executionMode: PermissionState["executionMode"],
@@ -327,6 +375,112 @@ export type ProviderModelList = {
   selectedModel?: string;
 };
 
+export type ProviderTestResult = {
+  ok: boolean;
+  status: "ok" | "warning" | "error" | "skipped" | string;
+  capability: "text" | "structured" | "vision" | string;
+  provider: string;
+  providerLabel?: string;
+  model?: string;
+  message: string;
+  responsePreview?: string;
+  skipped?: boolean;
+};
+
+export type ExternalAgentConnectorStatus = {
+  ok: boolean;
+  schema: string;
+  mcp: {
+    serverName: string;
+    transport: string;
+    url: string;
+    loopbackOnly: boolean;
+  };
+  auth: {
+    type: string;
+    header: string;
+    tokenEnvVar: string;
+    headerTemplate: string;
+    storesPlaintextToken: boolean;
+  };
+  gateway: {
+    enabled: boolean;
+    requiresToken: boolean;
+    allowWriteRequests: boolean;
+    tokenConfigured: boolean;
+    approvalTokenConfigured: boolean;
+    configPath?: string;
+    mcpUrl?: string;
+    restUrl?: string;
+    pendingApprovalCount?: number;
+  };
+  clientConfigs: {
+    codex?: { format: string; text: string; config?: unknown };
+    claudeCode?: { format: string; text: string; config?: unknown };
+  };
+  skillsProjection?: {
+    recommendedDirectory?: string;
+    layout?: string;
+    projectionMode?: string;
+    secretPolicy?: string;
+  };
+  advertisedTools?: Array<{ name?: string; category?: string; write?: boolean }>;
+  writeTargets?: Array<{ name?: string; riskLevel?: string; advanced?: boolean }>;
+  lastCalls?: Array<{ event?: string; createdAt?: string; agentName?: string; targetTool?: string; status?: string; riskLevel?: string }>;
+};
+
+export type SkillPackageEntry = {
+  id?: string;
+  name?: string;
+  title?: string;
+  version?: string;
+  source?: string;
+  enabled?: boolean;
+  available?: boolean;
+  signature_status?: string;
+  signatureStatus?: string;
+  signer_fingerprint?: string;
+  signerFingerprint?: string;
+  permissions?: string[];
+  permission_tiers?: Record<string, string[]>;
+  permissionTiers?: Record<string, string[]>;
+  risk_level?: string;
+  riskLevel?: string;
+  installed_path?: string;
+  installedPath?: string;
+  package_path?: string;
+  packagePath?: string;
+  update_action?: string;
+  updateAction?: string;
+  manifest?: Record<string, unknown>;
+  warnings?: string[];
+  errors?: string[];
+  changed?: boolean;
+};
+
+export type SkillPackageList = {
+  ok: boolean;
+  store?: string;
+  registry?: unknown;
+  installed: SkillPackageEntry[];
+};
+
+export type SkillPackagePreflight = SkillPackageEntry & {
+  ok?: boolean;
+  preview?: SkillPackageEntry;
+};
+
+export type SkillPackageImportResult = {
+  ok?: boolean;
+  installed?: SkillPackageEntry;
+  changed?: boolean;
+};
+
+export type SkillPackageExportResult = {
+  ok?: boolean;
+  exported?: SkillPackageEntry;
+};
+
 export async function fetchProviderModels(
   endpoint: string,
   config: { provider: string; api_key?: string; base_url?: string; model?: string },
@@ -335,6 +489,69 @@ export async function fetchProviderModels(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
+  });
+}
+
+export async function testProviderCapability(
+  endpoint: string,
+  request: { provider: string; api_key?: string; base_url?: string; model?: string; capability: "text" | "structured" | "vision" },
+): Promise<ProviderTestResult> {
+  return requestJson<ProviderTestResult>(`${endpoint}/api/app/provider/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchExternalAgentConnectors(endpoint: string): Promise<ExternalAgentConnectorStatus> {
+  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors`);
+}
+
+export async function updateExternalAgentGateway(
+  endpoint: string,
+  request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean },
+): Promise<ExternalAgentConnectorStatus> {
+  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/gateway`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchSkillPackages(endpoint: string): Promise<SkillPackageList> {
+  return requestJson<SkillPackageList>(`${endpoint}/api/app/skill-packages`);
+}
+
+export async function preflightSkillPackage(
+  endpoint: string,
+  request: { packagePath: string; allowDowngrade?: boolean; devMode?: boolean; projectToUserSkills?: boolean },
+): Promise<SkillPackagePreflight> {
+  return requestJson<SkillPackagePreflight>(`${endpoint}/api/app/skill-packages/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function importSkillPackage(
+  endpoint: string,
+  request: { packagePath: string; allowDowngrade?: boolean; devMode?: boolean; projectToUserSkills?: boolean },
+): Promise<SkillPackageImportResult> {
+  return requestJson<SkillPackageImportResult>(`${endpoint}/api/app/skill-packages/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function exportSkillPackage(
+  endpoint: string,
+  request: { skillName: string; outputPath: string; release?: boolean; privateKeyPath?: string; privateKeyPem?: string },
+): Promise<SkillPackageExportResult> {
+  return requestJson<SkillPackageExportResult>(`${endpoint}/api/app/skill-packages/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
   });
 }
 

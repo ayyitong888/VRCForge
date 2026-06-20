@@ -251,6 +251,172 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn("api_key", serialized)
 
+    def test_app_doctor_report_is_read_only_and_redacted(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.token = "doctor-secret-token"
+        config.approval_token = "doctor-approval-secret"
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        original_project_path = dashboard_server.DASHBOARD_STATE.selected_project_path
+        private_project_path = r"C:\Users\xiao123\PrivateAvatarProjects\DoctorLeakTest"
+        dashboard_server.DASHBOARD_STATE.selected_project_path = private_project_path
+
+        try:
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/doctor")
+        finally:
+            dashboard_server.DASHBOARD_STATE.selected_project_path = original_project_path
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["schema"], "vrcforge.doctor.v1")
+        self.assertEqual(payload["scope"], "vrcforge.environment.v1")
+        self.assertFalse(payload["projectContentInspected"])
+        self.assertNotIn("selectedProjectPath", payload)
+        self.assertEqual(payload["selectedUnityEnvironment"]["label"], ".../DoctorLeakTest")
+        self.assertIn("checks", payload)
+        check_ids = {item["id"] for item in payload["checks"]}
+        self.assertIn("desktop.runtime", check_ids)
+        self.assertIn("backend.online", check_ids)
+        self.assertIn("unity.project_root", check_ids)
+        self.assertIn("provider.test", check_ids)
+        self.assertIn("checkpoint.backend", check_ids)
+        self.assertIn("external.security_contract", check_ids)
+        self.assertTrue(payload["sections"])
+        provider_check = next(item for item in payload["checks"] if item["id"] == "provider.test")
+        self.assertEqual(provider_check["section"], "Providers")
+        self.assertIn("Settings", provider_check["fixCommand"])
+        self.assertFalse(provider_check["fixable"])
+        serialized = json.dumps(payload).lower()
+        self.assertNotIn("doctor-secret-token", serialized)
+        self.assertNotIn("doctor-approval-secret", serialized)
+        self.assertNotIn(private_project_path.lower(), serialized)
+        self.assertNotIn("privateavatarprojects", serialized)
+        self.assertNotIn("approval_token", serialized)
+        self.assertNotIn("api_key", serialized)
+
+    def test_app_doctor_degrades_when_diagnostics_fail(self) -> None:
+        with patch("dashboard_server.build_app_doctor_report", side_effect=RuntimeError("doctor exploded")):
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/doctor")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "vrcforge.doctor.v1")
+        self.assertEqual(payload["scope"], "vrcforge.environment.v1")
+        self.assertFalse(payload["projectContentInspected"])
+        check_by_id = {item["id"]: item for item in payload["checks"]}
+        self.assertEqual(check_by_id["desktop.runtime"]["status"], "ok")
+        self.assertEqual(check_by_id["doctor.degraded"]["status"], "warning")
+        self.assertIn("doctor exploded", check_by_id["doctor.degraded"]["message"])
+
+    def test_validation_report_mvp_is_read_only_and_registered(self) -> None:
+        with (
+            patch(
+                "dashboard_server.read_agent_compile_errors",
+                return_value={"ok": True, "result": {"exitCode": 0, "stdout": "hasErrors: False\nerrorCount: 0"}},
+            ),
+            patch("dashboard_server.scan_avatar_parameters_gateway_sync", return_value={"ok": True, "warningCount": 1, "suggestions": [{"id": "compress"}]}),
+            patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True, "missingReferences": [{"path": "Menu/Missing"}]}),
+            patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True, "parameterTypeMismatches": []}),
+            patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True, "brokenBindings": [{"clip": "BadClip"}]}),
+            patch("dashboard_server.scan_shader_materials_sync", return_value={"ok": True, "summary": {"unsupportedShaderCount": 1}}),
+            patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True, "wardrobeCandidateCount": 1}),
+            patch("dashboard_server.scan_avatar_performance_sync", side_effect=[
+                {"ok": True, "rank": "Poor"},
+                {"ok": True, "rank": "Excellent"},
+            ]),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/validation/report", json={"avatarPath": "Scene/Avatar", "projectPath": r"C:\Private\UnityProject"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["schema"], "vrcforge.validation.v1")
+        self.assertTrue(payload["readOnly"])
+        self.assertFalse(payload["autoFix"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["rules"]["validationNeverFixes"])
+        self.assertGreaterEqual(payload["summary"]["severityCounts"]["Warning"], 4)
+        self.assertGreaterEqual(payload["summary"]["severityCounts"]["Suggestion"], 1)
+        self.assertIn("sections", payload)
+        self.assertIn("findings", payload)
+        self.assertNotIn(r"C:\Private\UnityProject".lower(), json.dumps(payload).lower())
+
+        manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
+        tool_names = {tool["name"] for tool in manifest["tools"]}
+        write_targets = {target["name"] for target in manifest["writeTargets"]}
+        self.assertIn("vrcforge_run_validation_report", tool_names)
+        self.assertNotIn("vrcforge_run_validation_report", write_targets)
+
+    def test_validation_report_records_scanner_failures_as_findings(self) -> None:
+        with (
+            patch(
+                "dashboard_server.read_agent_compile_errors",
+                return_value={"ok": True, "result": {"exitCode": 0, "stdout": "hasErrors: False\nerrorCount: 0"}},
+            ),
+            patch("dashboard_server.scan_avatar_parameters_gateway_sync", side_effect=RuntimeError("parameter scanner down")),
+            patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_shader_materials_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_avatar_performance_sync", return_value={"ok": True, "rank": "Good"}),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/validation/report", json={"includeQuest": False})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["summary"]["failedSourceCount"], 1)
+        errors = [finding for finding in payload["findings"] if finding["severity"] == "Error"]
+        self.assertTrue(any("parameter scanner down" in finding["message"] for finding in errors))
+
+    def test_provider_test_vision_is_explicit_skip_without_project_upload(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/provider/test",
+                json={"provider": "ollama", "api_key": "", "base_url": "http://127.0.0.1:11434/v1", "model": "llama3.2", "capability": "vision"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "skipped")
+        self.assertTrue(payload["skipped"])
+        self.assertIn("no Unity screenshot", payload["message"])
+        self.assertNotIn("api_key", json.dumps(payload).lower())
+
+    def test_provider_test_structured_uses_probe_without_secret_leak(self) -> None:
+        with patch("dashboard_server._run_provider_text_probe", return_value='{"ok":true,"name":"vrcforge"}') as probe:
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/provider/test",
+                    json={"provider": "openai", "api_key": "provider-secret", "base_url": "", "model": "gpt-4.1-mini", "capability": "structured"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "ok")
+        probe.assert_called_once()
+        self.assertNotIn("provider-secret", json.dumps(payload))
+
+    def test_read_avatars_sync_reports_execution_mode_without_name_error(self) -> None:
+        export_payload = {"summary": {"avatarCount": 1}}
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.load_dashboard_export_payload", return_value=(export_payload, "unit-test", False)),
+            patch("dashboard_server.serialize_avatar_list", return_value=[{"name": "Avatar", "path": "Scene/Avatar"}]),
+        ):
+            payload = dashboard_server.read_avatars_sync(dashboard_server.DashboardRequest())
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["executed"])
+        self.assertEqual(payload["executionMode"], "live-unity")
+        self.assertEqual(payload["avatarCount"], 1)
+
     def test_app_auth_validation_checks_loopback_origin_and_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN
@@ -640,6 +806,31 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("CUSTOM_VRCFORGE_TOKEN", rendered)
         self.assertNotIn("real-token", rendered)
 
+    def test_external_agent_gateway_settings_update_and_revoke_token(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        original_token = config.token
+
+        with TestClient(dashboard_server.app) as client:
+            enabled = client.post(
+                "/api/app/external-agent/gateway",
+                json={"enabled": True, "allowWriteRequests": False},
+            )
+            revoked = client.post("/api/app/external-agent/gateway", json={"revokeToken": True})
+            old_token_manifest = client.get(
+                "/api/agent/manifest",
+                headers={"Authorization": f"Bearer {original_token}"},
+            )
+
+        self.assertEqual(enabled.status_code, 200)
+        self.assertTrue(enabled.json()["gateway"]["enabled"])
+        self.assertFalse(enabled.json()["gateway"]["allowWriteRequests"])
+        self.assertEqual(revoked.status_code, 200)
+        self.assertTrue(revoked.json()["gateway"]["tokenConfigured"])
+        self.assertEqual(old_token_manifest.status_code, 401)
+        serialized = json.dumps(revoked.json()).lower()
+        self.assertNotIn("approval_token", serialized)
+        self.assertNotIn(original_token.lower(), serialized)
+
     def test_skill_package_import_projects_skill_and_export_endpoint_builds_vsk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -802,7 +993,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
-        self.assertIn("vrcforge_apply_approved", tool_names)
+        self.assertNotIn("vrcforge_apply_approved", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_parameter", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_menu_control", tool_names)
         self.assertIn("vrcforge_preview_ensure_animator_state", tool_names)

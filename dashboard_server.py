@@ -118,6 +118,16 @@ LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
+
+
+def read_vrcforge_version() -> str:
+    try:
+        value = (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.5.3-beta"
+    return value or "0.5.3-beta"
+
+
 def resolve_app_session_token() -> str:
     token = os.environ.get("VRCFORGE_APP_SESSION_TOKEN", "").strip()
     if token:
@@ -468,6 +478,14 @@ class ExternalAgentConnectorRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ExternalAgentGatewayUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    allow_write_requests: bool | None = Field(default=None, alias="allowWriteRequests")
+    revoke_token: bool = Field(default=False, alias="revokeToken")
+
+    model_config = {"populate_by_name": True}
+
+
 class SkillPackagePathRequest(BaseModel):
     package_path: str = Field(alias="packagePath")
     allow_downgrade: bool = Field(default=False, alias="allowDowngrade")
@@ -485,6 +503,20 @@ class SkillPackageExportRequest(BaseModel):
     private_key_pem: str | None = Field(default=None, alias="privateKeyPem")
 
     model_config = {"populate_by_name": True}
+
+
+class ValidationReportRequest(BaseModel):
+    avatar_path: str = Field(default="", alias="avatarPath")
+    project_path: str = Field(default="", alias="projectPath")
+    include_quest: bool = Field(default=True, alias="includeQuest")
+    include_sources: bool = Field(default=False, alias="includeSources")
+    max_errors: int = Field(default=50, alias="maxErrors")
+
+    model_config = {"populate_by_name": True}
+
+
+class ProviderTestRequest(ApiConfigRequest):
+    capability: Literal["text", "structured", "vision"] = "text"
 
 
 class AgentCompactRequest(BaseModel):
@@ -584,7 +616,7 @@ class AgentMcpMount:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="VRCForge Dashboard", version="0.5.1-beta")
+app = FastAPI(title="VRCForge Dashboard", version=read_vrcforge_version())
 # The Tauri desktop webview runs on a different origin (tauri://localhost /
 # http://tauri.localhost in production, http://127.0.0.1:1420 in dev), so
 # without CORS headers every fetch() to this loopback server is blocked by
@@ -1288,17 +1320,93 @@ def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any
     return {"ok": True, **build_connector_bundle(options)}
 
 
+def summarize_external_agent_audit(limit: int = 25) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for entry in AGENT_GATEWAY.recent_audit_logs(limit=limit * 3):
+        event = str(entry.get("event") or "")
+        if not any(marker in event for marker in ("approval", "checkpoint", "agent")):
+            continue
+        approval = entry.get("approval") if isinstance(entry.get("approval"), dict) else {}
+        calls.append(
+            {
+                "event": event,
+                "createdAt": entry.get("createdAt") or approval.get("createdAt") or entry.get("timestamp") or "",
+                "agentName": approval.get("agentName") or entry.get("agentName") or "",
+                "targetTool": approval.get("targetTool") or entry.get("targetTool") or "",
+                "status": approval.get("status") or entry.get("status") or "",
+                "riskLevel": approval.get("riskLevel") or entry.get("riskLevel") or "",
+            }
+        )
+        if len(calls) >= limit:
+            break
+    return calls
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def external_agent_status_sync() -> dict[str, Any]:
+    config = AGENT_GATEWAY.ensure_config()
+    health = safe_agent_health()
+    manifest = safe_agent_manifest()
+    return {
+        **connector_bundle_sync({}),
+        "gateway": {
+            "enabled": bool(config.enabled),
+            "requiresToken": bool(config.require_token),
+            "allowWriteRequests": bool(config.allow_write_requests),
+            "tokenConfigured": bool(config.token),
+            "approvalTokenConfigured": bool(config.approval_token),
+            "configPath": str(AGENT_GATEWAY.config_path),
+            "mcpUrl": health.get("mcpUrl"),
+            "restUrl": health.get("restUrl"),
+            "pendingApprovalCount": health.get("pendingApprovalCount"),
+        },
+        "advertisedTools": [
+            {"name": tool.get("name"), "category": tool.get("category"), "write": bool(tool.get("write"))}
+            for tool in _list_or_empty(manifest.get("tools"))
+            if isinstance(tool, dict)
+        ],
+        "writeTargets": [
+            {"name": target.get("name"), "riskLevel": target.get("riskLevel"), "advanced": bool(target.get("advanced"))}
+            for target in _list_or_empty(manifest.get("writeTargets"))
+            if isinstance(target, dict)
+        ],
+        "lastCalls": summarize_external_agent_audit(),
+    }
+
+
+def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]:
+    config = AGENT_GATEWAY.ensure_config()
+    if params.get("enabled") is not None:
+        config.enabled = bool(params.get("enabled"))
+    if params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None:
+        config.allow_write_requests = bool(params.get("allowWriteRequests", params.get("allow_write_requests")))
+    if params.get("revokeToken") is True or params.get("revoke_token") is True:
+        config.token = secrets.token_urlsafe(32)
+        config.approval_token = secrets.token_urlsafe(32)
+    AGENT_GATEWAY.save_config(config)
+    return external_agent_status_sync()
+
+
 @app.get("/api/app/external-agent/connectors")
 def app_external_agent_connectors() -> dict[str, Any]:
-    return connector_bundle_sync({})
+    return external_agent_status_sync()
 
 
 @app.post("/api/app/external-agent/connectors")
 def app_external_agent_connectors_custom(request: ExternalAgentConnectorRequest) -> dict[str, Any]:
     try:
-        return connector_bundle_sync(request.model_dump(by_alias=True))
+        payload = connector_bundle_sync(request.model_dump(by_alias=True))
+        return {**external_agent_status_sync(), **payload}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/app/external-agent/gateway")
+def app_update_external_agent_gateway(request: ExternalAgentGatewayUpdateRequest) -> dict[str, Any]:
+    return update_external_agent_gateway_sync(request.model_dump(by_alias=True))
 
 
 @app.get("/api/app/skill-packages")
@@ -1333,6 +1441,11 @@ def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, An
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/validation/report")
+def app_validation_report(request: ValidationReportRequest) -> dict[str, Any]:
+    return build_validation_report_sync(request.model_dump(by_alias=True))
 
 
 @app.get("/api/agent/external-agent/connectors")
@@ -1449,6 +1562,595 @@ def serialize_app_api_config() -> dict[str, Any]:
     config = serialize_api_config(include_secret=False)
     config.pop("api_key", None)
     return config
+
+
+def _status_from_counts(error_count: int = 0, warning_count: int = 0, unknown_count: int = 0) -> str:
+    if error_count > 0:
+        return "error"
+    if warning_count > 0:
+        return "warning"
+    if unknown_count > 0:
+        return "unknown"
+    return "ok"
+
+
+def _doctor_section_for_id(check_id: str) -> str:
+    if check_id.startswith("desktop.") or check_id.startswith("backend.") or check_id.startswith("doctor."):
+        return "Runtime"
+    if check_id.startswith("unity."):
+        return "Unity environment"
+    if check_id.startswith("package."):
+        return "SDK / dependencies"
+    if check_id.startswith("provider."):
+        return "Providers"
+    if check_id.startswith("agent.") or check_id.startswith("external."):
+        return "External agents"
+    if check_id.startswith("skills."):
+        return "Skills"
+    if check_id.startswith("checkpoint."):
+        return "Rollback"
+    return "Doctor"
+
+
+def _doctor_fix_command_for_id(check_id: str) -> str:
+    commands = {
+        "unity.project_root": "Open Project Picker and select the Unity project root used by the bridge.",
+        "unity.plugin": "Run Unity plugin install/repair for the selected project.",
+        "unity.mcp.package": "Repair VRCForge Unity plugin install, or add the Unity MCP package through VCC/vrc-get/ALCOM.",
+        "unity.mcp.bridge": "Open the selected Unity project, start the MCP bridge, then Retry.",
+        "unity.mcp.instance": "Focus the correct Unity editor instance, then Retry.",
+        "unity.tools": "Wait for Unity compile, then repair/reinstall the VRCForge plugin if tools remain missing.",
+        "package.vrchat_sdk": "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
+        "package.modular_avatar": "Install Modular Avatar if this avatar or outfit workflow requires it.",
+        "package.vrcfury": "Install VRCFury only if this avatar uses VRCFury components.",
+        "package.manager": "Install vrc-get or use VCC/ALCOM UI for package changes.",
+        "provider.configured": "Open Settings > Providers and choose BYOK, Ollama, or manual/read-only mode.",
+        "provider.test": "Open Settings > Providers and run an explicit provider test.",
+        "provider.local_ollama": "Start Ollama and run the provider test when using local/offline mode.",
+        "agent.gateway": "Open Settings > Agent Connectors before enabling or revoking external access.",
+        "skills.registry": "Open Skill Manager, inspect broken skills, and disable or remove unsafe packages.",
+        "checkpoint.backend": "Open logs and repair checkpoint storage before approving writes.",
+        "external.security_contract": "Keep external agents on write-request tools; approve writes only inside VRCForge.",
+    }
+    return commands.get(check_id, "")
+
+
+def _looks_like_local_path(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or stripped.startswith(("http://", "https://")):
+        return False
+    return bool(re.match(r"^[A-Za-z]:[\\/]", stripped) or stripped.startswith("\\\\") or stripped.startswith("/"))
+
+
+def _redact_local_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        name = Path(text).name
+    except (OSError, ValueError):
+        name = ""
+    return f".../{name}" if name else "<redacted path>"
+
+
+def _redact_doctor_detail(value: Any, key_hint: str = "") -> Any:
+    key = key_hint.lower()
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for item_key, item_value in value.items():
+            lower_key = str(item_key).lower()
+            if any(marker in lower_key for marker in ("path", "directory", "folder", "root")) and "url" not in lower_key:
+                redacted[str(item_key)] = _redact_local_path(item_value)
+            else:
+                redacted[str(item_key)] = _redact_doctor_detail(item_value, lower_key)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_doctor_detail(item, key_hint) for item in value]
+    if isinstance(value, str) and (_looks_like_local_path(value) or any(marker in key for marker in ("path", "directory", "folder", "root"))):
+        return _redact_local_path(value)
+    return value
+
+
+def _doctor_check(
+    check_id: str,
+    title: str,
+    status: str,
+    message: str,
+    why_it_matters: str,
+    how_to_fix: str,
+    detail: Any = None,
+    actions: list[str] | None = None,
+) -> dict[str, Any]:
+    if status not in {"ok", "warning", "error", "unknown"}:
+        status = "unknown"
+    return {
+        "id": check_id,
+        "section": _doctor_section_for_id(check_id),
+        "title": title,
+        "status": status,
+        "message": message,
+        "whatFailed": "" if status == "ok" else message,
+        "whyItMatters": why_it_matters,
+        "howToFix": how_to_fix,
+        "fixCommand": _doctor_fix_command_for_id(check_id),
+        "fixable": False,
+        "actions": actions or ["retry", "open_logs", "copy_diagnostic_summary"],
+        "detail": _redact_doctor_detail(detail),
+    }
+
+
+def _doctor_check_from_component(
+    check_id: str,
+    title: str,
+    component: dict[str, Any] | None,
+    why_it_matters: str,
+    how_to_fix: str,
+    missing_status: str = "unknown",
+) -> dict[str, Any]:
+    component = component if isinstance(component, dict) else {}
+    status = str(component.get("status") or missing_status)
+    message = str(component.get("message") or "Check did not report a result.")
+    return _doctor_check(
+        check_id,
+        title,
+        status,
+        message,
+        why_it_matters,
+        how_to_fix,
+        component.get("detail"),
+    )
+
+
+def _doctor_summary(checks: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "okCount": sum(1 for check in checks if check.get("status") == "ok"),
+        "warningCount": sum(1 for check in checks if check.get("status") == "warning"),
+        "errorCount": sum(1 for check in checks if check.get("status") == "error"),
+        "unknownCount": sum(1 for check in checks if check.get("status") == "unknown"),
+    }
+
+
+def _doctor_sections(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sections: dict[str, list[dict[str, Any]]] = {}
+    for check in checks:
+        section = str(check.get("section") or "Doctor")
+        sections.setdefault(section, []).append(check)
+    order = ["Runtime", "Unity environment", "SDK / dependencies", "Providers", "External agents", "Skills", "Rollback", "Doctor"]
+    names = [name for name in order if name in sections] + sorted(name for name in sections if name not in order)
+    return [
+        {
+            "name": name,
+            "summary": _doctor_summary(sections[name]),
+            "checkIds": [str(check.get("id") or "") for check in sections[name]],
+        }
+        for name in names
+    ]
+
+
+def _selected_project_path_from_health(health: dict[str, Any]) -> str:
+    projects = health.get("projects") if isinstance(health.get("projects"), dict) else {}
+    state = health.get("state") if isinstance(health.get("state"), dict) else {}
+    return str(
+        projects.get("selectedProjectPath")
+        or state.get("selectedProjectPath")
+        or DASHBOARD_STATE.selected_project_path
+        or ""
+    ).strip()
+
+
+def _package_entry_version(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("version") or entry.get("hash") or entry.get("url") or "").strip()
+    return str(entry or "").strip()
+
+
+def detect_unity_project_package(project_path: Path | None, package_ids: list[str]) -> dict[str, Any]:
+    info: dict[str, Any] = {"installed": False, "packageId": "", "version": "", "source": "", "checkedPackageIds": package_ids}
+    if project_path is None:
+        info["warning"] = "No Unity project selected; package detection skipped."
+        return info
+    packages_dir = project_path / "Packages"
+    for package_id in package_ids:
+        embedded = packages_dir / package_id / "package.json"
+        if embedded.exists():
+            try:
+                data = json.loads(embedded.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            info.update({"installed": True, "packageId": package_id, "version": str(data.get("version") or ""), "source": "embedded"})
+            return info
+    manifest_specs = (
+        ("manifest.json", "upm", ("dependencies",)),
+        ("packages-lock.json", "lock", ("dependencies",)),
+        ("vpm-manifest.json", "vpm", ("locked", "dependencies")),
+    )
+    for manifest_name, source, section_names in manifest_specs:
+        manifest_path = packages_dir / manifest_name
+        payload = load_manifest_payload(manifest_path)
+        if not payload:
+            continue
+        for section_name in section_names:
+            section = payload.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for package_id in package_ids:
+                if package_id not in section:
+                    continue
+                info.update(
+                    {
+                        "installed": True,
+                        "packageId": package_id,
+                        "version": _package_entry_version(section.get(package_id)),
+                        "source": source,
+                    }
+                )
+                return info
+    return info
+
+
+def _package_doctor_check(
+    check_id: str,
+    title: str,
+    project_path: Path | None,
+    package_ids: list[str],
+    why_it_matters: str,
+    how_to_fix: str,
+    optional: bool = False,
+) -> dict[str, Any]:
+    info = detect_unity_project_package(project_path, package_ids)
+    if project_path is None:
+        status = "unknown"
+        message = "No Unity environment root is selected; dependency version detection was skipped."
+    elif info.get("installed"):
+        status = "ok"
+        version = str(info.get("version") or "").strip()
+        suffix = f" {version}" if version else ""
+        message = f"{title} is detected{suffix}."
+    else:
+        status = "warning" if optional else "error"
+        message = f"{title} was not detected."
+    return _doctor_check(check_id, title, status, message, why_it_matters, how_to_fix, info)
+
+
+def build_app_doctor_report() -> dict[str, Any]:
+    health = build_agentic_app_health()
+    components = health.get("components") if isinstance(health.get("components"), dict) else {}
+    api_config = serialize_app_api_config()
+    agent_health = safe_agent_health()
+    agent_manifest = safe_agent_manifest()
+    permission = safe_permission_state()
+    selected_project_value = _selected_project_path_from_health(health)
+    selected_project = Path(selected_project_value) if selected_project_value else None
+
+    checks: list[dict[str, Any]] = [
+        _doctor_check(
+            "desktop.runtime",
+            "Desktop runtime connection",
+            "ok",
+            "Desktop can reach the local VRCForge runtime.",
+            "The desktop UI needs the loopback runtime for chat, tools, approvals, checkpoints, and diagnostics.",
+            "Restart VRCForge or use Retry if this check ever disappears.",
+            {"endpoint": "http://127.0.0.1:8757"},
+        ),
+        _doctor_check_from_component(
+            "backend.online",
+            "Backend online",
+            components.get("backend"),
+            "All avatar workflows depend on the local FastAPI runtime.",
+            "Restart the backend from the desktop app; if it still fails, open logs and export a support bundle.",
+        ),
+        _doctor_check_from_component(
+            "unity.project_root",
+            "Unity environment root",
+            components.get("selectedUnityProject"),
+            "Unity bridge, plugin, and SDK dependency-version checks need the configured Unity root; Doctor does not inspect avatar assets or scene content.",
+            "Select the Unity root folder used by the editor bridge. Project content checks happen later as normal agent tasks.",
+        ),
+        _doctor_check_from_component(
+            "unity.plugin",
+            "VRCForge Unity plugin",
+            components.get("unityPluginInstalled"),
+            "The editor plugin provides the predefined Unity tools used for scans, previews, writes, and rollback validation.",
+            "Install or repair the VRCForge Unity plugin for the selected project.",
+        ),
+        _doctor_check_from_component(
+            "unity.mcp.package",
+            "Unity MCP package",
+            components.get("mcpPackageConfigured"),
+            "VRCForge reaches Unity through the MCP bridge, so the project manifest must include the Unity MCP package.",
+            "Repair the plugin install or add the Unity MCP package through VCC/vrc-get/ALCOM.",
+        ),
+        _doctor_check_from_component(
+            "unity.mcp.bridge",
+            "Unity MCP bridge",
+            components.get("unityMcpBridgeReachable"),
+            "Live scans and writes require the Unity editor bridge to be reachable.",
+            "Open the selected Unity project, confirm the MCP server is running, then Retry.",
+        ),
+        _doctor_check_from_component(
+            "unity.mcp.instance",
+            "Unity instance registration",
+            components.get("unityMcpInstance"),
+            "The runtime must target the correct Unity editor instance before tool calls are reliable.",
+            "Focus the Unity project, check MCP instance selection, or restart the bridge.",
+        ),
+        _doctor_check_from_component(
+            "unity.tools",
+            "VRCForge Unity tools",
+            components.get("vrcForgeUnityTools"),
+            "VRCForge uses predefined Unity tools for live editor access; Doctor only checks that the tool surface is registered.",
+            "Repair the VRCForge plugin and wait for Unity compile to finish.",
+        ),
+        _package_doctor_check(
+            "package.vrchat_sdk",
+            "VRChat SDK",
+            selected_project,
+            ["com.vrchat.avatars", "com.vrchat.base"],
+            "Avatar validation, expression menus, parameters, and VRChat build checks need the SDK packages.",
+            "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
+        ),
+        _package_doctor_check(
+            "package.modular_avatar",
+            "Modular Avatar",
+            selected_project,
+            ["nadena.dev.modular-avatar"],
+            "Outfit and menu workflows prefer Modular Avatar because it keeps edits non-destructive.",
+            "Install Modular Avatar if the avatar/outfit workflow needs MA components.",
+            optional=True,
+        ),
+        _package_doctor_check(
+            "package.vrcfury",
+            "VRCFury",
+            selected_project,
+            ["com.vrcfury.vrcfury"],
+            "VRCFury components can affect generated controllers and conflict analysis.",
+            "Install VRCFury only when the avatar uses it; otherwise this warning is informational.",
+            optional=True,
+        ),
+        _doctor_check_from_component(
+            "provider.configured",
+            "Provider configured",
+            components.get("providerConfigPresent"),
+            "Model planning needs a configured cloud, local, or fallback provider; manual tools still work without one.",
+            "Set a BYOK provider, choose Ollama/local, or continue in manual/read-only mode.",
+        ),
+    ]
+
+    provider = str(api_config.get("provider") or "")
+    provider_requires_key = bool(api_config.get("apiKeyRequired"))
+    provider_has_key = bool(api_config.get("apiKeyPresent"))
+    provider_status = "warning" if provider_requires_key and not provider_has_key else "unknown"
+    if provider == "ollama":
+        provider_status = "unknown"
+    checks.append(
+        _doctor_check(
+            "provider.test",
+            "Provider test call",
+            provider_status,
+            "Provider test has not been run automatically.",
+            "Automatic first-run diagnostics must not spend API credits or send project data without an explicit action.",
+            "Use Settings > Providers to run text, vision, or structured-output tests when needed.",
+            {"provider": provider, "model": api_config.get("model"), "apiKeyPresent": provider_has_key},
+            ["retry", "open_settings", "copy_diagnostic_summary"],
+        )
+    )
+
+    checks.append(
+        _doctor_check(
+            "provider.local_ollama",
+            "Ollama local provider",
+            "unknown" if provider == "ollama" else "ok",
+            "Ollama reachability is checked only when explicitly testing the provider."
+            if provider == "ollama"
+            else "Ollama is not the selected provider.",
+            "Local fallback keeps the app usable when cloud providers are unavailable or privacy mode is required.",
+            "Select Ollama in provider settings and run a provider test when using local/offline mode.",
+            {"provider": provider, "baseUrl": api_config.get("base_url")},
+            ["retry", "open_settings", "copy_diagnostic_summary"],
+        )
+    )
+
+    gateway_enabled = bool(agent_health.get("enabled"))
+    checks.append(
+        _doctor_check(
+            "agent.gateway",
+            "External Agent Gateway",
+            "ok" if gateway_enabled else "warning",
+            "Agent Gateway is enabled." if gateway_enabled else "Agent Gateway is disabled.",
+            "External Codex, Claude Code, and MCP clients can only use VRCForge through this supervised bridge.",
+            "Enable the gateway only when connecting an external agent; keep it disabled otherwise.",
+            {
+                "enabled": gateway_enabled,
+                "requiresToken": agent_health.get("requiresToken"),
+                "mcpUrl": agent_health.get("mcpUrl"),
+                "pendingApprovalCount": agent_health.get("pendingApprovalCount"),
+                "allowWriteRequests": agent_health.get("allowWriteRequests"),
+            },
+            ["retry", "open_settings", "copy_diagnostic_summary"],
+        )
+    )
+
+    try:
+        skill_check = AGENT_GATEWAY.check_skill_registry()
+        skill_status = _status_from_counts(
+            int(skill_check.get("errorCount") or 0),
+            int(skill_check.get("warningCount") or 0),
+        )
+        checks.append(
+            _doctor_check(
+                "skills.registry",
+                "Skill registry",
+                skill_status,
+                "Skill registry is healthy." if skill_status == "ok" else "Skill registry has warnings or errors.",
+                "Slash commands, community skills, and external-agent skill lists all depend on registry health.",
+                "Open Skill Manager, inspect broken skills, disable unsafe packages, or repair manifests.",
+                {
+                    "schema": skill_check.get("schema"),
+                    "count": skill_check.get("count"),
+                    "errorCount": skill_check.get("errorCount"),
+                    "warningCount": skill_check.get("warningCount"),
+                },
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            _doctor_check(
+                "skills.registry",
+                "Skill registry",
+                "error",
+                f"Skill registry check failed: {exc}",
+                "Broken skill registry state can hide capabilities or break startup surfaces.",
+                "Open logs, remove the broken skill package, or restart with user skills disabled.",
+                {"error": str(exc)},
+            )
+        )
+
+    try:
+        checkpoint_payload = AGENT_GATEWAY.list_checkpoints({"projectRoot": selected_project_value, "limit": 1})
+        checks.append(
+            _doctor_check(
+                "checkpoint.backend",
+                "Checkpoint backend",
+                "ok" if checkpoint_payload.get("ok") else "warning",
+                "Checkpoint timeline is readable." if checkpoint_payload.get("ok") else "Checkpoint timeline could not be read.",
+                "Every real write must create a pre-write checkpoint so restore can prove rollback.",
+                "Check logs and the checkpoint storage path before approving any write.",
+                {
+                    "checkpointLogPath": str(AGENT_GATEWAY.checkpoint_log_path),
+                    "checkpointStoreDir": str(AGENT_GATEWAY.checkpoint_store_dir),
+                    "count": checkpoint_payload.get("count"),
+                },
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            _doctor_check(
+                "checkpoint.backend",
+                "Checkpoint backend",
+                "error",
+                f"Checkpoint backend failed: {exc}",
+                "Writes must be blocked when VRCForge cannot create or read rollback checkpoints.",
+                "Open logs and repair checkpoint storage before approving writes.",
+                {"error": str(exc)},
+            )
+        )
+
+    try:
+        package_manager = package_manager_status_sync({"projectPath": selected_project_value})
+        preferred_cli = package_manager.get("preferredCli")
+        checks.append(
+            _doctor_check(
+                "package.manager",
+                "vrc-get / ALCOM / VPM",
+                "ok" if preferred_cli else "warning",
+                f"Preferred package CLI detected: {preferred_cli.get('name')}."
+                if isinstance(preferred_cli, dict)
+                else "No vrc-get or VCC vpm CLI was detected.",
+                "Dependency diagnostics and repair flows are clearer when VPM tooling is installed.",
+                "Install vrc-get or use VCC/ALCOM UI for dependency changes.",
+                {
+                    "managers": package_manager.get("managers"),
+                    "preferredCli": preferred_cli,
+                },
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            _doctor_check(
+                "package.manager",
+                "vrc-get / ALCOM / VPM",
+                "warning",
+                f"Package manager diagnostics failed: {exc}",
+                "Dependency diagnostics help explain missing MA/VRCFury/VRC SDK packages.",
+                "Open logs or verify vrc-get/VCC/ALCOM manually.",
+                {"error": str(exc)},
+            )
+        )
+
+    external_writes_blocked = not bool(permission.get("allowWriteRequests", True))
+    if external_writes_blocked:
+        checks.append(
+            _doctor_check(
+                "external.security_contract",
+                "External agent write contract",
+                "warning",
+                "External write requests are disabled by permission state.",
+                "External agents should request writes; VRCForge must own approval, checkpoint, apply, validation, and restore.",
+                "Enable write requests only when a trusted local agent needs supervised writes.",
+                {"permission": permission},
+            )
+        )
+    else:
+        checks.append(
+            _doctor_check(
+                "external.security_contract",
+                "External agent write contract",
+                "ok",
+                "External agents can request supervised writes; direct approval still belongs to VRCForge.",
+                "This prevents Codex, Claude Code, and other MCP clients from bypassing approval/checkpoint policy.",
+                "Keep gateway tokens private and revoke the gateway when external work is finished.",
+                {"permission": permission, "writeTargets": len(agent_manifest.get("writeTargets") or [])},
+            )
+        )
+
+    summary = _doctor_summary(checks)
+    return {
+        "ok": summary["errorCount"] == 0,
+        "schema": "vrcforge.doctor.v1",
+        "scope": "vrcforge.environment.v1",
+        "projectContentInspected": False,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "version": app.version,
+        "summary": summary,
+        "sections": _doctor_sections(checks),
+        "selectedUnityEnvironment": {
+            "configured": bool(selected_project_value),
+            "label": _redact_local_path(selected_project_value) if selected_project_value else "",
+        },
+        "checks": checks,
+    }
+
+
+@app.get("/api/app/doctor")
+def read_agentic_app_doctor() -> dict[str, Any]:
+    try:
+        return build_app_doctor_report()
+    except Exception as exc:  # noqa: BLE001 - doctor must not break first-run desktop startup.
+        checks = [
+            _doctor_check(
+                "desktop.runtime",
+                "Desktop runtime connection",
+                "ok",
+                "Desktop can reach the local VRCForge runtime.",
+                "The desktop UI needs the loopback runtime for chat, tools, approvals, checkpoints, and diagnostics.",
+                "Restart VRCForge or use Retry if this check ever disappears.",
+                {"endpoint": "http://127.0.0.1:8757"},
+            ),
+            _doctor_check(
+                "doctor.degraded",
+                "Doctor report",
+                "warning",
+                f"Doctor diagnostics failed: {exc}",
+                "Doctor should explain optional subsystem failures without blocking normal chat.",
+                "Open logs, copy the diagnostic summary, and continue in manual/read-only mode.",
+                {"error": str(exc)},
+            ),
+        ]
+        return {
+            "ok": False,
+            "schema": "vrcforge.doctor.v1",
+            "scope": "vrcforge.environment.v1",
+            "projectContentInspected": False,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "version": app.version,
+            "summary": _doctor_summary(checks),
+            "sections": _doctor_sections(checks),
+            "selectedUnityEnvironment": {
+                "configured": bool(DASHBOARD_STATE.selected_project_path),
+                "label": _redact_local_path(DASHBOARD_STATE.selected_project_path),
+            },
+            "checks": checks,
+        }
 
 
 @app.get("/api/agent/manifest")
@@ -1713,6 +2415,21 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
         {"provider": config.provider, "modelCount": len(models)},
     )
     return payload
+
+
+@app.post("/api/app/provider/test")
+async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
+    if not request.api_key.strip():
+        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+        if saved and saved.provider == normalize_provider_name(request.provider) and saved.api_key.strip():
+            request = ProviderTestRequest(
+                provider=request.provider,
+                api_key=saved.api_key,
+                base_url=request.base_url,
+                model=request.model,
+                capability=request.capability,
+            )
+    return await asyncio.to_thread(run_provider_test_sync, request)
 
 
 @app.post("/api/projects/install")
@@ -2132,7 +2849,7 @@ def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
         emit_log("info", "avatar", "Blendshape avatar export loaded.", {"count": len(avatars), "source": export_source})
         return {
             "ok": True,
-            "executed": execute,
+            "executed": not using_mock_execute,
             "exportSource": export_source,
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "summary": export_payload.get("summary", {}),
@@ -6388,6 +7105,117 @@ def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, str]]:
     return fetch_openai_compatible_models(config)
 
 
+def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
+    config = normalize_api_config_request(request)
+    capability = request.capability
+    provider_label = provider_display_name(config.provider)
+    if provider_requires_api_key(config.provider) and not config.api_key.strip():
+        return {
+            "ok": False,
+            "status": "error",
+            "capability": capability,
+            "provider": config.provider,
+            "providerLabel": provider_label,
+            "model": config.model,
+            "message": f"{provider_label} API key is empty.",
+        }
+    if capability == "vision":
+        return {
+            "ok": True,
+            "status": "skipped",
+            "skipped": True,
+            "capability": capability,
+            "provider": config.provider,
+            "providerLabel": provider_label,
+            "model": config.model,
+            "message": "Vision test requires an explicit user-selected image; no Unity screenshot or project asset was sent.",
+        }
+    prompt = (
+        "Return exactly: VRCForge provider test OK"
+        if capability == "text"
+        else 'Return compact JSON exactly like {"ok":true,"name":"vrcforge"}.'
+    )
+    try:
+        text = _run_provider_text_probe(config, prompt, structured=capability == "structured")
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "status": "error",
+            "capability": capability,
+            "provider": config.provider,
+            "providerLabel": provider_label,
+            "model": config.model,
+            "message": str(exc),
+        }
+    structured_ok = True
+    if capability == "structured":
+        try:
+            parsed = json.loads(extract_json_block(text) or text)
+            structured_ok = isinstance(parsed, dict) and bool(parsed.get("ok"))
+        except Exception:  # noqa: BLE001
+            structured_ok = False
+    return {
+        "ok": structured_ok,
+        "status": "ok" if structured_ok else "warning",
+        "capability": capability,
+        "provider": config.provider,
+        "providerLabel": provider_label,
+        "model": config.model,
+        "message": "Provider test succeeded." if structured_ok else "Provider responded, but structured JSON did not validate.",
+        "responsePreview": text[:240],
+    }
+
+
+def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured: bool = False) -> str:
+    if config.provider in {"gemini", "vertexai"}:
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError("The google-genai package is not installed.") from exc
+        if config.provider == "vertexai":
+            project, location = resolve_vertex_project_location(config.base_url)
+            client = genai.Client(vertexai=True, project=project, location=location)
+        else:
+            client = genai.Client(api_key=config.api_key)
+        response = client.models.generate_content(model=config.model, contents=prompt)
+        return str(getattr(response, "text", "") or response)
+    if config.provider == "anthropic":
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError("The anthropic package is not installed.") from exc
+        client = anthropic.Anthropic(api_key=config.api_key)
+        response = client.messages.create(
+            model=config.model,
+            max_tokens=64,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parts = getattr(response, "content", []) or []
+        texts = [str(getattr(part, "text", "") or "") for part in parts]
+        return "\n".join(text for text in texts if text).strip()
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("The openai package is not installed.") from exc
+    if not config.base_url.strip() and config.provider not in {"openai"}:
+        raise RuntimeError("Base URL is empty.")
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 64,
+    }
+    if structured:
+        kwargs["response_format"] = {"type": "json_object"}
+    client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url or None, timeout=30.0)
+    response = client.chat.completions.create(**kwargs)
+    choices = getattr(response, "choices", []) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    return str(getattr(message, "content", "") or "")
+
+
 def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, str]]:
     if not config.base_url.strip():
         raise RuntimeError("Base URL is empty. Enter a provider API endpoint before loading models.")
@@ -8093,6 +8921,389 @@ def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+VALIDATION_SEVERITIES = ("Error", "Warning", "Suggestion", "Info", "Ignored")
+
+
+def _validation_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _validation_severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
+    return {severity: sum(1 for finding in findings if finding.get("severity") == severity) for severity in VALIDATION_SEVERITIES}
+
+
+def _validation_add_finding(
+    findings: list[dict[str, Any]],
+    section: str,
+    severity: str,
+    title: str,
+    message: str,
+    source: str,
+    detail: Any = None,
+) -> None:
+    if severity not in VALIDATION_SEVERITIES:
+        severity = "Info"
+    finding = {
+        "id": f"{source}.{len(findings) + 1}",
+        "section": section,
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "source": source,
+        "fixPolicy": "Fixes are separate plans and require preview, approval, checkpoint, apply, validation, and restore.",
+    }
+    if detail is not None:
+        finding["detail"] = _redact_doctor_detail(detail)
+    findings.append(finding)
+
+
+def _validation_section_summaries(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    order = [
+        "Unity compile",
+        "Selected avatar",
+        "Expression parameters",
+        "Expression menu",
+        "FX animator",
+        "Animation bindings",
+        "Materials / shaders",
+        "Wardrobe",
+        "Performance",
+        "Quest",
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        grouped.setdefault(str(finding.get("section") or "Validation"), []).append(finding)
+    names = [name for name in order if name in grouped] + sorted(name for name in grouped if name not in order)
+    return [
+        {
+            "name": name,
+            "counts": _validation_severity_counts(grouped[name]),
+            "findingIds": [str(item.get("id") or "") for item in grouped[name]],
+        }
+        for name in names
+    ]
+
+
+def _validation_find_numbers(value: Any, names: set[str]) -> list[float]:
+    numbers: list[float] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in names and isinstance(item, (int, float)):
+                numbers.append(float(item))
+            numbers.extend(_validation_find_numbers(item, names))
+    elif isinstance(value, list):
+        for item in value:
+            numbers.extend(_validation_find_numbers(item, names))
+    return numbers
+
+
+def _validation_find_lists(value: Any, names: set[str]) -> list[list[Any]]:
+    lists: list[list[Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in names and isinstance(item, list):
+                lists.append(item)
+            lists.extend(_validation_find_lists(item, names))
+    elif isinstance(value, list):
+        for item in value:
+            lists.extend(_validation_find_lists(item, names))
+    return lists
+
+
+def _validation_max_number(value: Any, *names: str) -> float:
+    found = _validation_find_numbers(value, {name.lower() for name in names})
+    return max(found) if found else 0.0
+
+
+def _validation_list_count(value: Any, *names: str) -> int:
+    return sum(len(items) for items in _validation_find_lists(value, {name.lower() for name in names}))
+
+
+def _validation_source_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"type": type(payload).__name__}
+    summary: dict[str, Any] = {}
+    for key in (
+        "ok",
+        "avatarPath",
+        "error",
+        "errorCount",
+        "warningCount",
+        "suggestionCount",
+        "parameterCount",
+        "controlCount",
+        "materialCount",
+        "wardrobeCount",
+        "wardrobeCandidateCount",
+        "looseControlCount",
+        "rank",
+        "performanceRank",
+        "overallRank",
+        "jsonPath",
+    ):
+        if key in payload:
+            summary[key] = payload.get(key)
+    nested_summary = payload.get("summary")
+    if isinstance(nested_summary, dict):
+        summary["summary"] = {key: nested_summary.get(key) for key in list(nested_summary.keys())[:12]}
+    return _redact_doctor_detail(summary)
+
+
+def _run_validation_source(name: str, runner: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    try:
+        payload = runner()
+        if not isinstance(payload, dict):
+            payload = {"ok": True, "value": payload}
+        payload.setdefault("ok", True)
+        return {"ok": bool(payload.get("ok")), "payload": payload}
+    except HTTPException as exc:
+        return {"ok": False, "error": str(exc.detail)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "source": name}
+
+
+def _validation_add_source_failure(findings: list[dict[str, Any]], section: str, source: str, result: dict[str, Any]) -> None:
+    if result.get("ok"):
+        return
+    _validation_add_finding(
+        findings,
+        section,
+        "Error",
+        f"{section} scan failed",
+        str(result.get("error") or "Scanner returned ok=false."),
+        source,
+        result,
+    )
+
+
+def _compile_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Unity compile", "compile", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    raw_result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    stdout = str(raw_result.get("stdout") or "")
+    error_count = _validation_max_number(raw_result, "errorCount")
+    has_errors = "hasErrors: True" in stdout or error_count > 0
+    if has_errors:
+        _validation_add_finding(
+            findings,
+            "Unity compile",
+            "Error",
+            "Unity compile errors detected",
+            f"Unity reports {int(error_count)} compile error(s).",
+            "compile",
+            _validation_source_summary(raw_result),
+        )
+    else:
+        _validation_add_finding(findings, "Unity compile", "Info", "Unity compile clean", "No Unity compile errors were reported.", "compile")
+
+
+def _parameters_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Expression parameters", "parameters", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    error_count = _validation_max_number(payload, "errorCount")
+    warning_count = _validation_max_number(payload, "warningCount")
+    suggestions = _validation_list_count(payload, "suggestions", "optimizationSuggestions")
+    used_bits = _validation_max_number(payload, "usedBits", "syncedBits", "memoryCost", "parameterCost")
+    if error_count:
+        _validation_add_finding(findings, "Expression parameters", "Error", "Parameter errors detected", f"{int(error_count)} parameter error(s) were reported.", "parameters")
+    if warning_count or used_bits > 256:
+        message = f"{int(warning_count)} warning(s) were reported."
+        if used_bits > 256:
+            message = f"Parameter usage appears over budget ({used_bits:g} > 256)."
+        _validation_add_finding(findings, "Expression parameters", "Warning", "Parameter budget or consistency warning", message, "parameters")
+    if suggestions:
+        _validation_add_finding(findings, "Expression parameters", "Suggestion", "Parameter optimization suggestions available", f"{suggestions} optimization suggestion(s) were reported.", "parameters")
+    if not (error_count or warning_count or suggestions or used_bits > 256):
+        _validation_add_finding(findings, "Expression parameters", "Info", "Parameter scan completed", "No parameter errors were reported by the scanner.", "parameters")
+
+
+def _menu_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Expression menu", "menu", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    missing = _validation_list_count(payload, "missingReferences", "missingParameterControls", "brokenControls")
+    warnings = _validation_list_count(payload, "warnings")
+    if missing:
+        _validation_add_finding(findings, "Expression menu", "Warning", "Expression menu missing references", f"{missing} missing or broken menu reference(s) were reported.", "menu")
+    elif warnings:
+        _validation_add_finding(findings, "Expression menu", "Warning", "Expression menu warnings", f"{warnings} warning(s) were reported.", "menu")
+    else:
+        _validation_add_finding(findings, "Expression menu", "Info", "Expression menu scan completed", "No menu reference warnings were reported.", "menu")
+
+
+def _fx_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "FX animator", "fx", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    mismatches = _validation_list_count(payload, "parameterTypeMismatches", "typeMismatches", "mismatches")
+    warnings = _validation_list_count(payload, "warnings")
+    if mismatches:
+        _validation_add_finding(findings, "FX animator", "Warning", "FX parameter/type mismatch", f"{mismatches} FX parameter/type mismatch(es) were reported.", "fx")
+    elif warnings:
+        _validation_add_finding(findings, "FX animator", "Warning", "FX animator warnings", f"{warnings} warning(s) were reported.", "fx")
+    else:
+        _validation_add_finding(findings, "FX animator", "Info", "FX animator scan completed", "No FX parameter/type warnings were reported.", "fx")
+
+
+def _binding_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Animation bindings", "animation_bindings", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    broken = _validation_list_count(payload, "brokenBindings", "missingBindings", "missingObjectBindings", "unsupportedBindings")
+    warnings = _validation_list_count(payload, "warnings")
+    if broken:
+        _validation_add_finding(findings, "Animation bindings", "Warning", "Broken animation bindings", f"{broken} broken or unsupported animation binding(s) were reported.", "animation_bindings")
+    elif warnings:
+        _validation_add_finding(findings, "Animation bindings", "Warning", "Animation binding warnings", f"{warnings} warning(s) were reported.", "animation_bindings")
+    else:
+        _validation_add_finding(findings, "Animation bindings", "Info", "Animation binding scan completed", "No broken binding warnings were reported.", "animation_bindings")
+
+
+def _material_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Materials / shaders", "materials", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    unsupported = _validation_max_number(payload, "unsupportedShaderCount", "unsupportedMaterialCount")
+    missing = _validation_list_count(payload, "missingMaterials", "missingShaders")
+    if unsupported or missing:
+        _validation_add_finding(
+            findings,
+            "Materials / shaders",
+            "Warning",
+            "Material/shader compatibility warnings",
+            f"{int(unsupported)} unsupported shader/material item(s), {missing} missing reference(s).",
+            "materials",
+            _validation_source_summary(payload),
+        )
+    else:
+        _validation_add_finding(findings, "Materials / shaders", "Info", "Material scan completed", "No material/shader compatibility warnings were reported.", "materials")
+
+
+def _wardrobe_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Wardrobe", "wardrobe", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    inconsistencies = _validation_list_count(payload, "inconsistencies", "errors", "warnings")
+    candidate_count = _validation_max_number(payload, "wardrobeCandidateCount")
+    if inconsistencies:
+        _validation_add_finding(findings, "Wardrobe", "Warning", "Wardrobe consistency warnings", f"{inconsistencies} wardrobe consistency warning(s) were reported.", "wardrobe")
+    elif candidate_count:
+        _validation_add_finding(findings, "Wardrobe", "Suggestion", "Wardrobe candidates need confirmation", f"{int(candidate_count)} loose or candidate wardrobe group(s) require user selection before writes.", "wardrobe")
+    else:
+        _validation_add_finding(findings, "Wardrobe", "Info", "Wardrobe scan completed", "No wardrobe consistency warnings were reported.", "wardrobe")
+
+
+def _performance_validation(findings: list[dict[str, Any]], result: dict[str, Any], section: str, source: str) -> None:
+    _validation_add_source_failure(findings, section, source, result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") or {}
+    rank = str(payload.get("rank") or payload.get("performanceRank") or payload.get("overallRank") or "")
+    if not rank and isinstance(payload.get("summary"), dict):
+        rank = str(payload["summary"].get("rank") or payload["summary"].get("performanceRank") or payload["summary"].get("overallRank") or "")
+    lowered = rank.lower()
+    if any(value in lowered for value in ("poor", "very poor", "verypoor")):
+        _validation_add_finding(findings, section, "Warning", f"{section} performance warning", f"Performance rank is {rank or 'not ideal'}.", source, _validation_source_summary(payload))
+    else:
+        _validation_add_finding(findings, section, "Info", f"{section} performance headline", f"Performance scan completed{f' with rank {rank}' if rank else ''}.", source, _validation_source_summary(payload))
+
+
+def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    project_path = str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
+    include_quest = bool(params.get("include_quest", params.get("includeQuest", True)))
+    include_sources = bool(params.get("include_sources", params.get("includeSources", False)))
+    max_errors = int(params.get("max_errors") or params.get("maxErrors") or 50)
+    base_params = {
+        "avatarPath": avatar_path,
+        "projectPath": project_path,
+        "maxErrors": max(1, min(max_errors, 200)),
+        "includeConsoleFallback": True,
+    }
+
+    sources: dict[str, dict[str, Any]] = {
+        "compile": _run_validation_source("compile", lambda: read_agent_compile_errors(base_params)),
+        "parameters": _run_validation_source("parameters", lambda: scan_avatar_parameters_gateway_sync(base_params)),
+        "menu": _run_validation_source("menu", lambda: scan_avatar_controls_sync(base_params)),
+        "fx": _run_validation_source("fx", lambda: scan_fx_animator_sync(base_params)),
+        "animation_bindings": _run_validation_source("animation_bindings", lambda: scan_animation_bindings_sync(base_params)),
+        "materials": _run_validation_source("materials", lambda: scan_shader_materials_sync(ShaderMaterialScanRequest(**base_params))),
+        "wardrobe": _run_validation_source("wardrobe", lambda: scan_wardrobe_sync(base_params)),
+        "performance_pc": _run_validation_source("performance_pc", lambda: scan_avatar_performance_sync({**base_params, "isMobile": False})),
+    }
+    if include_quest:
+        sources["performance_quest"] = _run_validation_source(
+            "performance_quest",
+            lambda: scan_avatar_performance_sync({**base_params, "isMobile": True}),
+        )
+
+    findings: list[dict[str, Any]] = []
+    _compile_validation(findings, sources["compile"])
+    if avatar_path:
+        _validation_add_finding(findings, "Selected avatar", "Info", "Avatar path selected", "Validation ran against the selected avatar path.", "selected_avatar", {"avatarPath": avatar_path})
+    else:
+        _validation_add_finding(findings, "Selected avatar", "Warning", "No avatar path selected", "Validation could not confirm a selected avatar path. Some scanners may fall back to the current Unity selection or all avatars.", "selected_avatar")
+    _parameters_validation(findings, sources["parameters"])
+    _menu_validation(findings, sources["menu"])
+    _fx_validation(findings, sources["fx"])
+    _binding_validation(findings, sources["animation_bindings"])
+    _material_validation(findings, sources["materials"])
+    _wardrobe_validation(findings, sources["wardrobe"])
+    _performance_validation(findings, sources["performance_pc"], "Performance", "performance_pc")
+    if include_quest:
+        _performance_validation(findings, sources["performance_quest"], "Quest", "performance_quest")
+
+    counts = _validation_severity_counts(findings)
+    source_summaries = {
+        name: (
+            {"ok": bool(result.get("ok")), "error": result.get("error")}
+            if not result.get("ok")
+            else {"ok": True, "summary": _validation_source_summary(result.get("payload"))}
+        )
+        for name, result in sources.items()
+    }
+    if include_sources:
+        for name, result in sources.items():
+            if result.get("ok") and isinstance(result.get("payload"), dict):
+                source_summaries[name]["payload"] = _redact_doctor_detail(result["payload"])
+
+    return {
+        "ok": counts["Error"] == 0,
+        "schema": "vrcforge.validation.v1",
+        "readOnly": True,
+        "autoFix": False,
+        "generatedAt": _validation_now(),
+        "avatarPath": avatar_path,
+        "projectPathConfigured": bool(project_path),
+        "summary": {
+            "findingCount": len(findings),
+            "severityCounts": counts,
+            "sourceCount": len(sources),
+            "failedSourceCount": sum(1 for result in sources.values() if not result.get("ok")),
+        },
+        "sections": _validation_section_summaries(findings),
+        "findings": findings,
+        "sources": source_summaries,
+        "rules": {
+            "validationIsReadOnly": True,
+            "validationNeverFixes": True,
+            "fixesRequirePlanPreviewApprovalCheckpointApplyValidateRestore": True,
+        },
+    }
+
+
 def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
     return (
         str(
@@ -8749,6 +9960,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", scan_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, avatar, parameters, menu, FX, bindings, materials, wardrobe, and performance scanners.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))

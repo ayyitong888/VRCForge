@@ -3593,6 +3593,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_scan_avatar_controls",
         "vrcforge_scan_wardrobe",
         "vrcforge_scan_parameters",
+        "vrcforge_run_validation_report",
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",
@@ -3624,7 +3625,6 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_preview_blendshape_apply",
         "vrcforge_preview_shader_apply",
         "vrcforge_request_apply",
-        "vrcforge_apply_approved",
         "vrcforge_restore_last_backup",
         "vrcforge_request_roslyn_advanced",
     ]:

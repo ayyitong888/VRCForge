@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.5.2--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.2-beta)
+[![Version](https://img.shields.io/badge/version-v0.5.3--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.3-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.2-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.3-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.5.2-beta.zip`
+- `VRCForge_Windows_x64_0.5.3-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -99,6 +99,8 @@ The desktop app also includes uninstall actions:
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
+| First-run Doctor | Environment-only health report for backend, Unity bridge/MCP, providers, SDK/dependency versions, gateway, skills, and checkpoint backend | Available / 可用 |
+| Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
@@ -107,14 +109,17 @@ The desktop app also includes uninstall actions:
 | Roslyn Advanced Power Mode (in-memory compile, zero-install CodeDom fallback) | Roslyn 高级模式（内存编译，免安装 CodeDom 兜底） | Available / 可用 |
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
+| Agent Connector Settings | Gateway toggle, token revoke, connector config copy, recent calls, and write-request separation for external agents | Available / 可用 |
 | External agent connector templates | Codex/Claude Code-style loopback MCP snippets without plaintext tokens | Available / 可用 |
 | `.vsk` community skill packages | `.vsk` 社区 skill 包导入/导出/校验 | Available / 可用 |
+| Skill Manager UI for `.vsk` packages | List/import/preflight/export .vsk packages with risk, permissions, signature status, signer fingerprint, and no “verified” label | Available / 可用 |
 | Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Beta, local tests pass |
 | Generic avatar authoring primitives (parameters, menus, FX animator states) | Expression parameters / menu controls / animator states | Beta, local tests pass; preview path covered by wardrobe workflow |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
 | Modular Avatar component writer | MergeArmature / BoneProxy / MenuInstaller / MergeAnimator / Parameters | Beta, Unity live previews pass |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
+| Validation Report MVP (`vrcforge.validation.v1`) | Read-only compile/avatar/parameter/menu/FX/bindings/material/wardrobe/performance report; fixes remain separate approved plans | Beta, local and Unity live smoke pass |
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
@@ -163,11 +168,15 @@ The gateway is disabled by default. Enable it from the desktop settings, copy th
 
 The connector generator emits copyable loopback MCP snippets for external coding agents and uses environment-variable placeholders such as `VRCFORGE_AGENT_TOKEN`; it does not print or write plaintext access tokens into generated client config.
 
+External MCP clients can request writes, but VRCForge owns approval and execution. The MCP server advertises read, plan, and request tools; direct apply is kept on the desktop approval path.
+
 Gateway 默认关闭。请在桌面设置中启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 VRCForge 内部使用，不会写进复制给外部 agent 的配置。
 
 ## Community Skill Packages
 
 VRCForge supports `.vsk` skill packages for community distribution. Package import performs manifest validation, lock-file SHA-256 checks, optional Ed25519 signature verification, duplicate/update checks, and ZIP safety checks for traversal, absolute paths, drive paths, symlinks, duplicate entries, and oversized payloads. Export can build dev or release packages from installed user skills. Imported packages can be projected into the user skill directory so they appear in slash-command and gateway skill lists.
+
+The desktop Skill Manager can list installed packages, inspect preflight results, import packages by path, export dev/release packages, and show risk, permissions, signature status, signer fingerprint, and manifest details. Signature labels only mean package integrity and signer continuity; VRCForge does not label community packages as verified.
 
 ## Safety / 安全原则
 
@@ -176,7 +185,7 @@ VRCForge follows a supervised workflow for write operations:
 VRCForge 对写入操作采用受监督流程：
 
 ```text
-Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
+Scan -> Plan -> Preview -> Approval -> Checkpoint -> Apply -> Validate -> Restore
 ```
 
 Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode and every call still requires `confirmAdvancedPowerMode=true`. The first full-permission confirmation is persisted by the desktop app and synchronized to Unity; direct calls that bypass the app retain a one-time Unity warning fallback. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.

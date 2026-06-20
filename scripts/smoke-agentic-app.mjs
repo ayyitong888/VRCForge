@@ -95,6 +95,12 @@ try {
   assert(bootstrap.agentManifest.toolCount >= 10, "Agent manifest should expose the VRCForge skills.");
   assert(bootstrap.permission.executionMode === "approval", "Default permission mode should be per-action approval.");
 
+  const doctor = await requestJson(`${endpoint}/api/app/doctor`, "GET");
+  assert(doctor.status === 200, "Doctor endpoint should be available.");
+  assert(doctor.json.schema === "vrcforge.doctor.v1", "Doctor should return the vrcforge.doctor.v1 schema.");
+  assert(Array.isArray(doctor.json.checks) && doctor.json.checks.length > 0, "Doctor should return checks.");
+  assert(!JSON.stringify(doctor.json).toLowerCase().includes("approval_token"), "Doctor must not expose approval tokens.");
+
   const blocked = await postJson(`${endpoint}/api/app/permission`, { execution_mode: "roslyn_full_auto" });
   assert(blocked.status === 409, "Roslyn full-auto should require the one-time warning acknowledgement.");
 

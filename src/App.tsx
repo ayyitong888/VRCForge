@@ -54,13 +54,22 @@ import {
   ApiError,
   AppBootstrap,
   ChatHistoryEntry,
+  DoctorCheck,
+  DoctorReport,
+  ExternalAgentConnectorStatus,
+  SkillPackageEntry,
+  SkillPackagePreflight,
   approveAgentApproval,
   checkSkills,
   compactAgentHistory,
   createSkill,
   deleteSkill,
+  exportSkillPackage,
   fetchCheckpoints,
   fetchBootstrap,
+  fetchDoctor,
+  fetchExternalAgentConnectors,
+  fetchSkillPackages,
   fetchSkills,
   AgentSkillCheck,
   ExecutionMode,
@@ -69,6 +78,8 @@ import {
   fetchChats,
   fetchProjectPrefs,
   fetchProviderModels,
+  importSkillPackage,
+  preflightSkillPackage,
   ProjectPrefs,
   previewRestoreCheckpoint,
   rejectAgentApproval,
@@ -78,7 +89,9 @@ import {
   saveAgentNotes,
   sendAgentMessage,
   setAppSessionToken,
+  testProviderCapability,
   updateApiConfig,
+  updateExternalAgentGateway,
   updatePermission,
   updateSkill,
 } from "./lib/api";
@@ -101,7 +114,7 @@ type ConversationItem =
   | { id: string; type: "error"; text: string }
   | { id: string; type: "compact"; text: string };
 
-type ActiveView = "chat" | "skills" | "checkpoints" | "settings";
+type ActiveView = "chat" | "doctor" | "skills" | "checkpoints" | "settings";
 
 type ChatThread = {
   id: string;
@@ -188,11 +201,21 @@ export default function App() {
   const [modelOptions, setModelOptions] = useState<Array<{ id: string; label: string }>>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsError, setModelsError] = useState("");
+  const [testingProvider, setTestingProvider] = useState("");
+  const [providerTestMessage, setProviderTestMessage] = useState("");
   const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
   const [skillCheck, setSkillCheck] = useState<AgentSkillCheck | null>(null);
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
   const [savingSkill, setSavingSkill] = useState(false);
+  const [skillPackages, setSkillPackages] = useState<SkillPackageEntry[]>([]);
+  const [skillPackageStore, setSkillPackageStore] = useState("");
+  const [loadingSkillPackages, setLoadingSkillPackages] = useState(false);
+  const [skillPackageMessage, setSkillPackageMessage] = useState("");
+  const [skillPackageError, setSkillPackageError] = useState("");
+  const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
+  const [loadingDoctor, setLoadingDoctor] = useState(false);
+  const [doctorMessage, setDoctorMessage] = useState("");
   const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
   const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
@@ -203,6 +226,9 @@ export default function App() {
   const [agentNotesLoaded, setAgentNotesLoaded] = useState(false);
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesMessage, setNotesMessage] = useState("");
+  const [connectorStatus, setConnectorStatus] = useState<ExternalAgentConnectorStatus | null>(null);
+  const [loadingConnectors, setLoadingConnectors] = useState(false);
+  const [connectorMessage, setConnectorMessage] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const chatsLoadedRef = useRef(false);
@@ -242,7 +268,6 @@ export default function App() {
     : vrcForgeSkillsReady
       ? `头像能力 ${vrcForgeToolsCount}`
       : "基础模式";
-  const needsApiSetup = runtimeConnected && Boolean(apiConfig?.apiKeyRequired && !apiConfig.apiKeyPresent);
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
 
   const hiddenPathSet = useMemo(
@@ -435,6 +460,12 @@ export default function App() {
   useEffect(() => {
     if (activeView === "checkpoints" && runtimeConnected) {
       void loadCheckpoints();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (activeView === "doctor" && runtimeConnected) {
+      void loadDoctor();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
@@ -921,6 +952,33 @@ export default function App() {
     setError("");
   }
 
+  async function openDoctor() {
+    setActiveView("doctor");
+    setError("");
+    await loadDoctor();
+  }
+
+  async function loadDoctor(target = endpoint) {
+    setLoadingDoctor(true);
+    setDoctorMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchDoctor(targetEndpoint);
+      setDoctorReport(payload);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingDoctor(false);
+    }
+  }
+
   async function openSkills() {
     setActiveView("skills");
     setError("");
@@ -933,7 +991,7 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      const payload = await fetchSkills(targetEndpoint);
+      const [payload] = await Promise.all([fetchSkills(targetEndpoint), loadSkillPackages(targetEndpoint)]);
       setSkillRegistry(payload);
       setSkillCheck(await checkSkills(targetEndpoint));
       if (!selectedSkillName && payload.skills.length > 0) {
@@ -942,6 +1000,76 @@ export default function App() {
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function loadSkillPackages(target = endpoint) {
+    setLoadingSkillPackages(true);
+    setSkillPackageError("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return null;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchSkillPackages(targetEndpoint);
+      setSkillPackages(payload.installed || []);
+      setSkillPackageStore(payload.store || "");
+      return payload;
+    } catch (cause) {
+      setSkillPackageError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function preflightVskPackage(packagePath: string) {
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    const payload = await preflightSkillPackage(endpoint, { packagePath });
+    setSkillPackageMessage("Package preflight completed");
+    return payload;
+  }
+
+  async function importVskPackage(packagePath: string) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await importSkillPackage(endpoint, { packagePath });
+      setSkillPackageMessage(payload.changed === false ? "Package already installed" : "Package imported");
+      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+      setSkillRegistry(skillsPayload);
+      setSkillCheck(await checkSkills(endpoint));
+      await refresh(endpoint);
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function exportVskPackage(skillName: string, outputPath: string, release: boolean) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await exportSkillPackage(endpoint, { skillName, outputPath, release });
+      setSkillPackageMessage(release ? "Release package exported" : "Dev package exported");
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
     }
   }
 
@@ -962,9 +1090,46 @@ export default function App() {
       setAgentNotes(notes.content);
       setAgentNotesPath(notes.path);
       setAgentNotesLoaded(true);
+      void loadConnectors(targetEndpoint);
     } catch (cause) {
       setAgentNotesLoaded(false);
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function loadConnectors(target = endpoint) {
+    setLoadingConnectors(true);
+    setConnectorMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      setConnectorStatus(await fetchExternalAgentConnectors(targetEndpoint));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingConnectors(false);
+    }
+  }
+
+  async function updateGatewaySettings(request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean }) {
+    setLoadingConnectors(true);
+    setConnectorMessage("");
+    setError("");
+    try {
+      const payload = await updateExternalAgentGateway(endpoint, request);
+      setConnectorStatus(payload);
+      setConnectorMessage(request.revokeToken ? "Token revoked" : "Gateway updated");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingConnectors(false);
     }
   }
 
@@ -1207,6 +1372,41 @@ export default function App() {
     }
   }
 
+  async function runProviderTest(capability: "text" | "structured" | "vision") {
+    if (testingProvider) {
+      return;
+    }
+    setTestingProvider(capability);
+    setProviderTestMessage("");
+    setModelsError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setModelsError("Runtime is not connected.");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await testProviderCapability(targetEndpoint, {
+        provider: apiProvider,
+        api_key: apiKey.trim(),
+        base_url: apiBaseUrl.trim(),
+        model: apiModel.trim(),
+        capability,
+      });
+      setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}`);
+      if (!payload.ok && payload.status !== "skipped") {
+        setModelsError(payload.message);
+      }
+    } catch (cause) {
+      setModelsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setTestingProvider("");
+    }
+  }
+
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
@@ -1238,6 +1438,18 @@ export default function App() {
             >
               <FolderPlus className="h-4 w-4 shrink-0" />
               <span className="truncate">新项目</span>
+            </button>
+            <button
+              onClick={() => void openDoctor()}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "doctor"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <Shield className="h-4 w-4 shrink-0" />
+              <span className="truncate">Doctor</span>
             </button>
             <button
               onClick={() => void openSkills()}
@@ -1368,7 +1580,15 @@ export default function App() {
               <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : "临时对话"}</span>
               <span className="text-muted-foreground">/</span>
               <span className="truncate font-medium">
-                {activeView === "skills" ? "能力库" : activeView === "settings" ? "设置" : activeChat ? activeChat.title || "当前会话" : "新任务"}
+                {activeView === "doctor"
+                  ? "Doctor"
+                  : activeView === "skills"
+                    ? "能力库"
+                    : activeView === "settings"
+                      ? "设置"
+                      : activeChat
+                        ? activeChat.title || "当前会话"
+                        : "新任务"}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1404,7 +1624,24 @@ export default function App() {
             </div>
           ) : null}
 
-          {activeView === "skills" ? (
+          {activeView === "doctor" ? (
+            <DoctorWorkspace
+              report={doctorReport}
+              loading={loadingDoctor}
+              message={doctorMessage}
+              onRefresh={() => void loadDoctor()}
+              onOpenSettings={() => void openSettings()}
+              onCopy={() => {
+                if (!doctorReport) {
+                  return;
+                }
+                void navigator.clipboard
+                  .writeText(JSON.stringify(doctorReport, null, 2))
+                  .then(() => setDoctorMessage("已复制诊断摘要"))
+                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              }}
+            />
+          ) : activeView === "skills" ? (
             <SkillsWorkspace
               skills={skills}
               skillCount={skillCount}
@@ -1418,6 +1655,15 @@ export default function App() {
               onDraftChange={setSkillDraft}
               onSave={saveSkill}
               onDelete={removeSelectedSkill}
+              packages={skillPackages}
+              packageStore={skillPackageStore}
+              packagesLoading={loadingSkillPackages}
+              packageMessage={skillPackageMessage}
+              packageError={skillPackageError}
+              onRefreshPackages={() => void loadSkillPackages()}
+              onPreflightPackage={preflightVskPackage}
+              onImportPackage={importVskPackage}
+              onExportPackage={exportVskPackage}
             />
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
@@ -1503,8 +1749,11 @@ export default function App() {
                       models={modelOptions}
                       loadingModels={loadingModels}
                       modelsError={modelsError}
+                      testingProvider={testingProvider}
+                      providerTestMessage={providerTestMessage}
                       keySaved={apiKeySaved}
                       onLoadModels={() => void loadModels()}
+                      onTestProvider={(capability) => void runProviderTest(capability)}
                       onProviderChange={handleProviderChange}
                       onApiKeyChange={setApiKey}
                       onBaseUrlChange={setApiBaseUrl}
@@ -1512,6 +1761,24 @@ export default function App() {
                       onSubmit={saveApiProvider}
                     />
                   </div>
+                </section>
+
+                <section className="mt-12">
+                  <ExternalAgentConnectorsPanel
+                    status={connectorStatus}
+                    loading={loadingConnectors}
+                    message={connectorMessage}
+                    onRefresh={() => void loadConnectors()}
+                    onToggleGateway={(enabled) => void updateGatewaySettings({ enabled })}
+                    onToggleWriteRequests={(allowWriteRequests) => void updateGatewaySettings({ allowWriteRequests })}
+                    onRevoke={() => void updateGatewaySettings({ revokeToken: true })}
+                    onCopy={(text, label) => {
+                      void navigator.clipboard
+                        .writeText(text)
+                        .then(() => setConnectorMessage(`${label} copied`))
+                        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+                    }}
+                  />
                 </section>
 
                 <section className="mt-12 pb-6">
@@ -1546,30 +1813,6 @@ export default function App() {
                     </div>
                   </form>
                 </section>
-              </div>
-            </div>
-          ) : needsApiSetup ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-8">
-              <div className="w-full max-w-2xl">
-                <h1 className="text-2xl font-semibold tracking-tight">连接模型供应商</h1>
-                <p className="mt-1 mb-6 text-sm text-muted-foreground">首次使用需要配置 API 供应商与模型，保存后即可开始对话。</p>
-                <ProviderSetup
-                  provider={apiProvider}
-                  apiKey={apiKey}
-                  baseUrl={apiBaseUrl}
-                  model={apiModel}
-                  saving={savingApiConfig}
-                  models={modelOptions}
-                  loadingModels={loadingModels}
-                  modelsError={modelsError}
-                  keySaved={apiKeySaved}
-                  onLoadModels={() => void loadModels()}
-                  onProviderChange={handleProviderChange}
-                  onApiKeyChange={setApiKey}
-                  onBaseUrlChange={setApiBaseUrl}
-                  onModelChange={setApiModel}
-                  onSubmit={saveApiProvider}
-                />
               </div>
             </div>
           ) : conversation.length === 0 ? (
@@ -2320,8 +2563,11 @@ function ProviderSetup({
   models,
   loadingModels,
   modelsError,
+  testingProvider,
+  providerTestMessage,
   keySaved = false,
   onLoadModels,
+  onTestProvider,
   onProviderChange,
   onApiKeyChange,
   onBaseUrlChange,
@@ -2336,16 +2582,20 @@ function ProviderSetup({
   models: Array<{ id: string; label: string }>;
   loadingModels: boolean;
   modelsError: string;
+  testingProvider: string;
+  providerTestMessage: string;
   keySaved?: boolean;
   onLoadModels: () => void;
+  onTestProvider: (capability: "text" | "structured" | "vision") => void;
   onProviderChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onSubmit: (event?: FormEvent) => void;
 }) {
-  const requiresBaseUrl = provider === "openai" || provider === "openai-compatible" || provider === "ollama" || provider === "vertexai";
+  const requiresBaseUrl = ["openai", "deepseek", "openrouter", "ollama", "vertexai", "custom"].includes(provider);
   const hasModelList = models.length > 0;
+  const capabilities = providerCapabilities(provider);
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -2358,10 +2608,20 @@ function ProviderSetup({
           >
             <option value="gemini">Google AI Studio</option>
             <option value="anthropic">Anthropic</option>
-            <option value="openai">兼容接口</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="openrouter">OpenRouter</option>
             <option value="ollama">Ollama</option>
             <option value="vertexai">Vertex AI</option>
+            <option value="custom">自定义兼容接口</option>
           </select>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {capabilities.map((capability) => (
+              <Badge key={capability.label} tone={capability.tone} className="h-6 px-2 text-[10px]">
+                {capability.label}
+              </Badge>
+            ))}
+          </div>
         </FieldLabel>
         <FieldLabel label="访问密钥">
           {providerNeedsApiKey(provider) ? (
@@ -2429,18 +2689,162 @@ function ProviderSetup({
             </Button>
           </div>
           {modelsError ? <div className="mt-1.5 text-xs text-destructive/80">{modelsError}</div> : null}
+          {providerTestMessage ? <div className="mt-1.5 text-xs text-muted-foreground">{providerTestMessage}</div> : null}
           {hasModelList && !modelsError ? (
             <div className="mt-1.5 text-xs text-muted-foreground">已拉取 {models.length} 个可用模型</div>
           ) : null}
         </FieldLabel>
       </div>
-      <div className="mt-5 flex justify-end">
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
+          {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
+          Text
+        </Button>
+        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("structured")}>
+          {testingProvider === "structured" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+          JSON
+        </Button>
+        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("vision")}>
+          {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
+          Vision
+        </Button>
         <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           保存
         </Button>
       </div>
     </form>
+  );
+}
+
+function ExternalAgentConnectorsPanel({
+  status,
+  loading,
+  message,
+  onRefresh,
+  onToggleGateway,
+  onToggleWriteRequests,
+  onRevoke,
+  onCopy,
+}: {
+  status: ExternalAgentConnectorStatus | null;
+  loading: boolean;
+  message: string;
+  onRefresh: () => void;
+  onToggleGateway: (enabled: boolean) => void;
+  onToggleWriteRequests: (enabled: boolean) => void;
+  onRevoke: () => void;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const gateway = status?.gateway;
+  const codexText = status?.clientConfigs?.codex?.text || "";
+  const claudeText = status?.clientConfigs?.claudeCode?.text || "";
+  const toolCount = status?.advertisedTools?.length ?? 0;
+  const writeTargetCount = status?.writeTargets?.length ?? 0;
+  return (
+    <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+      <div className="flex min-w-0 items-center gap-2">
+        <Shield className="h-4 w-4 shrink-0 text-primary" />
+        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">Agent Connectors</h2>
+        <Badge tone={gateway?.enabled ? "ok" : "muted"} className="shrink-0">
+          {gateway?.enabled ? "Enabled" : "Disabled"}
+        </Badge>
+      </div>
+
+      <div className="mt-4 grid gap-3">
+        <DataLine label="Endpoint" value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
+        <DataLine label="Token env" value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
+        <DataLine label="Tools" value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
+        <DataLine label="Config" value={gateway?.configPath || "-"} />
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-2">
+        <ConnectorToggle
+          label="Gateway"
+          checked={Boolean(gateway?.enabled)}
+          disabled={loading || !status}
+          onChange={onToggleGateway}
+        />
+        <ConnectorToggle
+          label="Write requests"
+          checked={Boolean(gateway?.allowWriteRequests)}
+          disabled={loading || !status}
+          onChange={onToggleWriteRequests}
+        />
+      </div>
+
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        {message ? (
+          <Badge tone="ok" className="mr-auto shrink-0">
+            {message}
+          </Badge>
+        ) : null}
+        <Button type="button" variant="outline" disabled={loading} onClick={onRefresh}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          Refresh
+        </Button>
+        <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex config")}>
+          <Copy className="h-4 w-4" />
+          Codex
+        </Button>
+        <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude config")}>
+          <Copy className="h-4 w-4" />
+          Claude
+        </Button>
+        <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>
+          Revoke token
+        </Button>
+      </div>
+
+      {status?.lastCalls?.length ? (
+        <div className="mt-5 overflow-hidden rounded-lg border border-border">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+            <span className="truncate">Event</span>
+            <span className="truncate">Tool</span>
+            <span className="truncate">Status</span>
+          </div>
+          {status.lastCalls.slice(0, 8).map((call, index) => (
+            <div
+              key={`${call.event}-${call.createdAt}-${index}`}
+              className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0"
+            >
+              <span className="truncate">{call.event || "-"}</span>
+              <span className="truncate font-mono">{call.targetTool || "-"}</span>
+              <span className="truncate">{call.status || call.riskLevel || "-"}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ConnectorToggle({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "flex h-11 min-w-0 items-center gap-3 rounded-md border px-3 text-left text-sm transition-colors disabled:opacity-60",
+        checked ? "border-primary bg-primary/5" : "border-border bg-background hover:bg-muted",
+      )}
+    >
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <Badge tone={checked ? "ok" : "muted"} className="h-6 shrink-0 px-2">
+        {checked ? "On" : "Off"}
+      </Badge>
+    </button>
   );
 }
 
@@ -2573,6 +2977,15 @@ function SkillsWorkspace({
   onDraftChange,
   onSave,
   onDelete,
+  packages,
+  packageStore,
+  packagesLoading,
+  packageMessage,
+  packageError,
+  onRefreshPackages,
+  onPreflightPackage,
+  onImportPackage,
+  onExportPackage,
 }: {
   skills: AgentSkill[];
   skillCount: number;
@@ -2586,6 +2999,15 @@ function SkillsWorkspace({
   onDraftChange: (skill: Partial<AgentSkill>) => void;
   onSave: (event?: FormEvent) => void;
   onDelete: () => void;
+  packages: SkillPackageEntry[];
+  packageStore: string;
+  packagesLoading: boolean;
+  packageMessage: string;
+  packageError: string;
+  onRefreshPackages: () => void;
+  onPreflightPackage: (packagePath: string) => Promise<SkillPackagePreflight>;
+  onImportPackage: (packagePath: string) => Promise<unknown>;
+  onExportPackage: (skillName: string, outputPath: string, release: boolean) => Promise<unknown>;
 }) {
   const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
@@ -2685,6 +3107,7 @@ function SkillsWorkspace({
           </div>
         </section>
 
+        <div className="grid min-w-0 gap-6">
         <form onSubmit={onSave} className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
           <div className="mb-5 flex items-center gap-2">
             <div className="truncate text-sm font-semibold">{editable ? "User Skill" : "Read Only Skill"}</div>
@@ -2961,10 +3384,279 @@ function SkillsWorkspace({
             </Button>
           </div>
         </form>
+        <SkillPackageManagerPanel
+          packages={packages}
+          packageStore={packageStore}
+          loading={packagesLoading}
+          message={packageMessage}
+          error={packageError}
+          onRefresh={onRefreshPackages}
+          onPreflight={onPreflightPackage}
+          onImport={onImportPackage}
+          onExport={onExportPackage}
+        />
+        </div>
       </div>
     </div>
   );
 }
+
+function SkillPackageManagerPanel({
+  packages,
+  packageStore,
+  loading,
+  message,
+  error,
+  onRefresh,
+  onPreflight,
+  onImport,
+  onExport,
+}: {
+  packages: SkillPackageEntry[];
+  packageStore: string;
+  loading: boolean;
+  message: string;
+  error: string;
+  onRefresh: () => void;
+  onPreflight: (packagePath: string) => Promise<SkillPackagePreflight>;
+  onImport: (packagePath: string) => Promise<unknown>;
+  onExport: (skillName: string, outputPath: string, release: boolean) => Promise<unknown>;
+}) {
+  const [packagePath, setPackagePath] = useState("");
+  const [exportSkillName, setExportSkillName] = useState("");
+  const [exportPath, setExportPath] = useState("");
+  const [releaseExport, setReleaseExport] = useState(false);
+  const [preflight, setPreflight] = useState<SkillPackagePreflight | null>(null);
+  const [localMessage, setLocalMessage] = useState("");
+  const [localError, setLocalError] = useState("");
+  const preview = normalizeSkillPackagePreview(preflight);
+  async function runPreflight() {
+    if (!packagePath.trim()) {
+      return;
+    }
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      const payload = await onPreflight(packagePath.trim());
+      setPreflight(payload);
+      setLocalMessage("Preflight complete");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  async function runImport() {
+    if (!packagePath.trim()) {
+      return;
+    }
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onImport(packagePath.trim());
+      setLocalMessage("Package imported");
+      setPreflight(null);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  async function runExport() {
+    if (!exportSkillName.trim() || !exportPath.trim()) {
+      return;
+    }
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onExport(exportSkillName.trim(), exportPath.trim(), releaseExport);
+      setLocalMessage(releaseExport ? "Release package exported" : "Dev package exported");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  const displayMessage = localMessage || message;
+  const displayError = localError || error;
+  return (
+    <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+      <div className="mb-5 flex min-w-0 items-center gap-2">
+        <Shield className="h-4 w-4 shrink-0 text-primary" />
+        <div className="min-w-0 flex-1 truncate text-sm font-semibold">.vsk Package Manager</div>
+        <Badge tone="muted" className="shrink-0">
+          {packages.length}
+        </Badge>
+        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+
+      <div className="grid gap-4">
+        <div className="grid gap-3">
+          <DataLine label="Store" value={packageStore || "-"} />
+          {displayMessage ? <Badge tone="ok" className="w-fit">{displayMessage}</Badge> : null}
+          {displayError ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{displayError}</div> : null}
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
+          <FieldLabel label="Package Path">
+            <input
+              value={packagePath}
+              onChange={(event) => setPackagePath(event.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+            />
+          </FieldLabel>
+          <Button type="button" variant="outline" className="self-end" disabled={loading || !packagePath.trim()} onClick={() => void runPreflight()}>
+            <Eye className="h-4 w-4" />
+            Preflight
+          </Button>
+          <Button type="button" className="self-end" disabled={loading || !packagePath.trim()} onClick={() => void runImport()}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Import
+          </Button>
+        </div>
+
+        {preview ? (
+          <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-sm font-medium">{skillPackageTitle(preview)}</span>
+              {skillPackageLabels(preview).map((label) => (
+                <Badge key={label} tone={skillPackageLabelTone(label)} className="h-6 shrink-0">
+                  {label}
+                </Badge>
+              ))}
+            </div>
+            <div className="grid gap-2 md:grid-cols-3">
+              <DataLine label="Version" value={String(preview.version || "-")} />
+              <DataLine label="Risk" value={skillPackageRisk(preview)} />
+              <DataLine label="Signer" value={skillPackageSigner(preview)} mono />
+            </div>
+            <OutputBlock label="Permissions" value={skillPackagePermissions(preview).join("\n")} />
+            {preview.manifest ? <OutputBlock label="Manifest" value={formatPayload(preview.manifest)} /> : null}
+          </div>
+        ) : null}
+
+        <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <FieldLabel label="Skill Name">
+              <input
+                value={exportSkillName}
+                onChange={(event) => setExportSkillName(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
+              />
+            </FieldLabel>
+            <FieldLabel label="Output Path">
+              <input
+                value={exportPath}
+                onChange={(event) => setExportPath(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
+              />
+            </FieldLabel>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <label className="mr-auto flex h-9 min-w-0 items-center gap-2 rounded-md border border-border px-3 text-sm text-muted-foreground">
+              <input type="checkbox" checked={releaseExport} onChange={(event) => setReleaseExport(event.target.checked)} />
+              <span className="truncate">Signed release</span>
+            </label>
+            <Button type="button" variant="outline" disabled={loading || !exportSkillName.trim() || !exportPath.trim()} onClick={() => void runExport()}>
+              <Copy className="h-4 w-4" />
+              Export
+            </Button>
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div className="grid grid-cols-[minmax(0,1fr)_100px_160px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+            <span className="truncate">Package</span>
+            <span className="truncate">Risk</span>
+            <span className="truncate">Status</span>
+          </div>
+          {packages.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">No installed .vsk packages.</div>
+          ) : null}
+          {packages.map((pkg, index) => (
+            <div key={`${skillPackageId(pkg)}-${index}`} className="grid grid-cols-[minmax(0,1fr)_100px_160px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
+              <div className="min-w-0">
+                <div className="truncate font-medium">{skillPackageTitle(pkg)}</div>
+                <div className="truncate text-muted-foreground">{skillPackageId(pkg)}</div>
+              </div>
+              <span className="truncate">{skillPackageRisk(pkg)}</span>
+              <div className="flex min-w-0 flex-wrap gap-1">
+                {skillPackageLabels(pkg).map((label) => (
+                  <Badge key={label} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">
+                    {label}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function normalizeSkillPackagePreview(payload: SkillPackagePreflight | null): SkillPackageEntry | null {
+  if (!payload) {
+    return null;
+  }
+  return payload.preview || payload;
+}
+
+function skillPackageId(pkg: SkillPackageEntry): string {
+  return String(pkg.id || pkg.name || pkg.manifest?.id || "-");
+}
+
+function skillPackageTitle(pkg: SkillPackageEntry): string {
+  return String(pkg.title || pkg.manifest?.title || skillPackageId(pkg));
+}
+
+function skillPackageRisk(pkg: SkillPackageEntry): string {
+  return String(pkg.risk_level || pkg.riskLevel || "low");
+}
+
+function skillPackageSigner(pkg: SkillPackageEntry): string {
+  return String(pkg.signer_fingerprint || pkg.signerFingerprint || "-");
+}
+
+function skillPackagePermissions(pkg: SkillPackageEntry): string[] {
+  const permissions = pkg.permissions || [];
+  const tiers = pkg.permission_tiers || pkg.permissionTiers || {};
+  const tierValues = Object.entries(tiers).flatMap(([tier, items]) => (items || []).map((item) => `${tier}: ${item}`));
+  return [...permissions, ...tierValues];
+}
+
+function skillPackageLabels(pkg: SkillPackageEntry): string[] {
+  const labels: string[] = [];
+  const status = String(pkg.signature_status || pkg.signatureStatus || "").toLowerCase();
+  const errorText = [...(pkg.errors || []), ...(pkg.warnings || [])].join(" ").toLowerCase();
+  if (pkg.source === "builtin") {
+    labels.push("Built-in");
+  }
+  if (status === "signed") {
+    labels.push("Signed");
+  } else if (status === "dev") {
+    labels.push("Dev");
+  } else {
+    labels.push("Unsigned");
+  }
+  if (errorText.includes("signature")) {
+    labels.push("Signature mismatch");
+  }
+  if (pkg.enabled === false || pkg.available === false || errorText.includes("blocked")) {
+    labels.push("Blocked");
+  }
+  return [...new Set(labels)];
+}
+
+function skillPackageLabelTone(label: string): "ok" | "warn" | "danger" | "muted" {
+  if (label === "Signed" || label === "Built-in") {
+    return "ok";
+  }
+  if (label === "Signature mismatch" || label === "Blocked") {
+    return "danger";
+  }
+  if (label === "Unsigned" || label === "Dev") {
+    return "warn";
+  }
+  return "muted";
+}
+
 function FieldLabel({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="grid min-w-0 gap-2 text-sm">
@@ -2972,6 +3664,233 @@ function FieldLabel({ label, children }: { label: string; children: ReactNode })
       {children}
     </label>
   );
+}
+
+function DoctorWorkspace({
+  report,
+  loading,
+  message,
+  onRefresh,
+  onOpenSettings,
+  onCopy,
+}: {
+  report: DoctorReport | null;
+  loading: boolean;
+  message: string;
+  onRefresh: () => void;
+  onOpenSettings: () => void;
+  onCopy: () => void;
+}) {
+  const summary = report?.summary;
+  const checks = report?.checks ?? [];
+  const suggestedFixes = checks.filter((check) => check.status !== "ok" && (check.fixCommand || check.howToFix)).slice(0, 8);
+  const groupedChecks = useMemo(() => groupDoctorChecks(checks, report?.sections), [checks, report?.sections]);
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <section className="rounded-xl border border-border bg-card p-5 shadow-panel">
+          <div className="flex min-w-0 items-center gap-3">
+            <Shield className="h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <h1 className="truncate text-lg font-semibold">First-run Doctor</h1>
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="truncate">{report?.version || "runtime"}</span>
+                {report?.scope ? <span className="truncate">{report.scope}</span> : null}
+                {report?.selectedUnityEnvironment?.label ? <span className="truncate">{report.selectedUnityEnvironment.label}</span> : null}
+              </div>
+            </div>
+            <Badge tone={report?.ok ? "ok" : "warn"} className="shrink-0">
+              {report?.ok ? "Ready" : "Needs attention"}
+            </Badge>
+          </div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-4">
+            <DoctorSummaryTile label="OK" value={summary?.okCount ?? 0} tone="ok" />
+            <DoctorSummaryTile label="Warning" value={summary?.warningCount ?? 0} tone="warn" />
+            <DoctorSummaryTile label="Error" value={summary?.errorCount ?? 0} tone="danger" />
+            <DoctorSummaryTile label="Unknown" value={summary?.unknownCount ?? 0} tone="muted" />
+          </div>
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            {message ? (
+              <Badge tone="ok" className="mr-auto shrink-0">
+                {message}
+              </Badge>
+            ) : null}
+            <Button type="button" variant="outline" onClick={onOpenSettings}>
+              <Settings className="h-4 w-4" />
+              Settings
+            </Button>
+            <Button type="button" variant="outline" onClick={onCopy} disabled={!report}>
+              <Copy className="h-4 w-4" />
+              Copy
+            </Button>
+            <Button type="button" onClick={onRefresh} disabled={loading}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Retry
+            </Button>
+          </div>
+        </section>
+
+        {suggestedFixes.length > 0 ? (
+          <section className="rounded-xl border border-border bg-card p-5 shadow-panel">
+            <div className="mb-4 flex min-w-0 items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+              <h2 className="truncate text-sm font-semibold">Suggested fixes</h2>
+              <Badge tone="warn" className="ml-auto shrink-0">
+                {suggestedFixes.length}
+              </Badge>
+            </div>
+            <div className="grid gap-2">
+              {suggestedFixes.map((check) => (
+                <div key={`fix-${check.id}`} className="grid gap-1 rounded-lg border border-border bg-background px-3 py-2 text-sm">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-medium">{check.title}</span>
+                    <Badge tone={doctorTone(check.status)} className="h-6 shrink-0">
+                      {doctorStatusLabel(check.status)}
+                    </Badge>
+                  </div>
+                  <div className="break-words text-xs text-muted-foreground">{check.fixCommand || check.howToFix}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <div className="grid gap-6">
+          {checks.length === 0 ? (
+            <div className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground shadow-panel">
+              {loading ? "正在运行诊断…" : "暂无诊断结果。"}
+            </div>
+          ) : null}
+          {groupedChecks.map((group) => (
+            <section key={group.name} className="grid gap-3">
+              <div className="flex min-w-0 items-center gap-2 px-1">
+                <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{group.name}</h2>
+                <Badge tone={group.summary.errorCount > 0 ? "danger" : group.summary.warningCount > 0 ? "warn" : "muted"} className="shrink-0">
+                  {group.items.length}
+                </Badge>
+              </div>
+              {group.items.map((check) => (
+                <DoctorCheckRow key={check.id} check={check} />
+              ))}
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function groupDoctorChecks(
+  checks: DoctorCheck[],
+  sections?: DoctorReport["sections"],
+): Array<{ name: string; summary: { okCount: number; warningCount: number; errorCount: number; unknownCount: number }; items: DoctorCheck[] }> {
+  const byId = new Map(checks.map((check) => [check.id, check]));
+  if (sections?.length) {
+    return sections
+      .map((section) => ({
+        name: section.name,
+        summary: section.summary,
+        items: section.checkIds.map((id) => byId.get(id)).filter((item): item is DoctorCheck => Boolean(item)),
+      }))
+      .filter((section) => section.items.length > 0);
+  }
+  const grouped = new Map<string, DoctorCheck[]>();
+  for (const check of checks) {
+    const section = check.section || "Doctor";
+    grouped.set(section, [...(grouped.get(section) || []), check]);
+  }
+  return [...grouped.entries()].map(([name, items]) => ({
+    name,
+    summary: {
+      okCount: items.filter((check) => check.status === "ok").length,
+      warningCount: items.filter((check) => check.status === "warning").length,
+      errorCount: items.filter((check) => check.status === "error").length,
+      unknownCount: items.filter((check) => check.status === "unknown").length,
+    },
+    items,
+  }));
+}
+
+function DoctorSummaryTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "ok" | "warn" | "danger" | "muted";
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border bg-background px-3 py-3">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 flex items-center gap-2">
+        <Badge tone={tone} className="h-6 px-2">
+          {value}
+        </Badge>
+      </div>
+    </div>
+  );
+}
+
+function DoctorCheckRow({ check }: { check: DoctorCheck }) {
+  const openByDefault = check.status === "error" || check.status === "warning";
+  const [open, setOpen] = useState(openByDefault);
+  const tone = doctorTone(check.status);
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
+      >
+        {open ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{check.title}</span>
+        <Badge tone={tone} className="shrink-0">
+          {doctorStatusLabel(check.status)}
+        </Badge>
+      </button>
+      {open ? (
+        <div className="grid gap-3 border-t border-border px-4 py-4">
+          <DataLine label="What failed" value={check.whatFailed || (check.status === "ok" ? "-" : check.message)} />
+          <DataLine label="Why" value={check.whyItMatters || "-"} />
+          <DataLine label="How to fix" value={check.howToFix || "-"} />
+          {check.fixCommand ? <DataLine label="Fix" value={check.fixCommand} /> : null}
+          <DataLine label="Message" value={check.message || "-"} />
+          {check.detail !== undefined ? <OutputBlock label="Detail" value={formatPayload(check.detail)} /> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function doctorTone(status: string): "ok" | "warn" | "danger" | "muted" {
+  if (status === "ok") {
+    return "ok";
+  }
+  if (status === "warning") {
+    return "warn";
+  }
+  if (status === "error") {
+    return "danger";
+  }
+  return "muted";
+}
+
+function doctorStatusLabel(status: string): string {
+  switch (status) {
+    case "ok":
+      return "OK";
+    case "warning":
+      return "Warning";
+    case "error":
+      return "Error";
+    default:
+      return "Unknown";
+  }
 }
 
 function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; onOpenSettings?: () => void }) {
@@ -3500,14 +4419,19 @@ function getHealthDetailNumber(detail: unknown, key: string): number {
 function defaultModelForProvider(provider: string): string {
   switch (provider) {
     case "anthropic":
-      return "claude-3-5-sonnet-latest";
+      return "claude-opus-4-6";
+    case "deepseek":
+      return "deepseek-chat";
+    case "openrouter":
+      return "openai/gpt-4.1-mini";
     case "openai":
-    case "openai-compatible":
-      return "gpt-4o-mini";
+      return "gpt-4.1-mini";
     case "ollama":
-      return "llava";
+      return "llama3.2";
     case "vertexai":
       return "gemini-2.5-flash";
+    case "custom":
+      return "gpt-4.1-mini";
     case "gemini":
     default:
       return "gemini-2.5-flash";
@@ -3518,6 +4442,10 @@ function defaultBaseUrlForProvider(provider: string): string {
   switch (provider) {
     case "openai":
       return "https://api.openai.com/v1";
+    case "deepseek":
+      return "https://api.deepseek.com";
+    case "openrouter":
+      return "https://openrouter.ai/api/v1";
     case "ollama":
       return "http://127.0.0.1:11434/v1";
     default:
@@ -3527,6 +4455,28 @@ function defaultBaseUrlForProvider(provider: string): string {
 
 function providerNeedsApiKey(provider: string): boolean {
   return provider !== "ollama" && provider !== "vertexai";
+}
+
+function providerCapabilities(provider: string): Array<{ label: string; tone: "ok" | "warn" | "danger" | "muted" | "default" }> {
+  const paid = provider !== "ollama";
+  const local = provider === "ollama";
+  const capabilities: Array<{ label: string; tone: "ok" | "warn" | "danger" | "muted" | "default" }> = [
+    { label: "text", tone: "muted" },
+    { label: "structured JSON", tone: "muted" },
+  ];
+  if (["gemini", "openai", "openrouter", "vertexai"].includes(provider)) {
+    capabilities.push({ label: "vision", tone: "muted" });
+  }
+  if (local) {
+    capabilities.push({ label: "local", tone: "ok" }, { label: "offline", tone: "ok" }, { label: "free/local", tone: "ok" });
+  }
+  if (paid) {
+    capabilities.push({ label: "paid API", tone: "warn" });
+  }
+  if (["gemini", "anthropic", "openai", "openrouter", "vertexai"].includes(provider)) {
+    capabilities.push({ label: "long context", tone: "muted" });
+  }
+  return capabilities;
 }
 
 function emptySkillDraft(): Partial<AgentSkill> {
