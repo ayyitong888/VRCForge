@@ -241,6 +241,11 @@ try {
     if (-not (Test-Path -LiteralPath $UnityPackagePath)) {
         throw "VRCForge.unitypackage is required for manual fallback. Provide -UnityPackagePath or let build_unitypackage.ps1 generate it."
     }
+    $releaseUnityPackage = Join-Path $releaseRoot "VRCForge.unitypackage"
+    if ([System.IO.Path]::GetFullPath($UnityPackagePath) -ne [System.IO.Path]::GetFullPath($releaseUnityPackage)) {
+        Copy-Item -LiteralPath $UnityPackagePath -Destination $releaseUnityPackage -Force
+        $UnityPackagePath = $releaseUnityPackage
+    }
     Copy-Item -LiteralPath $UnityPackagePath -Destination (Join-Path $unityPluginRoot "VRCForge.unitypackage") -Force
 
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "licenses") | Out-Null
@@ -289,6 +294,7 @@ try {
         uvDownloadUrl = $uvDownloadUrl
         uvDownloadSha256 = $UvDownloadSha256
         artifacts = @(
+            @{ name = [System.IO.Path]::GetFileName($UnityPackagePath); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $UnityPackagePath).Hash.ToLowerInvariant() },
             @{ name = [System.IO.Path]::GetFileName($payloadZip); sha256 = $payloadSha256 },
             @{ name = [System.IO.Path]::GetFileName($offlineInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $offlineInstaller).Hash.ToLowerInvariant() },
             @{ name = [System.IO.Path]::GetFileName($webInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $webInstaller).Hash.ToLowerInvariant() }
