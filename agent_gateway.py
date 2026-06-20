@@ -881,6 +881,7 @@ class AgentGateway:
         # 由宿主在配置/调用 LLM 时更新，例如 "DeepSeek · deepseek-chat"。
         # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
         self.llm_planner_label: str = ""
+        self.llm_reasoning_trace: dict[str, Any] = {}
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -1295,7 +1296,9 @@ class AgentGateway:
         if history:
             self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
+        self.llm_reasoning_trace = {}
         plan = self._plan_agent_turn(message, params, observe, history)
+        reasoning_trace = ensure_dict(self.llm_reasoning_trace)
 
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
@@ -1326,6 +1329,8 @@ class AgentGateway:
             "observe": summarize_params(observe),
             "plan": plan,
         }
+        if int(reasoning_trace.get("itemCount") or 0) > 0:
+            turn["reasoning"] = reasoning_trace
         if shell_payload is not None:
             turn["shell"] = shell_payload
         if skill_payload is not None:
@@ -1367,6 +1372,8 @@ class AgentGateway:
             "observe": observe,
             "plan": plan,
         }
+        if int(reasoning_trace.get("itemCount") or 0) > 0:
+            payload["reasoning"] = reasoning_trace
         if shell_payload is not None:
             payload["shell"] = shell_payload
             if shell_payload.get("approval_id"):

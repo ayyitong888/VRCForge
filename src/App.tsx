@@ -48,6 +48,7 @@ import {
   AgentCheckpoint,
   AgentCheckpointPreview,
   AgentRuntimeResponse,
+  AgentReasoningTrace,
   AgentSkill,
   AgentSkillRegistry,
   AgentSkillResult,
@@ -2008,7 +2009,9 @@ export default function App() {
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
                   ))}
-                  {sending && currentTurn ? <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} /> : null}
+                  {sending && currentTurn ? (
+                    <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} provider={apiProvider} model={apiModel} />
+                  ) : null}
                   {queued.map((text, index) => (
                     <div key={`queued-${index}`} className="flex justify-end opacity-60">
                       <div className="max-w-[78%] rounded-2xl bg-primary/80 px-4 py-3 text-sm text-primary-foreground">
@@ -4160,6 +4163,12 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
           </div>
         </div>
 
+        <ReasoningTracePanel
+          trace={response.reasoning}
+          fallbackLabel={response.plan.plannerLabel || displayPlanner(response.plan.planner)}
+          elapsedSeconds={item.elapsedSeconds}
+        />
+
         {shell?.classification ? (
           <RunRow
             icon="shell"
@@ -4221,6 +4230,61 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
   );
 }
 
+function ReasoningTracePanel({
+  trace,
+  fallbackLabel,
+  elapsedSeconds,
+}: {
+  trace?: AgentReasoningTrace;
+  fallbackLabel: string;
+  elapsedSeconds?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const items = (trace?.items || []).filter((item) => (item.text || "").trim() || item.opaque);
+  if (!items.length) {
+    return null;
+  }
+  const status = thinkingStatusForModel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
+  const provider = trace?.providerLabel || trace?.provider || fallbackLabel || "model";
+  const model = trace?.model || "";
+  const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+        {elapsedSeconds ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{formatDuration(elapsedSeconds)}</span> : null}
+        <Badge tone={trace?.redacted ? "warn" : "muted"} className="shrink-0">
+          {items.length}
+        </Badge>
+      </button>
+      {open ? (
+        <div className="space-y-3 border-t border-border px-3 py-3">
+          <DataLine label="Provider" value={provider} />
+          {model ? <DataLine label="Model" value={model} mono /> : null}
+          {trace?.source ? <DataLine label="Source" value={trace.source} mono /> : null}
+          {items.map((item, index) => (
+            <OutputBlock
+              key={`${item.title || item.kind || "reasoning"}-${index}`}
+              label={item.title || item.kind || "Reasoning"}
+              value={item.text || (item.opaque ? "Opaque reasoning item retained by provider response." : "")}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RunRow({
   icon,
   title,
@@ -4259,19 +4323,21 @@ function RunRow({
   );
 }
 
-function RunningIndicator({ startedAt, text }: { startedAt: number; text: string }) {
+function RunningIndicator({ startedAt, text, provider, model }: { startedAt: number; text: string; provider: string; model: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const status = thinkingStatusForModel(provider, model);
   return (
     <div className="flex justify-start">
       <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-panel">
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
-        <span className="min-w-0 truncate">正在处理「{text}」</span>
-        <span className="shrink-0 font-mono text-xs">已运行 {formatDuration(seconds)}</span>
+        <span className="shrink-0 font-medium text-foreground">{status}</span>
+        <span className="min-w-0 truncate text-muted-foreground">「{text}」</span>
+        <span className="shrink-0 font-mono text-xs">{formatDuration(seconds)}</span>
       </div>
     </div>
   );
@@ -4661,6 +4727,29 @@ function providerCapabilities(provider: string): Array<{ label: string; tone: "o
     capabilities.push({ label: "long context", tone: "muted" });
   }
   return capabilities;
+}
+
+function thinkingStatusForModel(provider: string, model: string): string {
+  const key = `${provider || ""} ${model || ""}`.toLowerCase();
+  if (/(deepseek-reasoner|deepseek-r1|\br1\b|\bo[134](?:-|$)|reason|thinking)/.test(key)) {
+    return "Reasoning";
+  }
+  if (/(claude|anthropic)/.test(key)) {
+    return "Thinking";
+  }
+  if (/(gemini|google|vertex)/.test(key)) {
+    return "Thinking";
+  }
+  if (/(gpt|openai|codex)/.test(key)) {
+    return "Thinking";
+  }
+  if (/(deepseek|grok|x-ai|openrouter)/.test(key)) {
+    return "Thinking";
+  }
+  if (/(ollama|llama|qwen|mistral|mixtral|phi|local|custom)/.test(key)) {
+    return "Working on it";
+  }
+  return "Working on it";
 }
 
 function emptySkillDraft(): Partial<AgentSkill> {

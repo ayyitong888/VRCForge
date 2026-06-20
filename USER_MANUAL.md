@@ -24,6 +24,7 @@ This manual explains the public workflow and feature status without project-spec
 | `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
+| Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |
@@ -189,6 +190,8 @@ Composer commands / 输入框命令：
 
 VRCForge supports Google AI Studio, OpenAI, Anthropic, Ollama, Google Vertex AI, DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints.
 VRCForge 支持 Google AI Studio、OpenAI、Anthropic、Ollama、Google Vertex AI、DeepSeek、OpenRouter 和自定义 OpenAI-compatible endpoint。
+
+When a provider returns visible reasoning, thinking, or thought-summary fields, VRCForge passes them through to the chat response as a collapsed row. This includes fields such as DeepSeek `reasoning_content`, OpenRouter `reasoning_details`, Anthropic `thinking` blocks, Gemini thought summaries, and Ollama-style `thinking` fields when the selected model returns them. Opaque or encrypted reasoning continuity items are marked as opaque rather than displayed as plaintext.
 
 For face editing, original/current images and target reference images are both optional. Each group supports pasted images, local image selection, typed image paths, the latest Unity screenshot, or a new Unity screenshot captured from the desktop app. Added images show as removable previews.
 捏脸时，原图/当前脸和目标参考图都可以不传。每组都支持粘贴图片、选择本地图片、手填图片路径、使用最近 Unity 截图，或从桌面 app 直接捕获新的 Unity 截图。加入后的图片会显示为可单独删除的预览。

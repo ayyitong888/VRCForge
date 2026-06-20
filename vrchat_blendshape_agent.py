@@ -117,6 +117,12 @@ class McpResult:
     payload: Any | None
 
 
+@dataclass
+class LlmPlanResponse:
+    text: str
+    reasoning: dict[str, Any]
+
+
 class UnityMcpError(RuntimeError):
     pass
 
@@ -1267,16 +1273,30 @@ def request_llm_plan(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    return request_llm_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_path=reference_image_path,
+        reference_image_paths=reference_image_paths,
+    ).text
+
+
+def request_llm_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+) -> LlmPlanResponse:
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
     if provider == "gemini":
-        return request_gemini_plan(settings, prompt, reference_image_paths=image_paths)
+        return request_gemini_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
     if provider == "vertexai":
-        return request_vertex_ai_plan(settings, prompt, reference_image_paths=image_paths)
+        return request_vertex_ai_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
     if provider == "anthropic":
-        return request_anthropic_plan(settings, prompt, reference_image_paths=image_paths)
+        return request_anthropic_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
 
-    return request_openai_compatible_plan(settings, prompt, reference_image_paths=image_paths)
+    return request_openai_compatible_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
 
 
 def request_gemini_plan(
@@ -1285,6 +1305,20 @@ def request_gemini_plan(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    return request_gemini_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_path=reference_image_path,
+        reference_image_paths=reference_image_paths,
+    ).text
+
+
+def request_gemini_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+) -> LlmPlanResponse:
     try:
         from google import genai
     except ImportError as exc:
@@ -1306,7 +1340,10 @@ def request_gemini_plan(
             model=settings.llm_model,
             contents=contents,
         )
-        return getattr(response, "text", "") or ""
+        return LlmPlanResponse(
+            text=getattr(response, "text", "") or "",
+            reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
 
@@ -1317,6 +1354,20 @@ def request_vertex_ai_plan(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    return request_vertex_ai_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_path=reference_image_path,
+        reference_image_paths=reference_image_paths,
+    ).text
+
+
+def request_vertex_ai_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+) -> LlmPlanResponse:
     try:
         from google import genai
     except ImportError as exc:
@@ -1339,7 +1390,10 @@ def request_vertex_ai_plan(
             model=settings.llm_model,
             contents=contents,
         )
-        return getattr(response, "text", "") or ""
+        return LlmPlanResponse(
+            text=getattr(response, "text", "") or "",
+            reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
+        )
     except Exception as exc:  # noqa: BLE001
         detail = (
             f"Google Vertex AI request failed for model {settings.llm_model} "
@@ -1359,6 +1413,20 @@ def request_openai_compatible_plan(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    return request_openai_compatible_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_path=reference_image_path,
+        reference_image_paths=reference_image_paths,
+    ).text
+
+
+def request_openai_compatible_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+) -> LlmPlanResponse:
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
         raise RuntimeError(f"{provider_name} requires a Base URL for OpenAI-compatible requests.")
@@ -1394,7 +1462,10 @@ def request_openai_compatible_plan(
                 {"role": "user", "content": user_content},
             ],
         )
-        return extract_openai_message_text(response)
+        return LlmPlanResponse(
+            text=extract_openai_message_text(response),
+            reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
+        )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
@@ -1407,6 +1478,20 @@ def request_anthropic_plan(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
 ) -> str:
+    return request_anthropic_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_path=reference_image_path,
+        reference_image_paths=reference_image_paths,
+    ).text
+
+
+def request_anthropic_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_path: str | Path | None = None,
+    reference_image_paths: Sequence[str | Path] | None = None,
+) -> LlmPlanResponse:
     try:
         import anthropic
     except ImportError as exc:
@@ -1444,7 +1529,10 @@ def request_anthropic_plan(
             system="You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
             messages=[{"role": "user", "content": user_content}],
         )
-        return extract_anthropic_message_text(response)
+        return LlmPlanResponse(
+            text=extract_anthropic_message_text(response),
+            reasoning=extract_llm_reasoning_trace(response, settings, source="anthropic"),
+        )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, "Anthropic")) from exc
@@ -1569,6 +1657,125 @@ def extract_anthropic_message_text(response: Any) -> str:
         elif isinstance(block, dict) and block.get("text"):
             parts.append(str(block["text"]))
     return "\n".join(parts)
+
+
+def extract_llm_reasoning_trace(response: Any, settings: Settings, source: str = "") -> dict[str, Any]:
+    """Extract provider-returned visible reasoning/thinking fields.
+
+    This intentionally does not invent chain-of-thought. It only surfaces fields
+    the provider response explicitly returned, such as DeepSeek
+    ``reasoning_content``, Anthropic ``thinking`` blocks, Gemini thought
+    summaries, OpenRouter ``reasoning_details``, or opaque OpenAI reasoning
+    items.
+    """
+    items: list[dict[str, Any]] = []
+    redacted = False
+
+    def add_item(title: str, value: Any, kind: str = "reasoning", opaque: bool = False) -> None:
+        nonlocal redacted
+        if value is None:
+            return
+        text = stringify_reasoning_value(value)
+        if not text and not opaque:
+            return
+        if len(items) >= 8:
+            return
+        entry: dict[str, Any] = {
+            "title": title,
+            "kind": kind,
+            "text": text,
+        }
+        if opaque:
+            entry["opaque"] = True
+            redacted = True
+        items.append(entry)
+
+    choices = as_list(get_value(response, "choices"))
+    if choices:
+        message = get_value(choices[0], "message")
+        if message is not None:
+            add_item("reasoning_content", get_value(message, "reasoning_content"), "reasoning")
+            add_item("reasoning", get_value(message, "reasoning"), "reasoning")
+            add_item("thinking", get_value(message, "thinking"), "thinking")
+            add_item("reasoning_details", get_value(message, "reasoning_details"), "reasoning_details")
+
+    for block in as_list(get_value(response, "content")):
+        block_type = str(get_value(block, "type") or "").strip().lower()
+        if block_type == "thinking":
+            add_item("thinking", get_value(block, "thinking") or get_value(block, "text"), "thinking")
+        elif block_type == "redacted_thinking":
+            add_item("redacted thinking", "Provider returned an opaque thinking block.", "thinking", opaque=True)
+
+    for item in as_list(get_value(response, "output")):
+        item_type = str(get_value(item, "type") or "").strip().lower()
+        if item_type != "reasoning":
+            continue
+        summary = get_value(item, "summary")
+        if summary:
+            add_item("reasoning summary", summary, "summary")
+        encrypted = get_value(item, "encrypted_content")
+        if encrypted:
+            add_item("encrypted reasoning item", "Provider returned encrypted reasoning for continuity.", "encrypted", opaque=True)
+
+    for candidate in as_list(get_value(response, "candidates")):
+        content = get_value(candidate, "content")
+        for part in as_list(get_value(content, "parts")):
+            if bool(get_value(part, "thought")):
+                add_item("thought summary", get_value(part, "text"), "summary")
+
+    return {
+        "schema": "vrcforge.llm_reasoning.v1",
+        "provider": normalize_provider_name(settings.llm_provider),
+        "providerLabel": provider_display_name(settings.llm_provider),
+        "model": settings.llm_model,
+        "source": source,
+        "collapsedDefault": True,
+        "redacted": redacted,
+        "itemCount": len(items),
+        "items": items,
+    }
+
+
+def get_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    if value is None:
+        return None
+    return getattr(value, key, None)
+
+
+def as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if value is None:
+        return []
+    return [value]
+
+
+def stringify_reasoning_value(value: Any, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, list):
+        parts = [stringify_reasoning_value(item, limit=limit) for item in value]
+        text = "\n".join(part for part in parts if part)
+    elif isinstance(value, dict):
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    else:
+        model_dump = getattr(value, "model_dump", None)
+        to_dict = getattr(value, "to_dict", None)
+        if callable(model_dump):
+            text = json.dumps(model_dump(), ensure_ascii=False, indent=2, default=str)
+        elif callable(to_dict):
+            text = json.dumps(to_dict(), ensure_ascii=False, indent=2, default=str)
+        else:
+            text = str(value).strip()
+    if len(text) > limit:
+        return text[: limit - 14].rstrip() + "\n[truncated]"
+    return text
 
 
 def format_openai_compatible_error(exc: Exception, settings: Settings) -> str:

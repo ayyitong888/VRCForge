@@ -64,6 +64,7 @@ from vrchat_blendshape_agent import (
     provider_requires_api_key,
     read_plan_json,
     request_llm_plan,
+    request_llm_plan_with_metadata,
     render_apply_payload_json,
     render_preview,
     render_summary,
@@ -5237,7 +5238,12 @@ def _agent_gateway_llm_plan(prompt: str) -> str:
         raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
     label_parts = [provider_display_name(settings.llm_provider), str(settings.llm_model or "").strip()]
     AGENT_GATEWAY.llm_planner_label = " · ".join(part for part in label_parts if part)
-    return request_llm_plan(settings, prompt)
+    AGENT_GATEWAY.llm_reasoning_trace = {}
+    response = request_llm_plan_with_metadata(settings, prompt)
+    reasoning = dict(response.reasoning or {})
+    if int(reasoning.get("itemCount") or 0) > 0:
+        AGENT_GATEWAY.llm_reasoning_trace = reasoning
+    return response.text
 
 
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan

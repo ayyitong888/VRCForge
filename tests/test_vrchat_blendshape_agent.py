@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from vrchat_blendshape_agent import (
@@ -16,6 +17,7 @@ from vrchat_blendshape_agent import (
     filter_plan_by_instruction_relevance,
     filter_planning_payload_to_face_blendshapes,
     build_planning_payload,
+    extract_llm_reasoning_trace,
     humanize_unity_mcp_error,
     load_settings,
     load_export_payload,
@@ -84,6 +86,86 @@ def make_export_payload() -> dict:
             },
         ],
     }
+
+
+class LlmReasoningTraceTests(unittest.TestCase):
+    def test_extracts_openai_compatible_reasoning_fields(self) -> None:
+        settings = SimpleNamespace(llm_provider="deepseek", llm_model="deepseek-reasoner")
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"summary":"done"}',
+                        reasoning_content="checked avatar context first",
+                    )
+                )
+            ]
+        )
+
+        trace = extract_llm_reasoning_trace(response, settings, source="openai-compatible")
+
+        self.assertEqual(trace["provider"], "deepseek")
+        self.assertEqual(trace["model"], "deepseek-reasoner")
+        self.assertEqual(trace["itemCount"], 1)
+        self.assertEqual(trace["items"][0]["title"], "reasoning_content")
+        self.assertIn("checked avatar", trace["items"][0]["text"])
+
+    def test_extracts_anthropic_thinking_blocks(self) -> None:
+        settings = SimpleNamespace(llm_provider="anthropic", llm_model="claude-sonnet")
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="thinking", thinking="inspect tool state, then answer"),
+                SimpleNamespace(type="text", text='{"reply":"ok"}'),
+            ]
+        )
+
+        trace = extract_llm_reasoning_trace(response, settings, source="anthropic")
+
+        self.assertEqual(trace["itemCount"], 1)
+        self.assertEqual(trace["items"][0]["kind"], "thinking")
+        self.assertIn("inspect tool", trace["items"][0]["text"])
+
+    def test_extracts_gemini_thought_summary_parts(self) -> None:
+        settings = SimpleNamespace(llm_provider="gemini", llm_model="gemini-2.5-flash")
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(thought=True, text="summarized thought"),
+                            SimpleNamespace(thought=False, text='{"reply":"ok"}'),
+                        ]
+                    )
+                )
+            ]
+        )
+
+        trace = extract_llm_reasoning_trace(response, settings, source="gemini")
+
+        self.assertEqual(trace["itemCount"], 1)
+        self.assertEqual(trace["items"][0]["title"], "thought summary")
+        self.assertEqual(trace["items"][0]["text"], "summarized thought")
+
+    def test_extracts_openrouter_reasoning_details_and_opaque_items(self) -> None:
+        settings = SimpleNamespace(llm_provider="openrouter", llm_model="deepseek/deepseek-r1")
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "{}",
+                        "reasoning_details": [{"type": "reasoning.text", "text": "visible block"}],
+                    }
+                }
+            ],
+            "output": [{"type": "reasoning", "encrypted_content": "opaque"}],
+        }
+
+        trace = extract_llm_reasoning_trace(response, settings, source="openrouter")
+
+        self.assertEqual(trace["itemCount"], 2)
+        self.assertTrue(trace["redacted"])
+        self.assertIn("visible block", trace["items"][0]["text"])
+        self.assertTrue(trace["items"][1]["opaque"])
 
 
 class AvatarSelectionTests(unittest.TestCase):

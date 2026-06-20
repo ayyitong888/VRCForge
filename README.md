@@ -102,6 +102,7 @@ The desktop app also includes uninstall actions:
 | Startup Doctor | Environment-only health report for backend, Unity bridge/MCP, providers, SDK/dependency versions, gateway, skills, and checkpoint backend | Available / 可用 |
 | Debug logging + Support Bundle | User-controlled local interaction logs plus redacted Doctor export for startup/runtime troubleshooting | Available / 可用 |
 | Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
+| Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items are passed through to chat as a default-collapsed row | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |

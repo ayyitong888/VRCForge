@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import dashboard_server
 from agent_gateway import AgentGateway
 from skill_packages import SkillPackageService
-from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan
+from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
 
 def make_shader_inventory() -> dict:
@@ -627,6 +627,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["planner"], "deterministic-local")
         self.assertIn("session_id", payload)
         self.assertIn("turn_id", payload)
+
+    @patch("dashboard_server.request_llm_plan_with_metadata")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_agent_runtime_message_includes_provider_reasoning_trace(
+        self,
+        mock_load_settings,
+        mock_request_llm_plan,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="ollama",
+            llm_api_key="",
+            llm_model="qwen3",
+        )
+        mock_request_llm_plan.return_value = LlmPlanResponse(
+            text=json.dumps({"action": "reply", "reply": "ready"}),
+            reasoning={
+                "schema": "vrcforge.llm_reasoning.v1",
+                "provider": "ollama",
+                "providerLabel": "Ollama",
+                "model": "qwen3",
+                "collapsedDefault": True,
+                "itemCount": 1,
+                "items": [{"title": "thinking", "kind": "thinking", "text": "visible model thinking"}],
+            },
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.post("/api/app/agent/message", json={"message": "hello model planner"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["plan"]["planner"], "llm")
+        self.assertEqual(payload["reasoning"]["provider"], "ollama")
+        self.assertTrue(payload["reasoning"]["collapsedDefault"])
+        self.assertEqual(payload["reasoning"]["items"][0]["text"], "visible model thinking")
 
     def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
         with TestClient(dashboard_server.app) as client:

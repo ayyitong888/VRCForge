@@ -220,6 +220,23 @@ export type AgentSkillResult = {
   error?: string;
 };
 
+export type AgentReasoningTrace = {
+  schema?: string;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  source?: string;
+  collapsedDefault?: boolean;
+  redacted?: boolean;
+  itemCount?: number;
+  items?: Array<{
+    title?: string;
+    kind?: string;
+    text?: string;
+    opaque?: boolean;
+  }>;
+};
+
 export type AgentRuntimeResponse = {
   ok: boolean;
   session_id: string;
@@ -242,6 +259,7 @@ export type AgentRuntimeResponse = {
     expectedResult?: string;
     nextStep?: string;
   };
+  reasoning?: AgentReasoningTrace;
   shell?: {
     ok: boolean;
     status: "executed" | "pending_approval" | "rejected" | string;
