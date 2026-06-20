@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,7 +98,7 @@ class ExternalAgentBridgeSmoke:
 
     def client_preflight(self) -> dict[str, Any]:
         return {
-            "codexCli": probe_command(["codex", "--version"]),
+            "codexCli": probe_codex_cli(),
             "claudeCli": probe_command(["claude", "--version"]),
             "codexApp": probe_windows_app("OpenAI.Codex"),
             "claudeCoworkApp": probe_windows_app("Claude"),
@@ -537,15 +538,78 @@ def request_json(
     return json.loads(text or "{}")
 
 
-def probe_command(command: list[str]) -> dict[str, Any]:
-    exe = shutil.which(command[0])
-    payload: dict[str, Any] = {"found": bool(exe), "path": exe or "", "ok": False, "stdout": "", "stderr": "", "error": ""}
+def probe_codex_cli() -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    env_cli = os.environ.get("CODEX_CLI_PATH", "").strip()
+    if env_cli:
+        append_codex_probe_attempt(attempts, seen, env_cli, "env:CODEX_CLI_PATH")
+
+    config_path = resolve_codex_config_path()
+    config_cli = read_codex_cli_path_from_config(config_path)
+    if config_cli:
+        append_codex_probe_attempt(attempts, seen, config_cli, f"config:{config_path}")
+
+    path_cli = shutil.which("codex")
+    if path_cli:
+        append_codex_probe_attempt(attempts, seen, path_cli, "PATH")
+    elif not attempts:
+        attempts.append(probe_command(["codex", "--version"], source="PATH"))
+
+    ok_attempt = next((attempt for attempt in attempts if attempt.get("ok")), None)
+    best = ok_attempt or next((attempt for attempt in attempts if attempt.get("found")), attempts[-1] if attempts else {})
+    result = dict(best)
+    result["attempts"] = attempts
+    if ok_attempt and ok_attempt.get("source") != "PATH":
+        result["preferredConfiguredCli"] = True
+    return result
+
+
+def append_codex_probe_attempt(attempts: list[dict[str, Any]], seen: set[str], cli_path: str, source: str) -> None:
+    normalized = str(Path(cli_path).expanduser())
+    key = normalized.lower() if os.name == "nt" else normalized
+    if key in seen:
+        return
+    seen.add(key)
+    attempts.append(probe_command([normalized, "--version"], source=source))
+
+
+def resolve_codex_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def read_codex_cli_path_from_config(path: Path) -> str:
+    text = read_text_file(path)
+    if not text:
+        return ""
+    for line in text.splitlines():
+        match = re.match(r"\s*CODEX_CLI_PATH\s*=\s*(['\"])(.*?)\1\s*(?:#.*)?$", line)
+        if match:
+            return match.group(2).strip()
+    return ""
+
+
+def probe_command(command: list[str], source: str = "PATH") -> dict[str, Any]:
+    exe = resolve_command_exe(command[0])
+    payload: dict[str, Any] = {
+        "found": bool(exe),
+        "path": exe or "",
+        "source": source,
+        "ok": False,
+        "stdout": "",
+        "stderr": "",
+        "error": "",
+    }
     if not exe:
-        payload["error"] = f"{command[0]} was not found on PATH."
+        payload["error"] = f"{command[0]} was not found."
         return payload
     try:
         completed = subprocess.run(
-            command,
+            [exe, *command[1:]],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -566,6 +630,13 @@ def probe_command(command: list[str]) -> dict[str, Any]:
         }
     )
     return payload
+
+
+def resolve_command_exe(command_name: str) -> str:
+    command_path = Path(command_name).expanduser()
+    if command_path.is_file():
+        return str(command_path)
+    return shutil.which(command_name) or ""
 
 
 def probe_windows_app(name_fragment: str) -> dict[str, Any]:
