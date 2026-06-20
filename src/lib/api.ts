@@ -474,6 +474,21 @@ export type ExternalAgentConnectorStatus = {
     restUrl?: string;
     pendingApprovalCount?: number;
   };
+  clients?: Record<
+    "codexApp" | "codexCli" | "claudeCode" | "claudeCowork",
+    {
+      label?: string;
+      scope?: "user" | "project" | string;
+      configPath?: string;
+      installed?: boolean;
+      installable?: boolean;
+      lastError?: string;
+      sharedConfigGroup?: string;
+      cliDetected?: boolean | null;
+      bridge?: unknown;
+      restartInstruction?: string;
+    }
+  >;
   clientConfigs: {
     codex?: { format: string; text: string; config?: unknown };
     codexStdio?: { format: string; text: string; config?: unknown; transport?: string };
@@ -511,6 +526,40 @@ export type ExternalAgentConnectorStatus = {
   advertisedTools?: Array<{ name?: string; category?: string; write?: boolean }>;
   writeTargets?: Array<{ name?: string; riskLevel?: string; advanced?: boolean }>;
   lastCalls?: Array<{ event?: string; createdAt?: string; agentName?: string; targetTool?: string; status?: string; riskLevel?: string }>;
+  lastConnectorAction?: ExternalAgentConnectorActionResult;
+};
+
+export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork";
+
+export type ExternalAgentConnectorActionResult = {
+  ok: boolean;
+  client?: string;
+  action?: "install" | "uninstall" | string;
+  stage?: string;
+  configPath?: string;
+  backupPath?: string;
+  changed?: boolean;
+  installed?: boolean;
+  removed?: boolean;
+  restartRequired?: boolean;
+  restartInstruction?: string;
+  bridge?: unknown;
+  handshake?: {
+    ok?: boolean;
+    connected?: boolean;
+    ready?: boolean;
+    stage?: string;
+    toolCount?: number;
+    toolsSample?: string[];
+    hasBridgePreflight?: boolean;
+    hasRequestApply?: boolean;
+    stderrTail?: string[];
+    error?: string;
+    warning?: string;
+    suggestion?: string;
+  };
+  error?: string;
+  suggestion?: string;
 };
 
 export type SkillPackageEntry = {
@@ -596,6 +645,28 @@ export async function updateExternalAgentGateway(
   request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean },
 ): Promise<ExternalAgentConnectorStatus> {
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/gateway`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function installExternalAgentConnector(
+  endpoint: string,
+  request: { client: ExternalAgentConnectorClient; projectPath?: string },
+): Promise<ExternalAgentConnectorStatus> {
+  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function uninstallExternalAgentConnector(
+  endpoint: string,
+  request: { client: ExternalAgentConnectorClient; projectPath?: string },
+): Promise<ExternalAgentConnectorStatus> {
+  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors/uninstall`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

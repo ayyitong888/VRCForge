@@ -14,6 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from external_agent_connector_installer import StdioBridgeSpec, run_stdio_mcp_handshake
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
 HIDDEN_EXTERNAL_TOOLS = {"vrcforge_apply_approved", "vrcforge_execute_approved_shell"}
@@ -79,6 +85,7 @@ class ExternalAgentBridgeSmoke:
             if self.args.enable_gateway:
                 self.step("gateway.enable", self.enable_gateway())
             self.step("stdio.bridge_preflight", self.check_stdio_bridge_preflight())
+            self.step("stdio.mcp_tools_list", self.check_stdio_mcp_tools())
             self.step("gateway.manifest", self.check_manifest())
             self.step("mcp.tools_list", self.check_mcp_tools())
             if self.args.live_write_rollback:
@@ -212,6 +219,36 @@ class ExternalAgentBridgeSmoke:
             "advertisesRequestApply": bool(payload.get("advertisesRequestApply")),
             "advertisesDirectApply": bool(payload.get("advertisesDirectApply")),
             "error": payload.get("error") or completed.stderr.strip()[:500],
+        }
+
+    def check_stdio_mcp_tools(self) -> dict[str, Any]:
+        launcher = ensure_dict(ensure_dict(self.connector_payload.get("launcher")).get("stdioBridge"))
+        command_text = str(launcher.get("command") or sys.executable).strip()
+        bridge_args = [str(item) for item in ensure_list(launcher.get("args"))]
+        cwd = str(launcher.get("cwd") or Path(__file__).resolve().parents[1])
+        env = os.environ.copy()
+        env["VRCFORGE_AGENT_BASE_URL"] = self.base_url
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        previous_env = os.environ.copy()
+        try:
+            os.environ.update(env)
+            result = run_stdio_mcp_handshake(
+                StdioBridgeSpec(
+                    command=command_text,
+                    args=bridge_args,
+                    cwd=cwd,
+                    packaged=bool(launcher.get("packaged")),
+                    source="smoke-connector-payload",
+                ),
+                timeout_seconds=min(max(self.args.timeout, 15.0), 60.0),
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(previous_env)
+        return {
+            **result,
+            "ok": bool(result.get("ok")) and bool(result.get("hasRequestApply")),
+            "requestApplyListed": bool(result.get("hasRequestApply")),
         }
 
     def check_manifest(self) -> dict[str, Any]:

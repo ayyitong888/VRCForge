@@ -175,6 +175,8 @@ External MCP clients can request writes, but VRCForge owns approval and executio
 
 Use HTTP config when VRCForge Desktop is already running. Use the stdio bridge config for local MCP clients that should start or reconnect to VRCForge automatically. Installed builds generate a stdio command that runs `backend/vrcforge_backend.exe --agent-mcp-stdio`; source checkouts use `python tools/vrcforge_agent_mcp_stdio.py`. The stdio bridge reads the gateway token from the VRCForge user-data config or `VRCFORGE_AGENT_TOKEN`; copied configs must not contain plaintext tokens.
 
+Settings > Agent Connectors also provides one-click install/remove/copy actions for four MCP client targets: Codex App, Codex CLI, Claude Code CLI, and Claude Cowork App. Codex App and Codex CLI share the user `~/.codex/config.toml` server entry; Claude Code writes the selected project's `.mcp.json`; Claude Cowork writes `%APPDATA%\Claude\claude_desktop_config.json` and marks the server as `type: sdk`. Installs merge instead of overwriting existing servers, create a backup before writing, reject invalid JSON/TOML without partial writes, and run a real stdio MCP `initialize` + `tools/list` self-test before reporting success. When a client is not installed, VRCForge still writes valid config and reports the missing client separately.
+
 Connector success is gated by smoke tests:
 
 ```powershell
@@ -182,12 +184,13 @@ npm run smoke:external-agent
 npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
 ```
 
-The preflight smoke temporarily enables the gateway, checks connector config, reads the manifest, and lists MCP tools without writing Unity. The live smoke additionally forces approval mode, requests a supervised Unity write through MCP, approves it through the desktop app API, creates a pre-write checkpoint, runs validation, requests checkpoint restore through MCP, approves rollback, verifies the temporary scene object is gone, checks Unity compile errors, and restores the previous gateway/permission state. A passing report is written under `artifacts/external-agent-smoke/`. Success requires `vrcforge_request_apply` to be advertised, direct apply tools to be absent, a checkpoint id to be created for live writes, rollback to complete, no temporary object residue, and compile errors to remain zero.
+The preflight smoke temporarily enables the gateway, checks connector config, runs stdio bridge preflight, performs a real stdio MCP `initialize` + `tools/list`, reads the manifest, and lists HTTP MCP tools without writing Unity. The live smoke additionally forces approval mode, requests a supervised Unity write through MCP, approves it through the desktop app API, creates a pre-write checkpoint, runs validation, requests checkpoint restore through MCP, approves rollback, verifies the temporary scene object is gone, checks Unity compile errors, and restores the previous gateway/permission state. A passing report is written under `artifacts/external-agent-smoke/`. Success requires `vrcforge_request_apply` to be advertised, direct apply tools to be absent, a checkpoint id to be created for live writes, rollback to complete, no temporary object residue, and compile errors to remain zero.
 
 Common failure meanings:
 
 - `Gateway token was not found`: start VRCForge Desktop once or use the stdio bridge so it can read user-data config.
 - `connector.config` 404: the running backend is older than this connector/smoke layer; install or start a backend built from the current commit.
+- `stdio.mcp_tools_list` failed with `No module named 'mcp'`: a source-checkout bridge is using a Python environment without the MCP package; use the packaged build or install source dependencies.
 - `directApplyAdvertised`: the backend is exposing internal approval execution to external agents; do not treat that runtime as release-ready.
 - `mcp.tools_list` 403: the gateway is disabled or the token is invalid.
 - `rollback.verify_no_residue` failed: stop release work and fix rollback before shipping.

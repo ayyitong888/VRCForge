@@ -62,6 +62,7 @@ import {
   DoctorCheck,
   DoctorReport,
   DiagnosticsStatus,
+  ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
   ProjectIndexScanResult,
   SkillPackageEntry,
@@ -87,6 +88,7 @@ import {
   fetchChats,
   fetchProjectPrefs,
   fetchProviderModels,
+  installExternalAgentConnector,
   importSkillPackage,
   preflightSkillPackage,
   ProjectPrefs,
@@ -105,6 +107,7 @@ import {
   updateExternalAgentGateway,
   updatePermission,
   updateSkill,
+  uninstallExternalAgentConnector,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
@@ -117,6 +120,37 @@ type BackendStartResult = {
   mode: string;
   message: string;
 };
+
+const CONNECTOR_CLIENT_LABELS: Record<ExternalAgentConnectorClient, string> = {
+  codexApp: "Codex App",
+  codexCli: "Codex CLI",
+  claudeCode: "Claude Code CLI",
+  claudeCowork: "Claude Cowork App",
+};
+
+function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
+  if (client === "codex") {
+    return "codexApp";
+  }
+  return client === "codexApp" || client === "codexCli" || client === "claudeCode" || client === "claudeCowork" ? client : "";
+}
+
+function formatConnectorActionMessage(client: ExternalAgentConnectorClient, action?: ExternalAgentConnectorStatus["lastConnectorAction"]) {
+  const label = CONNECTOR_CLIENT_LABELS[client] || client;
+  if (!action) {
+    return `${label} updated`;
+  }
+  const verb = action.action === "uninstall" ? "removed" : "installed";
+  if (!action.ok) {
+    return `${label} ${action.action || "action"} failed: ${action.error || action.stage || "see details"}`;
+  }
+  if (action.action === "install") {
+    const toolCount = action.handshake?.toolCount;
+    const ready = action.handshake?.ready ? "ready" : action.handshake?.connected ? "connected" : "checked";
+    return `${label} installed; ${ready}${toolCount !== undefined ? `, ${toolCount} tools` : ""}`;
+  }
+  return `${label} ${verb}`;
+}
 
 type ConversationItem =
   | { id: string; type: "user"; text: string }
@@ -1429,6 +1463,34 @@ export default function App() {
     }
   }
 
+  async function runConnectorAction(client: ExternalAgentConnectorClient, action: "install" | "uninstall") {
+    setLoadingConnectors(true);
+    setConnectorMessage("");
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const request = { client, projectPath: activeProjectPath || undefined };
+      const payload =
+        action === "install"
+          ? await installExternalAgentConnector(targetEndpoint, request)
+          : await uninstallExternalAgentConnector(targetEndpoint, request);
+      setConnectorStatus(payload);
+      setConnectorMessage(formatConnectorActionMessage(client, payload.lastConnectorAction));
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingConnectors(false);
+    }
+  }
+
   async function saveNotes(event?: FormEvent) {
     event?.preventDefault();
     if (savingNotes) {
@@ -2141,10 +2203,13 @@ export default function App() {
                     status={connectorStatus}
                     loading={loadingConnectors}
                     message={connectorMessage}
+                    selectedProjectPath={activeProjectPath}
                     onRefresh={() => void loadConnectors()}
                     onToggleGateway={(enabled) => void updateGatewaySettings({ enabled })}
                     onToggleWriteRequests={(allowWriteRequests) => void updateGatewaySettings({ allowWriteRequests })}
                     onRevoke={() => void updateGatewaySettings({ revokeToken: true })}
+                    onInstall={(client) => void runConnectorAction(client, "install")}
+                    onUninstall={(client) => void runConnectorAction(client, "uninstall")}
                     onCopy={(text, label) => {
                       void navigator.clipboard
                         .writeText(text)
@@ -3238,19 +3303,25 @@ function ExternalAgentConnectorsPanel({
   status,
   loading,
   message,
+  selectedProjectPath,
   onRefresh,
   onToggleGateway,
   onToggleWriteRequests,
   onRevoke,
+  onInstall,
+  onUninstall,
   onCopy,
 }: {
   status: ExternalAgentConnectorStatus | null;
   loading: boolean;
   message: string;
+  selectedProjectPath: string;
   onRefresh: () => void;
   onToggleGateway: (enabled: boolean) => void;
   onToggleWriteRequests: (enabled: boolean) => void;
   onRevoke: () => void;
+  onInstall: (client: ExternalAgentConnectorClient) => void;
+  onUninstall: (client: ExternalAgentConnectorClient) => void;
   onCopy: (text: string, label: string) => void;
 }) {
   const gateway = status?.gateway;
@@ -3265,6 +3336,47 @@ function ExternalAgentConnectorsPanel({
   const smokeArgs = status?.launcher?.smoke?.args || [];
   const smokeLiveArgs = status?.launcher?.smoke?.liveWriteRollbackArgs || [];
   const smokeCommand = [status?.launcher?.smoke?.command, ...smokeArgs, ...smokeLiveArgs].filter(Boolean).join(" ");
+  const clients = status?.clients;
+  const lastAction = status?.lastConnectorAction;
+  const connectorRows: Array<{
+    client: ExternalAgentConnectorClient;
+    title: string;
+    mode: string;
+    copyText: string;
+    copyLabel: string;
+    shared?: string;
+  }> = [
+    {
+      client: "codexApp",
+      title: "Codex App",
+      mode: "User config",
+      copyText: codexStdioText,
+      copyLabel: "Codex App config",
+      shared: "Shared with Codex CLI",
+    },
+    {
+      client: "codexCli",
+      title: "Codex CLI",
+      mode: "User config",
+      copyText: codexStdioText,
+      copyLabel: "Codex CLI config",
+      shared: "Shared with Codex App",
+    },
+    {
+      client: "claudeCode",
+      title: "Claude Code CLI",
+      mode: "Project config",
+      copyText: claudeStdioText,
+      copyLabel: "Claude Code config",
+    },
+    {
+      client: "claudeCowork",
+      title: "Claude Cowork App",
+      mode: "Desktop config",
+      copyText: claudeStdioText,
+      copyLabel: "Claude Cowork config",
+    },
+  ];
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="flex min-w-0 items-center gap-2">
@@ -3299,9 +3411,30 @@ function ExternalAgentConnectorsPanel({
         />
       </div>
 
+      <div className="mt-5 grid gap-3">
+        {connectorRows.map((row) => (
+          <ConnectorClientRow
+            key={row.client}
+            client={row.client}
+            title={row.title}
+            mode={row.mode}
+            state={clients?.[row.client]}
+            loading={loading}
+            copyText={row.copyText}
+            copyLabel={row.copyLabel}
+            shared={row.shared}
+            selectedProjectPath={selectedProjectPath}
+            lastAction={lastAction}
+            onInstall={onInstall}
+            onUninstall={onUninstall}
+            onCopy={onCopy}
+          />
+        ))}
+      </div>
+
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         {message ? (
-          <Badge tone="ok" className="mr-auto shrink-0">
+          <Badge tone={lastAction?.ok === false ? "danger" : "ok"} className="mr-auto shrink-0">
             {message}
           </Badge>
         ) : null}
@@ -3309,21 +3442,13 @@ function ExternalAgentConnectorsPanel({
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           Refresh
         </Button>
-        <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex config")}>
+        <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex HTTP config")}>
           <Copy className="h-4 w-4" />
           Codex HTTP
         </Button>
-        <Button type="button" variant="outline" disabled={!codexStdioText} onClick={() => onCopy(codexStdioText, "Codex stdio config")}>
-          <Copy className="h-4 w-4" />
-          Codex App
-        </Button>
-        <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude config")}>
+        <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude HTTP config")}>
           <Copy className="h-4 w-4" />
           Claude HTTP
-        </Button>
-        <Button type="button" variant="outline" disabled={!claudeStdioText} onClick={() => onCopy(claudeStdioText, "Claude stdio config")}>
-          <Copy className="h-4 w-4" />
-          Claude App
         </Button>
         <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>
           Revoke token
@@ -3349,6 +3474,114 @@ function ExternalAgentConnectorsPanel({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+type ConnectorClientState = NonNullable<ExternalAgentConnectorStatus["clients"]>[ExternalAgentConnectorClient];
+
+function ConnectorClientRow({
+  client,
+  title,
+  mode,
+  state,
+  loading,
+  copyText,
+  copyLabel,
+  shared,
+  selectedProjectPath,
+  lastAction,
+  onInstall,
+  onUninstall,
+  onCopy,
+}: {
+  client: ExternalAgentConnectorClient;
+  title: string;
+  mode: string;
+  state?: ConnectorClientState;
+  loading: boolean;
+  copyText: string;
+  copyLabel: string;
+  shared?: string;
+  selectedProjectPath: string;
+  lastAction?: ExternalAgentConnectorStatus["lastConnectorAction"];
+  onInstall: (client: ExternalAgentConnectorClient) => void;
+  onUninstall: (client: ExternalAgentConnectorClient) => void;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const installed = Boolean(state?.installed);
+  const installable = state?.installable !== false && !(client === "claudeCode" && !selectedProjectPath);
+  const actionMatches = normalizeConnectorClient(lastAction?.client) === client;
+  const action = actionMatches ? lastAction : undefined;
+  const handshake = action?.handshake;
+  const statusTone = installed ? "ok" : installable ? "muted" : "warn";
+  const statusLabel = installed ? "Installed" : installable ? "Not installed" : "Needs project";
+  return (
+    <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-semibold">{title}</span>
+          <Badge tone={statusTone} className="shrink-0">
+            {statusLabel}
+          </Badge>
+          <Badge tone="muted" className="shrink-0">
+            {mode}
+          </Badge>
+          {shared ? (
+            <Badge tone="muted" className="shrink-0">
+              {shared}
+            </Badge>
+          ) : null}
+          {state?.cliDetected !== null && state?.cliDetected !== undefined ? (
+            <Badge tone={state.cliDetected ? "ok" : "muted"} className="shrink-0">
+              CLI {state.cliDetected ? "found" : "not found"}
+            </Badge>
+          ) : null}
+        </div>
+        <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+          <div className="min-w-0 truncate">
+            <span className="mr-2 text-foreground/70">Config</span>
+            <span className="font-mono">{state?.configPath || "-"}</span>
+          </div>
+          {state?.lastError ? <div className="text-amber-700 dark:text-amber-300">{state.lastError}</div> : null}
+          {!installable && client === "claudeCode" ? (
+            <div className="text-amber-700 dark:text-amber-300">Select a project before installing project-level config.</div>
+          ) : null}
+          {action ? (
+            <div
+              className={cn(
+                "mt-1 grid gap-1 rounded-md px-2 py-1.5",
+                action.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-destructive/10 text-destructive",
+              )}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="font-medium">{action.ok ? "Self-test passed" : "Self-test failed"}</span>
+                {handshake?.toolCount !== undefined ? <span>{handshake.toolCount} tools</span> : null}
+                {handshake?.connected ? <span>connected</span> : null}
+                {handshake?.ready ? <span>ready</span> : null}
+              </div>
+              {action.error ? <div className="break-words">{action.error}</div> : null}
+              {handshake?.warning ? <div className="break-words">{handshake.warning}</div> : null}
+              {action.suggestion || handshake?.suggestion ? <div className="break-words">{action.suggestion || handshake?.suggestion}</div> : null}
+              {action.backupPath ? <div className="truncate font-mono text-[11px]">Backup {action.backupPath}</div> : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-start justify-end gap-2">
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !copyText} onClick={() => onCopy(copyText, copyLabel)}>
+          <Copy className="h-3.5 w-3.5" />
+          Copy
+        </Button>
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !installable} onClick={() => onInstall(client)}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Install
+        </Button>
+        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installed} onClick={() => onUninstall(client)}>
+          <Trash2 className="h-3.5 w-3.5" />
+          Remove
+        </Button>
+      </div>
     </div>
   );
 }

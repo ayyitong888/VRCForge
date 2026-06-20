@@ -34,6 +34,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, redact_sensitive
+from external_agent_connector_installer import (
+    ConnectorInstallError,
+    connector_client_statuses,
+    install_connector,
+    resolve_stdio_bridge,
+    uninstall_connector,
+)
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
 from outfit_package_inspector import inspect_outfit_package
 from project_memory_index import scan_project_memory
@@ -516,6 +523,13 @@ class ExternalAgentGatewayUpdateRequest(BaseModel):
     enabled: bool | None = None
     allow_write_requests: bool | None = Field(default=None, alias="allowWriteRequests")
     revoke_token: bool = Field(default=False, alias="revokeToken")
+
+    model_config = {"populate_by_name": True}
+
+
+class ExternalAgentConnectorActionRequest(BaseModel):
+    client: Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork"]
+    project_path: str | None = Field(default=None, alias="projectPath")
 
     model_config = {"populate_by_name": True}
 
@@ -1423,16 +1437,10 @@ def inspect_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
-    packaged_stdio_command = ROOT_DIR / "backend" / "vrcforge_backend.exe"
-    if not packaged_stdio_command.is_file():
-        packaged_stdio_command = ROOT_DIR / "backend" / "vrcforge_backend"
-    if packaged_stdio_command.is_file() and not (params.get("stdioCommand") or params.get("stdio_command")):
-        stdio_command = str(packaged_stdio_command)
-        stdio_script = params.get("stdioScript") or params.get("stdio_script") or "--agent-mcp-stdio"
-    else:
-        stdio_command = str(params.get("stdioCommand") or params.get("stdio_command") or "python")
-        stdio_script = params.get("stdioScript") or params.get("stdio_script") or (ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
-    stdio_cwd = params.get("stdioCwd") or params.get("stdio_cwd") or ROOT_DIR
+    bridge = resolve_stdio_bridge(ROOT_DIR)
+    stdio_command = str(params.get("stdioCommand") or params.get("stdio_command") or bridge.command)
+    stdio_script = params.get("stdioScript") or params.get("stdio_script") or (bridge.args[0] if bridge.args else "")
+    stdio_cwd = params.get("stdioCwd") or params.get("stdio_cwd") or bridge.cwd
     smoke_script = params.get("smokeScript") or params.get("smoke_script") or (ROOT_DIR / "scripts" / "smoke_external_agent_bridge.py")
     options = ExternalAgentConnectorOptions(
         server_name=str(params.get("serverName") or params.get("server_name") or "vrcforge"),
@@ -1477,12 +1485,21 @@ def _list_or_empty(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def external_agent_status_sync() -> dict[str, Any]:
+def _selected_project_path_or(project_path: str | None = None) -> str:
+    value = str(project_path or "").strip()
+    if value:
+        return value
+    return DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+
+
+def external_agent_status_sync(project_path: str | None = None) -> dict[str, Any]:
     config = AGENT_GATEWAY.ensure_config()
     health = safe_agent_health()
     manifest = safe_agent_manifest()
+    selected_project_path = _selected_project_path_or(project_path)
     return {
         **connector_bundle_sync({}),
+        "clients": connector_client_statuses(root_dir=ROOT_DIR, project_path=selected_project_path),
         "gateway": {
             "enabled": bool(config.enabled),
             "requiresToken": bool(config.require_token),
@@ -1521,6 +1538,69 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     return external_agent_status_sync()
 
 
+def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:
+    client = str(params.get("client") or "").strip()
+    project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
+    try:
+        action = install_connector(client, root_dir=ROOT_DIR, project_path=project_path)
+    except ConnectorInstallError as exc:
+        action = exc.as_result(client=client or "unknown", action="install")
+    except Exception as exc:  # noqa: BLE001 - connector UX should return diagnostics instead of crashing Settings.
+        action = {
+            "ok": False,
+            "client": client or "unknown",
+            "action": "install",
+            "stage": "unexpected",
+            "error": str(exc),
+            "suggestion": "Export a support bundle and retry after restarting VRCForge.",
+        }
+    emit_log(
+        "success" if action.get("ok") else "warn",
+        "connectors",
+        f"External agent connector install {'succeeded' if action.get('ok') else 'failed'}.",
+        {
+            "client": action.get("client"),
+            "stage": action.get("stage", ""),
+            "configPath": action.get("configPath", ""),
+            "error": action.get("error", ""),
+            "suggestion": action.get("suggestion", ""),
+            "handshake": action.get("handshake", {}),
+        },
+    )
+    return {**external_agent_status_sync(project_path), "lastConnectorAction": action}
+
+
+def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:
+    client = str(params.get("client") or "").strip()
+    project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
+    try:
+        action = uninstall_connector(client, project_path=project_path)
+    except ConnectorInstallError as exc:
+        action = exc.as_result(client=client or "unknown", action="uninstall")
+    except Exception as exc:  # noqa: BLE001
+        action = {
+            "ok": False,
+            "client": client or "unknown",
+            "action": "uninstall",
+            "stage": "unexpected",
+            "error": str(exc),
+            "suggestion": "Export a support bundle and retry after restarting VRCForge.",
+        }
+    emit_log(
+        "success" if action.get("ok") else "warn",
+        "connectors",
+        f"External agent connector uninstall {'succeeded' if action.get('ok') else 'failed'}.",
+        {
+            "client": action.get("client"),
+            "stage": action.get("stage", ""),
+            "configPath": action.get("configPath", ""),
+            "error": action.get("error", ""),
+            "suggestion": action.get("suggestion", ""),
+        },
+    )
+    return {**external_agent_status_sync(project_path), "lastConnectorAction": action}
+
+
 @app.get("/api/app/external-agent/connectors")
 def app_external_agent_connectors() -> dict[str, Any]:
     return external_agent_status_sync()
@@ -1531,6 +1611,8 @@ def app_external_agent_connectors_custom(request: ExternalAgentConnectorRequest)
     try:
         payload = connector_bundle_sync(request.model_dump(by_alias=True))
         return {**external_agent_status_sync(), **payload}
+    except ConnectorInstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1538,6 +1620,16 @@ def app_external_agent_connectors_custom(request: ExternalAgentConnectorRequest)
 @app.post("/api/app/external-agent/gateway")
 def app_update_external_agent_gateway(request: ExternalAgentGatewayUpdateRequest) -> dict[str, Any]:
     return update_external_agent_gateway_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/external-agent/connectors/install")
+def app_install_external_agent_connector(request: ExternalAgentConnectorActionRequest) -> dict[str, Any]:
+    return install_external_agent_connector_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/external-agent/connectors/uninstall")
+def app_uninstall_external_agent_connector(request: ExternalAgentConnectorActionRequest) -> dict[str, Any]:
+    return uninstall_external_agent_connector_sync(request.model_dump(by_alias=True))
 
 
 @app.get("/api/app/skill-packages")

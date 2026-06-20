@@ -275,10 +275,14 @@ def find_vrcforge_executable() -> Path | None:
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path))
-    program_files = [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
-    for base in program_files:
-        if base:
-            candidates.append(Path(base) / "VRCForge" / "VRCForge.exe")
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False) or executable.name.lower().startswith("vrcforge_backend"):
+        candidates.extend(
+            [
+                executable.parent.parent / "VRCForge.exe",
+                executable.parent / "VRCForge.exe",
+            ]
+        )
     root = Path(__file__).resolve().parents[1]
     candidates.extend(
         [
@@ -286,6 +290,10 @@ def find_vrcforge_executable() -> Path | None:
             root / "dist" / "VRCForge_Windows_x64" / "VRCForge.exe",
         ]
     )
+    program_files = [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
+    for base in program_files:
+        if base:
+            candidates.append(Path(base) / "VRCForge" / "VRCForge.exe")
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
