@@ -800,7 +800,11 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     if (cause instanceof DOMException && cause.name === "AbortError") {
       throw new ApiError(`Request timed out after ${timeoutMs / 1000}s`, 0);
     }
-    throw cause;
+    throw new ApiError(
+      `VRCForge runtime is not reachable at ${runtimeOriginFromUrl(url)}. Use Retry to start the local backend, or open Doctor for logs and repair steps.`,
+      0,
+      cause instanceof Error ? cause.message : String(cause),
+    );
   } finally {
     window.clearTimeout(timeout);
   }
@@ -819,4 +823,13 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(typeof detail === "string" ? detail : `HTTP ${response.status}`, response.status, detail);
   }
   return payload as T;
+}
+
+function runtimeOriginFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "the configured endpoint";
+  }
 }

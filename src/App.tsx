@@ -314,14 +314,14 @@ export default function App() {
     if (loading && !error) {
       return { name: "扫描中", meta: "wait" };
     }
+    if (hasStartupIssue || !runtimeConnected) {
+      return { name: "核心未连接", meta: "retry" };
+    }
     if (error) {
       return { name: "刷新失败", meta: "retry" };
     }
-    if (!runtimeConnected) {
-      return { name: "核心未连接", meta: "retry" };
-    }
     return { name: "未发现 Unity 项目", meta: "empty" };
-  }, [error, loading, projectItems.length, runtimeConnected]);
+  }, [error, hasStartupIssue, loading, projectItems.length, runtimeConnected]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");

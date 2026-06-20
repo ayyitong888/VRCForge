@@ -674,7 +674,8 @@ async def authorize_local_requests(request: Request, call_next):
     started_at = time.perf_counter()
     status_code = 500
     error_message = ""
-    if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+    is_preflight = is_cors_preflight_request(request)
+    if not is_preflight and (request.url.path == "/mcp" or request.url.path.startswith("/mcp/")):
         try:
             authenticate_agent_request(request, allow_disabled=False)
         except HTTPException as exc:
@@ -692,7 +693,7 @@ async def authorize_local_requests(request: Request, call_next):
                 }
             )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
-    if app_route_requires_auth(request):
+    if not is_preflight and app_route_requires_auth(request):
         try:
             authenticate_app_request(request)
         except HTTPException as exc:
@@ -7732,6 +7733,14 @@ def app_route_requires_auth(request: Request) -> bool:
     if not APP_AUTH_REQUIRED and request.method.upper() == "GET":
         return False
     return True
+
+
+def is_cors_preflight_request(request: Request) -> bool:
+    return (
+        request.method.upper() == "OPTIONS"
+        and bool(request.headers.get("origin"))
+        and bool(request.headers.get("access-control-request-method"))
+    )
 
 
 def authenticate_app_request(request: Request) -> None:

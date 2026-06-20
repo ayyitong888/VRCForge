@@ -544,6 +544,31 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
+    def test_app_cors_preflight_is_not_blocked_by_session_auth(self) -> None:
+        original_required = dashboard_server.APP_AUTH_REQUIRED
+        original_token = dashboard_server.APP_SESSION_TOKEN
+        dashboard_server.APP_AUTH_REQUIRED = True
+        dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
+        try:
+            with TestClient(dashboard_server.app) as client:
+                preflight = client.options(
+                    "/api/app/bootstrap",
+                    headers={
+                        "Origin": "tauri://localhost",
+                        "Access-Control-Request-Method": "GET",
+                        "Access-Control-Request-Headers": "authorization",
+                    },
+                )
+                missing_token_get = client.get("/api/app/bootstrap", headers={"Origin": "tauri://localhost"})
+
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(preflight.headers.get("access-control-allow-origin"), "tauri://localhost")
+            self.assertIn("authorization", preflight.headers.get("access-control-allow-headers", "").lower())
+            self.assertEqual(missing_token_get.status_code, 401)
+        finally:
+            dashboard_server.APP_AUTH_REQUIRED = original_required
+            dashboard_server.APP_SESSION_TOKEN = original_token
+
     @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", return_value={"ok": True})
     def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self, mock_unity_ack) -> None:
         with TestClient(dashboard_server.app) as client:

@@ -19,6 +19,12 @@ Before publishing a release package:
       state the upstream project, pinned commit, license, and local changes.
 * [ ] Add a warning that users should back up Unity / VRChat avatar projects before writing assets.
 * [ ] Add changelog notes for major behavior changes.
+* [ ] Confirm desktop WebView CORS preflight for authenticated app APIs returns
+      200, not 401:
+      `OPTIONS /api/app/bootstrap` with `Origin: tauri://localhost` and
+      `Access-Control-Request-Headers: authorization`.
+* [ ] Confirm startup/refresh failure UI points to Startup Doctor and Retry,
+      and does not mislabel a runtime-offline state as a Unity project failure.
 * [ ] Run external-agent preflight smoke: `npm run smoke:external-agent`.
 * [ ] Run external-agent live write/rollback smoke against a real Unity project:
       `npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject`.
