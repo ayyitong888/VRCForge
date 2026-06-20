@@ -579,6 +579,12 @@ class DashboardServerTests(unittest.TestCase):
             ):
                 self.assertEqual(dashboard_server.default_runtime_root(), payload_root.resolve())
 
+    def test_packaged_backend_defaults_to_user_data_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+                expected = Path(tmp) / "VRCForge" / "agentic-app"
+                self.assertEqual(dashboard_server.default_user_data_root(), expected)
+
     @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", return_value={"ok": True})
     def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self, mock_unity_ack) -> None:
         with TestClient(dashboard_server.app) as client:

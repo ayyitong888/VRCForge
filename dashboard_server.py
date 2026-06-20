@@ -92,8 +92,15 @@ def default_runtime_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def default_user_data_root() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data).expanduser() / "VRCForge" / "agentic-app"
+    return default_runtime_root()
+
+
 ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", default_runtime_root())
-PORTABLE_MODE = any(
+PORTABLE_MODE = bool(getattr(sys, "frozen", False)) or any(
     os.environ.get(name, "").strip()
     for name in (
         "VRCFORGE_APP_DIR",
@@ -105,7 +112,7 @@ PORTABLE_MODE = any(
         "VRCFORGE_SETTINGS_PATH",
     )
 )
-USER_DATA_DIR = resolve_runtime_path("VRCFORGE_USER_DATA_DIR", ROOT_DIR)
+USER_DATA_DIR = resolve_runtime_path("VRCFORGE_USER_DATA_DIR", default_user_data_root())
 DASHBOARD_DIR = resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", ROOT_DIR / "dashboard")
 CONFIG_DIR = resolve_runtime_path("VRCFORGE_CONFIG_DIR", USER_DATA_DIR / "config") if PORTABLE_MODE else ROOT_DIR
 LOG_DIR = resolve_runtime_path("VRCFORGE_LOG_DIR", USER_DATA_DIR / "logs") if PORTABLE_MODE else ROOT_DIR / "artifacts" / "dashboard"
