@@ -142,9 +142,12 @@ type ProjectUiPrefs = {
   aliases: Record<string, string>;
 };
 
+type ThemeMode = "light" | "dark";
+
 const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
 const PROJECT_UI_PREFS_KEY = "vrcforge_project_ui_prefs";
+const THEME_STORAGE_KEY = "vrcforge_theme";
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
@@ -192,6 +195,15 @@ function loadProjectUiPrefs(): ProjectUiPrefs {
   }
 }
 
+function loadThemePreference(): ThemeMode {
+  try {
+    const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return raw === "dark" || raw === "light" ? raw : "light";
+  } catch {
+    return "light";
+  }
+}
+
 
 export default function App() {
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
@@ -200,7 +212,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const [showRoslynWarning, setShowRoslynWarning] = useState(false);
   const [pendingMode, setPendingMode] = useState<PermissionState["executionMode"] | null>(null);
   const [input, setInput] = useState("");
@@ -379,8 +391,17 @@ export default function App() {
     return { name: "未发现 Unity 项目", meta: "empty" };
   }, [error, hasStartupIssue, loading, projectItems.length, runtimeConnected]);
 
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
+  useLayoutEffect(() => {
+    const isDark = theme === "dark";
+    document.documentElement.classList.toggle("dark", isDark);
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    document.body.style.colorScheme = theme;
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore blocked storage; the in-memory theme still works for this run.
+    }
   }, [theme]);
 
   useLayoutEffect(() => {
@@ -1685,7 +1706,7 @@ export default function App() {
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-4 py-4">
+        <aside className="sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-4 py-4">
           <div className="flex h-10 items-center gap-3 px-2">
             <Bot className="h-5 w-5 shrink-0 text-primary" />
             <div className="truncate text-base font-semibold">VRCForge</div>
@@ -1992,7 +2013,7 @@ export default function App() {
               onRestore={restoreCheckpoint}
             />
           ) : activeView === "settings" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-10">
+            <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
               <div className="mx-auto w-full max-w-3xl">
                 <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
                 <p className="mt-1 text-sm text-muted-foreground">配置权限模式、模型供应商与全局自定义指令。</p>
@@ -2429,7 +2450,7 @@ export default function App() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+            <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
               <div>
                 <div className="mb-2 text-xs font-medium text-muted-foreground">已扫描到的项目</div>
                 {projectItems.length > 0 ? (
@@ -4441,7 +4462,7 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
     return (
       <div className="rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
         <div className="mb-2 text-xs font-medium text-muted-foreground">已压缩的历史</div>
-        <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
+        <pre className="app-scrollbar max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
       </div>
     );
   }
