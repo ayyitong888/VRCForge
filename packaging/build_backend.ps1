@@ -45,6 +45,7 @@ foreach ($module in $excludeModules) {
     --clean `
     --onedir `
     --name vrcforge_backend `
+    --hidden-import tools.vrcforge_agent_mcp_stdio `
     @excludeArgs `
     --distpath $tempDist `
     --specpath (Join-Path $repoRoot "build\pyinstaller") `

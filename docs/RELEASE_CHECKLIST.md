@@ -19,4 +19,11 @@ Before publishing a release package:
       state the upstream project, pinned commit, license, and local changes.
 * [ ] Add a warning that users should back up Unity / VRChat avatar projects before writing assets.
 * [ ] Add changelog notes for major behavior changes.
+* [ ] Run external-agent preflight smoke: `npm run smoke:external-agent`.
+* [ ] Run external-agent live write/rollback smoke against a real Unity project:
+      `npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject`.
+* [ ] Confirm external-agent smoke hides direct apply tools, creates a
+      checkpoint, runs validation, restores the checkpoint, leaves no temporary
+      GameObject residue, and keeps Unity compile errors at zero.
+* [ ] If external-agent rollback fails, fix rollback before publishing.
 * [ ] Do not remove GPL-3.0 notices from redistributed or modified versions.

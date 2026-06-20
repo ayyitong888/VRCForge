@@ -834,22 +834,18 @@ class DashboardServerTests(unittest.TestCase):
             agent_cannot_approve = client.post(f"/api/agent/approvals/{approval['id']}/approve", headers=headers)
             self.assertEqual(agent_cannot_approve.status_code, 401)
 
-            approval_headers = {
-                **headers,
-                "X-VRCForge-Approval-Token": config.approval_token,
-            }
-            approved = client.post(f"/api/agent/approvals/{approval['id']}/approve", headers=approval_headers)
-            self.assertEqual(approved.status_code, 200)
+            external_cannot_apply = client.post(
+                "/api/agent/tool/vrcforge_apply_approved",
+                headers=headers,
+                json={"agent_name": "codex-test", "params": {"approval_id": approval["id"]}},
+            )
+            self.assertEqual(external_cannot_apply.status_code, 404)
 
             with patch("dashboard_server.apply_manual_blendshapes_sync", return_value={"ok": True, "appliedAdjustments": []}) as mock_apply:
-                applied = client.post(
-                    "/api/agent/tool/vrcforge_apply_approved",
-                    headers=headers,
-                    json={"agent_name": "codex-test", "params": {"approval_id": approval["id"]}},
-                )
+                applied = client.post(f"/api/app/agent/approvals/{approval['id']}/approve")
             self.assertEqual(applied.status_code, 200)
             self.assertTrue(applied.json()["ok"])
-            self.assertEqual(applied.json()["result"]["status"], "applied")
+            self.assertEqual(applied.json()["execution"]["status"], "applied")
             mock_apply.assert_called_once()
 
     def test_agent_gateway_manifest_describes_codex_debug_loop_tools(self) -> None:
@@ -866,7 +862,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_agent_message", tool_names)
         self.assertIn("vrcforge_classify_shell", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
-        self.assertIn("vrcforge_execute_approved_shell", tool_names)
+        self.assertNotIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_skill_manifest", tool_names)
         self.assertIn("vrcforge_external_agent_connectors", tool_names)
         self.assertIn("vrcforge_list_skill_packages", tool_names)
@@ -876,7 +872,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
-        self.assertIn("vrcforge_apply_approved", tool_names)
+        self.assertNotIn("vrcforge_apply_approved", tool_names)
+        self.assertNotIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_read_recent_logs", tool_names)
         write_targets = {item["name"] for item in payload["writeTargets"]}
         self.assertIn("vrcforge_apply_blendshapes", write_targets)
@@ -903,8 +900,27 @@ class DashboardServerTests(unittest.TestCase):
         rendered = json.dumps(payload)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["mcp"]["url"], "http://127.0.0.1:8757/mcp")
+        stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge_local"]
+        self.assertEqual(Path(stdio["cwd"]), dashboard_server.ROOT_DIR)
+        self.assertEqual(Path(stdio["args"][0]), dashboard_server.ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
         self.assertIn("CUSTOM_VRCFORGE_TOKEN", rendered)
         self.assertNotIn("real-token", rendered)
+
+    def test_external_agent_connector_prefers_packaged_backend_stdio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend_dir = root / "backend"
+            backend_dir.mkdir()
+            backend_exe = backend_dir / "vrcforge_backend.exe"
+            backend_exe.write_text("", encoding="utf-8")
+
+            with patch("dashboard_server.ROOT_DIR", root):
+                payload = dashboard_server.connector_bundle_sync({})
+
+        stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge"]
+        self.assertEqual(Path(stdio["command"]), backend_exe)
+        self.assertEqual(stdio["args"], ["--agent-mcp-stdio"])
+        self.assertEqual(Path(stdio["cwd"]), root)
 
     def test_external_agent_gateway_settings_update_and_revoke_token(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -1094,6 +1110,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertNotIn("vrcforge_apply_approved", tool_names)
+        self.assertNotIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_parameter", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_menu_control", tool_names)
         self.assertIn("vrcforge_preview_ensure_animator_state", tool_names)

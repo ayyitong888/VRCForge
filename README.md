@@ -111,7 +111,7 @@ The desktop app also includes uninstall actions:
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
 | Agent Connector Settings | Gateway toggle, token revoke, connector config copy, recent calls, and write-request separation for external agents | Available / 可用 |
-| External agent connector templates | Codex/Claude Code-style loopback MCP snippets without plaintext tokens | Available / 可用 |
+| External agent connector templates and smoke | Codex/Claude Code HTTP + stdio snippets without plaintext tokens, plus supervised write/rollback smoke | Available / 可用 |
 | `.vsk` community skill packages | `.vsk` 社区 skill 包导入/导出/校验 | Available / 可用 |
 | Skill Manager UI for `.vsk` packages | List/import/preflight/export .vsk packages with risk, permissions, signature status, signer fingerprint, and no “verified” label | Available / 可用 |
 | Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Beta, local tests pass |
@@ -170,6 +170,25 @@ The gateway is disabled by default. Enable it from the desktop settings, copy th
 The connector generator emits copyable loopback MCP snippets for external coding agents and uses environment-variable placeholders such as `VRCFORGE_AGENT_TOKEN`; it does not print or write plaintext access tokens into generated client config.
 
 External MCP clients can request writes, but VRCForge owns approval and execution. The MCP server advertises read, plan, and request tools; direct apply is kept on the desktop approval path.
+
+Use HTTP config when VRCForge Desktop is already running. Use the stdio bridge config for clients that should start or reconnect to VRCForge automatically, including Codex App, Claude Code, and Claude Cowork-style local MCP clients. Installed builds generate a stdio command that runs `backend/vrcforge_backend.exe --agent-mcp-stdio`; source checkouts use `python tools/vrcforge_agent_mcp_stdio.py`. The stdio bridge reads the gateway token from the VRCForge user-data config or `VRCFORGE_AGENT_TOKEN`; copied configs must not contain plaintext tokens.
+
+Connector success is gated by smoke tests:
+
+```powershell
+npm run smoke:external-agent
+npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
+```
+
+The preflight smoke temporarily enables the gateway, checks connector config, reads the manifest, and lists MCP tools without writing Unity. The live smoke additionally forces approval mode, requests a supervised Unity write through MCP, approves it through the desktop app API, creates a pre-write checkpoint, runs validation, requests checkpoint restore through MCP, approves rollback, verifies the temporary scene object is gone, checks Unity compile errors, and restores the previous gateway/permission state. A passing report is written under `artifacts/external-agent-smoke/`. Success requires `vrcforge_request_apply` to be advertised, direct apply tools to be absent, a checkpoint id to be created for live writes, rollback to complete, no temporary object residue, and compile errors to remain zero.
+
+Common failure meanings:
+
+- `Gateway token was not found`: start VRCForge Desktop once or use the stdio bridge so it can read user-data config.
+- `connector.config` 404: the running backend is older than this connector/smoke layer; install or start a backend built from the current commit.
+- `directApplyAdvertised`: the backend is exposing internal approval execution to external agents; do not treat that runtime as release-ready.
+- `mcp.tools_list` 403: the gateway is disabled or the token is invalid.
+- `rollback.verify_no_residue` failed: stop release work and fix rollback before shipping.
 
 Gateway 默认关闭。请在桌面设置中启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 VRCForge 内部使用，不会写进复制给外部 agent 的配置。
 

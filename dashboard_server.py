@@ -1371,6 +1371,17 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
+    packaged_stdio_command = ROOT_DIR / "backend" / "vrcforge_backend.exe"
+    if not packaged_stdio_command.is_file():
+        packaged_stdio_command = ROOT_DIR / "backend" / "vrcforge_backend"
+    if packaged_stdio_command.is_file() and not (params.get("stdioCommand") or params.get("stdio_command")):
+        stdio_command = str(packaged_stdio_command)
+        stdio_script = params.get("stdioScript") or params.get("stdio_script") or "--agent-mcp-stdio"
+    else:
+        stdio_command = str(params.get("stdioCommand") or params.get("stdio_command") or "python")
+        stdio_script = params.get("stdioScript") or params.get("stdio_script") or (ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
+    stdio_cwd = params.get("stdioCwd") or params.get("stdio_cwd") or ROOT_DIR
+    smoke_script = params.get("smokeScript") or params.get("smoke_script") or (ROOT_DIR / "scripts" / "smoke_external_agent_bridge.py")
     options = ExternalAgentConnectorOptions(
         server_name=str(params.get("serverName") or params.get("server_name") or "vrcforge"),
         mcp_url=str(params.get("mcpUrl") or params.get("mcp_url") or "http://127.0.0.1:8757/mcp"),
@@ -1380,6 +1391,10 @@ def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any
             or params.get("skills_projection_dir")
             or AGENT_GATEWAY.user_skills_dir
         ),
+        stdio_command=stdio_command,
+        stdio_script=str(stdio_script),
+        stdio_cwd=str(stdio_cwd),
+        smoke_script=str(smoke_script),
     )
     return {"ok": True, **build_connector_bundle(options)}
 
@@ -10494,11 +10509,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", default=8757, type=int, help="Dashboard bind port.")
+    parser.add_argument("--agent-mcp-stdio", action="store_true", help="Run the external-agent stdio MCP bridge instead of the HTTP backend.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.agent_mcp_stdio:
+        from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, run_stdio_server
+
+        bridge = VRCForgeBridge(
+            base_url=os.environ.get("VRCFORGE_AGENT_BASE_URL", "http://127.0.0.1:8757").rstrip("/"),
+            config_path=Path(os.environ["VRCFORGE_AGENT_GATEWAY_CONFIG"]).expanduser().resolve()
+            if os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG")
+            else None,
+            timeout_seconds=float(os.environ.get("VRCFORGE_AGENT_TIMEOUT", "30")),
+            start_runtime=True,
+        )
+        run_stdio_server(bridge)
+        return 0
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 

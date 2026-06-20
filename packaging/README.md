@@ -95,3 +95,23 @@ Release smoke should also verify first-run resilience: optional failures in
 user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
 loading, or external-agent MCP startup must not prevent the backend and ordinary
 agent chat from opening.
+
+External-agent release smoke must verify both config generation and the
+supervised write/rollback path. The preflight smoke temporarily enables the
+gateway and restores previous gateway/permission state; the live smoke also
+writes to Unity and rolls back:
+
+```powershell
+npm run smoke:external-agent
+npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
+```
+
+The live report must show `vrcforge_request_apply` advertised, direct apply
+tools hidden, a checkpoint id, validation report generation, rollback applied,
+no temporary GameObject residue, Unity compile errors at zero, and cleanup that
+restores the previous gateway and permission settings. If rollback fails, fix
+rollback before publishing.
+
+For packaged builds, Agent Connector stdio config should point at
+`backend/vrcforge_backend.exe --agent-mcp-stdio` instead of requiring a system
+Python installation.

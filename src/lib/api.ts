@@ -458,7 +458,31 @@ export type ExternalAgentConnectorStatus = {
   };
   clientConfigs: {
     codex?: { format: string; text: string; config?: unknown };
+    codexStdio?: { format: string; text: string; config?: unknown; transport?: string };
     claudeCode?: { format: string; text: string; config?: unknown };
+    claudeCodeStdio?: { format: string; text: string; config?: unknown; transport?: string };
+    claudeCowork?: { format: string; text: string; config?: unknown; transport?: string };
+  };
+  launcher?: {
+    stdioBridge?: {
+      command?: string;
+      args?: string[];
+      cwd?: string;
+      startsOrReconnectsRuntime?: boolean;
+      readsGatewayTokenFromLocalConfig?: boolean;
+      storesPlaintextToken?: boolean;
+    };
+    httpPreflight?: {
+      url?: string;
+      tokenEnvVar?: string;
+      requiresRuntimeAlreadyOnline?: boolean;
+    };
+    smoke?: {
+      command?: string;
+      args?: string[];
+      preflightArgs?: string[];
+      liveWriteRollbackArgs?: string[];
+    };
   };
   skillsProjection?: {
     recommendedDirectory?: string;

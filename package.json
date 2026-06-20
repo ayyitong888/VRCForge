@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "smoke:agentic": "node scripts/smoke-agentic-app.mjs"
+    "smoke:agentic": "node scripts/smoke-agentic-app.mjs",
+    "smoke:external-agent": "python scripts/smoke_external_agent_bridge.py --enable-gateway",
+    "smoke:external-agent:live": "python scripts/smoke_external_agent_bridge.py --enable-gateway --live-write-rollback"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",

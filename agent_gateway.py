@@ -83,6 +83,10 @@ RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_restore_last_backup",
     "vrcforge_request_roslyn_advanced",
 }
+EXTERNAL_AGENT_INTERNAL_TOOLS = {
+    "vrcforge_apply_approved",
+    "vrcforge_execute_approved_shell",
+}
 
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
@@ -3467,6 +3471,8 @@ class AgentGateway:
         }
 
     def _tool_visible(self, tool: AgentTool, config: AgentGatewayConfig) -> bool:
+        if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
+            return False
         if tool.advanced and not self.roslyn_available(config):
             return False
         if tool.write and not config.allow_write_requests:
@@ -3573,7 +3579,6 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_agent_message",
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
-        "vrcforge_execute_approved_shell",
         "vrcforge_skill_manifest",
         "vrcforge_skill_check",
         "vrcforge_external_agent_connectors",

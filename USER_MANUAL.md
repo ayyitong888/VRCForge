@@ -37,7 +37,7 @@ This manual explains the public workflow and feature status without project-spec
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
-| External agent connector templates | Codex/Claude Code-style loopback MCP snippets without plaintext tokens | 已可用 / Available |
+| External agent connector templates and smoke | Codex/Claude Code HTTP + stdio snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
 | `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
@@ -48,6 +48,34 @@ Wardrobe scan results are split deliberately:
 workflow may use automatically, `wardrobeCandidates` need an explicit
 `parameterName`, and `looseControls` are ordinary accessory/clothing-off toggles
 that are never treated as wardrobes automatically.
+
+## External Agent Connectors
+
+Settings > Agent Connectors can generate loopback MCP config for Codex-style and
+Claude-style clients. Use the HTTP config when VRCForge Desktop is already
+running. Use the stdio bridge config when the client should start or reconnect
+to VRCForge automatically. Installed builds use the packaged backend exe for
+stdio; source checkouts use the Python bridge script. Copied configs use
+environment variables or the local VRCForge user-data config; plaintext gateway
+tokens are not written into client config.
+
+The external-agent success path is:
+
+```text
+MCP read/plan -> vrcforge_request_apply -> VRCForge approval -> checkpoint -> apply -> validation -> restore request -> VRCForge approval -> rollback proof
+```
+
+Developers and release testers can run:
+
+```powershell
+npm run smoke:external-agent
+npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
+```
+
+A passing live smoke must show that `vrcforge_request_apply` is available,
+direct apply tools are hidden, a checkpoint was created, rollback completed,
+the temporary object is gone, and Unity compile errors stayed at zero.
+The preflight smoke does not write Unity; the live smoke does.
 
 ## Requirements / 运行环境
 

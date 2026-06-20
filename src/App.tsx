@@ -2897,9 +2897,16 @@ function ExternalAgentConnectorsPanel({
 }) {
   const gateway = status?.gateway;
   const codexText = status?.clientConfigs?.codex?.text || "";
+  const codexStdioText = status?.clientConfigs?.codexStdio?.text || "";
   const claudeText = status?.clientConfigs?.claudeCode?.text || "";
+  const claudeStdioText = status?.clientConfigs?.claudeCodeStdio?.text || status?.clientConfigs?.claudeCowork?.text || "";
   const toolCount = status?.advertisedTools?.length ?? 0;
   const writeTargetCount = status?.writeTargets?.length ?? 0;
+  const launcherArgs = status?.launcher?.stdioBridge?.args || [];
+  const launcherCommand = [status?.launcher?.stdioBridge?.command, ...launcherArgs].filter(Boolean).join(" ");
+  const smokeArgs = status?.launcher?.smoke?.args || [];
+  const smokeLiveArgs = status?.launcher?.smoke?.liveWriteRollbackArgs || [];
+  const smokeCommand = [status?.launcher?.smoke?.command, ...smokeArgs, ...smokeLiveArgs].filter(Boolean).join(" ");
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="flex min-w-0 items-center gap-2">
@@ -2913,6 +2920,8 @@ function ExternalAgentConnectorsPanel({
       <div className="mt-4 grid gap-3">
         <DataLine label="Endpoint" value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
         <DataLine label="Token env" value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
+        <DataLine label="Stdio bridge" value={launcherCommand || "-"} mono />
+        <DataLine label="Smoke" value={smokeCommand || "-"} mono />
         <DataLine label="Tools" value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
         <DataLine label="Config" value={gateway?.configPath || "-"} />
       </div>
@@ -2944,11 +2953,19 @@ function ExternalAgentConnectorsPanel({
         </Button>
         <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex config")}>
           <Copy className="h-4 w-4" />
-          Codex
+          Codex HTTP
+        </Button>
+        <Button type="button" variant="outline" disabled={!codexStdioText} onClick={() => onCopy(codexStdioText, "Codex stdio config")}>
+          <Copy className="h-4 w-4" />
+          Codex App
         </Button>
         <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude config")}>
           <Copy className="h-4 w-4" />
-          Claude
+          Claude HTTP
+        </Button>
+        <Button type="button" variant="outline" disabled={!claudeStdioText} onClick={() => onCopy(claudeStdioText, "Claude stdio config")}>
+          <Copy className="h-4 w-4" />
+          Claude App
         </Button>
         <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>
           Revoke token
