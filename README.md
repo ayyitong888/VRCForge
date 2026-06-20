@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.5.1--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.1-beta)
+[![Version](https://img.shields.io/badge/version-v0.5.2--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.2-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.1-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.2-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.5.1-beta.zip`
+- `VRCForge_Windows_x64_0.5.2-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -78,6 +78,8 @@ The project picker merges manual folders, VCC user projects, Unity Hub recent pr
 
 `VRCForge.exe` opens the Tauri desktop app directly and starts or reconnects to the local FastAPI runtime. The legacy WebView2 launcher and `start_dashboard.cmd` path remain debug/compatibility surfaces only.
 
+First-run startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online.
+
 The desktop app also includes uninstall actions:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
 - Program uninstall opens the NSIS uninstaller when installed from the x64 installer; user data under `%LOCALAPPDATA%\VRCForge` is preserved unless removed manually.
@@ -92,10 +94,11 @@ The desktop app also includes uninstall actions:
 | Reference-image assisted face editing | 参考图辅助捏脸 | Available / 可用 |
 | AI face tuning history and presets | AI 捏脸历史与预设 | Available / 可用 |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
-| Shader / Material tuning MVP | Shader / 材质调参 MVP | Available / 可用 |
+| Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
+| First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
@@ -104,6 +107,8 @@ The desktop app also includes uninstall actions:
 | Roslyn Advanced Power Mode (in-memory compile, zero-install CodeDom fallback) | Roslyn 高级模式（内存编译，免安装 CodeDom 兜底） | Available / 可用 |
 | Unity compile-error reading (`vrc_get_compile_errors`) | Unity 编译错误读取（agent 自修闭环基础） | Available / 可用 |
 | External Agent Gateway (MCP + REST, supervised writes) | 外部 Agent Gateway（MCP + REST，受监督写入） | Available / 可用 |
+| External agent connector templates | Codex/Claude Code-style loopback MCP snippets without plaintext tokens | Available / 可用 |
+| `.vsk` community skill packages | `.vsk` 社区 skill 包导入/导出/校验 | Available / 可用 |
 | Generic Unity CRUD tools (component, GameObject, asset/prefab) | 通用 Unity CRUD 工具（组件、GameObject、资产/Prefab） | Beta, local tests pass |
 | Generic avatar authoring primitives (parameters, menus, FX animator states) | Expression parameters / menu controls / animator states | Beta, local tests pass; preview path covered by wardrobe workflow |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | Available / 可用 |
@@ -113,7 +118,7 @@ The desktop app also includes uninstall actions:
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
-| Pre-write checkpoint timeline | Git or archive checkpoint before gateway writes, plus incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
+| Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, plus incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 
 Wardrobe scanning is intentionally conservative. `wardrobes` contains only
 high-confidence int-exclusive wardrobes backed by FX Animator Any-State
@@ -156,7 +161,13 @@ VRCForge 提供本地 Agent Gateway，可接入支持 MCP 的外部 agent。它�
 
 The gateway is disabled by default. Enable it from the desktop settings, copy the local token/config, then let the agent read logs, capture screenshots, inspect Unity state, generate plans, and request supervised writes. Actual writes still require user approval before `apply`; the approval token is kept inside VRCForge and is not included in copied agent configs.
 
+The connector generator emits copyable loopback MCP snippets for external coding agents and uses environment-variable placeholders such as `VRCFORGE_AGENT_TOKEN`; it does not print or write plaintext access tokens into generated client config.
+
 Gateway 默认关闭。请在桌面设置中启用并复制本地 token/config。外部 agent 可以读取日志、截图、Unity 状态并生成方案；真正写入 Unity 前仍必须等待用户 approval，approval token 只由 VRCForge 内部使用，不会写进复制给外部 agent 的配置。
+
+## Community Skill Packages
+
+VRCForge supports `.vsk` skill packages for community distribution. Package import performs manifest validation, lock-file SHA-256 checks, optional Ed25519 signature verification, duplicate/update checks, and ZIP safety checks for traversal, absolute paths, drive paths, symlinks, duplicate entries, and oversized payloads. Export can build dev or release packages from installed user skills. Imported packages can be projected into the user skill directory so they appear in slash-command and gateway skill lists.
 
 ## Safety / 安全原则
 
@@ -170,7 +181,7 @@ Scan -> Plan -> Preview -> Backup -> Apply -> Validate -> Restore
 
 Core app workflows use predefined Unity tools. Roslyn is preserved only as Advanced Power Mode and every call still requires `confirmAdvancedPowerMode=true`. The first full-permission confirmation is persisted by the desktop app and synchronized to Unity; direct calls that bypass the app retain a one-time Unity warning fallback. Snippets are compiled fully in memory: the primary backend is Roslyn (only 4 DLLs, installed by `tools/install-roslyn-support.ps1`), with a zero-install CodeDom fallback when those DLLs are absent. Compile errors are returned with user-relative line numbers, and the read-only tool `vrc_get_compile_errors` reports project compile errors from the last Unity compilation pass.
 
-Gateway writes create a pre-write checkpoint after saving open Unity scenes and dirty assets. Git worktrees use git-backed checkpoints; other projects use a local compressed baseline. Restore previews and applies only the changed, added, or deleted files, then reloads restored scenes and refreshes Unity assets. The desktop Checkpoints view lists, previews, and requests restore through the same approval path as other writes. Generic Unity MCP writes must use the supervised gateway wrapper to receive this checkpoint coverage; raw calls made outside VRCForge cannot be intercepted.
+Gateway writes and legacy desktop REST write endpoints create a pre-write checkpoint after saving open Unity scenes and dirty assets. Git worktrees use git-backed checkpoints; other projects use a local compressed baseline. Restore previews and applies only the changed, added, or deleted files, then reloads restored scenes and refreshes Unity assets. The desktop Checkpoints view lists, previews, and requests restore through the same approval path as other writes. Direct raw Unity MCP calls made outside VRCForge cannot be intercepted; use the supervised gateway or desktop write paths when rollback is required.
 
 核心 app 流程使用预定义 Unity 工具。Roslyn 只作为 Advanced Power Mode 保留，每次调用仍必须传 `confirmAdvancedPowerMode=true`。桌面端首次确认完全权限后会把永久确认状态同步到 Unity；绕过桌面端直接调用时，Unity 仍保留一次性警告兜底。Snippet 在内存中完整编译：主后端为 Roslyn（仅 4 个 DLL，由 `tools/install-roslyn-support.ps1` 安装），未装 DLL 时自动回退到免安装的 CodeDom。编译错误带用户视角行号返回；只读工具 `vrc_get_compile_errors` 可读取最近一次 Unity 编译的错误列表。
 

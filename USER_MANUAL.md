@@ -17,7 +17,9 @@ This manual explains the public workflow and feature status without project-spec
 | AI face tuning history | AI 捏脸历史 | 已可用 / Available |
 | Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
+| Shader / Material tuning | Semantic material tuning for lilToon, Poiyomi, and conservative Generic fallback | 已可用 / Available |
 | Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
+| First-run resilient normal-agent fallback | Optional Unity/skill/project failures do not block ordinary agent chat | 已可用 / Available |
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |
 | `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
@@ -34,7 +36,9 @@ This manual explains the public workflow and feature status without project-spec
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
-| Pre-write checkpoint timeline | Git or archive checkpoint before gateway writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
+| Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
+| External agent connector templates | Codex/Claude Code-style loopback MCP snippets without plaintext tokens | 已可用 / Available |
+| `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |
@@ -72,6 +76,8 @@ that are never treated as wardrobes automatically.
 3. Complete the first-run setup: core connection, provider/model, and Unity project.
 4. Open the avatar project in Unity and let compilation finish.
 5. Select the project/chat in VRCForge, then use agent messages or slash skills.
+
+If Unity discovery, project scanning, skill loading, or user-data `AGENTS.md` setup fails on first launch, the desktop should still open as a normal agent workspace when the backend is online. Fix the shown setup action before using Unity-writing features.
 
 1. 使用 Windows x64 安装器安装 VRCForge。
 2. 从桌面或开始菜单启动 `VRCForge.exe`。
@@ -169,8 +175,8 @@ Image input depends on the selected provider and model. If image input is not su
 - Use dry-run or preview modes when available.
 - Stop and check Unity Console if Unity reports compile errors.
 - Review generated changes before applying them to important projects.
-- Gateway writes save Unity state and create a checkpoint first. Git projects use git-backed checkpoints; non-git projects use a compressed local baseline. Restore applies only the incremental file diff and then reloads Unity scenes/assets.
-- Raw Unity MCP writes made outside VRCForge cannot be intercepted. Use the supervised Unity MCP write path when checkpoint rollback is required.
+- Gateway writes and legacy desktop REST write endpoints save Unity state and create a checkpoint first. Git projects use git-backed checkpoints; non-git projects use a compressed local baseline. Restore applies only the incremental file diff and then reloads Unity scenes/assets.
+- Raw Unity MCP writes made outside VRCForge cannot be intercepted. Use the supervised gateway or desktop write path when checkpoint rollback is required.
 
 - 写入 Unity 资产前先备份 Avatar 工程。
 - 第一次调整使用小幅 Blendshape 改动。

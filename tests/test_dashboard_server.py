@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import dashboard_server
 from agent_gateway import AgentGateway
+from skill_packages import SkillPackageService
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan
 
 
@@ -119,6 +120,90 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("projects", message["payload"])
                 self.assertIn("unityStatus", message["payload"])
                 self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
+
+    def test_project_prefs_accepts_only_unity_project_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            valid = root / "ValidAvatarProject"
+            (valid / "Assets").mkdir(parents=True)
+            (valid / "Packages").mkdir()
+            (valid / "ProjectSettings").mkdir()
+            (valid / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1",
+                encoding="utf-8",
+            )
+            plain_dir = root / "Start Menu Shortcut Folder"
+            plain_dir.mkdir()
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/projects/prefs",
+                    json={"customPaths": [str(valid), str(plain_dir)], "hiddenPaths": []},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["customPaths"], [str(valid).replace("\\", "/")])
+
+    def test_project_prefs_rejects_parent_directory_without_project_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            project = parent / "ChildUnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1",
+                encoding="utf-8",
+            )
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/projects/prefs",
+                    json={"customPaths": [str(parent)], "hiddenPaths": []},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["customPaths"], [])
+
+    def test_app_bootstrap_degrades_when_health_diagnostics_fail(self) -> None:
+        with patch("dashboard_server.read_health", side_effect=RuntimeError("project scanner exploded")):
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/bootstrap")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["health"]["components"]["backend"]["status"], "ok")
+        self.assertEqual(payload["health"]["components"]["startupDegraded"]["status"], "warning")
+        self.assertIn("project scanner exploded", payload["health"]["projects"]["warning"])
+
+    def test_app_bootstrap_degrades_when_agent_surfaces_fail(self) -> None:
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest", side_effect=RuntimeError("manifest broken")),
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_health", side_effect=RuntimeError("health broken")),
+            patch.object(dashboard_server.AGENT_GATEWAY, "permission_state", side_effect=RuntimeError("permission broken")),
+            patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", side_effect=RuntimeError("approvals broken")),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/bootstrap")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["agentManifest"]["ok"])
+        self.assertIn("manifest broken", payload["agentManifest"]["error"])
+        self.assertFalse(payload["agentHealth"]["ok"])
+        self.assertEqual(payload["permission"]["executionMode"], "approval")
+        self.assertEqual(payload["approvals"], [])
+
+    def test_mcp_startup_failure_does_not_block_app_bootstrap(self) -> None:
+        with patch("dashboard_server.create_agent_mcp_app", side_effect=RuntimeError("mcp broken")):
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/bootstrap")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
 
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -517,6 +602,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_skill_manifest", tool_names)
+        self.assertIn("vrcforge_external_agent_connectors", tool_names)
+        self.assertIn("vrcforge_list_skill_packages", tool_names)
+        self.assertIn("vrcforge_preflight_skill_package", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertIn("vrcforge_roslyn_status", tool_names)
@@ -524,9 +612,86 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_apply_approved", tool_names)
         self.assertIn("vrcforge_read_recent_logs", tool_names)
-        self.assertIn("vrcforge_apply_blendshapes", {item["name"] for item in payload["writeTargets"]})
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        self.assertIn("vrcforge_apply_blendshapes", write_targets)
+        self.assertIn("vrcforge_import_skill_package", write_targets)
+        self.assertIn("vrcforge_export_skill_package", write_targets)
+        self.assertNotIn("vrcforge_import_skill_package", tool_names)
+        self.assertNotIn("vrcforge_export_skill_package", tool_names)
         self.assertNotIn("api_key", json.dumps(payload).lower())
         self.assertNotIn("approval_token", json.dumps(payload).lower())
+
+    def test_external_agent_connector_endpoint_uses_env_placeholder(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/external-agent/connectors",
+                json={
+                    "serverName": "vrcforge_local",
+                    "tokenEnvVar": "CUSTOM_VRCFORGE_TOKEN",
+                    "mcpUrl": "http://127.0.0.1:8757/mcp",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        rendered = json.dumps(payload)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["mcp"]["url"], "http://127.0.0.1:8757/mcp")
+        self.assertIn("CUSTOM_VRCFORGE_TOKEN", rendered)
+        self.assertNotIn("real-token", rendered)
+
+    def test_skill_package_import_projects_skill_and_export_endpoint_builds_vsk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "package-source"
+            source.mkdir()
+            manifest = {
+                "id": "community.avatar-review",
+                "name": "Avatar Review Package",
+                "skill_name": "avatar-review",
+                "version": "1.0.0",
+                "author": "Unit Test",
+                "description": "Dashboard skill package fixture.",
+                "min_vrcforge_version": "0.5.0",
+                "permissions": ["read_project"],
+                "entrypoints": {"skill": "SKILL.md"},
+            }
+            (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (source / "SKILL.md").write_text(
+                "---\n"
+                "name: avatar-review\n"
+                "title: Avatar Review\n"
+                "description: Imported package skill.\n"
+                "allowed-tools:\n"
+                "  - vrcforge_health\n"
+                "entrypoint-tool: vrcforge_health\n"
+                "---\n"
+                "Inspect project state before edits.\n",
+                encoding="utf-8",
+            )
+            package = SkillPackageService(root / "store", vrcforge_version="0.5.1").export_dev(
+                source,
+                root / "avatar-review.vsk",
+            ).package_path
+
+            with TestClient(dashboard_server.app) as client:
+                preflight = client.post("/api/app/skill-packages/preflight", json={"packagePath": str(package)})
+                imported = client.post("/api/app/skill-packages/import", json={"packagePath": str(package)})
+                skills = client.get("/api/app/skills").json()["skills"]
+                exported_path = root / "exported-avatar-review.vsk"
+                exported = client.post(
+                    "/api/app/skill-packages/export",
+                    json={"skillName": "avatar-review", "outputPath": str(exported_path)},
+                )
+
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(preflight.json()["preview"]["manifest"]["id"], "community.avatar-review")
+            self.assertEqual(imported.status_code, 200)
+            self.assertEqual(imported.json()["projectedSkill"]["name"], "avatar-review")
+            self.assertTrue(any(skill["name"] == "avatar-review" and skill["source"] == "user" for skill in skills))
+            self.assertEqual(exported.status_code, 200)
+            self.assertTrue(exported_path.is_file())
+            self.assertEqual(exported.json()["exported"]["signature_status"], "dev")
 
     def test_roslyn_advanced_skill_requires_full_auto_mode_and_confirmation(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -1433,6 +1598,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn('name: "vrc_reload_after_checkpoint_restore"', source)
         self.assertIn("EditorSceneManager.SaveOpenScenes", source)
         self.assertIn("EditorSceneManager.OpenScene", source)
+        self.assertIn("NewSceneSetup.EmptyScene", source)
+        self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
+        self.assertIn("ForceSynchronousImport", source)
         self.assertIn("AssetDatabase.Refresh", source)
 
     def test_setup_outfit_uses_modular_avatar_public_api(self) -> None:
@@ -2960,22 +3128,23 @@ class DashboardServerTests(unittest.TestCase):
             payload={"ok": True, "appliedCount": 1},
         )
 
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/blendshapes/apply",
-                json={
-                    "source_mode": "unity_live_export",
-                    "mock_execute": False,
-                    "avatar": "Scene/HeroAvatar",
-                    "adjustments": [
-                        {
-                            "renderer_path": "Scene/HeroAvatar/Face",
-                            "blendshape_name": "Smile",
-                            "target_weight": 42.0,
-                        }
-                    ],
-                },
-            )
+        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/blendshapes/apply",
+                    json={
+                        "source_mode": "unity_live_export",
+                        "mock_execute": False,
+                        "avatar": "Scene/HeroAvatar",
+                        "adjustments": [
+                            {
+                                "renderer_path": "Scene/HeroAvatar/Face",
+                                "blendshape_name": "Smile",
+                                "target_weight": 42.0,
+                            }
+                        ],
+                    },
+                )
 
         self.assertEqual(response.status_code, 200)
         mock_invoke_unity_mcp.assert_called_once()
@@ -3063,17 +3232,18 @@ class DashboardServerTests(unittest.TestCase):
 
         mock_capture_blendshape_visual_proof.side_effect = capture_proof_side_effect
 
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/pipeline/run",
-                json={
-                    "source_mode": "unity_live_export",
-                    "mock_execute": False,
-                    "avatar": "Scene/HeroAvatar",
-                    "instruction": "把脸变得更圆润一些",
-                    "allow_low_confidence": True,
-                },
-            )
+        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/pipeline/run",
+                    json={
+                        "source_mode": "unity_live_export",
+                        "mock_execute": False,
+                        "avatar": "Scene/HeroAvatar",
+                        "instruction": "把脸变得更圆润一些",
+                        "allow_low_confidence": True,
+                    },
+                )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -3463,6 +3633,44 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(any("Unsupported shader family" in item["warning"] for item in validation["skippedChanges"]))
         self.assertTrue(any("Unknown material_id" in item["warning"] for item in validation["skippedChanges"]))
 
+    def test_shader_plan_validation_allows_generic_semantic_fallback(self) -> None:
+        inventory = make_shader_inventory()
+        inventory["materials"].append(
+            {
+                "material_id": "mat_generic",
+                "material_name": "Standardish",
+                "shader_family": "Generic",
+                "category": "clothes",
+                "supported_properties": {
+                    "base_color": {"type": "color", "value": "#FFFFFFFF", "writable": True},
+                    "smoothness": {"type": "float", "value": 0.4, "writable": True},
+                },
+            }
+        )
+
+        validation = dashboard_server.validate_shader_material_tuning_plan(
+            plan={
+                "type": "material_tuning_plan",
+                "version": "0.2",
+                "changes": [
+                    {"material_id": "mat_generic", "semantic_property": "smoothness", "after": 0.75},
+                    {"material_id": "mat_generic", "shader_property": "_Color", "semantic_property": "_Color", "after": "#000000"},
+                ],
+            },
+            inventory=inventory,
+        )
+
+        self.assertEqual(validation["validatedChanges"][0]["after"], 0.75)
+        self.assertEqual(validation["skippedChanges"][0]["warning"], "Real shader property names are not accepted; use semantic_property only.")
+
+    def test_unity_shader_adapter_source_keeps_poiyomi_and_generic_fallback(self) -> None:
+        source = Path("Assets/VRCForge/Editor/ShaderMaterialAdapters.cs").read_text(encoding="utf-8-sig")
+
+        self.assertIn("new PoiyomiShaderAdapter()", source)
+        self.assertIn("new GenericShaderAdapter()", source)
+        self.assertIn('base("Generic"', source)
+        self.assertIn('"_BaseColor"', source)
+
     def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(
             plan={
@@ -3535,14 +3743,76 @@ class DashboardServerTests(unittest.TestCase):
             },
         )
 
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/shader/presets/shader_preset_test/apply",
-                json={"avatar": "Scene/HeroAvatar", "source_mode": "unity_live_export"},
-            )
+        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/shader/presets/shader_preset_test/apply",
+                    json={"avatar": "Scene/HeroAvatar", "source_mode": "unity_live_export"},
+                )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["appliedChanges"][0]["after"], 0.8)
+
+    @patch("dashboard_server.apply_shader_material_tuning_direct")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_shader_apply_reconstructs_undo_when_unity_flattens_applied_list(
+        self,
+        mock_load_settings,
+        mock_apply_shader_material_tuning_direct,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
+
+        mock_apply_shader_material_tuning_direct.side_effect = [
+            {"ok": True, "appliedCount": 1, "applied": [], "skipped": []},
+            {"ok": True, "appliedCount": 1, "applied": [], "skipped": []},
+        ]
+
+        apply_payload = dashboard_server.apply_shader_material_plan_sync(
+            dashboard_server.ShaderMaterialApplyRequest(
+                avatar_path="Scene/HeroAvatar",
+                inventory=make_shader_inventory(),
+                changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
+            )
+        )
+
+        self.assertTrue(apply_payload["ok"])
+        self.assertEqual(apply_payload["appliedChanges"][0]["before"], 0.2)
+        self.assertEqual(apply_payload["appliedChanges"][0]["after"], 0.8)
+        self.assertEqual(apply_payload["undoDepth"], 1)
+
+        restore_payload = dashboard_server.restore_shader_material_plan_sync(
+            dashboard_server.ShaderMaterialRestoreRequest(avatar_path="Scene/HeroAvatar")
+        )
+
+        self.assertTrue(restore_payload["ok"])
+        self.assertEqual(restore_payload["restoredChanges"][0]["after"], 0.2)
+        self.assertEqual(restore_payload["undoDepth"], 0)
+
+    def test_legacy_write_checkpoint_failure_blocks_callback(self) -> None:
+        called = False
+
+        def callback() -> dict:
+            nonlocal called
+            called = True
+            return {"ok": True}
+
+        with patch(
+            "dashboard_server.create_legacy_write_checkpoint",
+            side_effect=dashboard_server.HTTPException(status_code=409, detail="checkpoint failed"),
+        ):
+            with self.assertRaises(dashboard_server.HTTPException):
+                dashboard_server.run_legacy_write_with_checkpoint(
+                    "vrcforge_apply_shader_tuning",
+                    dashboard_server.ShaderMaterialApplyRequest(
+                        avatar_path="Scene/HeroAvatar",
+                        inventory=make_shader_inventory(),
+                        changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
+                    ),
+                    callback,
+                )
+
+        self.assertFalse(called)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -3990,11 +4260,12 @@ class DashboardServerTests(unittest.TestCase):
                     "dashboard_server.invoke_unity_mcp",
                     side_effect=invoke_side_effect,
                 ):
-                    with TestClient(dashboard_server.app) as client:
-                        response = client.post(
-                            "/api/parameters/apply-optimization",
-                            json={"avatar_path": "MyAvatar", "suggestions": suggestions, "dry_run": False},
-                        )
+                    with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+                        with TestClient(dashboard_server.app) as client:
+                            response = client.post(
+                                "/api/parameters/apply-optimization",
+                                json={"avatar_path": "MyAvatar", "suggestions": suggestions, "dry_run": False},
+                            )
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
@@ -4047,11 +4318,12 @@ class DashboardServerTests(unittest.TestCase):
                         payload={"data": {"ok": True, "restoredCount": 1}},
                     ),
                 ) as mock_invoke:
-                    with TestClient(dashboard_server.app) as client:
-                        response = client.post(
-                            "/api/parameters/rollback",
-                            json={"avatar_path": "MyAvatar", "snapshot_path": str(snapshot_path)},
-                        )
+                    with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+                        with TestClient(dashboard_server.app) as client:
+                            response = client.post(
+                                "/api/parameters/rollback",
+                                json={"avatar_path": "MyAvatar", "snapshot_path": str(snapshot_path)},
+                            )
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()

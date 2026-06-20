@@ -13,6 +13,7 @@ import subprocess
 import re
 import secrets
 import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -31,6 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app
+from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
+from skill_packages import SkillPackageError, SkillPackageService
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
@@ -456,6 +459,34 @@ class ProjectPrefsRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ExternalAgentConnectorRequest(BaseModel):
+    server_name: str = Field(default="vrcforge", alias="serverName")
+    mcp_url: str = Field(default="http://127.0.0.1:8757/mcp", alias="mcpUrl")
+    token_env_var: str = Field(default="VRCFORGE_AGENT_TOKEN", alias="tokenEnvVar")
+    skills_projection_dir: str | None = Field(default=None, alias="skillsProjectionDir")
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackagePathRequest(BaseModel):
+    package_path: str = Field(alias="packagePath")
+    allow_downgrade: bool = Field(default=False, alias="allowDowngrade")
+    dev_mode: bool = Field(default=False, alias="devMode")
+    project_to_user_skills: bool = Field(default=True, alias="projectToUserSkills")
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackageExportRequest(BaseModel):
+    skill_name: str = Field(alias="skillName")
+    output_path: str = Field(alias="outputPath")
+    release: bool = False
+    private_key_path: str | None = Field(default=None, alias="privateKeyPath")
+    private_key_pem: str | None = Field(default=None, alias="privateKeyPem")
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentCompactRequest(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -615,10 +646,16 @@ async def on_startup() -> None:
     global AGENT_MCP_CONTEXT
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
-    AGENT_MCP_APP = create_agent_mcp_app(AGENT_GATEWAY)
-    AGENT_MCP_CONTEXT = AGENT_MCP_APP.state.fastmcp_server.session_manager.run()
-    await AGENT_MCP_CONTEXT.__aenter__()
-    AGENT_MCP_MOUNT.app = AGENT_MCP_APP
+    try:
+        AGENT_MCP_APP = create_agent_mcp_app(AGENT_GATEWAY)
+        AGENT_MCP_CONTEXT = AGENT_MCP_APP.state.fastmcp_server.session_manager.run()
+        await AGENT_MCP_CONTEXT.__aenter__()
+        AGENT_MCP_MOUNT.app = AGENT_MCP_APP
+    except Exception as exc:  # noqa: BLE001 - external MCP must not block the desktop agent.
+        AGENT_MCP_APP = None
+        AGENT_MCP_CONTEXT = None
+        AGENT_MCP_MOUNT.app = None
+        emit_log("warn", "agent", "Agent MCP app failed to initialize; desktop normal-agent mode remains available.", {"error": str(exc)})
     if not CONFIG_PATH.exists():
         save_dashboard_api_config(DASHBOARD_API_CONFIG)
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
@@ -724,10 +761,10 @@ def read_agentic_app_bootstrap() -> dict[str, Any]:
         },
         "health": build_agentic_app_health(),
         "apiConfig": serialize_app_api_config(),
-        "agentManifest": AGENT_GATEWAY.build_manifest(),
-        "agentHealth": AGENT_GATEWAY.build_health(),
-        "permission": AGENT_GATEWAY.permission_state(),
-        "approvals": AGENT_GATEWAY.list_approvals(include_expired=False),
+        "agentManifest": safe_agent_manifest(),
+        "agentHealth": safe_agent_health(),
+        "permission": safe_permission_state(),
+        "approvals": safe_approval_list(),
     }
 
 
@@ -1019,7 +1056,8 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         normalized = normalize_path_string(raw)
         if not normalized or normalized.casefold() in seen:
             continue
-        if not Path(normalized).is_dir():
+        candidate = Path(normalized)
+        if not candidate.is_dir() or not is_unity_project_path(candidate):
             continue
         seen.add(normalized.casefold())
         custom_paths.append(normalized)
@@ -1074,10 +1112,337 @@ def app_delete_agent_skill(skill_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+def request_model_to_dict(request: Any) -> dict[str, Any]:
+    if isinstance(request, BaseModel):
+        return request.model_dump(by_alias=True)
+    if isinstance(request, dict):
+        return dict(request)
+    return {}
+
+
+def should_skip_legacy_checkpoint(request: Any, *, skip_when_mock_execute: bool) -> bool:
+    if bool(getattr(request, "dry_run", False)):
+        return True
+    if skip_when_mock_execute and bool(getattr(request, "mock_execute", False)):
+        return True
+    return False
+
+
+def create_legacy_write_checkpoint(target_tool: str, request: Any) -> dict[str, Any]:
+    arguments = request_model_to_dict(request)
+    if not any(arguments.get(key) for key in ("project_root", "projectRoot", "project_path", "projectPath")):
+        selected_project = str(getattr(DASHBOARD_STATE, "selected_project_path", "") or "").strip()
+        if selected_project:
+            arguments["project_path"] = selected_project
+
+    approval = {
+        "id": f"legacy_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
+        "targetTool": target_tool,
+    }
+    try:
+        checkpoint = AGENT_GATEWAY._create_pre_write_checkpoint(approval, arguments)  # noqa: SLF001 - legacy REST writes share the gateway checkpoint engine.
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=f"Could not create a pre-write checkpoint for this Unity write: {exc}") from exc
+    if not checkpoint or not checkpoint.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str((checkpoint or {}).get("error") or "Could not create a pre-write checkpoint for this Unity write."),
+        )
+    return checkpoint
+
+
+def run_legacy_write_with_checkpoint(
+    target_tool: str,
+    request: Any,
+    callback: Callable[[], dict[str, Any]],
+    *,
+    skip_when_mock_execute: bool = False,
+) -> dict[str, Any]:
+    checkpoint: dict[str, Any] | None = None
+    if not should_skip_legacy_checkpoint(request, skip_when_mock_execute=skip_when_mock_execute):
+        checkpoint = create_legacy_write_checkpoint(target_tool, request)
+    result = callback()
+    if checkpoint and isinstance(result, dict):
+        result.setdefault("checkpoint", checkpoint)
+    return result
+
+
+def skill_package_store_dir() -> Path:
+    return AGENT_GATEWAY.user_constraints_path.parent / "skill-packages"
+
+
+def skill_package_service() -> SkillPackageService:
+    return SkillPackageService(skill_package_store_dir(), vrcforge_version=app.version)
+
+
+def skill_package_error_response(exc: Exception) -> HTTPException:
+    status = 400 if isinstance(exc, SkillPackageError) else 500
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def list_skill_packages_sync(_params: dict[str, Any] | None = None) -> dict[str, Any]:
+    service = skill_package_service()
+    return {
+        "ok": True,
+        "store": str(service.skill_store),
+        "registry": service.load_registry(),
+        "installed": service.list_installed(),
+    }
+
+
+def preflight_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    preview = service.preflight_import(
+        str(params.get("packagePath") or params.get("package_path") or ""),
+        allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
+        dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
+    )
+    return {"ok": True, "preview": preview.as_dict()}
+
+
+def _project_installed_skill(installed_path: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    skill_file = installed_path / "SKILL.md"
+    if not skill_file.is_file():
+        return None
+    target_name = str(manifest.get("skill_name") or manifest.get("skillName") or manifest.get("id") or "").strip()
+    target_name = re.sub(r"[^a-z0-9_.-]+", "-", target_name.lower()).strip("-._")
+    if not target_name:
+        return None
+    target_dir = AGENT_GATEWAY.user_skills_dir / target_name
+    if target_dir.is_symlink():
+        raise RuntimeError(f"Refusing to write through symlinked skill directory: {target_dir}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(skill_file, target_dir / "SKILL.md")
+    return {"name": target_name, "path": str(target_dir / "SKILL.md")}
+
+
+def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    result = service.install(
+        str(params.get("packagePath") or params.get("package_path") or ""),
+        source=str(params.get("source") or "local-import"),
+        allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
+        dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
+    )
+    projection = None
+    if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
+        projection = _project_installed_skill(result.installed_path, result.preview.manifest)
+    return {"ok": True, "imported": result.as_dict(), "projectedSkill": projection}
+
+
+def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
+    skill = AGENT_GATEWAY._find_user_skill(skill_name)  # noqa: SLF001 - package export is a host-level integration.
+    if not skill:
+        raise AgentGatewayError(f"User skill was not found: {skill_name}", status_code=404)
+    storage_path = Path(str(skill.get("storagePath") or ""))
+    if not storage_path.is_file():
+        raise AgentGatewayError(f"User skill file was not found: {skill_name}", status_code=404)
+    return skill, storage_path
+
+
+def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    skill_name = str(params.get("skillName") or params.get("skill_name") or "").strip()
+    output_text = str(params.get("outputPath") or params.get("output_path") or "").strip()
+    if not skill_name or not output_text:
+        raise AgentGatewayError("skillName and outputPath are required.", status_code=400)
+    output_path = Path(output_text)
+    skill, skill_file = _exportable_user_skill(skill_name)
+    service = skill_package_service()
+    with tempfile.TemporaryDirectory(prefix="vrcforge-skill-export-") as temp_dir:
+        source = Path(temp_dir)
+        shutil.copy2(skill_file, source / "SKILL.md")
+        package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
+        package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
+        manifest = {
+            "id": package_id,
+            "name": str(skill.get("title") or skill.get("name") or skill_name)[:160],
+            "skill_name": str(skill.get("name") or skill_name),
+            "version": "1.0.0",
+            "author": "VRCForge User",
+            "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
+            "min_vrcforge_version": app.version,
+            "permissions": ["read_project"],
+            "entrypoints": {"skill": "SKILL.md"},
+        }
+        (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        if params.get("release"):
+            private_key = params.get("privateKeyPem") or params.get("private_key_pem") or params.get("privateKeyPath") or params.get("private_key_path")
+            exported = service.export_release(source, output_path, private_key)
+        else:
+            exported = service.export_dev(source, output_path)
+    return {"ok": True, "exported": exported.as_dict()}
+
+
+def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    params = params or {}
+    options = ExternalAgentConnectorOptions(
+        server_name=str(params.get("serverName") or params.get("server_name") or "vrcforge"),
+        mcp_url=str(params.get("mcpUrl") or params.get("mcp_url") or "http://127.0.0.1:8757/mcp"),
+        token_env_var=str(params.get("tokenEnvVar") or params.get("token_env_var") or "VRCFORGE_AGENT_TOKEN"),
+        skills_projection_dir=str(
+            params.get("skillsProjectionDir")
+            or params.get("skills_projection_dir")
+            or AGENT_GATEWAY.user_skills_dir
+        ),
+    )
+    return {"ok": True, **build_connector_bundle(options)}
+
+
+@app.get("/api/app/external-agent/connectors")
+def app_external_agent_connectors() -> dict[str, Any]:
+    return connector_bundle_sync({})
+
+
+@app.post("/api/app/external-agent/connectors")
+def app_external_agent_connectors_custom(request: ExternalAgentConnectorRequest) -> dict[str, Any]:
+    try:
+        return connector_bundle_sync(request.model_dump(by_alias=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/app/skill-packages")
+def app_list_skill_packages() -> dict[str, Any]:
+    try:
+        return list_skill_packages_sync({})
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/preflight")
+def app_preflight_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]:
+    try:
+        return preflight_skill_package_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/import")
+def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]:
+    try:
+        return import_skill_package_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/export")
+def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, Any]:
+    try:
+        return export_skill_package_sync(request.model_dump(by_alias=True))
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.get("/api/agent/external-agent/connectors")
+def read_agent_external_connectors(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return connector_bundle_sync({})
+
+
+@app.get("/api/agent/skill-packages")
+def read_agent_skill_packages(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    try:
+        return list_skill_packages_sync({})
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
 def build_agentic_app_health() -> dict[str, Any]:
-    payload = copy.deepcopy(read_health())
+    try:
+        payload = copy.deepcopy(read_health())
+    except Exception as exc:  # noqa: BLE001 - first-run desktop must still open as a normal agent.
+        message = str(exc)
+        return {
+            "ok": False,
+            "version": app.version,
+            "portableMode": PORTABLE_MODE,
+            "projectRoot": str(ROOT_DIR),
+            "settingsPath": str(RUNTIME_SETTINGS_PATH),
+            "configPath": str(CONFIG_PATH),
+            "paths": {
+                "programDir": str(ROOT_DIR),
+                "userDataDir": str(USER_DATA_DIR),
+                "configDir": str(CONFIG_DIR),
+                "logsDir": str(LOG_DIR),
+                "artifactsDir": str(ARTIFACTS_DIR),
+                "dashboardDir": str(DASHBOARD_DIR),
+            },
+            "components": {
+                "backend": health_component(
+                    "ok",
+                    "Backend process is responding.",
+                    {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+                ),
+                "startupDegraded": health_component(
+                    "warning",
+                    "Startup diagnostics failed; VRCForge is running in normal agent mode.",
+                    message,
+                ),
+            },
+            "defaults": {},
+            "state": serialize_dashboard_state(),
+            "projects": {
+                "selectedProjectPath": DASHBOARD_STATE.selected_project_path,
+                "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
+                "projects": [],
+                "warning": message,
+            },
+            "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
+            "unityStatus": CURRENT_UNITY_STATUS,
+        }
     payload.pop("apiConfig", None)
     return payload
+
+
+def safe_agent_manifest() -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.build_manifest()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "schema": "vrcforge.agent-gateway.v1",
+            "tools": [],
+            "toolCount": 0,
+            "skills": [],
+            "writeTargets": [],
+            "error": str(exc),
+        }
+
+
+def safe_agent_health() -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.build_health()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "enabled": False,
+            "pendingApprovalCount": 0,
+            "allowRoslynAdvanced": False,
+            "error": str(exc),
+        }
+
+
+def safe_permission_state() -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.permission_state()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "executionMode": "approval",
+            "allowRoslynAdvanced": False,
+            "roslynFullAuto": False,
+            "roslynRiskAcknowledged": False,
+            "error": str(exc),
+        }
+
+
+def safe_approval_list() -> list[dict[str, Any]]:
+    try:
+        return AGENT_GATEWAY.list_approvals(include_expired=False)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def serialize_app_api_config() -> dict[str, Any]:
@@ -1450,17 +1815,34 @@ async def build_pipeline_plan(request: DashboardRequest) -> dict[str, Any]:
 
 @app.post("/api/pipeline/run")
 async def run_pipeline(request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(run_dashboard_pipeline_sync, request, True)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_run_face_tuning",
+        request,
+        lambda: run_dashboard_pipeline_sync(request, True),
+        skip_when_mock_execute=True,
+    )
 
 
 @app.post("/api/blendshapes/apply")
 async def apply_manual_blendshapes(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_manual_blendshapes_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_blendshapes",
+        request,
+        lambda: apply_manual_blendshapes_sync(request),
+        skip_when_mock_execute=True,
+    )
 
 
 @app.post("/api/blendshapes/undo")
 async def undo_manual_blendshapes(request: UndoBlendshapeRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(undo_manual_blendshapes_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_undo_blendshapes",
+        request,
+        lambda: undo_manual_blendshapes_sync(request),
+    )
 
 
 @app.get("/api/tuning/history")
@@ -1477,7 +1859,13 @@ def read_tuning_history(avatar_path: str | None = None) -> dict[str, Any]:
 
 @app.post("/api/tuning/history/{history_id}/reapply")
 async def reapply_tuning_history(history_id: str, request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_saved_tuning_history_sync, history_id, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_run_face_tuning",
+        request,
+        lambda: apply_saved_tuning_history_sync(history_id, request),
+        skip_when_mock_execute=True,
+    )
 
 
 @app.get("/api/tuning/presets")
@@ -1499,7 +1887,13 @@ async def create_tuning_preset(request: TuningPresetCreateRequest) -> dict[str, 
 
 @app.post("/api/tuning/presets/{preset_id}/apply")
 async def apply_tuning_preset(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_saved_tuning_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_run_face_tuning",
+        request,
+        lambda: apply_saved_tuning_preset_sync(preset_id, request),
+        skip_when_mock_execute=True,
+    )
 
 
 @app.post("/api/tuning/presets/{preset_id}/rename")
@@ -1541,7 +1935,12 @@ async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]
 
 @app.post("/api/clothes/toggle")
 async def toggle_clothing(request: ClothingToggleRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(toggle_clothing_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_toggle_clothing",
+        request,
+        lambda: toggle_clothing_sync(request),
+    )
 
 
 @app.post("/api/clothes/generate-fx")
@@ -1551,7 +1950,12 @@ async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[s
 
 @app.post("/api/clothes/apply-fx")
 async def apply_clothing_fx(request: ClothingApplyFxRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_clothing_fx_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_clothing_fx",
+        request,
+        lambda: apply_clothing_fx_sync(request),
+    )
 
 
 @app.post("/api/parameters/scan")
@@ -1566,12 +1970,22 @@ async def optimize_avatar_parameters(request: AvatarScopedConnectionRequest) -> 
 
 @app.post("/api/parameters/apply-optimization")
 async def apply_parameter_optimization(request: ParameterApplyOptimizationRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_parameter_optimization_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_parameter_optimization",
+        request,
+        lambda: apply_parameter_optimization_sync(request),
+    )
 
 
 @app.post("/api/parameters/rollback")
 async def rollback_parameter_optimization(request: ParameterRollbackRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(rollback_parameter_optimization_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_rollback_parameters",
+        request,
+        lambda: rollback_parameter_optimization_sync(request),
+    )
 
 
 @app.post("/api/shader/materials/scan")
@@ -1586,12 +2000,22 @@ async def generate_shader_material_plan(request: ShaderMaterialPlanRequest) -> d
 
 @app.post("/api/shader/apply")
 async def apply_shader_material_plan(request: ShaderMaterialApplyRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_shader_material_plan_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_shader_tuning",
+        request,
+        lambda: apply_shader_material_plan_sync(request),
+    )
 
 
 @app.post("/api/shader/restore")
 async def restore_shader_material_plan(request: ShaderMaterialRestoreRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(restore_shader_material_plan_sync, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_restore_shader_tuning",
+        request,
+        lambda: restore_shader_material_plan_sync(request),
+    )
 
 
 @app.get("/api/shader/history")
@@ -1608,7 +2032,12 @@ def read_shader_tuning_history(avatar_path: str | None = None) -> dict[str, Any]
 
 @app.post("/api/shader/history/{history_id}/reapply")
 async def reapply_shader_tuning_history(history_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_saved_shader_history_sync, history_id, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_shader_tuning",
+        request,
+        lambda: apply_saved_shader_history_sync(history_id, request),
+    )
 
 
 @app.get("/api/shader/presets")
@@ -1630,7 +2059,12 @@ async def create_shader_tuning_preset(request: ShaderTuningPresetCreateRequest) 
 
 @app.post("/api/shader/presets/{preset_id}/apply")
 async def apply_shader_tuning_preset(preset_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(apply_saved_shader_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        run_legacy_write_with_checkpoint,
+        "vrcforge_apply_shader_tuning",
+        request,
+        lambda: apply_saved_shader_preset_sync(preset_id, request),
+    )
 
 
 @app.post("/api/shader/presets/{preset_id}/rename")
@@ -2840,7 +3274,7 @@ def apply_shader_material_plan_sync(request: ShaderMaterialApplyRequest) -> dict
             raise RuntimeError("No valid shader material changes remained after validation.")
 
         result = apply_shader_material_tuning_direct(settings, avatar_path, changes)
-        applied = list(result.get("applied") or [])
+        applied = normalize_shader_applied_changes(result, changes)
         skipped = [*validation["skippedChanges"], *list(result.get("skipped") or [])]
         backup_changes = build_shader_restore_changes(applied)
         if backup_changes:
@@ -2879,7 +3313,7 @@ def restore_shader_material_plan_sync(request: ShaderMaterialRestoreRequest) -> 
 
         restore_changes = undo_stack.pop()
         result = apply_shader_material_tuning_direct(settings, avatar_path, restore_changes)
-        applied = list(result.get("applied") or [])
+        applied = normalize_shader_applied_changes(result, restore_changes)
         skipped = list(result.get("skipped") or [])
         emit_log(
             "success",
@@ -2919,6 +3353,28 @@ def build_shader_restore_changes(applied_changes: list[dict[str, Any]]) -> list[
             }
         )
     return restore
+
+
+def normalize_shader_applied_changes(result: dict[str, Any], requested_changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    raw_applied = result.get("applied") or result.get("appliedChanges") or []
+    if isinstance(raw_applied, list) and raw_applied:
+        return [item for item in raw_applied if isinstance(item, dict)]
+
+    try:
+        applied_count = int(result.get("appliedCount") or result.get("applied_count") or 0)
+    except (TypeError, ValueError):
+        applied_count = 0
+
+    if applied_count <= 0:
+        return []
+    if applied_count != len(requested_changes):
+        return []
+
+    # Some unity-mcp custom-tool calls flatten list payloads as "[N items]" in
+    # stdout. The validation layer already expanded before/after values, so when
+    # Unity reports that every requested change applied we can preserve rollback
+    # state from the validated request instead of losing the undo point.
+    return [dict(change) for change in requested_changes if isinstance(change, dict)]
 
 
 def save_shader_tuning_history_record(
@@ -3205,7 +3661,7 @@ def validate_shader_material_tuning_plan(
         material = material_index.get(material_id) or {}
         if not skip_reason:
             shader_family = str(material.get("shader_family") or "")
-            if shader_family not in {"lilToon", "Poiyomi"}:
+            if shader_family not in {"lilToon", "Poiyomi", "Generic"}:
                 skip_reason = f"Unsupported shader family: {shader_family or 'Unknown'}"
 
         supported_properties = material.get("supported_properties") or {}
@@ -8266,6 +8722,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda _params: AGENT_GATEWAY.build_manifest())
     AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda _params: AGENT_GATEWAY.check_skill_registry())
+    AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
@@ -8320,6 +8779,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
+    AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
+    AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)

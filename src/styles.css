@@ -21,6 +21,9 @@
     --border: 220 13% 91%;
     --input: 220 13% 91%;
     --ring: 221 83% 53%;
+    --scrollbar-track: 220 14% 96%;
+    --scrollbar-thumb: 220 10% 58%;
+    color-scheme: light;
   }
 
   .dark {
@@ -41,10 +44,32 @@
     --border: 224 16% 26%;
     --input: 224 16% 26%;
     --ring: 221 83% 62%;
+    --scrollbar-track: 228 24% 9%;
+    --scrollbar-thumb: 224 12% 40%;
+    color-scheme: dark;
   }
 
   * {
     @apply border-border;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    scrollbar-width: thin;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: hsl(var(--scrollbar-track));
+  }
+
+  *::-webkit-scrollbar-thumb {
+    min-height: 32px;
+    border: 2px solid hsl(var(--scrollbar-track));
+    border-radius: 9999px;
+    background-color: hsl(var(--scrollbar-thumb));
   }
 
   body {

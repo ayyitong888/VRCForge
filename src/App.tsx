@@ -30,7 +30,16 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { FormEvent, MouseEvent as ReactMouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
@@ -202,6 +211,7 @@ export default function App() {
   const queueRef = useRef<string[]>([]);
   const sendingRef = useRef(false);
   const runtimeStartingRef = useRef(false);
+  const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
   const apiConfig = bootstrap?.apiConfig;
@@ -278,6 +288,32 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  useLayoutEffect(() => {
+    const menu = selectionMenuRef.current;
+    if (!selectionMenu || !menu) {
+      return;
+    }
+
+    const positionMenu = () => {
+      const margin = 8;
+      const gap = 8;
+      const rect = menu.getBoundingClientRect();
+      const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+      const left = Math.min(Math.max(margin, selectionMenu.x - rect.width / 2), maxLeft);
+      const preferredTop = selectionMenu.y - rect.height - gap;
+      const fallbackTop = selectionMenu.y + gap;
+      const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+      const top = Math.min(Math.max(margin, preferredTop >= margin ? preferredTop : fallbackTop), maxTop);
+
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    };
+
+    positionMenu();
+    window.addEventListener("resize", positionMenu);
+    return () => window.removeEventListener("resize", positionMenu);
+  }, [selectionMenu]);
 
   useEffect(() => {
     // 屏蔽 WebView 默认右键菜单（返回/刷新/另存为等）；输入框保留原生菜单以便粘贴。
@@ -804,7 +840,7 @@ export default function App() {
     }
     const accepted = saved.customPaths.some((item) => item.replace(/\//g, "\\").toLowerCase() === path.replace(/\//g, "\\").toLowerCase());
     if (!accepted) {
-      setProjectModalError("路径不存在或不可访问，请确认这是一个文件夹路径。");
+      setProjectModalError("请输入真正的 Unity 工程根目录：这一层必须同时包含 Assets/、Packages/ 和 ProjectSettings/ProjectVersion.txt。");
       return;
     }
     setNewProjectPath("");
@@ -1955,35 +1991,33 @@ export default function App() {
 
       {selectionMenu ? (
         <div
-          className="fixed z-50 flex items-center gap-0.5 rounded-lg border border-border bg-card p-1 shadow-panel"
-          style={{
-            left: Math.max(8, Math.min(selectionMenu.x - 130, window.innerWidth - 270)),
-            top: Math.max(8, selectionMenu.y - 44),
-          }}
+          ref={selectionMenuRef}
+          className="fixed z-50 flex w-max max-w-[calc(100vw-1rem)] flex-wrap items-center gap-0.5 rounded-lg border border-border bg-card p-1 shadow-panel"
+          style={{ left: 0, top: 0 }}
           onMouseUp={(event) => event.stopPropagation()}
         >
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
             onClick={() => copySelection(selectionMenu.text)}
           >
-            <Copy className="h-3.5 w-3.5" />
+            <Copy className="h-3.5 w-3.5 shrink-0" />
             复制
           </button>
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
             onClick={() => addSelectionToComposer(selectionMenu.text)}
           >
-            <MessageSquare className="h-3.5 w-3.5" />
+            <MessageSquare className="h-3.5 w-3.5 shrink-0" />
             添加到对话
           </button>
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
             onClick={() => askInNewSession(selectionMenu.text)}
           >
-            <Bot className="h-3.5 w-3.5" />
+            <Bot className="h-3.5 w-3.5 shrink-0" />
             新会话提问
           </button>
         </div>

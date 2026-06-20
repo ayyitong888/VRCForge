@@ -148,6 +148,7 @@ namespace VRCForge.Editor
                     materialCount = materials.Count,
                     lilToonCount = materials.Count(item => item.shader_family == "lilToon"),
                     poiyomiCount = materials.Count(item => item.shader_family == "Poiyomi"),
+                    genericCount = materials.Count(item => item.shader_family == "Generic"),
                     unsupportedCount = materials.Count(item => item.shader_family == "Unsupported")
                 }
             };
@@ -383,6 +384,7 @@ namespace VRCForge.Editor
         public int materialCount;
         public int lilToonCount;
         public int poiyomiCount;
+        public int genericCount;
         public int unsupportedCount;
     }
 

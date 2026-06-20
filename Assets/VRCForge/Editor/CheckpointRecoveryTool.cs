@@ -98,16 +98,52 @@ namespace VRCForge.Editor
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
                 var scenes = CheckpointPrepareTool.OpenProjectScenePaths()
-                    .Where(path => File.Exists(Path.GetFullPath(path)))
+                    .Where(path => File.Exists(Path.Combine(CheckpointPrepareTool.ProjectRoot(), path)))
                     .ToList();
 
-                for (var index = 0; index < scenes.Count; index++)
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                if (scenes.Count > 0)
                 {
-                    EditorSceneManager.OpenScene(
-                        scenes[index],
-                        index == 0 ? OpenSceneMode.Single : OpenSceneMode.Additive);
+                    // Keep a scratch scene loaded while the dirty project scenes
+                    // are closed without saving, then open the restored files.
+                    var scratch = EditorSceneManager.NewScene(
+                        NewSceneSetup.EmptyScene,
+                        NewSceneMode.Additive);
+                    SceneManager.SetActiveScene(scratch);
+
+                    var loadedProjectScenes = new List<Scene>();
+                    for (var index = 0; index < SceneManager.sceneCount; index++)
+                    {
+                        var scene = SceneManager.GetSceneAt(index);
+                        if (scene.IsValid() && scene.isLoaded && scenes.Contains(scene.path))
+                        {
+                            loadedProjectScenes.Add(scene);
+                        }
+                    }
+                    foreach (var scene in loadedProjectScenes)
+                    {
+                        if (!EditorSceneManager.CloseScene(scene, true))
+                        {
+                            throw new InvalidOperationException(
+                                $"Could not close dirty scene without saving: {scene.path}");
+                        }
+                    }
+
+                    Scene firstRestored = default;
+                    foreach (var path in scenes)
+                    {
+                        var restored = EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
+                        if (!firstRestored.IsValid())
+                        {
+                            firstRestored = restored;
+                        }
+                    }
+                    if (firstRestored.IsValid())
+                    {
+                        SceneManager.SetActiveScene(firstRestored);
+                    }
+                    EditorSceneManager.CloseScene(scratch, true);
                 }
-                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
                 return new SuccessResponse(
                     "Reloaded restored scenes and refreshed project assets.",
                     new { ok = true, projectPath = CheckpointPrepareTool.ProjectRoot(), scenes });

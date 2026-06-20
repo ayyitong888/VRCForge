@@ -21,6 +21,7 @@ python -m pip install -r requirements.txt
 | `google-genai` | Google AI Studio and Google Vertex AI Gemini calls | Google AI Studio 与 Google Vertex AI Gemini 调用 |
 | `anthropic` | Anthropic Claude calls | Anthropic Claude 调用 |
 | `mcpforunityserver` | Python side of the Unity MCP connection | Unity MCP 连接的 Python 侧组件 |
+| `cryptography` | `.vsk` skill package signing and Ed25519 signature verification | Skill 包签名与验签 |
 | `httpx` | FastAPI test client support | FastAPI 测试客户端支持 |
 | `pytest` | Local test runner | 本地测试运行器 |
 

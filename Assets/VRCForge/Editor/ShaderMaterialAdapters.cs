@@ -21,7 +21,8 @@ namespace VRCForge.Editor
         private static readonly List<IShaderMaterialAdapter> Adapters = new List<IShaderMaterialAdapter>
         {
             new LilToonShaderAdapter(),
-            new PoiyomiShaderAdapter()
+            new PoiyomiShaderAdapter(),
+            new GenericShaderAdapter()
         };
 
         public static IShaderMaterialAdapter GetAdapter(Material material)
@@ -315,6 +316,46 @@ namespace VRCForge.Editor
         {
             var shaderName = material != null && material.shader != null ? material.shader.name.ToLowerInvariant() : "";
             return shaderName.Contains("poiyomi");
+        }
+    }
+
+    public sealed class GenericShaderAdapter : ShaderMaterialAdapterBase
+    {
+        public GenericShaderAdapter()
+            : base("Generic", new Dictionary<string, SemanticPropertyMapping>
+            {
+                ["base_color"] = SemanticPropertyMapping.Color("_Color", "_BaseColor", "_MainColor", "_MainTexColor"),
+                ["shade_color"] = SemanticPropertyMapping.Color("_ShadeColor", "_ShadowColor", "_ShadowTint"),
+                ["shadow_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_ShadowStrength", "_ShadowIntensity"),
+                ["shadow_softness"] = SemanticPropertyMapping.Float(0f, 1f, "_ShadowSoftness", "_ShadowBlur", "_ShadowBorder"),
+                ["smoothness"] = SemanticPropertyMapping.Float(0f, 1f, "_Smoothness", "_Glossiness"),
+                ["specular_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_SpecularStrength", "_SpecularIntensity"),
+                ["rim_color"] = SemanticPropertyMapping.Color("_RimColor"),
+                ["rim_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_RimStrength", "_RimIntensity", "_RimPower"),
+                ["emission_color"] = SemanticPropertyMapping.Color("_EmissionColor", "_EmissionColor0", "_EmissionColor1"),
+                ["emission_strength"] = SemanticPropertyMapping.Float(0f, 2f, "_EmissionStrength", "_EmissionIntensity"),
+                ["matcap_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_MatcapIntensity", "_MatcapStrength", "_MatCapBlend"),
+                ["outline_color"] = SemanticPropertyMapping.Color("_OutlineColor"),
+                ["outline_width"] = SemanticPropertyMapping.Float(0f, 0.25f, "_OutlineWidth", "_OutlineWidthMask"),
+                ["normal_strength"] = SemanticPropertyMapping.Float(0f, 2f, "_BumpScale", "_NormalStrength")
+            })
+        {
+        }
+
+        public override bool Supports(Material material)
+        {
+            if (material == null || material.shader == null)
+            {
+                return false;
+            }
+
+            var shaderName = material.shader.name.ToLowerInvariant();
+            if (shaderName.Contains("liltoon") || shaderName.Contains("lil/toon") || shaderName.Contains("poiyomi"))
+            {
+                return false;
+            }
+
+            return ReadSupportedProperties(material).Count > 0;
         }
     }
 

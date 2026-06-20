@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
+    io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -59,6 +60,11 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
     let user_data = user_data_dir()?;
     let app_session_token = ensure_app_session_token(&user_data)?;
     if backend_port_open() {
+        if !existing_backend_accepts_session(&app_session_token) {
+            return Err(
+                "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
+            );
+        }
         return Ok(BackendStartResult {
             endpoint: BACKEND_ENDPOINT.to_string(),
             app_session_token,
@@ -139,12 +145,35 @@ fn stop_backend(state: State<'_, BackendState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn ensure_agent_notes_file() -> Result<String, String> {
-    let path = user_data_dir()?.join("AGENTS.md");
-    if !path.exists() {
-        fs::write(&path, "").map_err(|error| format!("无法创建 AGENTS.md: {error}"))?;
+fn ensure_agent_notes_file() -> String {
+    let Ok(user_data) = user_data_dir() else {
+        eprintln!("Optional AGENTS.md path could not be resolved");
+        return String::new();
+    };
+    let path = user_data.join("AGENTS.md");
+    if let Err(error) = try_ensure_agent_notes_file(&user_data) {
+        eprintln!("Optional AGENTS.md is unavailable: {error}");
     }
-    Ok(path.display().to_string())
+    path.display().to_string()
+}
+
+fn try_ensure_agent_notes_file(user_data: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(user_data).map_err(|error| {
+        format!(
+            "unable to create AGENTS.md parent directory {}: {error}",
+            user_data.display()
+        )
+    })?;
+    let path = user_data.join("AGENTS.md");
+    if path.exists() {
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("{} is not a file", path.display()));
+    }
+    fs::write(&path, "")
+        .map_err(|error| format!("unable to create {}: {error}", path.display()))?;
+    Ok(path)
 }
 
 fn backend_command(root: &Path) -> Result<Command, String> {
@@ -165,8 +194,9 @@ fn backend_command(root: &Path) -> Result<Command, String> {
 
 fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
     for dir in ["config", "logs", "artifacts", "backups", "skills"] {
-        fs::create_dir_all(user_data.join(dir))
-            .map_err(|error| format!("无法创建用户数据目录: {error}"))?;
+        let path = user_data.join(dir);
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("无法创建必要的运行目录 {}: {error}", path.display()))?;
     }
     let settings_path = user_data.join("config").join("settings.json");
     if !settings_path.exists() {
@@ -205,9 +235,8 @@ fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
         )
         .map_err(|error| format!("无法写入默认 settings.json: {error}"))?;
     }
-    let notes_path = user_data.join("AGENTS.md");
-    if !notes_path.exists() {
-        fs::write(notes_path, "").map_err(|error| format!("无法创建空 AGENTS.md: {error}"))?;
+    if let Err(error) = try_ensure_agent_notes_file(user_data) {
+        eprintln!("Optional AGENTS.md is unavailable: {error}");
     }
     if !root.join("dashboard").join("index.html").exists() {
         return Err("缺少 dashboard 静态资源，无法启动 runtime。".to_string());
@@ -283,6 +312,36 @@ fn backend_port_open() -> bool {
     }
 }
 
+fn existing_backend_accepts_session(token: &str) -> bool {
+    let addrs = (BACKEND_HOST, BACKEND_PORT).to_socket_addrs();
+    let Ok(mut addrs) = addrs else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(350)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
+    let request = format!(
+        "GET /api/app/bootstrap HTTP/1.1\r\nHost: {BACKEND_HOST}:{BACKEND_PORT}\r\nOrigin: tauri://localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 64];
+    let Ok(size) = stream.read(&mut response) else {
+        return false;
+    };
+    parse_http_status_ok(&response[..size])
+}
+
+fn parse_http_status_ok(response: &[u8]) -> bool {
+    response.starts_with(b"HTTP/1.1 200 ") || response.starts_with(b"HTTP/1.0 200 ")
+}
+
 fn wait_for_backend(timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -348,5 +407,86 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_http_status_ok, prepare_runtime_files, try_ensure_agent_notes_file};
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        env::temp_dir().join(format!("vrcforge-{label}-{}-{nonce}", process::id()))
+    }
+
+    fn create_dashboard(root: &Path) {
+        let dashboard = root.join("dashboard");
+        fs::create_dir_all(&dashboard).expect("dashboard directory should be created");
+        fs::write(dashboard.join("index.html"), "test").expect("dashboard index should be created");
+    }
+
+    #[test]
+    fn agent_notes_creation_creates_missing_parent_directories() {
+        let base = test_dir("agent-notes-parent");
+        let user_data = base.join("missing").join("nested");
+
+        let path = try_ensure_agent_notes_file(&user_data)
+            .expect("optional AGENTS.md should be created when its parent is missing");
+
+        assert_eq!(path, user_data.join("AGENTS.md"));
+        assert!(path.is_file());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn runtime_preparation_ignores_optional_agent_notes_failure() {
+        let base = test_dir("optional-agent-notes");
+        let root = base.join("app");
+        let user_data = base.join("user-data");
+        create_dashboard(&root);
+        fs::create_dir_all(user_data.join("AGENTS.md"))
+            .expect("conflicting AGENTS.md directory should be created");
+
+        let result = prepare_runtime_files(&root, &user_data);
+
+        assert!(result.is_ok(), "optional AGENTS.md failure blocked runtime");
+        assert!(user_data.join("config").join("settings.json").is_file());
+        assert!(user_data.join("logs").is_dir());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn runtime_preparation_reports_required_directory_failure() {
+        let base = test_dir("required-runtime-dir");
+        let root = base.join("app");
+        let user_data = base.join("user-data");
+        create_dashboard(&root);
+        fs::create_dir_all(&user_data).expect("user data directory should be created");
+        let logs_path = user_data.join("logs");
+        fs::write(&logs_path, "not a directory").expect("logs conflict should be created");
+
+        let error = prepare_runtime_files(&root, &user_data)
+            .expect_err("required logs directory failure must block runtime");
+
+        assert!(error.contains(&logs_path.display().to_string()));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn existing_backend_probe_only_accepts_success_status() {
+        assert!(parse_http_status_ok(b"HTTP/1.1 200 OK\r\n"));
+        assert!(parse_http_status_ok(b"HTTP/1.0 200 OK\r\n"));
+        assert!(!parse_http_status_ok(b"HTTP/1.1 401 Unauthorized\r\n"));
+        assert!(!parse_http_status_ok(b"HTTP/1.1 404 Not Found\r\n"));
+        assert!(!parse_http_status_ok(b"not http"));
     }
 }

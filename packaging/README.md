@@ -72,7 +72,7 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.5.1-beta/VRCForge_Windows_x64_0.5.1-beta.zip
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.5.2-beta/VRCForge_Windows_x64_0.5.2-beta.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1
 ```
@@ -90,3 +90,8 @@ If release contents change after `v<VERSION>` was already created, bump
 `-PayloadDownloadUrl`, then publish the new tag/release. The web installer
 downloads exactly the URL passed at build time, so that URL must point to the
 payload zip generated from the same commit.
+
+Release smoke should also verify first-run resilience: optional failures in
+user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
+loading, or external-agent MCP startup must not prevent the backend and ordinary
+agent chat from opening.
