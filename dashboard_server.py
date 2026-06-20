@@ -13,6 +13,7 @@ import subprocess
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import time
 import urllib.error
@@ -82,7 +83,16 @@ def resolve_runtime_path(env_name: str, default: Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
-ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", Path(__file__).resolve().parent)
+def default_runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).resolve()
+        if executable.parent.name.lower() == "backend":
+            return executable.parent.parent
+        return executable.parent
+    return Path(__file__).resolve().parent
+
+
+ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", default_runtime_root())
 PORTABLE_MODE = any(
     os.environ.get(name, "").strip()
     for name in (

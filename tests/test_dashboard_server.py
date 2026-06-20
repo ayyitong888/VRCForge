@@ -569,6 +569,16 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
+    def test_packaged_backend_exe_resolves_payload_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload_root = Path(tmp) / "VRCForge_Windows_x64"
+            backend_exe = payload_root / "backend" / "vrcforge_backend.exe"
+            with (
+                patch.object(dashboard_server.sys, "frozen", True, create=True),
+                patch.object(dashboard_server.sys, "executable", str(backend_exe)),
+            ):
+                self.assertEqual(dashboard_server.default_runtime_root(), payload_root.resolve())
+
     @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", return_value={"ok": True})
     def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self, mock_unity_ack) -> None:
         with TestClient(dashboard_server.app) as client:
