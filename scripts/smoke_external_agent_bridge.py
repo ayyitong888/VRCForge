@@ -55,6 +55,7 @@ class ExternalAgentBridgeSmoke:
         self.checkpoint_id: str = ""
         self.created_object_path: str = ""
         self.rollback_done = False
+        self.connector_payload: dict[str, Any] = {}
 
     def run(self) -> dict[str, Any]:
         started = utc_now()
@@ -124,6 +125,7 @@ class ExternalAgentBridgeSmoke:
                 "error": payload.get("error"),
                 "hint": "The running VRCForge backend does not expose the external-agent connector bundle. Install or start a backend built from this commit.",
             }
+        self.connector_payload = payload
         rendered = json.dumps(payload, ensure_ascii=False)
         return {
             "ok": bool(payload.get("ok")) and self.gateway_token not in rendered,
@@ -159,21 +161,24 @@ class ExternalAgentBridgeSmoke:
         }
 
     def check_stdio_bridge_preflight(self) -> dict[str, Any]:
-        script = Path(__file__).resolve().parents[1] / "tools" / "vrcforge_agent_mcp_stdio.py"
-        if not script.is_file():
-            return {"ok": False, "error": f"stdio bridge script was not found: {script}"}
+        launcher = ensure_dict(ensure_dict(self.connector_payload.get("launcher")).get("stdioBridge"))
+        command_text = str(launcher.get("command") or sys.executable).strip()
+        bridge_args = [str(item) for item in ensure_list(launcher.get("args"))]
+        cwd = str(launcher.get("cwd") or Path(__file__).resolve().parents[1])
         command = [
-            sys.executable,
-            str(script),
-            "--base-url",
-            self.base_url,
+            command_text,
+            *bridge_args,
             "--preflight",
             "--json",
         ]
+        env = os.environ.copy()
+        env["VRCFORGE_AGENT_BASE_URL"] = self.base_url
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         try:
             completed = subprocess.run(
                 command,
-                cwd=str(Path(__file__).resolve().parents[1]),
+                cwd=cwd,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -196,6 +201,9 @@ class ExternalAgentBridgeSmoke:
         return {
             "ok": completed.returncode == 0 and bool(payload.get("ok")),
             "exitCode": completed.returncode,
+            "command": command_text,
+            "args": bridge_args,
+            "cwd": cwd,
             "runtimeOnline": bool(payload.get("runtimeOnline")),
             "gatewayEnabled": bool(payload.get("gatewayEnabled")),
             "allowWriteRequests": bool(payload.get("allowWriteRequests")),

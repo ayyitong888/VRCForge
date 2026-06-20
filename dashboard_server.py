@@ -10510,6 +10510,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", default=8757, type=int, help="Dashboard bind port.")
     parser.add_argument("--agent-mcp-stdio", action="store_true", help="Run the external-agent stdio MCP bridge instead of the HTTP backend.")
+    parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
+    parser.add_argument("--json", action="store_true", help="Compatibility flag for preflight JSON output.")
     return parser.parse_args()
 
 
@@ -10526,6 +10528,9 @@ def main() -> int:
             timeout_seconds=float(os.environ.get("VRCFORGE_AGENT_TIMEOUT", "30")),
             start_runtime=True,
         )
+        if args.preflight:
+            print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
         run_stdio_server(bridge)
         return 0
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
