@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   Eye,
   EyeOff,
   Folder,
@@ -56,6 +57,7 @@ import {
   ChatHistoryEntry,
   DoctorCheck,
   DoctorReport,
+  DiagnosticsStatus,
   ExternalAgentConnectorStatus,
   SkillPackageEntry,
   SkillPackagePreflight,
@@ -64,9 +66,11 @@ import {
   compactAgentHistory,
   createSkill,
   deleteSkill,
+  exportSupportBundle,
   exportSkillPackage,
   fetchCheckpoints,
   fetchBootstrap,
+  fetchDiagnostics,
   fetchDoctor,
   fetchExternalAgentConnectors,
   fetchSkillPackages,
@@ -91,6 +95,7 @@ import {
   setAppSessionToken,
   testProviderCapability,
   updateApiConfig,
+  updateDiagnostics,
   updateExternalAgentGateway,
   updatePermission,
   updateSkill,
@@ -217,6 +222,10 @@ export default function App() {
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
   const [startupIssue, setStartupIssue] = useState("");
+  const [diagnosticsStatus, setDiagnosticsStatus] = useState<DiagnosticsStatus | null>(null);
+  const [loadingDiagnostics, setLoadingDiagnostics] = useState(false);
+  const [exportingSupportBundle, setExportingSupportBundle] = useState(false);
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
   const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
   const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
@@ -1100,6 +1109,7 @@ export default function App() {
     setActiveView("settings");
     setError("");
     setNotesMessage("");
+    setDiagnosticsMessage("");
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -1114,9 +1124,68 @@ export default function App() {
       setAgentNotesPath(notes.path);
       setAgentNotesLoaded(true);
       void loadConnectors(targetEndpoint);
+      void loadDiagnostics(targetEndpoint);
     } catch (cause) {
       setAgentNotesLoaded(false);
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function loadDiagnostics(target = endpoint) {
+    setLoadingDiagnostics(true);
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      setDiagnosticsStatus(await fetchDiagnostics(targetEndpoint));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingDiagnostics(false);
+    }
+  }
+
+  async function setDebugLogging(enabled: boolean) {
+    setLoadingDiagnostics(true);
+    setDiagnosticsMessage("");
+    setError("");
+    try {
+      const payload = await updateDiagnostics(endpoint, { debugLogging: enabled });
+      setDiagnosticsStatus(payload);
+      setDiagnosticsMessage(enabled ? "Debug logging enabled" : "Debug logging disabled");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingDiagnostics(false);
+    }
+  }
+
+  async function createSupportBundle() {
+    setExportingSupportBundle(true);
+    setDoctorMessage("");
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await exportSupportBundle(targetEndpoint, { logLimit: 200 });
+      setDoctorMessage(`Support bundle exported: ${payload.bundlePath}`);
+      setDiagnosticsMessage(`Support bundle exported: ${payload.bundlePath}`);
+      void loadDiagnostics(targetEndpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExportingSupportBundle(false);
     }
   }
 
@@ -1679,8 +1748,10 @@ export default function App() {
               report={doctorReport}
               loading={loadingDoctor}
               message={doctorMessage}
+              exportingSupportBundle={exportingSupportBundle}
               onRefresh={() => void loadDoctor()}
               onOpenSettings={() => void openSettings()}
+              onExportSupportBundle={() => void createSupportBundle()}
               onCopy={() => {
                 if (!doctorReport) {
                   return;
@@ -1810,6 +1881,44 @@ export default function App() {
                       onModelChange={setApiModel}
                       onSubmit={saveApiProvider}
                     />
+                  </div>
+                </section>
+
+                <section className="mt-12">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h2 className="truncate text-base font-semibold">Diagnostics</h2>
+                    {diagnosticsMessage ? (
+                      <Badge tone="ok" className="shrink-0">
+                        {diagnosticsMessage}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <div className="mt-4 rounded-lg border border-border bg-card p-4">
+                    <div className="flex min-w-0 flex-wrap items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">Debug logging</div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">
+                          {diagnosticsStatus?.debugLogging ? "Recording local API, MCP, agent, checkpoint, and runtime interactions" : "Off"}
+                        </div>
+                      </div>
+                      <Badge tone={diagnosticsStatus?.debugLogging ? "warn" : "muted"} className="shrink-0">
+                        {diagnosticsStatus?.debugLogging ? "Debug on" : "Debug off"}
+                      </Badge>
+                      <Button
+                        type="button"
+                        variant={diagnosticsStatus?.debugLogging ? "outline" : "primary"}
+                        disabled={loadingDiagnostics}
+                        onClick={() => void setDebugLogging(!diagnosticsStatus?.debugLogging)}
+                      >
+                        {loadingDiagnostics ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                        {diagnosticsStatus?.debugLogging ? "Turn off" : "Turn on"}
+                      </Button>
+                      <Button type="button" variant="outline" disabled={exportingSupportBundle} onClick={() => void createSupportBundle()}>
+                        {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        Export Bundle
+                      </Button>
+                    </div>
+                    {diagnosticsStatus?.logsDir ? <div className="mt-3 truncate text-xs text-muted-foreground/70">{diagnosticsStatus.logsDir}</div> : null}
                   </div>
                 </section>
 
@@ -3720,15 +3829,19 @@ function DoctorWorkspace({
   report,
   loading,
   message,
+  exportingSupportBundle,
   onRefresh,
   onOpenSettings,
+  onExportSupportBundle,
   onCopy,
 }: {
   report: DoctorReport | null;
   loading: boolean;
   message: string;
+  exportingSupportBundle: boolean;
   onRefresh: () => void;
   onOpenSettings: () => void;
+  onExportSupportBundle: () => void;
   onCopy: () => void;
 }) {
   const summary = report?.summary;
@@ -3768,6 +3881,10 @@ function DoctorWorkspace({
             <Button type="button" variant="outline" onClick={onOpenSettings}>
               <Settings className="h-4 w-4" />
               Settings
+            </Button>
+            <Button type="button" variant="outline" onClick={onExportSupportBundle} disabled={exportingSupportBundle}>
+              {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Support Bundle
             </Button>
             <Button type="button" variant="outline" onClick={onCopy} disabled={!report}>
               <Copy className="h-4 w-4" />

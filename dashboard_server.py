@@ -17,6 +17,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app
+from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, redact_sensitive
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
 from skill_packages import SkillPackageError, SkillPackageService
 from vrchat_blendshape_agent import (
@@ -118,6 +119,9 @@ LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(hours=24)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
+DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
+INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
+SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
 
 
 def read_vrcforge_version() -> str:
@@ -269,6 +273,15 @@ class ApiConfigRequest(BaseModel):
 
 class ApiModelListRequest(ApiConfigRequest):
     pass
+
+
+class DiagnosticsConfigRequest(BaseModel):
+    debug_logging: bool = Field(default=False, alias="debugLogging")
+
+
+class SupportBundleRequest(BaseModel):
+    include_full_paths: bool = Field(default=False, alias="includeFullPaths")
+    log_limit: int = Field(default=200, alias="logLimit", ge=1, le=500)
 
 
 class AvatarSceneScanRequest(ConnectionRequest):
@@ -658,17 +671,67 @@ AGENT_MCP_CONTEXT = None
 
 @app.middleware("http")
 async def authorize_local_requests(request: Request, call_next):
+    started_at = time.perf_counter()
+    status_code = 500
+    error_message = ""
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
         try:
             authenticate_agent_request(request, allow_disabled=False)
         except HTTPException as exc:
+            status_code = exc.status_code
+            record_debug_interaction(
+                {
+                    "kind": "http",
+                    "direction": "inbound",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error": str(exc.detail),
+                    "client": request.client.host if request.client else "",
+                }
+            )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     if app_route_requires_auth(request):
         try:
             authenticate_app_request(request)
         except HTTPException as exc:
+            status_code = exc.status_code
+            record_debug_interaction(
+                {
+                    "kind": "http",
+                    "direction": "inbound",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error": str(exc.detail),
+                    "client": request.client.host if request.client else "",
+                }
+            )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    except Exception as exc:  # noqa: BLE001
+        error_message = str(exc)
+        raise
+    finally:
+        if request.url.path.startswith("/api/") or request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+            record_debug_interaction(
+                {
+                    "kind": "http",
+                    "direction": "inbound",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "query": dict(request.query_params),
+                    "status": status_code,
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error": error_message,
+                    "client": request.client.host if request.client else "",
+                }
+            )
 
 
 @app.on_event("startup")
@@ -1565,6 +1628,168 @@ def serialize_app_api_config() -> dict[str, Any]:
     return config
 
 
+def load_diagnostics_config() -> dict[str, Any]:
+    try:
+        payload = json.loads(DIAGNOSTICS_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    return {"debugLogging": bool(payload.get("debugLogging", payload.get("debug_logging", False)))}
+
+
+def save_diagnostics_config(payload: dict[str, Any]) -> dict[str, Any]:
+    state = {"debugLogging": bool(payload.get("debugLogging", payload.get("debug_logging", False)))}
+    DIAGNOSTICS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_CONFIG_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return state
+
+
+def diagnostics_state() -> dict[str, Any]:
+    config = load_diagnostics_config()
+    return {
+        "ok": True,
+        "schema": "vrcforge.diagnostics.v1",
+        "debugLogging": bool(config.get("debugLogging")),
+        "configPath": str(DIAGNOSTICS_CONFIG_PATH),
+        "logsDir": str(LOG_DIR),
+        "dashboardLogPath": str(LOCAL_LOG_PATH),
+        "interactionLogPath": str(INTERACTION_LOG_PATH),
+        "supportBundleDir": str(SUPPORT_BUNDLE_DIR),
+        "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
+    }
+
+
+def debug_logging_enabled() -> bool:
+    return bool(load_diagnostics_config().get("debugLogging"))
+
+
+def summarize_debug_payload(value: Any) -> Any:
+    value = redact_sensitive(value)
+    if isinstance(value, dict):
+        return {str(key): summarize_debug_payload(item) for key, item in list(value.items())[:40]}
+    if isinstance(value, list):
+        return {"type": "list", "count": len(value), "items": [summarize_debug_payload(item) for item in value[:5]]}
+    if isinstance(value, str):
+        if _looks_like_local_path(value):
+            return _redact_local_path(value)
+        return value[:500] + ("..." if len(value) > 500 else "")
+    return value
+
+
+def record_debug_interaction(entry: dict[str, Any]) -> None:
+    if not debug_logging_enabled():
+        return
+    safe_entry = summarize_debug_payload({"timestamp": utc_now_iso(), **entry})
+    with LOCAL_LOG_LOCK:
+        INTERACTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with INTERACTION_LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+        prune_jsonl_log_file(INTERACTION_LOG_PATH)
+
+
+def read_jsonl_tail(path: Path, limit: int = 200) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 500)):]
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entries.append(payload if isinstance(payload, dict) else {"value": payload})
+    return entries
+
+
+def read_text_tail(path: Path, limit: int = 200) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, min(limit, 500)):]
+    except OSError:
+        return []
+
+
+def redact_support_payload(value: Any, include_full_paths: bool = False) -> Any:
+    redacted = redact_sensitive(value)
+    if include_full_paths:
+        return redacted
+    return _redact_doctor_detail(redacted)
+
+
+def write_support_bundle_member(bundle: zipfile.ZipFile, name: str, payload: Any, include_full_paths: bool = False) -> None:
+    redacted = redact_support_payload(payload, include_full_paths=include_full_paths)
+    bundle.writestr(name, json.dumps(redacted, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
+    SUPPORT_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    generated_at = datetime.now(timezone.utc)
+    bundle_path = SUPPORT_BUNDLE_DIR / f"vrcforge-support-{generated_at.strftime('%Y%m%d-%H%M%S')}.zip"
+    log_limit = max(1, min(int(request.log_limit), 500))
+    metadata = {
+        "schema": "vrcforge.support-bundle.v1",
+        "generatedAt": generated_at.isoformat(),
+        "version": app.version,
+        "portableMode": PORTABLE_MODE,
+        "debugLogging": debug_logging_enabled(),
+        "includeFullPaths": bool(request.include_full_paths),
+        "paths": {
+            "programDir": str(ROOT_DIR),
+            "userDataDir": str(USER_DATA_DIR),
+            "configDir": str(CONFIG_DIR),
+            "logsDir": str(LOG_DIR),
+            "artifactsDir": str(ARTIFACTS_DIR),
+        },
+        "privacy": {
+            "redactsSecrets": True,
+            "includesScreenshots": False,
+            "includesPaidAssetContents": False,
+            "includesFullPaths": bool(request.include_full_paths),
+        },
+    }
+    try:
+        bootstrap = read_agentic_app_bootstrap()
+    except Exception as exc:  # noqa: BLE001
+        bootstrap = {"ok": False, "error": str(exc)}
+    try:
+        doctor = read_agentic_app_doctor()
+    except Exception as exc:  # noqa: BLE001
+        doctor = {"ok": False, "error": str(exc)}
+    try:
+        checkpoints = AGENT_GATEWAY.list_checkpoints({"limit": 50})
+    except Exception as exc:  # noqa: BLE001
+        checkpoints = {"ok": False, "error": str(exc)}
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
+        write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
+        write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
+        write_support_bundle_member(bundle, "diagnostics.json", diagnostics_state(), request.include_full_paths)
+        write_support_bundle_member(bundle, "dashboard-log.json", read_jsonl_tail(LOCAL_LOG_PATH, log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "interaction-log.json", read_jsonl_tail(INTERACTION_LOG_PATH, log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
+        write_support_bundle_member(bundle, "backend-stdout-tail.json", read_text_tail(LOG_DIR / "backend_stdout.log", log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "backend-stderr-tail.json", read_text_tail(LOG_DIR / "backend_stderr.log", log_limit), request.include_full_paths)
+    emit_log(
+        "success",
+        "diagnostics",
+        "Support bundle exported.",
+        {"bundlePath": str(bundle_path), "debugLogging": debug_logging_enabled(), "logLimit": log_limit},
+    )
+    return {
+        "ok": True,
+        "schema": "vrcforge.support-bundle.v1",
+        "bundlePath": str(bundle_path),
+        "bundleUrl": to_artifact_url(str(bundle_path)),
+        "bytes": bundle_path.stat().st_size,
+        "debugLogging": debug_logging_enabled(),
+        "redacted": not bool(request.include_full_paths),
+    }
+
+
 def _status_from_counts(error_count: int = 0, warning_count: int = 0, unknown_count: int = 0) -> str:
     if error_count > 0:
         return "error"
@@ -1619,6 +1844,8 @@ def _doctor_fix_command_for_id(check_id: str) -> str:
 def _looks_like_local_path(value: str) -> bool:
     stripped = value.strip()
     if not stripped or stripped.startswith(("http://", "https://")):
+        return False
+    if stripped.startswith(("/api/", "/mcp", "/artifacts/")):
         return False
     return bool(re.match(r"^[A-Za-z]:[\\/]", stripped) or stripped.startswith("\\\\") or stripped.startswith("/"))
 
@@ -2152,6 +2379,29 @@ def read_agentic_app_doctor() -> dict[str, Any]:
             },
             "checks": checks,
         }
+
+
+@app.get("/api/app/diagnostics")
+def read_app_diagnostics() -> dict[str, Any]:
+    return diagnostics_state()
+
+
+@app.post("/api/app/diagnostics")
+async def update_app_diagnostics(request: DiagnosticsConfigRequest) -> dict[str, Any]:
+    save_diagnostics_config(request.model_dump(by_alias=True))
+    payload = diagnostics_state()
+    await emit_log_async(
+        "success",
+        "diagnostics",
+        "Diagnostics settings updated.",
+        {"debugLogging": payload["debugLogging"], "interactionLogPath": payload["interactionLogPath"]},
+    )
+    return payload
+
+
+@app.post("/api/app/support-bundle")
+def create_app_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
+    return build_support_bundle(request)
 
 
 @app.get("/api/agent/manifest")
@@ -6151,13 +6401,19 @@ def prune_local_log_file() -> None:
     if not LOCAL_LOG_PATH.exists():
         return
 
+    prune_jsonl_log_file(LOCAL_LOG_PATH)
+
+
+def prune_jsonl_log_file(path: Path) -> None:
+    if not path.exists():
+        return
     cutoff = datetime.now(timezone.utc) - LOG_RETENTION
     kept_lines: list[str] = []
-    for line in LOCAL_LOG_PATH.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if should_keep_log_line(line, cutoff):
             kept_lines.append(line)
 
-    LOCAL_LOG_PATH.write_text(("\n".join(kept_lines) + "\n") if kept_lines else "", encoding="utf-8")
+    path.write_text(("\n".join(kept_lines) + "\n") if kept_lines else "", encoding="utf-8")
 
 
 def prune_stale_dashboard_log_files() -> None:

@@ -78,7 +78,7 @@ The project picker merges manual folders, VCC user projects, Unity Hub recent pr
 
 `VRCForge.exe` opens the Tauri desktop app directly and starts or reconnects to the local FastAPI runtime. The legacy WebView2 launcher and `start_dashboard.cmd` path remain debug/compatibility surfaces only.
 
-Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet.
+Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet. Settings also includes a Debug logging switch that records local API/MCP/runtime interactions to redacted logs, and Doctor can export a redacted Support Bundle for troubleshooting.
 
 The desktop app also includes uninstall actions:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
@@ -100,6 +100,7 @@ The desktop app also includes uninstall actions:
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
 | Startup Doctor | Environment-only health report for backend, Unity bridge/MCP, providers, SDK/dependency versions, gateway, skills, and checkpoint backend | Available / 可用 |
+| Debug logging + Support Bundle | User-controlled local interaction logs plus redacted Doctor export for startup/runtime troubleshooting | Available / 可用 |
 | Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |

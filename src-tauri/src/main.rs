@@ -77,6 +77,23 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
 
     let root = repo_root()?;
     prepare_runtime_files(&root, &user_data)?;
+    let log_dir = user_data.join("logs");
+    fs::create_dir_all(&log_dir).map_err(|error| {
+        format!(
+            "unable to create runtime log directory {}: {error}",
+            log_dir.display()
+        )
+    })?;
+    let stdout_log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("backend_stdout.log"))
+        .map_err(|error| format!("unable to open backend stdout log: {error}"))?;
+    let stderr_log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("backend_stderr.log"))
+        .map_err(|error| format!("unable to open backend stderr log: {error}"))?;
 
     let mut command = backend_command(&root)?;
     command
@@ -97,8 +114,8 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         .arg("--port")
         .arg(BACKEND_PORT.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log));
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 

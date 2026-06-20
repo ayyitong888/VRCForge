@@ -122,6 +122,28 @@ export type ApiConfig = {
   apiKeyRequired: boolean;
 };
 
+export type DiagnosticsStatus = {
+  ok: boolean;
+  schema: string;
+  debugLogging: boolean;
+  configPath?: string;
+  logsDir?: string;
+  dashboardLogPath?: string;
+  interactionLogPath?: string;
+  supportBundleDir?: string;
+  logRetentionHours?: number;
+};
+
+export type SupportBundleResult = {
+  ok: boolean;
+  schema: string;
+  bundlePath: string;
+  bundleUrl?: string;
+  bytes: number;
+  debugLogging: boolean;
+  redacted: boolean;
+};
+
 export type AgentApproval = {
   id: string;
   status: string;
@@ -341,6 +363,26 @@ export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
 
 export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
   return requestJson<DoctorReport>(`${endpoint}/api/app/doctor`);
+}
+
+export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsStatus> {
+  return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`);
+}
+
+export async function updateDiagnostics(endpoint: string, request: { debugLogging: boolean }): Promise<DiagnosticsStatus> {
+  return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function exportSupportBundle(endpoint: string, request: { includeFullPaths?: boolean; logLimit?: number } = {}): Promise<SupportBundleResult> {
+  return requestJson<SupportBundleResult>(`${endpoint}/api/app/support-bundle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
 }
 
 export async function updatePermission(

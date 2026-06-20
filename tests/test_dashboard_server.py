@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -309,6 +310,105 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(check_by_id["desktop.runtime"]["status"], "ok")
         self.assertEqual(check_by_id["doctor.degraded"]["status"], "warning")
         self.assertIn("doctor exploded", check_by_id["doctor.degraded"]["message"])
+
+    def test_debug_diagnostics_toggle_records_interaction_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            original_config_path = dashboard_server.DIAGNOSTICS_CONFIG_PATH
+            original_interaction_log_path = dashboard_server.INTERACTION_LOG_PATH
+            dashboard_server.DIAGNOSTICS_CONFIG_PATH = temp_path / "diagnostics.json"
+            dashboard_server.INTERACTION_LOG_PATH = temp_path / "interactions.jsonl"
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    update = client.post("/api/app/diagnostics", json={"debugLogging": True})
+                    self.assertEqual(update.status_code, 200)
+                    self.assertTrue(update.json()["debugLogging"])
+
+                    bootstrap = client.get("/api/app/bootstrap")
+                    self.assertEqual(bootstrap.status_code, 200)
+
+                entries = [
+                    json.loads(line)
+                    for line in dashboard_server.INTERACTION_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                paths = {entry.get("path") for entry in entries}
+                self.assertIn("/api/app/diagnostics", paths)
+                self.assertIn("/api/app/bootstrap", paths)
+                serialized = json.dumps(entries).lower()
+                self.assertNotIn("approval_token", serialized)
+                self.assertNotIn("api_key", serialized)
+            finally:
+                dashboard_server.DIAGNOSTICS_CONFIG_PATH = original_config_path
+                dashboard_server.INTERACTION_LOG_PATH = original_interaction_log_path
+
+    def test_support_bundle_exports_redacted_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            original_config_path = dashboard_server.DIAGNOSTICS_CONFIG_PATH
+            original_support_bundle_dir = dashboard_server.SUPPORT_BUNDLE_DIR
+            original_log_path = dashboard_server.LOCAL_LOG_PATH
+            original_interaction_log_path = dashboard_server.INTERACTION_LOG_PATH
+            dashboard_server.DIAGNOSTICS_CONFIG_PATH = temp_path / "diagnostics.json"
+            dashboard_server.SUPPORT_BUNDLE_DIR = temp_path / "support-bundles"
+            dashboard_server.LOCAL_LOG_PATH = temp_path / "dashboard.log"
+            dashboard_server.INTERACTION_LOG_PATH = temp_path / "interactions.jsonl"
+            private_path = r"C:\Users\xiao123\PrivateAvatarProjects\PaidAvatar"
+            try:
+                dashboard_server.save_diagnostics_config({"debugLogging": True})
+                dashboard_server.LOCAL_LOG_PATH.write_text(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "level": "error",
+                            "scope": "test",
+                            "message": "failure",
+                            "data": {"api_key": "provider-secret", "projectPath": private_path},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                dashboard_server.INTERACTION_LOG_PATH.write_text(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "path": "/api/test",
+                            "authorization": "Bearer secret-token",
+                            "cwd": private_path,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post("/api/app/support-bundle", json={"logLimit": 20})
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                bundle_path = Path(payload["bundlePath"])
+                self.assertTrue(bundle_path.exists())
+                with zipfile.ZipFile(bundle_path) as bundle:
+                    names = set(bundle.namelist())
+                    self.assertIn("metadata.json", names)
+                    self.assertIn("dashboard-log.json", names)
+                    self.assertIn("interaction-log.json", names)
+                    content = "\n".join(bundle.read(name).decode("utf-8") for name in names)
+                lowered = content.lower()
+                self.assertNotIn("provider-secret", lowered)
+                self.assertNotIn("secret-token", lowered)
+                self.assertNotIn(private_path.lower(), lowered)
+                self.assertNotIn("privateavatarprojects", lowered)
+                self.assertIn(".../paidavatar", lowered)
+            finally:
+                dashboard_server.DIAGNOSTICS_CONFIG_PATH = original_config_path
+                dashboard_server.SUPPORT_BUNDLE_DIR = original_support_bundle_dir
+                dashboard_server.LOCAL_LOG_PATH = original_log_path
+                dashboard_server.INTERACTION_LOG_PATH = original_interaction_log_path
 
     def test_validation_report_mvp_is_read_only_and_registered(self) -> None:
         with (
