@@ -1435,6 +1435,141 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorSceneManager.OpenScene", source)
         self.assertIn("AssetDatabase.Refresh", source)
 
+    def test_setup_outfit_uses_modular_avatar_public_api(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "SetupOutfitTool.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("nadena.dev.modular_avatar.core.editor.SetupOutfit", source)
+        self.assertIn('"SetupOutfitUI"', source)
+        self.assertIn("method.Invoke(null, new object[] { outfit })", source)
+        self.assertIn("ESOErrorWindow", source)
+        self.assertIn("suppressField?.SetValue(null, true)", source)
+        self.assertNotIn("EditorApplication.ExecuteMenuItem(", source)
+
+    def test_setup_outfit_saves_target_scene_only(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "SetupOutfitTool.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SaveTargetScene(outfit.gameObject.scene)", source)
+        self.assertIn("EditorSceneManager.SaveScene(scene)", source)
+        self.assertNotIn("EditorSceneManager.SaveOpenScenes", source)
+
+    def test_setup_outfit_write_uses_job_polling(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "dashboard_server.py").read_text(encoding="utf-8")
+        start = source.index("def setup_outfit_sync")
+        end = source.index("\ndef _coerce_path_list", start)
+        setup_source = source[start:end]
+
+        self.assertIn("wait_for_setup_outfit_job(settings, params, payload)", setup_source)
+        self.assertNotIn("unity_mcp_timeout_seconds = max(settings.unity_mcp_timeout_seconds, 120)", setup_source)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_setup_outfit_sync_polls_pending_job_to_completion(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace(unity_mcp_timeout_seconds=30)
+        mock_invoke.side_effect = [
+            dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": True, "pending": True, "status": "pending", "jobId": "job-1"}},
+            ),
+            dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": True, "pending": True, "status": "running", "jobId": "job-1"}},
+            ),
+            dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": True, "pending": False, "status": "completed", "jobId": "job-1", "sceneSaved": True}},
+            ),
+        ]
+
+        result = dashboard_server.setup_outfit_sync(
+            {
+                "avatarPath": "Avatar",
+                "outfitPath": "Avatar/Hoodie",
+                "setupOutfitPollIntervalSeconds": 0,
+                "setupOutfitPollTimeoutSeconds": 1,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([call.args[2] for call in mock_invoke.call_args_list], [
+            {"avatarPath": "Avatar", "outfitPath": "Avatar/Hoodie", "confirmSetup": True, "saveScene": True},
+            {"jobId": "job-1"},
+            {"jobId": "job-1"},
+        ])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_setup_outfit_sync_returns_job_error(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace(unity_mcp_timeout_seconds=30)
+        mock_invoke.side_effect = [
+            dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": True, "pending": True, "status": "pending", "jobId": "job-2"}},
+            ),
+            dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": False, "pending": False, "status": "error", "jobId": "job-2", "error": "MA failed"}},
+            ),
+        ]
+
+        result = dashboard_server.setup_outfit_sync(
+            {
+                "avatarPath": "Avatar",
+                "outfitPath": "Avatar/Hoodie",
+                "setupOutfitPollIntervalSeconds": 0,
+                "setupOutfitPollTimeoutSeconds": 1,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "MA failed")
+        self.assertEqual(mock_invoke.call_count, 2)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_setup_outfit_sync_returns_timeout_for_unfinished_job(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace(unity_mcp_timeout_seconds=30)
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "pending": True, "status": "pending", "jobId": "job-3"}},
+        )
+
+        result = dashboard_server.setup_outfit_sync(
+            {
+                "avatarPath": "Avatar",
+                "outfitPath": "Avatar/Hoodie",
+                "setupOutfitPollTimeoutSeconds": 0,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["jobId"], "job-3")
+        self.assertEqual(mock_invoke.call_count, 1)
+
     def test_app_approval_executes_non_shell_write_handler(self) -> None:
         original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
         calls: list[dict] = []
