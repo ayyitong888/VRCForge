@@ -216,6 +216,7 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
+  const [startupIssue, setStartupIssue] = useState("");
   const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
   const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
@@ -245,6 +246,9 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
+  const hasStartupIssue = startupIssue.trim().length > 0;
+  const hasEnvironmentAttention = runtimeConnected && (healthErrors > 0 || healthWarnings > 0);
+  const showDoctorStartupPrompt = activeView !== "doctor" && (hasStartupIssue || hasEnvironmentAttention);
   const pendingApprovalItems = (bootstrap?.approvals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = Math.max(bootstrap?.agentHealth.pendingApprovalCount ?? 0, pendingApprovalItems.length);
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
@@ -492,7 +496,9 @@ export default function App() {
       }
       return targetEndpoint;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setStartupIssue(message);
       return null;
     } finally {
       runtimeStartingRef.current = false;
@@ -504,12 +510,14 @@ export default function App() {
     setError("");
     const payload = await fetchBootstrap(target);
     setBootstrap(payload);
+    setStartupIssue("");
   }
 
   async function refreshSilently(target = endpoint) {
     try {
       const payload = await fetchBootstrap(target);
       setBootstrap(payload);
+      setStartupIssue("");
       setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
     } catch {
       // Keep the current UI usable; explicit retry remains available.
@@ -958,6 +966,20 @@ export default function App() {
     await loadDoctor();
   }
 
+  async function retryStartupOrHealth() {
+    if (hasStartupIssue || !runtimeConnected) {
+      await startRuntime();
+      return;
+    }
+    try {
+      await refresh();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setStartupIssue(message);
+    }
+  }
+
   async function loadDoctor(target = endpoint) {
     setLoadingDoctor(true);
     setDoctorMessage("");
@@ -972,6 +994,7 @@ export default function App() {
       }
       const payload = await fetchDoctor(targetEndpoint);
       setDoctorReport(payload);
+      setStartupIssue("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1608,7 +1631,34 @@ export default function App() {
             </div>
           </header>
 
-          {error ? (
+          {showDoctorStartupPrompt ? (
+            <div className="mx-auto mt-3 w-full max-w-4xl px-4">
+              <div className="flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="font-medium">
+                    {hasStartupIssue ? "Startup issue detected" : "Environment needs attention"}
+                  </div>
+                  <div className="break-words text-amber-900/80 dark:text-amber-100/80">
+                    {hasStartupIssue
+                      ? "Open Doctor to diagnose VRCForge startup, runtime, Unity bridge, provider, gateway, skills, and checkpoint checks."
+                      : `Doctor can review ${healthErrors} error${healthErrors === 1 ? "" : "s"} and ${healthWarnings} warning${
+                          healthWarnings === 1 ? "" : "s"
+                        } across the VRCForge environment.`}
+                  </div>
+                  {hasStartupIssue ? <div className="break-words text-amber-900/70 dark:text-amber-100/70">{startupIssue}</div> : null}
+                </div>
+                <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={() => void openDoctor()} disabled={loadingDoctor}>
+                  Doctor
+                </Button>
+                <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => void retryStartupOrHealth()} disabled={loading}>
+                  {loading ? "Retrying" : "Retry"}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {error && !showDoctorStartupPrompt ? (
             <div className="mx-auto mt-3 w-full max-w-4xl px-4">
               <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
                 <span className="break-words">{error}</span>
@@ -3692,7 +3742,7 @@ function DoctorWorkspace({
           <div className="flex min-w-0 items-center gap-3">
             <Shield className="h-4 w-4 shrink-0 text-primary" />
             <div className="min-w-0 flex-1">
-              <h1 className="truncate text-lg font-semibold">First-run Doctor</h1>
+              <h1 className="truncate text-lg font-semibold">Startup Doctor</h1>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="truncate">{report?.version || "runtime"}</span>
                 {report?.scope ? <span className="truncate">{report.scope}</span> : null}
