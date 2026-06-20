@@ -31,5 +31,9 @@ Before publishing a release package:
 * [ ] Confirm external-agent smoke hides direct apply tools, creates a
       checkpoint, runs validation, restores the checkpoint, leaves no temporary
       GameObject residue, and keeps Unity compile errors at zero.
+* [ ] If live smoke hits a timeout after creating a checkpoint, confirm the
+      report contains `rollback.emergency` and
+      `rollback.verify_no_residue_after_emergency` evidence before treating the
+      Unity project as clean.
 * [ ] If external-agent rollback fails, fix rollback before publishing.
 * [ ] Do not remove GPL-3.0 notices from redistributed or modified versions.

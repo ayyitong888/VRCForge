@@ -12,7 +12,7 @@
     "tauri:build": "tauri build",
     "smoke:agentic": "node scripts/smoke-agentic-app.mjs",
     "smoke:external-agent": "python scripts/smoke_external_agent_bridge.py --enable-gateway",
-    "smoke:external-agent:live": "python scripts/smoke_external_agent_bridge.py --enable-gateway --live-write-rollback"
+    "smoke:external-agent:live": "python scripts/smoke_external_agent_bridge.py --enable-gateway --live-write-rollback --timeout 180"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",

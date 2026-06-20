@@ -97,6 +97,8 @@ class ExternalAgentBridgeSmoke:
         finally:
             if self.args.live_write_rollback and self.checkpoint_id and not self.rollback_done:
                 self.try_emergency_rollback()
+                if self.rollback_done:
+                    self.verify_no_residue("rollback.verify_no_residue_after_emergency")
             self.restore_previous_state()
             report["finishedAt"] = utc_now()
             report["steps"] = self.steps
@@ -354,19 +356,7 @@ class ExternalAgentBridgeSmoke:
         exists_after = self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": object_name})
         self.step("write.verify_object_exists", {"ok": bool(exists_after.get("result", exists_after).get("ok")), "objectPath": object_name})
 
-        validation = self.mcp_call_tool("vrcforge_run_validation_report", {"projectPath": project_root, "maxErrors": 20})
-        validation_payload = ensure_dict(validation.get("result", validation))
-        self.step(
-            "validation.after_write",
-            {
-                "ok": validation_payload.get("schema") == "vrcforge.validation.v1",
-                "reportOk": bool(validation_payload.get("ok", True)),
-                "schema": validation_payload.get("schema"),
-                "errorCount": ensure_dict(validation_payload.get("summary")).get("errorCount"),
-                "warningCount": ensure_dict(validation_payload.get("summary")).get("warningCount"),
-                "findingCount": len(ensure_list(validation_payload.get("findings"))),
-            },
-        )
+        self.record_validation_after_write(project_root)
 
         rollback_request = self.mcp_call_tool(
             "vrcforge_request_apply",
@@ -404,19 +394,46 @@ class ExternalAgentBridgeSmoke:
             },
         )
 
-        exists_after_rollback = self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": object_name})
-        exists_payload = ensure_dict(exists_after_rollback.get("result", exists_after_rollback))
-        self.step(
-            "rollback.verify_no_residue",
-            {
-                "ok": not bool(exists_payload.get("ok")),
-                "objectPath": object_name,
-                "readOkAfterRollback": bool(exists_payload.get("ok")),
-                "readError": exists_payload.get("error"),
-            },
-        )
+        self.verify_no_residue("rollback.verify_no_residue")
         compile_after = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
         self.step("unity.compile_after_rollback", compile_result_summary(compile_after))
+
+    def record_validation_after_write(self, project_root: str) -> None:
+        try:
+            validation = self.mcp_call_tool("vrcforge_run_validation_report", {"projectPath": project_root, "maxErrors": 20})
+            validation_payload = ensure_dict(validation.get("result", validation))
+            self.step(
+                "validation.after_write",
+                {
+                    "ok": validation_payload.get("schema") == "vrcforge.validation.v1",
+                    "reportOk": bool(validation_payload.get("ok", True)),
+                    "schema": validation_payload.get("schema"),
+                    "errorCount": ensure_dict(validation_payload.get("summary")).get("errorCount"),
+                    "warningCount": ensure_dict(validation_payload.get("summary")).get("warningCount"),
+                    "findingCount": len(ensure_list(validation_payload.get("findings"))),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - rollback must still be attempted after validation trouble.
+            self.step("validation.after_write", {"ok": False, "error": str(exc)})
+
+    def verify_no_residue(self, step_name: str) -> None:
+        if not self.created_object_path:
+            self.step(step_name, {"ok": False, "error": "No created object path was recorded."})
+            return
+        try:
+            exists_after_rollback = self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": self.created_object_path})
+            exists_payload = ensure_dict(exists_after_rollback.get("result", exists_after_rollback))
+            self.step(
+                step_name,
+                {
+                    "ok": not bool(exists_payload.get("ok")),
+                    "objectPath": self.created_object_path,
+                    "readOkAfterRollback": bool(exists_payload.get("ok")),
+                    "readError": exists_payload.get("error"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.step(step_name, {"ok": False, "objectPath": self.created_object_path, "error": str(exc)})
 
     def try_emergency_rollback(self) -> None:
         try:
