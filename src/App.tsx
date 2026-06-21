@@ -56,6 +56,8 @@ import {
   AgentSkillRegistry,
   AgentSkillResult,
   AgentShellResult,
+  SubAgentTask,
+  SubAgentTaskList,
   ApiError,
   AppBootstrap,
   ChatHistoryEntry,
@@ -71,6 +73,8 @@ import {
   approveAgentApproval,
   checkSkills,
   compactAgentHistory,
+  cancelSubAgent,
+  createSubAgent,
   createSkill,
   deleteSkill,
   exportSupportBundle,
@@ -89,6 +93,8 @@ import {
   fetchChats,
   fetchProjectPrefs,
   fetchProviderModels,
+  fetchSubAgent,
+  fetchSubAgents,
   installExternalAgentConnector,
   importSkillPackage,
   planOutfitImport,
@@ -98,6 +104,7 @@ import {
   rejectAgentApproval,
   requestOutfitImport,
   requestRestoreCheckpoint,
+  retrySubAgent,
   saveChats,
   saveProjectPrefs,
   saveAgentNotes,
@@ -160,7 +167,8 @@ type ConversationItem =
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
-  | { id: string; type: "compact"; text: string };
+  | { id: string; type: "compact"; text: string }
+  | { id: string; type: "subagent"; task: SubAgentTask };
 
 type ActiveView = "chat" | "doctor" | "skills" | "checkpoints" | "settings";
 
@@ -260,6 +268,20 @@ function pickSubAgentName(): string {
   return VRCHAT_AVATAR_AGENT_NAMES[index] || "Manuka";
 }
 
+function updateSubAgentList(current: SubAgentTaskList | null, task: SubAgentTask): SubAgentTaskList {
+  const existing = current?.tasks || [];
+  const tasks = [task, ...existing.filter((item) => item.id !== task.id)];
+  return {
+    ok: true,
+    schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
+    tasks,
+    count: tasks.length,
+    roles: current?.roles,
+    maxConcurrent: current?.maxConcurrent,
+    runningCount: tasks.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length,
+  };
+}
+
 function loadProjectUiPrefs(): ProjectUiPrefs {
   try {
     const raw = window.localStorage.getItem(PROJECT_UI_PREFS_KEY);
@@ -335,6 +357,10 @@ export default function App() {
   const [projectIndexProject, setProjectIndexProject] = useState("");
   const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
   const [projectIndexError, setProjectIndexError] = useState("");
+  const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
+  const [loadingSubAgents, setLoadingSubAgents] = useState(false);
+  const [subAgentError, setSubAgentError] = useState("");
+  const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(null);
   const [outfitPackagePath, setOutfitPackagePath] = useState("");
   const [outfitImportPlan, setOutfitImportPlan] = useState<OutfitImportPlanResult | null>(null);
   const [outfitImportStatus, setOutfitImportStatus] = useState("");
@@ -464,6 +490,17 @@ export default function App() {
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
+  const subAgentTasks = subAgentList?.tasks ?? [];
+  const activeSubAgentTasks = useMemo(() => {
+    const parentSession = activeChat?.sessionId || "";
+    const projectKeyValue = normalizeProjectPathKey(activeChat?.projectPath || activeProjectPath);
+    return subAgentTasks.filter((task) => {
+      const sameSession = parentSession && task.parentSessionId === parentSession;
+      const sameProject = projectKeyValue && normalizeProjectPathKey(task.projectPath || "") === projectKeyValue;
+      return sameSession || sameProject || (!parentSession && !projectKeyValue);
+    });
+  }, [activeChat?.projectPath, activeChat?.sessionId, activeProjectPath, subAgentTasks]);
+  const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
@@ -610,6 +647,7 @@ export default function App() {
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
           title: typeof chat.title === "string" ? chat.title : "",
           projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+          agentName: typeof chat.agentName === "string" ? chat.agentName : "",
           pinned: chat.pinned === true,
           archived: chat.archived === true,
           items: chat.items,
@@ -649,6 +687,24 @@ export default function App() {
     }, 5000);
     return () => window.clearInterval(timer);
   }, [endpoint]);
+
+  useEffect(() => {
+    if (!runtimeConnected) {
+      setSubAgentList(null);
+      return;
+    }
+    void loadSubAgents(false);
+  }, [runtimeConnected, endpoint]);
+
+  useEffect(() => {
+    if (!runtimeConnected || !hasRunningSubAgents) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadSubAgents(false);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [runtimeConnected, endpoint, hasRunningSubAgents]);
 
   useEffect(() => {
     if (activeView === "checkpoints" && runtimeConnected) {
@@ -1012,16 +1068,112 @@ export default function App() {
     setActiveChatId(id);
   }
 
+  async function loadSubAgents(includeEvents = false) {
+    if (!runtimeConnected && !includeEvents) {
+      return;
+    }
+    setLoadingSubAgents(true);
+    try {
+      const payload = await fetchSubAgents(endpoint, includeEvents);
+      setSubAgentList(payload);
+      setSubAgentError("");
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingSubAgents(false);
+    }
+  }
+
   function newSubAgentChat() {
+    void startSubAgentTask();
+  }
+
+  async function startSubAgentTask(roleOverride?: string) {
     const agentName = pickSubAgentName();
-    const projectPath = activeProjectPath;
+    const projectPath = activeChat?.projectPath || activeProjectPath;
+    const hasPackage = outfitPackagePath.trim().length > 0;
+    const role = roleOverride || (hasPackage ? "outfit_import_plan_review" : "project_index_review");
+    const task =
+      role === "outfit_import_plan_review"
+        ? "Inspect the selected outfit package and return a supervised import plan summary."
+        : role === "validation_triage"
+          ? "Run read-only validation triage and summarize findings."
+          : "Review the local Unity project index and summarize changed scanner families.";
     setActiveView("chat");
-    setActiveProjectPath(projectPath);
     setError("");
-    setCollapsedProjects((map) => (projectPath ? map : map[TEMP_CHATS_COLLAPSE_KEY] ? { ...map, [TEMP_CHATS_COLLAPSE_KEY]: false } : map));
-    const id = `chat-${Date.now()}`;
-    setChats((list) => [{ id, sessionId: "", title: agentName, projectPath, agentName, items: [] }, ...list]);
-    setActiveChatId(id);
+    setSubAgentError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setSubAgentError("Runtime is not connected.");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await createSubAgent(targetEndpoint, {
+        role,
+        task,
+        displayName: agentName,
+        parentSessionId: activeChat?.sessionId || "",
+        projectPath,
+        params: {
+          projectPath,
+          packagePath: outfitPackagePath.trim(),
+        },
+      });
+      setSubAgentList((current) => ({
+        ok: true,
+        schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
+        tasks: [payload.task, ...(current?.tasks || []).filter((taskItem) => taskItem.id !== payload.task.id)],
+        count: (current?.count || 0) + 1,
+        roles: current?.roles,
+        maxConcurrent: current?.maxConcurrent,
+        runningCount: (current?.runningCount || 0) + 1,
+      }));
+      void loadSubAgents(false);
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function cancelSubAgentTask(taskId: string) {
+    try {
+      const payload = await cancelSubAgent(endpoint, taskId);
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function retrySubAgentTask(taskId: string) {
+    try {
+      const payload = await retrySubAgent(endpoint, taskId);
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function inspectSubAgentTask(taskId: string) {
+    try {
+      const payload = await fetchSubAgent(endpoint, taskId);
+      setSelectedSubAgent(payload.task);
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function acceptSubAgentSummary(task: SubAgentTask) {
+    const chatId = ensureActiveChat();
+    setActiveView("chat");
+    appendToChat(chatId, {
+      id: `subagent-${task.id}-${Date.now()}`,
+      type: "subagent",
+      task,
+    });
   }
 
   function handleConversationMouseUp() {
@@ -2419,6 +2571,18 @@ export default function App() {
                   onPlan={() => void planActiveOutfitImport()}
                   onRequest={() => void requestActiveOutfitImport()}
                 />
+                <SubAgentPanel
+                  tasks={activeSubAgentTasks}
+                  loading={loadingSubAgents}
+                  error={subAgentError}
+                  selected={selectedSubAgent}
+                  onStart={(role) => void startSubAgentTask(role)}
+                  onInspect={(taskId) => void inspectSubAgentTask(taskId)}
+                  onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+                  onRetry={(taskId) => void retrySubAgentTask(taskId)}
+                  onAccept={acceptSubAgentSummary}
+                  onCloseInspect={() => setSelectedSubAgent(null)}
+                />
                 <Composer
                   input={input}
                   setInput={setInput}
@@ -2464,6 +2628,18 @@ export default function App() {
                     onPackagePathChange={setOutfitPackagePath}
                     onPlan={() => void planActiveOutfitImport()}
                     onRequest={() => void requestActiveOutfitImport()}
+                  />
+                  <SubAgentPanel
+                    tasks={activeSubAgentTasks}
+                    loading={loadingSubAgents}
+                    error={subAgentError}
+                    selected={selectedSubAgent}
+                    onStart={(role) => void startSubAgentTask(role)}
+                    onInspect={(taskId) => void inspectSubAgentTask(taskId)}
+                    onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+                    onRetry={(taskId) => void retrySubAgentTask(taskId)}
+                    onAccept={acceptSubAgentSummary}
+                    onCloseInspect={() => setSelectedSubAgent(null)}
                   />
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
@@ -3386,6 +3562,174 @@ function OutfitImportPanel({
             />
           ) : null}
           {result?.warnings?.length ? <OutputBlock label="Warnings" value={result.warnings.join("\n")} /> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function subAgentRoleLabel(role: string): string {
+  switch (role) {
+    case "project_index_review":
+      return "Project";
+    case "outfit_package_inspection":
+      return "Package";
+    case "validation_triage":
+      return "Validation";
+    case "package_install_diagnosis":
+      return "Install log";
+    case "outfit_import_plan_review":
+      return "Outfit plan";
+    default:
+      return role || "Worker";
+  }
+}
+
+function subAgentStatusTone(status: string): "ok" | "warn" | "danger" | "muted" {
+  if (status === "completed") {
+    return "ok";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  if (status === "queued" || status === "running" || status === "cancelling") {
+    return "warn";
+  }
+  return "muted";
+}
+
+function SubAgentPanel({
+  tasks,
+  loading,
+  error,
+  selected,
+  onStart,
+  onInspect,
+  onCancel,
+  onRetry,
+  onAccept,
+  onCloseInspect,
+}: {
+  tasks: SubAgentTask[];
+  loading: boolean;
+  error: string;
+  selected: SubAgentTask | null;
+  onStart: (role: string) => void;
+  onInspect: (taskId: string) => void;
+  onCancel: (taskId: string) => void;
+  onRetry: (taskId: string) => void;
+  onAccept: (task: SubAgentTask) => void;
+  onCloseInspect: () => void;
+}) {
+  const [open, setOpen] = useState(tasks.length > 0 || Boolean(error));
+  const running = tasks.filter((task) => task.status === "queued" || task.status === "running" || task.status === "cancelling").length;
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  const failed = tasks.filter((task) => task.status === "failed").length;
+  const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : failed ? "danger" : running ? "warn" : completed ? "ok" : "muted";
+  const statusLabel = error ? "Attention" : running ? `${running} running` : completed ? `${completed} done` : "Ready";
+  const recentTasks = tasks.slice(0, 6);
+  return (
+    <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+        <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen((value) => !value)}>
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">Sub-agents</span>
+          <Badge tone={statusTone} className="shrink-0">
+            {statusLabel}
+          </Badge>
+        </button>
+        {loading ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" /> : null}
+      </div>
+      {open ? (
+        <div className="space-y-3 border-t border-border px-3 py-3">
+          {error ? <DataLine label="Error" value={error} /> : null}
+          <div className="flex min-w-0 flex-wrap gap-2">
+            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("project_index_review")}>
+              <Search className="h-3.5 w-3.5" />
+              Project
+            </Button>
+            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("validation_triage")}>
+              <Shield className="h-3.5 w-3.5" />
+              Validate
+            </Button>
+            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("outfit_import_plan_review")}>
+              <FolderPlus className="h-3.5 w-3.5" />
+              Outfit
+            </Button>
+            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("package_install_diagnosis")}>
+              <Wrench className="h-3.5 w-3.5" />
+              Install log
+            </Button>
+          </div>
+          {recentTasks.length ? (
+            <div className="grid gap-2">
+              {recentTasks.map((task) => (
+                <div key={task.id} className="rounded-lg border border-border bg-background px-3 py-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                      {task.displayName || "Sub-agent"} 路 {subAgentRoleLabel(task.role)}
+                    </span>
+                    <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
+                      {task.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 min-w-0 truncate text-xs text-muted-foreground">{task.summary || task.task || task.error || task.id}</div>
+                  <div className="mt-2 flex flex-wrap justify-end gap-2">
+                    <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onInspect(task.id)}>
+                      <Eye className="h-3.5 w-3.5" />
+                      Inspect
+                    </Button>
+                    {task.status === "queued" || task.status === "running" || task.status === "cancelling" ? (
+                      <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCancel(task.id)}>
+                        <X className="h-3.5 w-3.5" />
+                        Cancel
+                      </Button>
+                    ) : null}
+                    {task.status === "failed" || task.status === "cancelled" ? (
+                      <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onRetry(task.id)}>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Retry
+                      </Button>
+                    ) : null}
+                    {task.status === "completed" ? (
+                      <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onAccept(task)}>
+                        <Check className="h-3.5 w-3.5" />
+                        Add
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+              Start a read-only worker when a scan or package check can run beside the main chat.
+            </div>
+          )}
+          {selected ? (
+            <div className="rounded-lg border border-border bg-background px-3 py-3">
+              <div className="mb-2 flex min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold">{selected.displayName || selected.id}</span>
+                <Badge tone={subAgentStatusTone(selected.status)} className="shrink-0">
+                  {selected.status}
+                </Badge>
+                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCloseInspect}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <DataLine label="Role" value={subAgentRoleLabel(selected.role)} />
+              <DataLine label="Profile" value={selected.toolProfile || "read-only"} />
+              {selected.projectPath ? <DataLine label="Project" value={selected.projectPath} mono /> : null}
+              {selected.summary ? <OutputBlock label="Summary" value={selected.summary} /> : null}
+              {selected.error ? <OutputBlock label="Error" value={selected.error} danger /> : null}
+              {selected.result !== undefined ? <OutputBlock label="Result" value={formatPayload(selected.result)} /> : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -4956,6 +5300,29 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
     );
   }
 
+  if (item.type === "subagent") {
+    const task = item.task;
+    return (
+      <div className="flex justify-start">
+        <div className="w-full max-w-[85%] space-y-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+          <div className="flex min-w-0 items-center gap-2">
+            <Bot className="h-4 w-4 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1 truncate font-medium">
+              {task.displayName || "Sub-agent"} 路 {subAgentRoleLabel(task.role)}
+            </span>
+            <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
+              {task.status}
+            </Badge>
+          </div>
+          <p className="whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
+            {task.summary || task.error || task.task || "No summary was returned."}
+          </p>
+          {task.result !== undefined ? <OutputBlock label="Result" value={formatPayload(task.result)} /> : null}
+        </div>
+      </div>
+    );
+  }
+
   const response = item.response;
   const shell = response.shell;
   const skill = response.skill;
@@ -5843,6 +6210,18 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
       }
     } else if (item.type === "compact") {
       history.push({ role: "agent", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
+    } else if (item.type === "subagent") {
+      const task = item.task;
+      const text = [
+        `Sub-agent ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
+        task.summary || task.error || task.task || "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (text) {
+        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
+      }
     }
   }
   return history;

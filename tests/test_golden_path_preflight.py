@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import tarfile
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 
 
 def write_tar_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -87,3 +89,57 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
     assert "vrcforge_inspect_outfit_package" not in write_targets
     assert "vrcforge_plan_outfit_import" not in write_targets
     assert "vrcforge_import_outfit_package" in write_targets
+
+
+def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "UnityProject"
+    make_project(project)
+    monkeypatch.setattr(dashboard_server, "PROJECT_MEMORY_INDEX_DIR", tmp_path / "indexes")
+    registry = SubAgentTaskRegistry(
+        tmp_path / "sub-agents",
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": dashboard_server.run_project_index_sub_agent},
+    )
+    monkeypatch.setattr(dashboard_server, "SUB_AGENT_REGISTRY", registry)
+
+    with TestClient(dashboard_server.app) as client:
+        created = client.post(
+            "/api/app/sub-agents",
+            json={
+                "role": "project_index_review",
+                "displayName": "Kikyo",
+                "task": "Scan the project index.",
+                "projectPath": str(project),
+                "params": {"projectPath": str(project)},
+            },
+        )
+        assert created.status_code == 200
+        task_id = created.json()["task"]["id"]
+
+        deadline = time.time() + 5
+        payload = client.get(f"/api/app/sub-agents/{task_id}").json()
+        while payload["task"]["status"] not in {"completed", "failed"} and time.time() < deadline:
+            time.sleep(0.05)
+            payload = client.get(f"/api/app/sub-agents/{task_id}").json()
+
+    assert payload["task"]["status"] == "completed"
+    assert payload["task"]["displayName"] == "Kikyo"
+    assert payload["task"]["result"]["projectIndex"]["schema"] == "vrcforge.project_memory_index.v1"
+    assert payload["task"]["result"]["projectIndex"]["privacy"]["binaryAssetContentsReturned"] is False
+    assert payload["task"]["events"]
+
+
+def test_tool_registry_v1_exposes_read_tools_and_supervised_writes() -> None:
+    registry = dashboard_server.AGENT_GATEWAY.build_tool_registry()
+    assert registry["ok"] is True
+    assert registry["schema"] == "vrcforge.tool_registry.v1"
+    by_name = {tool["name"]: tool for tool in registry["tools"]}
+
+    assert by_name["vrcforge_scan_project_index"]["risk"] == "read_only"
+    assert by_name["vrcforge_scan_project_index"]["requiresApproval"] is False
+    assert by_name["vrcforge_scan_project_index"]["availableInMcp"] is True
+    assert by_name["vrcforge_import_outfit_package"]["risk"] == "write_request"
+    assert by_name["vrcforge_import_outfit_package"]["requiresApproval"] is True
+    assert by_name["vrcforge_import_outfit_package"]["requiresCheckpoint"] is True
+    assert by_name["vrcforge_import_outfit_package"]["directTool"] is False
+    assert "vrcforge_apply_approved" not in by_name

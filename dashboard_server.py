@@ -46,6 +46,7 @@ from outfit_import_planner import build_outfit_import_plan
 from outfit_package_inspector import inspect_outfit_package
 from project_memory_index import scan_project_memory
 from skill_packages import SkillPackageError, SkillPackageService
+from sub_agent_tasks import CancelledError, SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
@@ -151,6 +152,7 @@ DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
 INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
 SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
 PROJECT_MEMORY_INDEX_DIR = USER_DATA_DIR / "project-indexes"
+SUB_AGENT_TASK_DIR = DASHBOARD_ARTIFACTS_DIR / "sub-agents"
 
 
 def read_vrcforge_version() -> str:
@@ -601,6 +603,17 @@ class PackageInstallDiagnosticsRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SubAgentCreateRequest(BaseModel):
+    role: str = Field(default="project_index_review")
+    task: str = Field(default="")
+    display_name: str = Field(default="", alias="displayName")
+    parent_session_id: str = Field(default="", alias="parentSessionId")
+    project_path: str = Field(default="", alias="projectPath")
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"populate_by_name": True}
+
+
 class ProviderTestRequest(ApiConfigRequest):
     capability: Literal["text", "structured", "vision"] = "text"
 
@@ -736,6 +749,49 @@ DASHBOARD_RUNTIME = DashboardRuntimeState()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
+)
+SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
+    artifact_dir=SUB_AGENT_TASK_DIR,
+    roles=[
+        SubAgentRole(
+            id="project_index_review",
+            title="Project index review",
+            description="Scan the local Unity project index and summarize changed scanner families.",
+            tool_profile="local-index-only",
+        ),
+        SubAgentRole(
+            id="outfit_package_inspection",
+            title="Outfit package inspection",
+            description="Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes.",
+            tool_profile="read-only",
+        ),
+        SubAgentRole(
+            id="validation_triage",
+            title="Validation triage",
+            description="Run the read-only validation report and summarize errors, warnings, and likely next plans.",
+            tool_profile="read-only",
+        ),
+        SubAgentRole(
+            id="package_install_diagnosis",
+            title="Package install diagnosis",
+            description="Classify package install output and Unity compile errors without repairing automatically.",
+            tool_profile="read-only",
+        ),
+        SubAgentRole(
+            id="outfit_import_plan_review",
+            title="Outfit import plan review",
+            description="Inspect a package and build a supervised import plan without writing to Unity.",
+            tool_profile="plan-only",
+        ),
+    ],
+    handlers={
+        "project_index_review": lambda payload, cancel_event: run_project_index_sub_agent(payload, cancel_event),
+        "outfit_package_inspection": lambda payload, cancel_event: run_outfit_package_sub_agent(payload, cancel_event),
+        "validation_triage": lambda payload, cancel_event: run_validation_sub_agent(payload, cancel_event),
+        "package_install_diagnosis": lambda payload, cancel_event: run_package_install_sub_agent(payload, cancel_event),
+        "outfit_import_plan_review": lambda payload, cancel_event: run_outfit_import_plan_sub_agent(payload, cancel_event),
+    },
+    max_concurrent=3,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -1476,6 +1532,124 @@ def plan_outfit_import_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _sub_agent_cancel_checkpoint(cancel_event: Any) -> None:
+    if cancel_event.is_set():
+        raise CancelledError("Sub-agent task was cancelled.")
+
+
+def run_project_index_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    project_path = str(payload.get("projectPath") or "").strip()
+    result = scan_project_index_sync({"projectPath": project_path, "maxFiles": payload.get("maxFiles") or 100000})
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    changed = bool(summary.get("changed"))
+    scanner_families = result.get("summary", {}).get("scannerFamilies") if isinstance(result.get("summary"), dict) else []
+    summary_text = (
+        f"Project index {'changed' if changed else 'is clean'}: "
+        f"+{summary.get('addedFiles', 0)} / ~{summary.get('modifiedFiles', 0)} / -{summary.get('deletedFiles', 0)}; "
+        f"scanner families: {', '.join(scanner_families or []) or 'none'}."
+    )
+    _sub_agent_cancel_checkpoint(cancel_event)
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": "vrcforge.sub_agent.project_index_review.v1",
+        "role": "project_index_review",
+        "readOnly": True,
+        "summaryText": summary_text,
+        "projectIndex": result,
+        "proposedNextAction": "Run targeted scanners for the affected families before planning writes." if changed else "No project-index-triggered scanner rerun is needed.",
+    }
+
+
+def run_outfit_package_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    package_path = str(payload.get("packagePath") or payload.get("package_path") or "").strip()
+    result = inspect_outfit_package_sync({"packagePath": package_path, "maxEntries": payload.get("maxEntries") or 5000})
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    summary_text = (
+        "Outfit package inspected: "
+        f"{summary.get('unityPackageCount', 0)} UnityPackage(s), "
+        f"{summary.get('prefabCandidateCount', 0)} prefab candidate(s), "
+        f"{summary.get('textureCount', 0)} texture(s)."
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": "vrcforge.sub_agent.outfit_package_inspection.v1",
+        "role": "outfit_package_inspection",
+        "readOnly": True,
+        "summaryText": summary_text,
+        "inspection": result,
+        "proposedNextAction": "Create a supervised import plan if the package has a UnityPackage or prefab candidate.",
+    }
+
+
+def run_validation_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    result = build_validation_report_sync(
+        {
+            "avatarPath": payload.get("avatarPath") or payload.get("avatar_path") or "",
+            "projectPath": payload.get("projectPath") or payload.get("project_path") or "",
+            "includeQuest": payload.get("includeQuest", True),
+            "maxErrors": payload.get("maxErrors") or 50,
+        }
+    )
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    severity_counts = summary.get("severityCounts") if isinstance(summary.get("severityCounts"), dict) else {}
+    summary_text = (
+        "Validation triage finished: "
+        f"{severity_counts.get('Error', 0)} error(s), "
+        f"{severity_counts.get('Warning', 0)} warning(s), "
+        f"{severity_counts.get('Suggestion', 0)} suggestion(s)."
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": "vrcforge.sub_agent.validation_triage.v1",
+        "role": "validation_triage",
+        "readOnly": True,
+        "summaryText": summary_text,
+        "validation": result,
+        "proposedNextAction": "Convert selected validation findings into separate supervised fix plans.",
+    }
+
+
+def run_package_install_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    result = diagnose_package_install_errors_sync(payload)
+    symptoms = result.get("symptoms") if isinstance(result.get("symptoms"), list) else []
+    titles = [str(item.get("title") or item.get("code") or "") for item in symptoms if isinstance(item, dict)]
+    summary_text = f"Package install diagnosis found {len(symptoms)} symptom(s): {', '.join(titles[:4]) or 'none'}."
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": "vrcforge.sub_agent.package_install_diagnosis.v1",
+        "role": "package_install_diagnosis",
+        "readOnly": True,
+        "summaryText": summary_text,
+        "diagnostics": result,
+        "proposedNextAction": "Create a separate supervised repair plan for any selected symptom.",
+    }
+
+
+def run_outfit_import_plan_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    result = plan_outfit_import_sync(payload)
+    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    ready = bool(plan.get("readyToApply"))
+    summary_text = (
+        f"Outfit import plan {'ready' if ready else 'needs review'}: "
+        f"kind={plan.get('kind') or 'unknown'}, writeTarget={plan.get('writeTarget') or 'none'}."
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": "vrcforge.sub_agent.outfit_import_plan_review.v1",
+        "role": "outfit_import_plan_review",
+        "readOnly": True,
+        "planOnly": True,
+        "summaryText": summary_text,
+        "importPlan": result,
+        "proposedNextAction": "Queue the normal VRCForge approval from the parent thread if the user accepts this plan." if ready else "Resolve package ambiguity before requesting a write.",
+    }
+
+
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
     bridge = resolve_stdio_bridge(ROOT_DIR)
@@ -1755,6 +1929,54 @@ def app_package_install_diagnostics(request: PackageInstallDiagnosticsRequest) -
     return diagnose_package_install_errors_sync(request.model_dump(by_alias=True))
 
 
+@app.get("/api/app/sub-agents")
+def app_list_sub_agents(includeEvents: bool = False, limit: int = 50) -> dict[str, Any]:
+    return SUB_AGENT_REGISTRY.list_tasks(include_events=includeEvents, limit=limit)
+
+
+@app.post("/api/app/sub-agents")
+async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]:
+    try:
+        payload = SUB_AGENT_REGISTRY.create_task(
+            role=request.role,
+            task=request.task,
+            display_name=request.display_name,
+            parent_session_id=request.parent_session_id,
+            project_path=request.project_path,
+            params=request.params,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    return payload
+
+
+@app.get("/api/app/sub-agents/{task_id}")
+def app_get_sub_agent(task_id: str) -> dict[str, Any]:
+    payload = SUB_AGENT_REGISTRY.get_task(task_id, include_events=True)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
+    return payload
+
+
+@app.post("/api/app/sub-agents/{task_id}/cancel")
+async def app_cancel_sub_agent(task_id: str) -> dict[str, Any]:
+    payload = SUB_AGENT_REGISTRY.cancel_task(task_id)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    return payload
+
+
+@app.post("/api/app/sub-agents/{task_id}/retry")
+async def app_retry_sub_agent(task_id: str) -> dict[str, Any]:
+    payload = SUB_AGENT_REGISTRY.retry_task(task_id)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    return payload
+
+
 @app.get("/api/agent/external-agent/connectors")
 def read_agent_external_connectors(request: Request) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
@@ -2013,6 +2235,8 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         write_support_bundle_member(bundle, "dashboard-log.json", read_jsonl_tail(LOCAL_LOG_PATH, log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "interaction-log.json", read_jsonl_tail(INTERACTION_LOG_PATH, log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_REGISTRY.recent_events(limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_REGISTRY.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
         write_support_bundle_member(bundle, "backend-stdout-tail.json", read_text_tail(LOG_DIR / "backend_stdout.log", log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "backend-stderr-tail.json", read_text_tail(LOG_DIR / "backend_stderr.log", log_limit), request.include_full_paths)
@@ -2647,10 +2871,21 @@ def create_app_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     return build_support_bundle(request)
 
 
+@app.get("/api/app/tools/registry")
+def read_app_tool_registry() -> dict[str, Any]:
+    return AGENT_GATEWAY.build_tool_registry()
+
+
 @app.get("/api/agent/manifest")
 def read_agent_manifest(request: Request) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
     return AGENT_GATEWAY.build_manifest()
+
+
+@app.get("/api/agent/tools/registry")
+def read_agent_tool_registry(request: Request) -> dict[str, Any]:
+    authenticate_agent_request(request, allow_disabled=True)
+    return AGENT_GATEWAY.build_tool_registry()
 
 
 @app.get("/api/agent/health")
@@ -10739,6 +10974,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda _params: AGENT_GATEWAY.build_manifest())
     AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda _params: AGENT_GATEWAY.check_skill_registry())
+    AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda _params: AGENT_GATEWAY.build_tool_registry())
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)

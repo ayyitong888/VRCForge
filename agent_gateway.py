@@ -1069,6 +1069,26 @@ class AgentGateway:
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
 
+    def build_tool_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        tools: list[dict[str, Any]] = []
+        for tool in self._tools.values():
+            if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
+                continue
+            tools.append(self._serialize_tool_registry_entry(tool, config))
+        for handler in self._write_handlers.values():
+            tools.append(self._serialize_write_registry_entry(handler, config))
+        tools.sort(key=lambda item: (str(item.get("category") or ""), str(item.get("id") or "")))
+        categories = sorted({str(item.get("category") or "misc") for item in tools})
+        return {
+            "ok": True,
+            "schema": "vrcforge.tool_registry.v1",
+            "generatedAt": utc_now_iso(),
+            "count": len(tools),
+            "categories": categories,
+            "tools": tools,
+        }
+
     def build_skill_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self.ensure_config()
         builtin_skills = self._builtin_skill_definitions(config)
@@ -3529,6 +3549,111 @@ class AgentGateway:
             "available": self._tool_visible(tool, config),
         }
 
+    def _serialize_tool_registry_entry(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
+        available = self._tool_visible(tool, config)
+        risk = self._registry_risk_for_tool(tool)
+        requires_approval = tool.write or risk in {"write_request", "advanced_write"}
+        return {
+            "id": self._registry_tool_id(tool.name),
+            "name": tool.name,
+            "title": tool.name.replace("vrcforge_", "").replace("_", " ").title(),
+            "description": tool.description,
+            "category": self._registry_category(tool.category, tool.name),
+            "risk": risk,
+            "requiresApproval": requires_approval,
+            "requiresCheckpoint": requires_approval and tool.name not in {"vrcforge_execute_shell", "vrcforge_execute_approved_shell"},
+            "availableInDesktop": available,
+            "availableInMcp": available,
+            "availableInCli": available,
+            "inputsSchema": self._registry_object_schema(),
+            "outputsSchema": self._registry_object_schema(),
+            "fallbacks": self._registry_fallbacks_for_tool(tool),
+            "source": "gateway-tool",
+            "advanced": bool(tool.advanced),
+            "directTool": True,
+        }
+
+    def _serialize_write_registry_entry(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
+        visible = self._write_handler_visible(handler, config)
+        available = visible and bool(config.allow_write_requests)
+        return {
+            "id": self._registry_tool_id(handler.name),
+            "name": handler.name,
+            "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
+            "description": handler.description,
+            "category": self._registry_category("supervised-write", handler.name),
+            "risk": "advanced_write" if handler.advanced else "write_request",
+            "requiresApproval": True,
+            "requiresCheckpoint": True,
+            "availableInDesktop": visible,
+            "availableInMcp": available,
+            "availableInCli": visible,
+            "inputsSchema": self._registry_object_schema(),
+            "outputsSchema": self._registry_object_schema(),
+            "fallbacks": ["vrcforge_request_apply"],
+            "source": "write-target",
+            "advanced": bool(handler.advanced),
+            "directTool": False,
+        }
+
+    def _registry_tool_id(self, name: str) -> str:
+        if name.startswith("vrcforge_"):
+            name = name[len("vrcforge_") :]
+        return "vrcforge." + name.replace("_", ".")
+
+    def _registry_risk_for_tool(self, tool: AgentTool) -> str:
+        if tool.advanced:
+            return "advanced_write"
+        if tool.write:
+            return "write_request"
+        if tool.category == "plan/preview":
+            return "plan"
+        return "read_only"
+
+    def _registry_category(self, category: str, name: str) -> str:
+        text = f"{category} {name}".lower()
+        if "health" in text or "status" in text:
+            return "health"
+        if "project" in text or "package_manager" in text:
+            return "project"
+        if "unity" in text or "compile" in text or "roslyn" in text:
+            return "unity"
+        if "avatar" in text or "blendshape" in text or "face" in text:
+            return "avatar"
+        if "material" in text or "shader" in text:
+            return "material"
+        if "outfit" in text or "booth" in text or "unitypackage" in text:
+            return "outfit"
+        if "wardrobe" in text:
+            return "wardrobe"
+        if "modular_avatar" in text or " ma" in text:
+            return "ma"
+        if "vrcfury" in text:
+            return "vrcfury"
+        if "skill" in text:
+            return "skill"
+        if "checkpoint" in text or "backup" in text or "restore" in text:
+            return "checkpoint"
+        if "validation" in text:
+            return "validation"
+        if "agent" in text or "connector" in text:
+            return "agent"
+        if category == "plan/preview":
+            return "plan"
+        if category == "supervised-write":
+            return "write"
+        return "tool"
+
+    def _registry_object_schema(self) -> dict[str, Any]:
+        return {"type": "object", "additionalProperties": True}
+
+    def _registry_fallbacks_for_tool(self, tool: AgentTool) -> list[str]:
+        if tool.write:
+            return ["vrcforge_request_apply"]
+        if tool.category == "plan/preview":
+            return ["manual-review"]
+        return []
+
     def _tool_visible(self, tool: AgentTool, config: AgentGatewayConfig) -> bool:
         if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
             return False
@@ -3640,6 +3765,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_execute_shell",
         "vrcforge_skill_manifest",
         "vrcforge_skill_check",
+        "vrcforge_tool_registry",
         "vrcforge_external_agent_connectors",
         "vrcforge_list_skill_packages",
         "vrcforge_preflight_skill_package",

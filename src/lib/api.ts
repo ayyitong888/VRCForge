@@ -834,6 +834,47 @@ export type OutfitImportPlanResult = {
   privacy?: Record<string, unknown>;
 };
 
+export type SubAgentRole = {
+  id: string;
+  title: string;
+  description?: string;
+  toolProfile?: string;
+  readOnly?: boolean;
+};
+
+export type SubAgentTask = {
+  schema?: string;
+  id: string;
+  role: string;
+  displayName: string;
+  task: string;
+  parentSessionId?: string;
+  projectPath?: string;
+  toolProfile?: string;
+  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | string;
+  createdAt?: string;
+  startedAt?: string;
+  stoppedAt?: string;
+  updatedAt?: string;
+  cancelRequested?: boolean;
+  summary?: string;
+  error?: string;
+  eventCount?: number;
+  result?: Record<string, unknown> | null;
+  paramsSummary?: Record<string, unknown>;
+  events?: Array<{ timestamp?: string; event?: string; data?: Record<string, unknown> }>;
+};
+
+export type SubAgentTaskList = {
+  ok: boolean;
+  schema: string;
+  tasks: SubAgentTask[];
+  count: number;
+  roles?: SubAgentRole[];
+  maxConcurrent?: number;
+  runningCount?: number;
+};
+
 export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs> {
   const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
@@ -900,6 +941,41 @@ export async function requestOutfitImport(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
+}
+
+export async function fetchSubAgents(endpoint: string, includeEvents = false): Promise<SubAgentTaskList> {
+  const suffix = includeEvents ? "?includeEvents=true" : "";
+  return requestJson<SubAgentTaskList>(`${endpoint}/api/app/sub-agents${suffix}`);
+}
+
+export async function createSubAgent(
+  endpoint: string,
+  request: {
+    role: string;
+    task?: string;
+    displayName?: string;
+    parentSessionId?: string;
+    projectPath?: string;
+    params?: Record<string, unknown>;
+  },
+): Promise<{ ok: boolean; task: SubAgentTask }> {
+  return requestJson(`${endpoint}/api/app/sub-agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchSubAgent(endpoint: string, taskId: string): Promise<{ ok: boolean; task: SubAgentTask }> {
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}`);
+}
+
+export async function cancelSubAgent(endpoint: string, taskId: string): Promise<{ ok: boolean; task: SubAgentTask }> {
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+}
+
+export async function retrySubAgent(endpoint: string, taskId: string): Promise<{ ok: boolean; task: SubAgentTask }> {
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
 }
 
 export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
