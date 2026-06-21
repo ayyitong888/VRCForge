@@ -41,7 +41,7 @@ class VRCForgeClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise CliError(f"HTTP {exc.code} {method.upper()} {path}: {detail}") from exc
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise CliError(
                 f"Cannot reach VRCForge runtime at {self.endpoint}. Open VRCForge Desktop or start the local backend first. {exc}"
             ) from exc
@@ -68,7 +68,7 @@ def default_token() -> str:
 
 
 def write_json(payload: Any, stdout: TextIO) -> None:
-    stdout.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    stdout.write(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
     stdout.write("\n")
 
 

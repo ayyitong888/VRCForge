@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -117,3 +118,21 @@ def test_rollback_execute_uses_approval_endpoint() -> None:
     assert client.calls[1] == ("POST", "/api/app/checkpoints/ckpt_1/restore", None)
     assert client.calls[2] == ("POST", "/api/app/agent/approvals/approval-restore/approve", None)
     assert client.calls[3] == ("POST", "/api/app/validation/report", {"projectPath": "E:/unity/avatar"})
+
+
+def test_write_json_is_windows_console_safe() -> None:
+    stdout = io.StringIO()
+
+    vrcforge_cli.write_json({"message": "ok ✅"}, stdout)
+
+    assert "\\u2705" in stdout.getvalue()
+
+
+def test_client_wraps_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_timeout(*args: Any, **kwargs: Any) -> None:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_timeout)
+
+    with pytest.raises(vrcforge_cli.CliError, match="Cannot reach VRCForge runtime"):
+        vrcforge_cli.VRCForgeClient(timeout=0.01).request("GET", "/api/app/doctor")
