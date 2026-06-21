@@ -157,8 +157,8 @@ def read_vrcforge_version() -> str:
     try:
         value = (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
-        return "0.5.3-beta"
-    return value or "0.5.3-beta"
+        return os.environ.get("VRCFORGE_VERSION", "").strip() or "0.0.0-dev"
+    return value or os.environ.get("VRCFORGE_VERSION", "").strip() or "0.0.0-dev"
 
 
 def resolve_app_session_token() -> str:

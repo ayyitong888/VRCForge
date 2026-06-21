@@ -220,6 +220,7 @@ try {
 
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
 
+    Copy-Item -LiteralPath .\VERSION -Destination (Join-Path $payloadRoot "VERSION") -Force
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
     $legacyLauncherPayloadRoot = Join-Path $payloadRoot "tools\legacy-launcher"
