@@ -402,6 +402,7 @@ export default function App() {
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
   const [startupIssue, setStartupIssue] = useState("");
+  const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<DiagnosticsStatus | null>(null);
   const [loadingDiagnostics, setLoadingDiagnostics] = useState(false);
   const [exportingSupportBundle, setExportingSupportBundle] = useState(false);
@@ -437,7 +438,13 @@ export default function App() {
   const runtimeConnected = Boolean(bootstrap?.ok);
   const hasStartupIssue = startupIssue.trim().length > 0;
   const hasEnvironmentAttention = runtimeConnected && (healthErrors > 0 || healthWarnings > 0);
-  const showDoctorStartupPrompt = activeView !== "doctor" && (hasStartupIssue || hasEnvironmentAttention);
+  const doctorPromptSignature = hasStartupIssue
+    ? `startup:${startupIssue.trim()}`
+    : `health:${Object.entries(healthComponents)
+        .map(([id, component]) => `${id}:${component.status}:${component.message}`)
+        .join("|")}`;
+  const showDoctorStartupPrompt =
+    activeView !== "doctor" && dismissedDoctorPromptSignature !== doctorPromptSignature && (hasStartupIssue || hasEnvironmentAttention);
   const pendingApprovalItems = (bootstrap?.approvals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = Math.max(bootstrap?.agentHealth.pendingApprovalCount ?? 0, pendingApprovalItems.length);
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
@@ -505,7 +512,7 @@ export default function App() {
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
-  const projectPromptTitle = activeProjectPath && activeProjectName ? `我们应该在 ${activeProjectName} 中构建什么？` : "随心聊点什么？";
+  const projectPromptTitle = activeProjectPath && activeProjectName ? `想在 ${activeProjectName} 里改什么？` : "随心聊点什么？";
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
       return null;
@@ -1082,10 +1089,6 @@ export default function App() {
     } finally {
       setLoadingSubAgents(false);
     }
-  }
-
-  function newSubAgentChat() {
-    void startSubAgentTask();
   }
 
   async function startSubAgentTask(roleOverride?: string) {
@@ -2076,13 +2079,6 @@ export default function App() {
               <span className="truncate">临时对话</span>
             </button>
             <button
-              onClick={newSubAgentChat}
-              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <Sparkles className="h-4 w-4 shrink-0" />
-              <span className="truncate">Sub-agent</span>
-            </button>
-            <button
               onClick={() => {
                 setProjectModalError("");
                 setShowProjectModal(true);
@@ -2293,6 +2289,13 @@ export default function App() {
                 </Button>
                 <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => void retryStartupOrHealth()} disabled={loading}>
                   {loading ? "Retrying" : "Retry"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-7 shrink-0 px-2 text-xs"
+                  onClick={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
+                >
+                  Dismiss
                 </Button>
               </div>
             </div>
@@ -2551,7 +2554,7 @@ export default function App() {
           ) : conversation.length === 0 ? (
             <div className="flex min-h-0 flex-1 items-center justify-center p-8">
               <div className="w-full max-w-4xl">
-                {projectPromptTitle ? <h1 className="mb-8 text-center text-3xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+                {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
                 <ProjectIndexPanel
                   projectPath={activeProjectPath}
                   projectName={activeProjectName}
@@ -2559,6 +2562,7 @@ export default function App() {
                   loading={loadingProjectIndex}
                   error={projectIndexError}
                   onScan={() => void scanActiveProjectIndex(activeProjectPath)}
+                  onReview={() => void startSubAgentTask("project_index_review")}
                 />
                 <OutfitImportPanel
                   projectPath={activeProjectPath}
@@ -2570,13 +2574,13 @@ export default function App() {
                   onPackagePathChange={setOutfitPackagePath}
                   onPlan={() => void planActiveOutfitImport()}
                   onRequest={() => void requestActiveOutfitImport()}
+                  onReview={() => void startSubAgentTask("outfit_import_plan_review")}
                 />
                 <SubAgentPanel
                   tasks={activeSubAgentTasks}
                   loading={loadingSubAgents}
                   error={subAgentError}
                   selected={selectedSubAgent}
-                  onStart={(role) => void startSubAgentTask(role)}
                   onInspect={(taskId) => void inspectSubAgentTask(taskId)}
                   onCancel={(taskId) => void cancelSubAgentTask(taskId)}
                   onRetry={(taskId) => void retrySubAgentTask(taskId)}
@@ -2617,6 +2621,7 @@ export default function App() {
                     loading={loadingProjectIndex}
                     error={projectIndexError}
                     onScan={() => void scanActiveProjectIndex(activeProjectPath)}
+                    onReview={() => void startSubAgentTask("project_index_review")}
                   />
                   <OutfitImportPanel
                     projectPath={activeProjectPath}
@@ -2628,13 +2633,13 @@ export default function App() {
                     onPackagePathChange={setOutfitPackagePath}
                     onPlan={() => void planActiveOutfitImport()}
                     onRequest={() => void requestActiveOutfitImport()}
+                    onReview={() => void startSubAgentTask("outfit_import_plan_review")}
                   />
                   <SubAgentPanel
                     tasks={activeSubAgentTasks}
                     loading={loadingSubAgents}
                     error={subAgentError}
                     selected={selectedSubAgent}
-                    onStart={(role) => void startSubAgentTask(role)}
                     onInspect={(taskId) => void inspectSubAgentTask(taskId)}
                     onCancel={(taskId) => void cancelSubAgentTask(taskId)}
                     onRetry={(taskId) => void retrySubAgentTask(taskId)}
@@ -3407,6 +3412,7 @@ function ProjectIndexPanel({
   loading,
   error,
   onScan,
+  onReview,
 }: {
   projectPath: string;
   projectName: string;
@@ -3414,6 +3420,7 @@ function ProjectIndexPanel({
   loading: boolean;
   error: string;
   onScan: () => void;
+  onReview: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (!projectPath) {
@@ -3429,7 +3436,7 @@ function ProjectIndexPanel({
   const total = Number(summary.totalFiles || 0);
   const scannerFamilies = summary.scannerFamilies || [];
   const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : loading ? "muted" : changed && !firstScan ? "warn" : "ok";
-  const statusLabel = error ? "Scan failed" : loading ? "Indexing" : firstScan ? "Baseline" : changed ? "Changed" : "Clean";
+  const statusLabel = error ? "失败" : loading ? "索引中" : firstScan ? "基线" : changed ? "有变更" : "干净";
   const changeText = firstScan
     ? `${formatCount(total)} indexed`
     : `+${added} ~${modified} -${deleted}${guidChanges ? ` guid ${guidChanges}` : ""}`;
@@ -3450,7 +3457,7 @@ function ProjectIndexPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <Search className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">Project changes · {projectName || shortPath(projectPath)}</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">项目变更 · {projectName || shortPath(projectPath)}</span>
           <Badge tone={statusTone} className="shrink-0">
             {statusLabel}
           </Badge>
@@ -3458,6 +3465,10 @@ function ProjectIndexPanel({
         </button>
         <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onScan}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onReview} title="后台复查项目变更">
+          <Bot className="h-3.5 w-3.5" />
+          复查
         </Button>
       </div>
       {open ? (
@@ -3487,6 +3498,7 @@ function OutfitImportPanel({
   onPackagePathChange,
   onPlan,
   onRequest,
+  onReview,
 }: {
   projectPath: string;
   packagePath: string;
@@ -3497,6 +3509,7 @@ function OutfitImportPanel({
   onPackagePathChange: (value: string) => void;
   onPlan: () => void;
   onRequest: () => void;
+  onReview: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (!projectPath) {
@@ -3507,7 +3520,7 @@ function OutfitImportPanel({
   const ready = Boolean(plan?.readyToApply);
   const hasResult = Boolean(result);
   const tone: "ok" | "warn" | "danger" | "muted" = !hasResult ? "muted" : result?.ok && ready ? "ok" : result?.ok ? "warn" : "danger";
-  const label = !hasResult ? "Outfit import" : ready ? "Ready" : result?.ok ? "Needs review" : "Blocked";
+  const label = !hasResult ? "待检查" : ready ? "可请求" : result?.ok ? "需确认" : "受阻";
   const expected = plan?.expectedAssetPaths || [];
   return (
     <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
@@ -3519,7 +3532,7 @@ function OutfitImportPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <FolderPlus className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">Outfit import</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">服装导入</span>
           <Badge tone={tone} className="shrink-0">
             {label}
           </Badge>
@@ -3546,6 +3559,17 @@ function OutfitImportPanel({
             <Button type="button" className="h-9 shrink-0 px-3 text-xs" disabled={requesting || !ready} onClick={onRequest}>
               {requesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
               Request
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-9 shrink-0 px-3 text-xs"
+              disabled={loading || (!packagePath.trim() && !result)}
+              onClick={onReview}
+              title="后台复查导入方案"
+            >
+              <Bot className="h-3.5 w-3.5" />
+              复查
             </Button>
           </div>
           {status ? <DataLine label="Status" value={status} /> : null}
@@ -3603,7 +3627,6 @@ function SubAgentPanel({
   loading,
   error,
   selected,
-  onStart,
   onInspect,
   onCancel,
   onRetry,
@@ -3614,7 +3637,6 @@ function SubAgentPanel({
   loading: boolean;
   error: string;
   selected: SubAgentTask | null;
-  onStart: (role: string) => void;
   onInspect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   onRetry: (taskId: string) => void;
@@ -3625,9 +3647,21 @@ function SubAgentPanel({
   const running = tasks.filter((task) => task.status === "queued" || task.status === "running" || task.status === "cancelling").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
+  const hasActivity = Boolean(error) || tasks.length > 0;
   const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : failed ? "danger" : running ? "warn" : completed ? "ok" : "muted";
-  const statusLabel = error ? "Attention" : running ? `${running} running` : completed ? `${completed} done` : "Ready";
+  const statusLabel = error ? "需处理" : running ? `${running} 运行中` : completed ? `${completed} 完成` : "就绪";
   const recentTasks = tasks.slice(0, 6);
+
+  useEffect(() => {
+    if (error || running > 0) {
+      setOpen(true);
+    }
+  }, [error, running]);
+
+  if (!hasActivity) {
+    return null;
+  }
+
   return (
     <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
       <div className="flex min-w-0 items-center gap-2 px-3 py-2">
@@ -3638,7 +3672,7 @@ function SubAgentPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">Sub-agents</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">后台任务</span>
           <Badge tone={statusTone} className="shrink-0">
             {statusLabel}
           </Badge>
@@ -3648,31 +3682,13 @@ function SubAgentPanel({
       {open ? (
         <div className="space-y-3 border-t border-border px-3 py-3">
           {error ? <DataLine label="Error" value={error} /> : null}
-          <div className="flex min-w-0 flex-wrap gap-2">
-            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("project_index_review")}>
-              <Search className="h-3.5 w-3.5" />
-              Project
-            </Button>
-            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("validation_triage")}>
-              <Shield className="h-3.5 w-3.5" />
-              Validate
-            </Button>
-            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("outfit_import_plan_review")}>
-              <FolderPlus className="h-3.5 w-3.5" />
-              Outfit
-            </Button>
-            <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onStart("package_install_diagnosis")}>
-              <Wrench className="h-3.5 w-3.5" />
-              Install log
-            </Button>
-          </div>
           {recentTasks.length ? (
             <div className="grid gap-2">
               {recentTasks.map((task) => (
                 <div key={task.id} className="rounded-lg border border-border bg-background px-3 py-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {task.displayName || "Sub-agent"} 路 {subAgentRoleLabel(task.role)}
+                      {task.displayName || "后台任务"} · {subAgentRoleLabel(task.role)}
                     </span>
                     <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
                       {task.status}
@@ -3708,7 +3724,7 @@ function SubAgentPanel({
             </div>
           ) : (
             <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-              Start a read-only worker when a scan or package check can run beside the main chat.
+              暂无后台任务。
             </div>
           )}
           {selected ? (
@@ -5326,7 +5342,7 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
           <div className="flex min-w-0 items-center gap-2">
             <Bot className="h-4 w-4 shrink-0 text-primary" />
             <span className="min-w-0 flex-1 truncate font-medium">
-              {task.displayName || "Sub-agent"} 路 {subAgentRoleLabel(task.role)}
+              {task.displayName || "后台任务"} · {subAgentRoleLabel(task.role)}
             </span>
             <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
               {task.status}
@@ -6231,7 +6247,7 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
     } else if (item.type === "subagent") {
       const task = item.task;
       const text = [
-        `Sub-agent ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
+        `后台任务 ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
         task.summary || task.error || task.task || "",
       ]
         .filter(Boolean)
