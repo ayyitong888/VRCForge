@@ -4857,6 +4857,61 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(verified[0]["actualWeight"], 55.0)
         self.assertEqual(verified[0]["verificationStatus"], "verified")
 
+    def test_outfit_import_request_creates_supervised_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "UnityProject"
+            source = root / "LooseOutfit"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
+            source.mkdir()
+            (source / "Dress.prefab").write_text("%YAML prefab", encoding="utf-8")
+            (source / "body.png").write_bytes(b"secret texture bytes")
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/outfit-imports/request",
+                    json={"packagePath": str(source), "projectPath": str(project)},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["ok"])
+            approval = payload["approval"]
+            self.assertEqual(approval["targetTool"], "vrcforge_import_outfit_package")
+            self.assertEqual(approval["status"], "pending")
+            self.assertEqual(approval["preview"]["plan"]["kind"], "loose_prefab_copy")
+            self.assertTrue(approval["preview"]["plan"]["requiresCheckpoint"])
+            self.assertTrue(approval["preview"]["plan"]["rollbackProofRequired"])
+
+    def test_package_install_diagnostics_is_read_only_and_suggests_supervised_fix(self) -> None:
+        with (
+            patch("dashboard_server.package_manager_status_sync", return_value={"ok": True, "preferredCli": {"name": "vrc-get"}}),
+            patch(
+                "dashboard_server.read_agent_compile_errors",
+                return_value={"ok": True, "result": {"payload": {"errors": [{"message": "CS0246 missing type"}]}}},
+            ),
+        ):
+            payload = dashboard_server.diagnose_package_install_errors_sync(
+                {
+                    "projectPath": "E:/unity/milltina",
+                    "packageId": "nadena.dev.modular-avatar",
+                    "stderrSummary": "network timeout then compilation failed CS0246",
+                }
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "vrcforge.package_install_diagnostics.v1")
+        self.assertTrue(payload["readOnly"])
+        codes = {symptom["code"] for symptom in payload["symptoms"]}
+        self.assertIn("network", codes)
+        self.assertIn("compile", codes)
+        self.assertFalse(payload["repairPolicy"]["automaticRepair"])
+        self.assertTrue(payload["repairPolicy"]["requiresPreviewApprovalCheckpointValidationRollback"])
+        self.assertIn("retry_vpm_install_request", {item["id"] for item in payload["suggestedFixPlans"]})
+
 
 if __name__ == "__main__":
     unittest.main()

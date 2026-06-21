@@ -787,6 +787,53 @@ export type ProjectIndexScanResult = {
   privacy?: Record<string, unknown>;
 };
 
+export type OutfitImportPlanResult = {
+  ok: boolean;
+  schema?: string;
+  preview?: boolean;
+  plannedAt?: string;
+  error?: string;
+  inspection?: {
+    ok?: boolean;
+    summary?: {
+      unityPackageCount?: number;
+      prefabCandidateCount?: number;
+      textureCount?: number;
+      materialCount?: number;
+      modelCount?: number;
+      unsafeEntryCount?: number;
+      duplicateEntryCount?: number;
+      importPlanKind?: string;
+    };
+    unityPackages?: Array<{ path?: string; size?: number; pathnameCount?: number }>;
+    prefabCandidates?: Array<{ path?: string; source?: string }>;
+    textures?: Array<{ path?: string; source?: string }>;
+    materials?: Array<{ path?: string; source?: string }>;
+    models?: Array<{ path?: string; source?: string }>;
+    warnings?: string[];
+  };
+  plan?: {
+    id?: string;
+    kind?: string;
+    ok?: boolean;
+    readyToApply?: boolean;
+    requiresApproval?: boolean;
+    requiresCheckpoint?: boolean;
+    validationAfterApply?: boolean;
+    rollbackProofRequired?: boolean;
+    projectPath?: string;
+    targetFolder?: string;
+    selectedPrefab?: string;
+    expectedAssetPaths?: string[];
+    writeTarget?: string;
+    steps?: Array<{ id?: string; category?: string; tool?: string; description?: string; enabled?: boolean }>;
+    warnings?: string[];
+    error?: string;
+  };
+  warnings?: string[];
+  privacy?: Record<string, unknown>;
+};
+
 export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs> {
   const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
@@ -811,6 +858,44 @@ export async function scanProjectIndex(
   request: { projectPath: string; maxFiles?: number },
 ): Promise<ProjectIndexScanResult> {
   return requestJson<ProjectIndexScanResult>(`${endpoint}/api/app/project-index/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function planOutfitImport(
+  endpoint: string,
+  request: {
+    packagePath: string;
+    projectPath?: string;
+    targetFolder?: string;
+    selectedUnityPackage?: string;
+    selectedPrefab?: string;
+    baseAvatarName?: string;
+    maxEntries?: number;
+  },
+): Promise<OutfitImportPlanResult> {
+  return requestJson<OutfitImportPlanResult>(`${endpoint}/api/app/outfit-imports/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function requestOutfitImport(
+  endpoint: string,
+  request: {
+    packagePath: string;
+    projectPath?: string;
+    targetFolder?: string;
+    selectedUnityPackage?: string;
+    selectedPrefab?: string;
+    baseAvatarName?: string;
+    maxEntries?: number;
+  },
+): Promise<{ ok: boolean; approval?: AgentApproval; error?: string }> {
+  return requestJson(`${endpoint}/api/app/outfit-imports/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -857,11 +942,13 @@ export async function sendAgentMessage(
   message: string,
   sessionId?: string,
   history?: ChatHistoryEntry[],
+  agentName?: string,
 ): Promise<AgentRuntimeResponse> {
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      agent_name: agentName || "desktop-agent",
       session_id: sessionId || null,
       message,
       history: history ?? [],

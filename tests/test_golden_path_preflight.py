@@ -42,6 +42,10 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
         with TestClient(dashboard_server.app) as client:
             index_response = client.post("/api/app/project-index/scan", json={"projectPath": str(project)})
             package_response = client.post("/api/app/outfit-packages/inspect", json={"packagePath": str(package)})
+            plan_response = client.post(
+                "/api/app/outfit-imports/plan",
+                json={"packagePath": str(package), "projectPath": str(project)},
+            )
     finally:
         dashboard_server.PROJECT_MEMORY_INDEX_DIR = original_index_dir
 
@@ -60,10 +64,26 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
     assert package_payload["privacy"]["readsAssetBinaryContents"] is False
     assert "SECRET_ASSET_BYTES" not in str(package_payload)
 
+    assert plan_response.status_code == 200
+    plan_payload = plan_response.json()
+    assert plan_payload["ok"] is True
+    assert plan_payload["schema"] == "vrcforge.outfit_import_plan.v1"
+    assert plan_payload["plan"]["kind"] == "unitypackage_import"
+    assert plan_payload["plan"]["readyToApply"] is True
+    assert plan_payload["plan"]["requiresApproval"] is True
+    assert plan_payload["plan"]["requiresCheckpoint"] is True
+    assert plan_payload["plan"]["rollbackProofRequired"] is True
+    assert plan_payload["plan"]["writeTarget"] == "vrcforge_import_outfit_package"
+    assert "SECRET_ASSET_BYTES" not in str(plan_payload)
+
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     write_targets = {target["name"] for target in manifest["writeTargets"]}
     assert "vrcforge_scan_project_index" in tool_names
     assert "vrcforge_inspect_outfit_package" in tool_names
+    assert "vrcforge_plan_outfit_import" in tool_names
+    assert "vrcforge_diagnose_package_install_errors" in tool_names
     assert "vrcforge_scan_project_index" not in write_targets
     assert "vrcforge_inspect_outfit_package" not in write_targets
+    assert "vrcforge_plan_outfit_import" not in write_targets
+    assert "vrcforge_import_outfit_package" in write_targets

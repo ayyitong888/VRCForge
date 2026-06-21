@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.5.3--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.3-beta)
+[![Version](https://img.shields.io/badge/version-v0.6.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.6.0-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.5.3-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.6.0-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.5.3-beta.zip`
+- `VRCForge_Windows_x64_0.6.0-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -104,6 +104,9 @@ The desktop app also includes uninstall actions:
 | Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items are passed through to chat as a default-collapsed row | Available / 可用 |
 | Project memory / incremental scan | Local project index for `Assets`, `Packages`, and `ProjectSettings`, surfaced in the desktop chat as added / modified / deleted deltas | Available / 可用 |
+| Outfit package import planning | Local `.unitypackage`, Booth folder, and loose prefab/texture folder inspection plus supervised import request UI | Beta, approval/checkpoint required |
+| Package/plugin install diagnostics | Read-only VPM/ALCOM/vrc-get status, install-output classification, and Unity compile-error context for repair planning | Beta, fixes remain supervised plans |
+| Named sub-agent sessions | Independent desktop chat sessions can use random VRChat avatar names as agent identities | Beta |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |

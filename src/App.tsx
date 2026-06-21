@@ -64,6 +64,7 @@ import {
   DiagnosticsStatus,
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
+  OutfitImportPlanResult,
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
@@ -90,10 +91,12 @@ import {
   fetchProviderModels,
   installExternalAgentConnector,
   importSkillPackage,
+  planOutfitImport,
   preflightSkillPackage,
   ProjectPrefs,
   previewRestoreCheckpoint,
   rejectAgentApproval,
+  requestOutfitImport,
   requestRestoreCheckpoint,
   saveChats,
   saveProjectPrefs,
@@ -166,6 +169,7 @@ type ChatThread = {
   sessionId: string;
   title: string;
   projectPath: string;
+  agentName?: string;
   pinned?: boolean;
   archived?: boolean;
   items: ConversationItem[];
@@ -186,6 +190,52 @@ const THEME_STORAGE_KEY = "vrcforge_theme";
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
+const VRCHAT_AVATAR_AGENT_NAMES = [
+  "Manuka",
+  "Shinano",
+  "Kikyo",
+  "Moe",
+  "Selestia",
+  "Milltina",
+  "Kipfel",
+  "Rurune",
+  "Mamehinata",
+  "Usasaki",
+  "Airi",
+  "Maya",
+  "Rindo",
+  "Karin",
+  "Lasyusha",
+  "Lime",
+  "Chiffon",
+  "Chocolat",
+  "Mizuki",
+  "Sio",
+  "Milfy",
+  "Mao",
+  "Lumina",
+  "Leefa",
+  "Lunalitt",
+  "Rusk",
+  "Clonka",
+  "Uzuruha",
+  "Mitsumame",
+  "Ulthara",
+  "IsanaiNuku",
+  "Yilnel",
+  "NoraFirika",
+  "IODragonewt",
+  "Ortwa",
+  "Ricorine",
+  "Siska",
+  "NoraMiaree",
+  "Clara",
+  "Korone",
+  "Azuki",
+  "Miminoko",
+  "Nemesis",
+  "Elusion",
+];
 
 const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
   { value: "approval", label: "受限模式", description: "沙箱模式：高风险命令与写操作逐项审批，最安全。" },
@@ -203,6 +253,11 @@ function isTauriRuntime() {
 
 function normalizeProjectPathKey(path?: string): string {
   return (path || "").replace(/\//g, "\\").trim().toLowerCase();
+}
+
+function pickSubAgentName(): string {
+  const index = Math.floor(Math.random() * VRCHAT_AVATAR_AGENT_NAMES.length);
+  return VRCHAT_AVATAR_AGENT_NAMES[index] || "Manuka";
 }
 
 function loadProjectUiPrefs(): ProjectUiPrefs {
@@ -280,6 +335,11 @@ export default function App() {
   const [projectIndexProject, setProjectIndexProject] = useState("");
   const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
   const [projectIndexError, setProjectIndexError] = useState("");
+  const [outfitPackagePath, setOutfitPackagePath] = useState("");
+  const [outfitImportPlan, setOutfitImportPlan] = useState<OutfitImportPlanResult | null>(null);
+  const [outfitImportStatus, setOutfitImportStatus] = useState("");
+  const [loadingOutfitImportPlan, setLoadingOutfitImportPlan] = useState(false);
+  const [requestingOutfitImport, setRequestingOutfitImport] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
@@ -810,6 +870,7 @@ export default function App() {
   async function runSingleTurn(chatId: string, message: string) {
     const chat = chatsRef.current.find((item) => item.id === chatId);
     const chatSessionId = chat?.sessionId || "";
+    const chatAgentName = chat?.agentName || "desktop-agent";
     const history = chat && chat.items.length > 0 ? buildChatHistory(chat.items) : [];
     const startedAt = Date.now();
     setCurrentTurn({ text: message, startedAt });
@@ -828,7 +889,7 @@ export default function App() {
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
         items: [...current.items, userItem],
       }));
-      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined, history);
+      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined, history, chatAgentName);
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
         ...current,
@@ -951,6 +1012,18 @@ export default function App() {
     setActiveChatId(id);
   }
 
+  function newSubAgentChat() {
+    const agentName = pickSubAgentName();
+    const projectPath = activeProjectPath;
+    setActiveView("chat");
+    setActiveProjectPath(projectPath);
+    setError("");
+    setCollapsedProjects((map) => (projectPath ? map : map[TEMP_CHATS_COLLAPSE_KEY] ? { ...map, [TEMP_CHATS_COLLAPSE_KEY]: false } : map));
+    const id = `chat-${Date.now()}`;
+    setChats((list) => [{ id, sessionId: "", title: agentName, projectPath, agentName, items: [] }, ...list]);
+    setActiveChatId(id);
+  }
+
   function handleConversationMouseUp() {
     window.setTimeout(() => {
       const selection = window.getSelection();
@@ -984,7 +1057,8 @@ export default function App() {
     // 基于选中内容开新会话提问——后续多 agent 的入口。
     const projectPath = activeChat?.projectPath ?? activeProjectPath;
     const id = `chat-${Date.now()}`;
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath, items: [] }, ...list]);
+    const agentName = pickSubAgentName();
+    setChats((list) => [{ id, sessionId: "", title: agentName, projectPath, agentName, items: [] }, ...list]);
     setActiveChatId(id);
     setActiveView("chat");
     setInput(`${quoteLines(text)}\n`);
@@ -1163,6 +1237,68 @@ export default function App() {
       }
     } finally {
       setLoadingProjectIndex(false);
+    }
+  }
+
+  async function planActiveOutfitImport() {
+    const packagePath = outfitPackagePath.trim();
+    if (!packagePath) {
+      setOutfitImportStatus("Package path is required.");
+      return;
+    }
+    setLoadingOutfitImportPlan(true);
+    setOutfitImportStatus("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setOutfitImportStatus("VRCForge runtime is not connected.");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await planOutfitImport(targetEndpoint, {
+        packagePath,
+        projectPath: activeProjectPath,
+      });
+      setOutfitImportPlan(payload);
+      setOutfitImportStatus(payload.ok ? "Import plan ready." : payload.error || payload.plan?.error || "Import plan needs review.");
+    } catch (cause) {
+      setOutfitImportStatus(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingOutfitImportPlan(false);
+    }
+  }
+
+  async function requestActiveOutfitImport() {
+    const packagePath = outfitPackagePath.trim();
+    if (!packagePath) {
+      setOutfitImportStatus("Package path is required.");
+      return;
+    }
+    setRequestingOutfitImport(true);
+    setOutfitImportStatus("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setOutfitImportStatus("VRCForge runtime is not connected.");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await requestOutfitImport(targetEndpoint, {
+        packagePath,
+        projectPath: activeProjectPath,
+      });
+      setOutfitImportStatus(payload.approval ? `Approval queued: ${payload.approval.id}` : "Approval queued.");
+      await refresh(targetEndpoint);
+    } catch (cause) {
+      setOutfitImportStatus(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRequestingOutfitImport(false);
     }
   }
 
@@ -1788,6 +1924,13 @@ export default function App() {
               <span className="truncate">临时对话</span>
             </button>
             <button
+              onClick={newSubAgentChat}
+              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Sparkles className="h-4 w-4 shrink-0" />
+              <span className="truncate">Sub-agent</span>
+            </button>
+            <button
               onClick={() => {
                 setProjectModalError("");
                 setShowProjectModal(true);
@@ -2265,6 +2408,17 @@ export default function App() {
                   error={projectIndexError}
                   onScan={() => void scanActiveProjectIndex(activeProjectPath)}
                 />
+                <OutfitImportPanel
+                  projectPath={activeProjectPath}
+                  packagePath={outfitPackagePath}
+                  result={outfitImportPlan}
+                  status={outfitImportStatus}
+                  loading={loadingOutfitImportPlan}
+                  requesting={requestingOutfitImport}
+                  onPackagePathChange={setOutfitPackagePath}
+                  onPlan={() => void planActiveOutfitImport()}
+                  onRequest={() => void requestActiveOutfitImport()}
+                />
                 <Composer
                   input={input}
                   setInput={setInput}
@@ -2299,6 +2453,17 @@ export default function App() {
                     loading={loadingProjectIndex}
                     error={projectIndexError}
                     onScan={() => void scanActiveProjectIndex(activeProjectPath)}
+                  />
+                  <OutfitImportPanel
+                    projectPath={activeProjectPath}
+                    packagePath={outfitPackagePath}
+                    result={outfitImportPlan}
+                    status={outfitImportStatus}
+                    loading={loadingOutfitImportPlan}
+                    requesting={requestingOutfitImport}
+                    onPackagePathChange={setOutfitPackagePath}
+                    onPlan={() => void planActiveOutfitImport()}
+                    onRequest={() => void requestActiveOutfitImport()}
                   />
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
@@ -3130,6 +3295,97 @@ function ProjectIndexPanel({
           {modifiedPaths.length ? <OutputBlock label="Modified" value={formatProjectIndexPaths(modifiedPaths)} /> : null}
           {deletedPaths.length ? <OutputBlock label="Deleted" value={formatProjectIndexPaths(deletedPaths)} /> : null}
           {result?.staleDataPolicy ? <DataLine label="Policy" value={result.staleDataPolicy} /> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function OutfitImportPanel({
+  projectPath,
+  packagePath,
+  result,
+  status,
+  loading,
+  requesting,
+  onPackagePathChange,
+  onPlan,
+  onRequest,
+}: {
+  projectPath: string;
+  packagePath: string;
+  result: OutfitImportPlanResult | null;
+  status: string;
+  loading: boolean;
+  requesting: boolean;
+  onPackagePathChange: (value: string) => void;
+  onPlan: () => void;
+  onRequest: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!projectPath) {
+    return null;
+  }
+  const plan = result?.plan;
+  const summary = result?.inspection?.summary;
+  const ready = Boolean(plan?.readyToApply);
+  const hasResult = Boolean(result);
+  const tone: "ok" | "warn" | "danger" | "muted" = !hasResult ? "muted" : result?.ok && ready ? "ok" : result?.ok ? "warn" : "danger";
+  const label = !hasResult ? "Outfit import" : ready ? "Ready" : result?.ok ? "Needs review" : "Blocked";
+  const expected = plan?.expectedAssetPaths || [];
+  return (
+    <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+        <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen((value) => !value)}>
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <FolderPlus className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">Outfit import</span>
+          <Badge tone={tone} className="shrink-0">
+            {label}
+          </Badge>
+          {summary ? (
+            <span className="shrink-0 font-mono text-xs text-muted-foreground">
+              pkg {summary.unityPackageCount || 0} 路 prefab {summary.prefabCandidateCount || 0}
+            </span>
+          ) : null}
+        </button>
+      </div>
+      {open ? (
+        <div className="space-y-3 border-t border-border px-3 py-3">
+          <div className="flex min-w-0 gap-2">
+            <input
+              value={packagePath}
+              onChange={(event) => onPackagePathChange(event.target.value)}
+              placeholder=".unitypackage / Booth folder / prefab folder"
+              className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+            />
+            <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading || !packagePath.trim()} onClick={onPlan}>
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+              Plan
+            </Button>
+            <Button type="button" className="h-9 shrink-0 px-3 text-xs" disabled={requesting || !ready} onClick={onRequest}>
+              {requesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
+              Request
+            </Button>
+          </div>
+          {status ? <DataLine label="Status" value={status} /> : null}
+          {plan?.kind ? <DataLine label="Plan" value={plan.kind} /> : null}
+          {plan?.targetFolder ? <DataLine label="Target" value={plan.targetFolder} mono /> : null}
+          {plan?.selectedPrefab ? <DataLine label="Prefab" value={plan.selectedPrefab} mono /> : null}
+          {expected.length ? <OutputBlock label="Expected assets" value={expected.slice(0, 20).join("\n")} /> : null}
+          {plan?.steps?.length ? (
+            <OutputBlock
+              label="Steps"
+              value={plan.steps
+                .map((step) => `${step.enabled === false ? "[off]" : "[on]"} ${step.category || ""} ${step.tool || step.id || ""}`.trim())
+                .join("\n")}
+            />
+          ) : null}
+          {result?.warnings?.length ? <OutputBlock label="Warnings" value={result.warnings.join("\n")} /> : null}
         </div>
       ) : null}
     </section>

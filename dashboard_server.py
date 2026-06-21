@@ -42,6 +42,7 @@ from external_agent_connector_installer import (
     uninstall_connector,
 )
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
+from outfit_import_planner import build_outfit_import_plan
 from outfit_package_inspector import inspect_outfit_package
 from project_memory_index import scan_project_memory
 from skill_packages import SkillPackageError, SkillPackageService
@@ -573,6 +574,29 @@ class ProjectIndexScanRequest(BaseModel):
 class OutfitPackageInspectRequest(BaseModel):
     package_path: str = Field(alias="packagePath")
     max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
+
+    model_config = {"populate_by_name": True}
+
+
+class OutfitImportPlanRequest(BaseModel):
+    package_path: str = Field(alias="packagePath")
+    project_path: str = Field(default="", alias="projectPath")
+    target_folder: str = Field(default="", alias="targetFolder")
+    selected_unitypackage: str = Field(default="", alias="selectedUnityPackage")
+    selected_prefab: str = Field(default="", alias="selectedPrefab")
+    base_avatar_name: str = Field(default="", alias="baseAvatarName")
+    max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
+
+    model_config = {"populate_by_name": True}
+
+
+class PackageInstallDiagnosticsRequest(BaseModel):
+    project_path: str = Field(default="", alias="projectPath")
+    package_id: str = Field(default="", alias="packageId")
+    stdout_summary: str = Field(default="", alias="stdoutSummary")
+    stderr_summary: str = Field(default="", alias="stderrSummary")
+    log_text: str = Field(default="", alias="logText")
+    max_compile_errors: int = Field(default=30, alias="maxCompileErrors", ge=1, le=200)
 
     model_config = {"populate_by_name": True}
 
@@ -1435,6 +1459,23 @@ def inspect_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return inspect_outfit_package(package_path, max_entries=max_entries)
 
 
+def plan_outfit_import_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    package_path = str(params.get("packagePath") or params.get("package_path") or "").strip()
+    if not package_path:
+        raise AgentGatewayError("packagePath is required.", status_code=400)
+    project_path = str(params.get("projectPath") or params.get("project_path") or DASHBOARD_STATE.selected_project_path or "").strip()
+    return build_outfit_import_plan(
+        package_path=package_path,
+        project_path=project_path or None,
+        target_folder=str(params.get("targetFolder") or params.get("target_folder") or "").strip() or None,
+        selected_unitypackage=str(params.get("selectedUnityPackage") or params.get("selected_unitypackage") or "").strip() or None,
+        selected_prefab=str(params.get("selectedPrefab") or params.get("selected_prefab") or "").strip() or None,
+        base_avatar_name=str(params.get("baseAvatarName") or params.get("base_avatar_name") or "").strip() or None,
+        max_entries=int(params.get("maxEntries") or params.get("max_entries") or 5000),
+    )
+
+
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
     bridge = resolve_stdio_bridge(ROOT_DIR)
@@ -1679,6 +1720,39 @@ def app_project_index_scan(request: ProjectIndexScanRequest) -> dict[str, Any]:
 @app.post("/api/app/outfit-packages/inspect")
 def app_outfit_package_inspect(request: OutfitPackageInspectRequest) -> dict[str, Any]:
     return inspect_outfit_package_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/outfit-imports/plan")
+def app_outfit_import_plan(request: OutfitImportPlanRequest) -> dict[str, Any]:
+    return plan_outfit_import_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/outfit-imports/request")
+async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[str, Any]:
+    params = request.model_dump(by_alias=True)
+    preview = plan_outfit_import_sync(params)
+    plan_payload = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
+    if not preview.get("ok") or not plan_payload.get("readyToApply"):
+        raise HTTPException(status_code=400, detail=preview.get("error") or "Outfit import plan is not ready to apply.")
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_import_outfit_package",
+                "arguments": params,
+                "reason": "Import outfit package through VRCForge supervised Golden Path.",
+                "preview": preview,
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/package-install/diagnose")
+def app_package_install_diagnostics(request: PackageInstallDiagnosticsRequest) -> dict[str, Any]:
+    return diagnose_package_install_errors_sync(request.model_dump(by_alias=True))
 
 
 @app.get("/api/agent/external-agent/connectors")
@@ -8781,6 +8855,154 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+PACKAGE_DIAGNOSTIC_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
+    ("network", r"\b(timeout|timed out|network|connection|ssl|tls|proxy|dns|unable to resolve)\b", "Package source/network failure", "Retry after checking network/proxy settings, then rerun package status."),
+    ("manifest", r"\b(manifest|packages-lock|lock file|json|parse|invalid character|could not parse)\b", "Project manifest or lock-file problem", "Use the package manager UI/CLI to restore packages; any manifest edit must be a supervised repair plan."),
+    ("dependency", r"\b(dependency|dependencies|version conflict|conflict|incompatible|resolution|resolve packages)\b", "Package dependency resolution problem", "Inspect Packages/manifest.json and packages-lock.json, then plan a dependency repair with checkpoint."),
+    ("permission", r"\b(access denied|permission denied|unauthorized|read-only|being used by another process|locked)\b", "Filesystem permission or lock problem", "Close tools holding the project, check write permissions, then retry."),
+    ("compile", r"\b(cs\d{4}|compile error|compilation failed|compiler|assembly)\b", "Unity compile error after package import", "Open the compile errors and generate a separate supervised fix plan."),
+    ("unitypackage", r"\b(importpackage|unitypackage|assetdatabase\.importpackage|failed to import)\b", "UnityPackage import problem", "Inspect the UnityPackage/folder first, then import through VRCForge with checkpoint and rollback proof."),
+)
+
+
+def diagnose_package_install_errors_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_value = resolve_addon_project_path(params)
+    package_id = str(params.get("packageId") or params.get("package_id") or "").strip().lower()
+    max_compile_errors = int(params.get("maxCompileErrors") or params.get("max_compile_errors") or 30)
+    raw_text = "\n".join(
+        str(params.get(key) or "")
+        for key in ("stdoutSummary", "stdout_summary", "stderrSummary", "stderr_summary", "logText", "log_text")
+    )
+    safe_text = str(summarize_debug_payload(raw_text))[:5000]
+    warnings: list[str] = []
+
+    try:
+        package_status = package_manager_status_sync({"projectPath": project_value})
+    except Exception as exc:  # noqa: BLE001 - diagnostics must survive partial failures.
+        package_status = {"ok": False, "error": str(exc)}
+        warnings.append(f"Package manager status failed: {exc}")
+
+    compile_errors: dict[str, Any]
+    try:
+        compile_errors = read_agent_compile_errors({"projectPath": project_value, "maxErrors": max_compile_errors})
+    except Exception as exc:  # noqa: BLE001
+        compile_errors = {"ok": False, "error": str(exc)}
+        warnings.append(f"Unity compile-error reader failed: {exc}")
+
+    symptoms = _classify_package_install_symptoms(safe_text, compile_errors, package_status)
+    suggested_fix_plans = _build_package_install_fix_suggestions(symptoms, package_status, package_id)
+    return {
+        "ok": True,
+        "schema": "vrcforge.package_install_diagnostics.v1",
+        "readOnly": True,
+        "projectPath": project_value,
+        "packageId": package_id,
+        "packageManager": redact_support_payload(package_status),
+        "compileErrors": redact_support_payload(compile_errors),
+        "symptoms": symptoms,
+        "warnings": warnings,
+        "suggestedFixPlans": suggested_fix_plans,
+        "repairPolicy": {
+            "automaticRepair": False,
+            "supervisedRepairOnly": True,
+            "requiresPreviewApprovalCheckpointValidationRollback": True,
+        },
+    }
+
+
+def _classify_package_install_symptoms(
+    log_text: str,
+    compile_errors: dict[str, Any],
+    package_status: dict[str, Any],
+) -> list[dict[str, str]]:
+    haystack = f"{log_text}\n{json.dumps(compile_errors, ensure_ascii=False)}\n{json.dumps(package_status, ensure_ascii=False)}".lower()
+    symptoms: list[dict[str, str]] = []
+    for code, pattern, title, suggestion in PACKAGE_DIAGNOSTIC_PATTERNS:
+        if re.search(pattern, haystack, flags=re.IGNORECASE):
+            symptoms.append({"code": code, "title": title, "suggestion": suggestion})
+    if package_status.get("ok") and not package_status.get("preferredCli"):
+        symptoms.append(
+            {
+                "code": "no_vpm_cli",
+                "title": "No command-line VPM installer detected",
+                "suggestion": "Use the package manager UI, or install vrc-get/VCC CLI before command-line package installs.",
+            }
+        )
+    if not symptoms:
+        symptoms.append(
+            {
+                "code": "unknown",
+                "title": "No known package-install signature matched",
+                "suggestion": "Export a support bundle or rerun with debug logging enabled to capture more context.",
+            }
+        )
+    seen: set[str] = set()
+    unique: list[dict[str, str]] = []
+    for symptom in symptoms:
+        code = symptom["code"]
+        if code in seen:
+            continue
+        seen.add(code)
+        unique.append(symptom)
+    return unique
+
+
+def _build_package_install_fix_suggestions(
+    symptoms: list[dict[str, str]],
+    package_status: dict[str, Any],
+    package_id: str,
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    codes = {item.get("code") for item in symptoms}
+    if "compile" in codes:
+        suggestions.append(
+            {
+                "id": "explain_compile_errors",
+                "risk": "read_only",
+                "tool": "vrcforge_get_compile_errors",
+                "summary": "Read Unity compile errors and create a separate fix plan.",
+            }
+        )
+    if {"manifest", "dependency"} & codes:
+        suggestions.append(
+            {
+                "id": "dependency_repair_plan",
+                "risk": "plan_only",
+                "tool": "vrcforge_package_manager_status",
+                "summary": "Compare package manager status with manifest/lock state before any repair.",
+            }
+        )
+    if "unitypackage" in codes:
+        suggestions.append(
+            {
+                "id": "unitypackage_import_plan",
+                "risk": "plan_only",
+                "tool": "vrcforge_plan_outfit_import",
+                "summary": "Inspect the package and build a supervised import plan with rollback proof.",
+            }
+        )
+    if package_id and package_status.get("preferredCli"):
+        suggestions.append(
+            {
+                "id": "retry_vpm_install_request",
+                "risk": "approval_required",
+                "tool": "vrcforge_install_vpm_package",
+                "summary": f"Retry package install for {package_id} only through the approval/checkpoint path.",
+            }
+        )
+    if not suggestions:
+        suggestions.append(
+            {
+                "id": "support_bundle",
+                "risk": "read_only",
+                "tool": "vrcforge_support_bundle",
+                "summary": "Collect redacted diagnostics before attempting repair.",
+            }
+        )
+    return suggestions
+
+
 def build_setup_outfit_request(params: dict[str, Any], confirm: bool) -> dict[str, Any]:
     return {
         "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
@@ -10075,6 +10297,151 @@ def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
+    ".prefab",
+    ".mat",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tga",
+    ".psd",
+    ".exr",
+    ".fbx",
+    ".blend",
+    ".obj",
+    ".asset",
+    ".controller",
+    ".anim",
+}
+
+
+def import_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    plan = plan_outfit_import_sync(params)
+    plan_payload = ensure_dict_payload(plan.get("plan"), "outfit import plan")
+    if not plan_payload.get("readyToApply"):
+        return {"ok": False, "plan": plan_payload, "error": "Outfit import plan is not ready to apply."}
+    project_root = _resolve_unity_project_root_for_import(params, plan_payload)
+    kind = str(plan_payload.get("kind") or "")
+    if kind == "unitypackage_import":
+        result = import_unitypackage_sync({**params, "projectPath": str(project_root), "unityPackagePath": ensure_dict_payload(plan_payload.get("source"), "outfit import source").get("actualPackagePath")})
+        return {
+            "ok": bool(result.get("ok")),
+            "kind": kind,
+            "plan": plan_payload,
+            "unityImport": result,
+            "importedPrefabCandidates": _expected_prefab_assets(plan_payload),
+            "nextTool": "vrcforge_add_outfit",
+        }
+    if kind == "loose_prefab_copy":
+        copied = _copy_loose_outfit_assets(Path(str(plan_payload["source"]["path"])), project_root, str(plan_payload.get("targetFolder") or "Assets/VRCForge/ImportedOutfits"))
+        refresh = refresh_asset_database_sync({**params, "projectPath": str(project_root)})
+        return {
+            "ok": True,
+            "kind": kind,
+            "plan": plan_payload,
+            "copiedFiles": copied["copiedFiles"],
+            "copiedFileCount": copied["copiedFileCount"],
+            "importedPrefabCandidates": copied["prefabAssets"],
+            "assetDatabaseRefresh": refresh,
+            "nextTool": "vrcforge_add_outfit",
+        }
+    return {"ok": False, "plan": plan_payload, "error": f"Unsupported outfit import plan kind: {kind}"}
+
+
+def import_unitypackage_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    package_path = str(params.get("unityPackagePath") or params.get("unity_package_path") or "").strip()
+    if not package_path:
+        return {"ok": False, "error": "unityPackagePath is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_import_unitypackage", {
+            "projectPath": str(params.get("projectPath") or params.get("project_path") or ""),
+            "unityPackagePath": package_path,
+            "interactive": False,
+        })),
+        "import unitypackage",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
+    settings = load_dashboard_settings(build_agent_connection_request(params or {}))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_refresh_asset_database", {
+            "projectPath": str((params or {}).get("projectPath") or (params or {}).get("project_path") or ""),
+        })),
+        "refresh asset database",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def _resolve_unity_project_root_for_import(params: dict[str, Any], plan_payload: dict[str, Any]) -> Path:
+    value = str(params.get("projectPath") or params.get("project_path") or plan_payload.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
+    if not value:
+        raise AgentGatewayError("projectPath is required for outfit import.", status_code=400)
+    project_root = Path(value).expanduser().resolve()
+    if not is_unity_project_root(project_root):
+        raise AgentGatewayError("projectPath must point to a Unity project root.", status_code=400)
+    return project_root
+
+
+def _copy_loose_outfit_assets(source_root: Path, project_root: Path, target_folder: str) -> dict[str, Any]:
+    source_root = source_root.expanduser().resolve()
+    if not source_root.is_dir():
+        raise AgentGatewayError("Loose outfit import requires a folder source.", status_code=400)
+    target_asset_root = _resolve_import_target_folder(project_root, target_folder)
+    copied: list[str] = []
+    prefab_assets: list[str] = []
+    for source in sorted((item for item in source_root.rglob("*") if item.is_file()), key=lambda item: str(item).lower()):
+        if source.is_symlink():
+            continue
+        if source.suffix.lower() == ".meta":
+            continue
+        if source.suffix.lower() not in OUTFIT_IMPORT_ALLOWED_SUFFIXES:
+            continue
+        relative = source.relative_to(source_root)
+        target = (target_asset_root / relative).resolve()
+        _ensure_path_inside_project(project_root, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        asset_path = target.relative_to(project_root).as_posix()
+        copied.append(asset_path)
+        if target.suffix.lower() == ".prefab":
+            prefab_assets.append(asset_path)
+        meta_source = source.with_name(source.name + ".meta")
+        if meta_source.is_file():
+            meta_target = target.with_name(target.name + ".meta")
+            shutil.copy2(meta_source, meta_target)
+            copied.append(meta_target.relative_to(project_root).as_posix())
+    if not copied:
+        raise AgentGatewayError("No importable loose outfit files were found.", status_code=400)
+    return {"copiedFileCount": len(copied), "copiedFiles": copied, "prefabAssets": prefab_assets}
+
+
+def _resolve_import_target_folder(project_root: Path, target_folder: str) -> Path:
+    normalized = str(target_folder or "Assets/VRCForge/ImportedOutfits").replace("\\", "/").strip().strip("/")
+    if not normalized.startswith("Assets/"):
+        raise AgentGatewayError("targetFolder must be under Assets/.", status_code=400)
+    target = (project_root / normalized).resolve()
+    _ensure_path_inside_project(project_root, target)
+    return target
+
+
+def _ensure_path_inside_project(project_root: Path, target: Path) -> None:
+    try:
+        target.resolve().relative_to(project_root.resolve())
+    except ValueError as exc:
+        raise AgentGatewayError("Resolved import target is outside the Unity project.", status_code=400) from exc
+
+
+def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
+    return [str(path) for path in (plan_payload.get("expectedAssetPaths") or []) if str(path).lower().endswith(".prefab")]
+
+
 def _workflow_project_params(params: dict[str, Any]) -> dict[str, Any]:
     project_value = str(params.get("project_path") or params.get("projectPath") or "").strip()
     return {"projectPath": project_value} if project_value else {}
@@ -10377,6 +10744,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", inspect_outfit_package_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", plan_outfit_import_sync)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
@@ -10409,6 +10777,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", diagnose_package_install_errors_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", preview_add_outfit_part_sync)
@@ -10546,6 +10915,12 @@ def register_agent_gateway_tools() -> None:
         "Run the semantic add-outfit workflow: instantiate a prefab under the avatar, run Modular Avatar Setup Outfit, scan/create an int-exclusive wardrobe if needed, and add the outfit to it.",
         "high",
         add_outfit_workflow_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_import_outfit_package",
+        "Import a direct UnityPackage or copy loose outfit prefab/material/texture assets into the Unity project through VRCForge.",
+        "high",
+        import_outfit_package_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_component",

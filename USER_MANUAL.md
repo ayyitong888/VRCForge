@@ -26,6 +26,9 @@ This manual explains the public workflow and feature status without project-spec
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |
 | Project memory / incremental scan | Local index shows added, modified, and deleted project files in the desktop workspace | 已可用 / Available |
+| Outfit package import planning | Inspect `.unitypackage`, Booth folders, and loose prefab/texture folders, then request a supervised import | Beta, approval/checkpoint required |
+| Package/plugin install diagnostics | Read VPM/ALCOM/vrc-get status, install output, and compile-error context before planning repairs | Beta, read-only diagnostics |
+| Named sub-agent sessions | Independent chat sessions can use random VRChat avatar names as agent identities | Beta |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |
