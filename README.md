@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.7.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.0-beta)
+[![Version](https://img.shields.io/badge/version-v0.7.1--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.1-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -20,7 +20,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.0-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.1-beta
 
 Recommended:
 
@@ -44,7 +44,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.7.0-beta.zip`
+- `VRCForge_Windows_x64_0.7.1-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -84,6 +84,43 @@ The desktop app also includes uninstall actions:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
 - Program uninstall opens the NSIS uninstaller when installed from the x64 installer; user data under `%LOCALAPPDATA%\VRCForge` is preserved unless removed manually.
 
+## CLI / 命令行
+
+VRCForge 0.7.1-beta includes a local CLI for diagnostics, read-only scans, and
+request-based write flows. It talks to the same local desktop runtime at
+`http://127.0.0.1:8757`; open VRCForge Desktop first so the backend and app
+session token are available.
+
+```powershell
+# Source checkout
+python tools\vrcforge_cli.py doctor
+python tools\vrcforge_cli.py validation run --project E:\unity\milltina
+python tools\vrcforge_cli.py build-test readiness --project E:\unity\milltina
+python tools\vrcforge_cli.py plan outfit E:\Booth\outfit.unitypackage --project E:\unity\milltina --out %TEMP%\vrcforge-plan.json
+
+# Packaged build
+backend\vrcforge_backend.exe --cli doctor
+backend\vrcforge_backend.exe --cli --json doctor
+backend\vrcforge_backend.exe --cli checkpoint list --project E:\unity\milltina
+```
+
+Safe write flow:
+
+```powershell
+python tools\vrcforge_cli.py apply --request plan.json
+python tools\vrcforge_cli.py rollback --request ckpt_20260621_114108_780917_eeb9ca
+```
+
+By default, `apply` and `rollback` only create a VRCForge approval request.
+Actual Unity writes still run through VRCForge Desktop approval, pre-write
+checkpoint, apply, validation, and rollback. Passing `--execute` requires an
+additional terminal confirmation and still approves the same queued VRCForge
+request; it does not bypass the safety path.
+
+CLI plan files are local developer artifacts, not Unity assets. By default the
+CLI refuses to write `--out` inside the selected Unity project; use a temp
+folder or an external notes folder for plan JSON.
+
 ## Features / 功能状态
 
 | Feature | 功能 | Status |
@@ -108,6 +145,8 @@ The desktop app also includes uninstall actions:
 | Package/plugin install diagnostics | Read-only VPM/ALCOM/vrc-get status, install-output classification, and Unity compile-error context for repair planning | Beta, fixes remain supervised plans |
 | Delegated sub-agent workers | Parallel read-only / plan-only workers with avatar-name display labels, lifecycle logs, cancel/retry/inspect, and parent-thread summary merge | Beta |
 | Tool Registry v1 | Standardized metadata for Desktop, MCP, and future CLI surfaces, including risk, approval/checkpoint requirements, schemas, and fallbacks | Beta |
+| CLI read-only + request-based apply | `doctor`, provider test, Unity status, project/avatar scan, validation, Build/Test readiness, checkpoint, skill, outfit plan, request apply, and request rollback commands | Beta, local CLI tests pass |
+| Build/Test readiness gate | Read-only Unity compile, SDK/avatar, validation severity, and optional VRChat SDK validation status for deciding whether an avatar is ready to test | Beta, fixes remain supervised plans |
 | Three-tier permission model (approval / auto / Roslyn full-auto) | 三档权限（审批 / 自动 / Roslyn 全自动） | Available / 可用 |
 | Chat persistence and history replay across restarts | 会话持久化与重启后历史回放 | Available / 可用 |
 | `/compact` history compaction (LLM summary with local fallback) | `/compact` 历史压缩（模型摘要，失败回退本地摘要） | Available / 可用 |
@@ -126,7 +165,7 @@ The desktop app also includes uninstall actions:
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | Available / 可用 |
 | Modular Avatar component writer | MergeArmature / BoneProxy / MenuInstaller / MergeAnimator / Parameters | Beta, Unity live previews pass |
 | Avatar performance scan | Avatar 性能扫描 | Available / 可用 |
-| Validation Report MVP (`vrcforge.validation.v1`) | Read-only compile/avatar/parameter/menu/FX/bindings/material/wardrobe/performance report; fixes remain separate approved plans | Beta, local and Unity live smoke pass |
+| Validation Report v1 (`vrcforge.validation.v1`) | Read-only compile/avatar/parameter/menu/FX/bindings/material/wardrobe/performance report with severity gate; fixes remain separate approved plans | Beta, local and Unity live smoke pass |
 | Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |

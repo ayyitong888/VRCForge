@@ -11757,18 +11757,35 @@ def to_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if "--cli" in raw_args:
+        cli_index = raw_args.index("--cli")
+        return argparse.Namespace(
+            host="127.0.0.1",
+            port=8757,
+            agent_mcp_stdio=False,
+            preflight=False,
+            json=False,
+            cli=True,
+            cli_args=raw_args[cli_index + 1 :],
+        )
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", default=8757, type=int, help="Dashboard bind port.")
     parser.add_argument("--agent-mcp-stdio", action="store_true", help="Run the external-agent stdio MCP bridge instead of the HTTP backend.")
     parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag for preflight JSON output.")
-    return parser.parse_args()
+    parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
+    return parser.parse_args(raw_args)
 
 
 def main() -> int:
     args = parse_args()
+    if args.cli:
+        from tools.vrcforge_cli import main as cli_main
+
+        return cli_main(args.cli_args)
     if args.agent_mcp_stdio:
         from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, run_stdio_server
 

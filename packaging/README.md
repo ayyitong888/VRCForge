@@ -72,16 +72,20 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.7.0-beta/VRCForge_Windows_x64_0.7.0-beta.zip
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.7.1-beta/VRCForge_Windows_x64_0.7.1-beta.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1
 ```
 
-Publishing uploads the two installer executables to the GitHub Release matching `VERSION`.
-The web installer also requires the payload zip on the same release:
+Publishing uploads the Unity package, Windows payload zip, offline installer,
+and web installer to the GitHub Release matching `VERSION`. The web installer
+also requires the payload zip on the same release:
 
 ```text
+VRCForge.unitypackage
 VRCForge_Windows_x64_<VERSION>.zip
+VRCForge_Offline_Installer_x64.exe
+VRCForge_Web_Installer_x64.exe
 ```
 
 Do not upload artifacts built from a newer commit into an older existing tag.
