@@ -1727,7 +1727,7 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      setConnectorStatus(await fetchExternalAgentConnectors(targetEndpoint));
+      setConnectorStatus(await fetchExternalAgentConnectors(targetEndpoint, activeProjectPath || undefined));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -4110,12 +4110,14 @@ function ConnectorClientRow({
   onCopy: (text: string, label: string) => void;
 }) {
   const installed = Boolean(state?.installed);
-  const installable = state?.installable !== false && !(client === "claudeCode" && !selectedProjectPath);
+  const needsProject = client === "claudeCode" && !selectedProjectPath;
+  const installable = state?.installable !== false && !needsProject;
+  const installActionDisabled = loading || !state;
   const actionMatches = normalizeConnectorClient(lastAction?.client) === client;
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
   const statusTone = installed ? "ok" : installable ? "muted" : "warn";
-  const statusLabel = installed ? "Installed" : installable ? "Not installed" : "Needs project";
+  const statusLabel = installed ? "Installed" : needsProject ? "Needs project" : installable ? "Not installed" : "Needs attention";
   return (
     <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
@@ -4137,15 +4139,31 @@ function ConnectorClientRow({
               CLI {state.cliDetected ? "found" : "not found"}
             </Badge>
           ) : null}
+          {state?.appDetected !== null && state?.appDetected !== undefined ? (
+            <Badge tone={state.appDetected ? "ok" : "muted"} className="shrink-0">
+              App {state.appDetected ? "found" : "not found"}
+            </Badge>
+          ) : null}
         </div>
         <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
           <div className="min-w-0 truncate">
             <span className="mr-2 text-foreground/70">Config</span>
             <span className="font-mono">{state?.configPath || "-"}</span>
           </div>
+          {state?.cliPath ? (
+            <div className="min-w-0 truncate">
+              <span className="mr-2 text-foreground/70">CLI</span>
+              <span className="font-mono">{state.cliPath}</span>
+              {state.cliSource ? <span className="ml-2">({state.cliSource})</span> : null}
+            </div>
+          ) : null}
+          {state?.cliError ? <div className="break-words text-amber-700 dark:text-amber-300">{state.cliError}</div> : null}
+          {state?.appError ? <div className="break-words text-amber-700 dark:text-amber-300">{state.appError}</div> : null}
           {state?.lastError ? <div className="text-amber-700 dark:text-amber-300">{state.lastError}</div> : null}
-          {!installable && client === "claudeCode" ? (
-            <div className="text-amber-700 dark:text-amber-300">Select a project before installing project-level config.</div>
+          {needsProject ? (
+            <div className="text-amber-700 dark:text-amber-300">Install will check the selected project and return a fix if none is available.</div>
+          ) : !installable ? (
+            <div className="text-amber-700 dark:text-amber-300">Install can still run diagnostics and return a repair hint.</div>
           ) : null}
           {action ? (
             <div
@@ -4173,7 +4191,7 @@ function ConnectorClientRow({
           <Copy className="h-3.5 w-3.5" />
           Copy
         </Button>
-        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !installable} onClick={() => onInstall(client)}>
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={installActionDisabled} onClick={() => onInstall(client)}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
           Install
         </Button>

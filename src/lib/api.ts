@@ -485,6 +485,12 @@ export type ExternalAgentConnectorStatus = {
       lastError?: string;
       sharedConfigGroup?: string;
       cliDetected?: boolean | null;
+      cliPath?: string;
+      cliSource?: string;
+      cliError?: string;
+      appDetected?: boolean | null;
+      appMatches?: string[];
+      appError?: string;
       bridge?: unknown;
       restartInstruction?: string;
     }
@@ -636,8 +642,9 @@ export async function testProviderCapability(
   });
 }
 
-export async function fetchExternalAgentConnectors(endpoint: string): Promise<ExternalAgentConnectorStatus> {
-  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors`);
+export async function fetchExternalAgentConnectors(endpoint: string, projectPath?: string): Promise<ExternalAgentConnectorStatus> {
+  const query = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : "";
+  return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors${query}`);
 }
 
 export async function updateExternalAgentGateway(

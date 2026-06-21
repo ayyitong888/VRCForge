@@ -1817,8 +1817,8 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
 
 
 @app.get("/api/app/external-agent/connectors")
-def app_external_agent_connectors() -> dict[str, Any]:
-    return external_agent_status_sync()
+def app_external_agent_connectors(projectPath: str | None = None, project_path: str | None = None) -> dict[str, Any]:
+    return external_agent_status_sync(projectPath or project_path)
 
 
 @app.post("/api/app/external-agent/connectors")

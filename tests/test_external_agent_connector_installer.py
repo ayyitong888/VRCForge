@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from external_agent_connector_installer import (
     ConnectorInstallError,
     StdioBridgeSpec,
+    _probe_appx_package,
     connector_client_statuses,
     install_connector,
     run_stdio_mcp_handshake,
@@ -206,3 +208,89 @@ def test_connector_statuses_are_split_by_app_and_cli(monkeypatch: pytest.MonkeyP
     assert statuses["codexCli"]["label"] == "Codex CLI"
     assert statuses["claudeCode"]["scope"] == "project"
     assert statuses["claudeCowork"]["scope"] == "user"
+
+
+def test_connector_status_does_not_treat_broken_path_shim_as_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    shim = tmp_path / "WindowsApps" / "codex.exe"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    def fake_which(command: str) -> str | None:
+        if command == "codex":
+            return str(shim)
+        if command == "claude":
+            return None
+        return None
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("Access is denied")
+
+    monkeypatch.setattr("external_agent_connector_installer.shutil.which", fake_which)
+    monkeypatch.setattr("external_agent_connector_installer.subprocess.run", fake_run)
+
+    statuses = connector_client_statuses(root_dir=root, project_path=str(tmp_path))
+
+    assert statuses["codexCli"]["cliDetected"] is False
+    assert "Access is denied" in statuses["codexCli"]["cliError"]
+    assert statuses["claudeCode"]["cliDetected"] is False
+    assert "claude was not found" in statuses["claudeCode"]["cliError"]
+
+
+def test_connector_status_prefers_configured_codex_cli_over_broken_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    configured_cli = tmp_path / "OpenAI" / "Codex" / "bin" / "real" / "codex.exe"
+    configured_cli.parent.mkdir(parents=True)
+    configured_cli.write_text("", encoding="utf-8")
+    (codex_home / "config.toml").write_text(f"CODEX_CLI_PATH = '{configured_cli}'\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    def fake_which(command: str) -> str | None:
+        if command == "codex":
+            return str(tmp_path / "WindowsApps" / "codex.exe")
+        return None
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == str(configured_cli):
+            return subprocess.CompletedProcess(command, 0, stdout="codex-cli test", stderr="")
+        return subprocess.CompletedProcess(command, 5, stdout="", stderr="Access is denied")
+
+    monkeypatch.setattr("external_agent_connector_installer.shutil.which", fake_which)
+    monkeypatch.setattr("external_agent_connector_installer.subprocess.run", fake_run)
+
+    statuses = connector_client_statuses(root_dir=root, project_path=str(tmp_path))
+
+    assert statuses["codexCli"]["cliDetected"] is True
+    assert statuses["codexCli"]["cliPath"] == str(configured_cli)
+    assert statuses["codexCli"]["cliSource"].startswith("config:")
+
+
+def test_appx_package_probe_reports_installed_desktop_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_which(command: str) -> str | None:
+        if command == "powershell":
+            return "powershell.exe"
+        return None
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert "Get-AppxPackage" in command[-1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="C:\\Program Files\\WindowsApps\\Claude_1.0.0.0_x64__example\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("external_agent_connector_installer.shutil.which", fake_which)
+    monkeypatch.setattr("external_agent_connector_installer.subprocess.run", fake_run)
+
+    probe = _probe_appx_package("Claude")
+
+    assert probe["ok"] is True
+    assert probe["matches"] == ["C:\\Program Files\\WindowsApps\\Claude_1.0.0.0_x64__example"]

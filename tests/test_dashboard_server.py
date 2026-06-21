@@ -1000,6 +1000,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(stdio["args"], ["--agent-mcp-stdio"])
         self.assertEqual(Path(stdio["cwd"]), root)
 
+    def test_external_agent_connector_status_uses_project_query_for_claude_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "Unity Project"
+            project.mkdir()
+            (project / ".mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "vrcforge": {
+                                "command": "vrcforge_backend.exe",
+                                "args": ["--agent-mcp-stdio"],
+                                "env": {},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with TestClient(dashboard_server.app) as client:
+                without_project = client.get("/api/app/external-agent/connectors")
+                with_project = client.get(
+                    "/api/app/external-agent/connectors",
+                    params={"projectPath": str(project)},
+                )
+
+        self.assertEqual(without_project.status_code, 200)
+        self.assertEqual(with_project.status_code, 200)
+        self.assertFalse(without_project.json()["clients"]["claudeCode"]["installed"])
+        self.assertTrue(with_project.json()["clients"]["claudeCode"]["installed"])
+        self.assertTrue(with_project.json()["clients"]["claudeCode"]["installable"])
+        self.assertEqual(Path(with_project.json()["clients"]["claudeCode"]["configPath"]), project / ".mcp.json")
+
     def test_external_agent_gateway_settings_update_and_revoke_token(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         original_token = config.token

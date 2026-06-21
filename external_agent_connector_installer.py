@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -642,6 +643,8 @@ CLIENT_LABELS = {
 
 def _codex_status(client: Literal["codexApp", "codexCli"], bridge: dict[str, Any]) -> dict[str, Any]:
     path = codex_config_path()
+    app_probe = _probe_windows_app("OpenAI.Codex") if client == "codexApp" else {}
+    cli_probe = _probe_codex_cli() if client == "codexCli" else {}
     return {
         "label": CLIENT_LABELS[client],
         "scope": "user",
@@ -649,13 +652,20 @@ def _codex_status(client: Literal["codexApp", "codexCli"], bridge: dict[str, Any
         "installed": _codex_server_installed(path),
         "installable": True,
         "sharedConfigGroup": "codex",
-        "cliDetected": bool(shutil.which("codex")) if client == "codexCli" else None,
+        "cliDetected": bool(cli_probe.get("ok")) if client == "codexCli" else None,
+        "cliPath": cli_probe.get("path", "") if cli_probe else "",
+        "cliSource": cli_probe.get("source", "") if cli_probe else "",
+        "cliError": _probe_error(cli_probe) if cli_probe and not cli_probe.get("ok") else "",
+        "appDetected": bool(app_probe.get("ok")) if app_probe else None,
+        "appMatches": app_probe.get("matches", []) if app_probe else [],
+        "appError": _probe_error(app_probe) if app_probe and not app_probe.get("ok") else "",
         "bridge": bridge,
         "restartInstruction": restart_instruction(client),
     }
 
 
 def _claude_code_status(project_path: str | None, bridge: dict[str, Any]) -> dict[str, Any]:
+    cli_probe = _probe_command(["claude", "--version"], source="PATH")
     installable = bool(project_path and str(project_path).strip())
     path = ""
     installed = False
@@ -674,13 +684,17 @@ def _claude_code_status(project_path: str | None, bridge: dict[str, Any]) -> dic
         "installed": installed,
         "installable": installable,
         "lastError": last_error,
-        "cliDetected": bool(shutil.which("claude")),
+        "cliDetected": bool(cli_probe.get("ok")),
+        "cliPath": cli_probe.get("path", ""),
+        "cliSource": cli_probe.get("source", ""),
+        "cliError": _probe_error(cli_probe) if not cli_probe.get("ok") else "",
         "bridge": bridge,
         "restartInstruction": restart_instruction("claudeCode"),
     }
 
 
 def _claude_cowork_status(bridge: dict[str, Any]) -> dict[str, Any]:
+    app_probe = _probe_windows_app("Claude")
     path = ""
     installed = False
     last_error = ""
@@ -698,9 +712,172 @@ def _claude_cowork_status(bridge: dict[str, Any]) -> dict[str, Any]:
         "installable": bool(path),
         "lastError": last_error,
         "cliDetected": False,
+        "appDetected": bool(app_probe.get("ok")),
+        "appMatches": app_probe.get("matches", []),
+        "appError": _probe_error(app_probe) if not app_probe.get("ok") else "",
         "bridge": bridge,
         "restartInstruction": restart_instruction("claudeCowork"),
     }
+
+
+def _probe_codex_cli() -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    env_cli = os.environ.get("CODEX_CLI_PATH", "").strip()
+    if env_cli:
+        _append_cli_probe_attempt(attempts, seen, env_cli, "env:CODEX_CLI_PATH")
+    config_cli = _read_codex_cli_path_from_config(codex_config_path())
+    if config_cli:
+        _append_cli_probe_attempt(attempts, seen, config_cli, f"config:{codex_config_path()}")
+    path_cli = shutil.which("codex")
+    if path_cli:
+        _append_cli_probe_attempt(attempts, seen, path_cli, "PATH")
+    elif not attempts:
+        attempts.append(_probe_command(["codex", "--version"], source="PATH"))
+    ok_attempt = next((attempt for attempt in attempts if attempt.get("ok")), None)
+    best = ok_attempt or next((attempt for attempt in attempts if attempt.get("found")), attempts[-1] if attempts else {})
+    result = dict(best)
+    result["attempts"] = attempts
+    return result
+
+
+def _append_cli_probe_attempt(attempts: list[dict[str, Any]], seen: set[str], cli_path: str, source: str) -> None:
+    normalized = str(Path(cli_path).expanduser())
+    key = normalized.lower() if os.name == "nt" else normalized
+    if key in seen:
+        return
+    seen.add(key)
+    attempts.append(_probe_command([normalized, "--version"], source=source))
+
+
+def _read_codex_cli_path_from_config(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        match = re.match(r"\s*CODEX_CLI_PATH\s*=\s*(['\"])(.*?)\1\s*(?:#.*)?$", line)
+        if match:
+            return match.group(2).strip()
+    return ""
+
+
+def _probe_command(command: list[str], *, source: str, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    exe = _resolve_command_exe(command[0])
+    payload: dict[str, Any] = {
+        "found": bool(exe),
+        "path": exe or "",
+        "source": source,
+        "ok": False,
+        "stdout": "",
+        "stderr": "",
+        "error": "",
+    }
+    if not exe:
+        payload["error"] = f"{command[0]} was not found."
+        return payload
+    try:
+        completed = subprocess.run(
+            [exe, *command[1:]],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except Exception as exc:  # noqa: BLE001 - user-facing status detail.
+        payload["error"] = str(exc)
+        return payload
+    payload.update(
+        {
+            "ok": completed.returncode == 0,
+            "exitCode": completed.returncode,
+            "stdout": (completed.stdout or "").strip()[:500],
+            "stderr": (completed.stderr or "").strip()[:500],
+        }
+    )
+    return payload
+
+
+def _resolve_command_exe(command_name: str) -> str:
+    command_path = Path(command_name).expanduser()
+    if command_path.is_file():
+        return str(command_path)
+    return shutil.which(command_name) or ""
+
+
+def _probe_windows_app(name_fragment: str) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"found": False, "ok": False, "reason": "not-windows", "matches": []}
+    appx_probe = _probe_appx_package(name_fragment)
+    roots = [
+        Path(os.environ.get("ProgramFiles", "")) / "WindowsApps",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WindowsApps",
+    ]
+    matches: list[str] = []
+    path_matches: list[str] = []
+    for path_item in os.environ.get("PATH", "").split(os.pathsep):
+        if name_fragment.lower() in path_item.lower():
+            path_matches.append(path_item)
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for item in root.iterdir():
+                if name_fragment.lower() in item.name.lower():
+                    matches.append(str(item))
+        except OSError:
+            continue
+    all_matches = []
+    seen: set[str] = set()
+    for candidate in [*matches, *path_matches, *appx_probe.get("matches", [])]:
+        key = candidate.lower() if os.name == "nt" else candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        all_matches.append(candidate)
+    error = ""
+    if not all_matches:
+        error = _probe_error(appx_probe) or f"No installed app matching {name_fragment} was found."
+    return {"found": bool(all_matches), "ok": bool(all_matches), "matches": all_matches[:10], "error": error}
+
+
+def _probe_appx_package(name_fragment: str) -> dict[str, Any]:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return {"found": False, "ok": False, "matches": [], "error": "PowerShell was not found."}
+    escaped = name_fragment.replace("'", "''")
+    command = (
+        "$ErrorActionPreference='SilentlyContinue'; "
+        f"Get-AppxPackage -Name '*{escaped}*' | "
+        "ForEach-Object { $_.InstallLocation } | "
+        "Where-Object { $_ } | "
+        "Select-Object -First 10"
+    )
+    try:
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except Exception as exc:  # noqa: BLE001 - user-facing diagnostic detail.
+        return {"found": False, "ok": False, "matches": [], "error": str(exc)}
+    matches = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    error = "" if completed.returncode == 0 else (completed.stderr or completed.stdout or "").strip()
+    return {"found": bool(matches), "ok": bool(matches), "matches": matches[:10], "error": error}
+
+
+def _probe_error(probe: dict[str, Any]) -> str:
+    return str(probe.get("error") or probe.get("stderr") or probe.get("stdout") or "").strip()
 
 
 def _json_server_installed(path: Path, server_name: str) -> bool:
