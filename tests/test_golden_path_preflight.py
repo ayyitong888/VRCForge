@@ -91,6 +91,28 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
     assert "vrcforge_import_outfit_package" in write_targets
 
 
+def test_outfit_import_handler_resolves_unity_project_root(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "UnityProject"
+    make_project(project)
+    package = tmp_path / "Dress.unitypackage"
+    make_unitypackage(package)
+    seen: dict[str, str] = {}
+
+    def fake_import(params: dict[str, object]) -> dict[str, object]:
+        seen["projectPath"] = str(params.get("projectPath") or "")
+        seen["unityPackagePath"] = str(params.get("unityPackagePath") or "")
+        return {"ok": True, "importedAssetCount": 1}
+
+    monkeypatch.setattr(dashboard_server, "import_unitypackage_sync", fake_import)
+
+    payload = dashboard_server.import_outfit_package_sync({"packagePath": str(package), "projectPath": str(project)})
+
+    assert payload["ok"] is True
+    assert payload["kind"] == "unitypackage_import"
+    assert seen["projectPath"] == str(project.resolve())
+    assert seen["unityPackagePath"] == str(package.resolve())
+
+
 def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "UnityProject"
     make_project(project)

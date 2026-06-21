@@ -561,6 +561,17 @@ class ValidationReportRequest(BaseModel):
     project_path: str = Field(default="", alias="projectPath")
     include_quest: bool = Field(default=True, alias="includeQuest")
     include_sources: bool = Field(default=False, alias="includeSources")
+    include_readiness: bool = Field(default=True, alias="includeReadiness")
+    gate_build: bool = Field(default=True, alias="gateBuild")
+    max_errors: int = Field(default=50, alias="maxErrors")
+
+    model_config = {"populate_by_name": True}
+
+
+class BuildTestReadinessRequest(BaseModel):
+    avatar_path: str = Field(default="", alias="avatarPath")
+    project_path: str = Field(default="", alias="projectPath")
+    include_quest: bool = Field(default=True, alias="includeQuest")
     max_errors: int = Field(default=50, alias="maxErrors")
 
     model_config = {"populate_by_name": True}
@@ -1884,6 +1895,11 @@ def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, An
 @app.post("/api/app/validation/report")
 def app_validation_report(request: ValidationReportRequest) -> dict[str, Any]:
     return build_validation_report_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/build-test/readiness")
+def app_build_test_readiness(request: BuildTestReadinessRequest) -> dict[str, Any]:
+    return build_test_readiness_sync(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/project-index/scan")
@@ -9818,6 +9834,40 @@ def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 VALIDATION_SEVERITIES = ("Error", "Warning", "Suggestion", "Info", "Ignored")
+VALIDATION_BLOCKING_SEVERITIES = ("Error",)
+VALIDATION_SECTION_ORDER = (
+    "Unity compile",
+    "VRChat SDK",
+    "Selected avatar",
+    "Hierarchy paths",
+    "Animation bindings",
+    "Expression parameters",
+    "Expression menu",
+    "FX animator",
+    "Materials / shaders",
+    "PhysBones",
+    "Contacts",
+    "Particles",
+    "Performance PC",
+    "Performance Quest",
+    "Modular Avatar conflicts",
+    "VRCFury conflicts",
+    "VRCForge Unity plugin",
+    "MCP bridge",
+    "Package manager",
+    "Generated asset residue",
+)
+VALIDATION_SECTION_IDS = {
+    name: re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    for name in VALIDATION_SECTION_ORDER
+}
+VRCHAT_SDK_PACKAGE_IDS = ["com.vrchat.avatars", "com.vrchat.base"]
+GENERATED_ASSET_RESIDUE_DIRS = (
+    Path("Assets") / "VRCForge" / "Generated",
+    Path("Assets") / "VRCForge" / "Imported",
+    Path("Assets") / "VRCForge" / "RollbackSmoke",
+    Path("Assets") / "VRCForge" / "Temp",
+)
 
 
 def _validation_now() -> str:
@@ -9853,31 +9903,59 @@ def _validation_add_finding(
     findings.append(finding)
 
 
-def _validation_section_summaries(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    order = [
-        "Unity compile",
-        "Selected avatar",
-        "Expression parameters",
-        "Expression menu",
-        "FX animator",
-        "Animation bindings",
-        "Materials / shaders",
-        "Wardrobe",
-        "Performance",
-        "Quest",
-    ]
+def _validation_section_status(counts: dict[str, int]) -> str:
+    if counts.get("Error"):
+        return "error"
+    if counts.get("Warning"):
+        return "warning"
+    if counts.get("Suggestion"):
+        return "suggestion"
+    if counts.get("Info"):
+        return "info"
+    if counts.get("Ignored"):
+        return "ignored"
+    return "not_run"
+
+
+def _validation_section_summaries(findings: list[dict[str, Any]], include_all: bool = True) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for finding in findings:
         grouped.setdefault(str(finding.get("section") or "Validation"), []).append(finding)
-    names = [name for name in order if name in grouped] + sorted(name for name in grouped if name not in order)
+    names = [
+        name
+        for name in VALIDATION_SECTION_ORDER
+        if include_all or name in grouped
+    ] + sorted(name for name in grouped if name not in VALIDATION_SECTION_ORDER)
     return [
         {
             "name": name,
-            "counts": _validation_severity_counts(grouped[name]),
-            "findingIds": [str(item.get("id") or "") for item in grouped[name]],
+            "id": VALIDATION_SECTION_IDS.get(name) or re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_"),
+            "status": _validation_section_status(_validation_severity_counts(grouped.get(name, []))),
+            "counts": _validation_severity_counts(grouped.get(name, [])),
+            "findingIds": [str(item.get("id") or "") for item in grouped.get(name, [])],
         }
         for name in names
     ]
+
+
+def _validation_gate(findings: list[dict[str, Any]], enabled: bool) -> dict[str, Any]:
+    blocking = [
+        finding
+        for finding in findings
+        if str(finding.get("severity") or "") in VALIDATION_BLOCKING_SEVERITIES
+    ]
+    status = "blocked" if enabled and blocking else "pass"
+    return {
+        "enabled": bool(enabled),
+        "status": status,
+        "blockingSeverities": list(VALIDATION_BLOCKING_SEVERITIES),
+        "blockingFindingIds": [str(finding.get("id") or "") for finding in blocking],
+        "message": (
+            f"{len(blocking)} blocking validation error(s) must be resolved before Build & Test."
+            if status == "blocked"
+            else "No blocking validation errors."
+        ),
+    }
 
 
 def _validation_find_numbers(value: Any, names: set[str]) -> list[float]:
@@ -9960,13 +10038,19 @@ def _run_validation_source(name: str, runner: Callable[[], dict[str, Any]]) -> d
         return {"ok": False, "error": str(exc), "source": name}
 
 
-def _validation_add_source_failure(findings: list[dict[str, Any]], section: str, source: str, result: dict[str, Any]) -> None:
+def _validation_add_source_failure(
+    findings: list[dict[str, Any]],
+    section: str,
+    source: str,
+    result: dict[str, Any],
+    severity: str = "Warning",
+) -> None:
     if result.get("ok"):
         return
     _validation_add_finding(
         findings,
         section,
-        "Error",
+        severity,
         f"{section} scan failed",
         str(result.get("error") or "Scanner returned ok=false."),
         source,
@@ -9975,7 +10059,7 @@ def _validation_add_source_failure(findings: list[dict[str, Any]], section: str,
 
 
 def _compile_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
-    _validation_add_source_failure(findings, "Unity compile", "compile", result)
+    _validation_add_source_failure(findings, "Unity compile", "compile", result, severity="Error")
     if not result.get("ok"):
         return
     payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
@@ -10115,12 +10199,236 @@ def _performance_validation(findings: list[dict[str, Any]], result: dict[str, An
         _validation_add_finding(findings, section, "Info", f"{section} performance headline", f"Performance scan completed{f' with rank {rank}' if rank else ''}.", source, _validation_source_summary(payload))
 
 
+def _validation_resolve_project_path(project_value: str) -> Path | None:
+    if not project_value:
+        return None
+    try:
+        project_path = Path(project_value)
+    except (OSError, ValueError):
+        return None
+    return project_path if project_path.is_dir() else None
+
+
+def validation_dependency_status_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_value = str(params.get("projectPath") or params.get("project_path") or DASHBOARD_STATE.selected_project_path or "").strip()
+    project_path = _validation_resolve_project_path(project_value)
+    return {
+        "ok": True,
+        "projectConfigured": bool(project_value),
+        "projectReadable": project_path is not None,
+        "packages": {
+            "vrchat_sdk": detect_addon_package(project_path, VRCHAT_SDK_PACKAGE_IDS),
+            "modular_avatar": detect_addon_package(project_path, list(ADDON_FRAMEWORKS["modular_avatar"]["packageIds"])),
+            "vrcfury": detect_addon_package(project_path, list(ADDON_FRAMEWORKS["vrcfury"]["packageIds"])),
+        },
+    }
+
+
+def validation_environment_status_sync(_params: dict[str, Any]) -> dict[str, Any]:
+    health = build_agentic_app_health()
+    components = health.get("components") if isinstance(health.get("components"), dict) else {}
+    selected = {
+        key: components.get(key)
+        for key in (
+            "unityPluginInstalled",
+            "mcpPackageConfigured",
+            "unityMcpBridgeReachable",
+            "unityMcpInstance",
+            "vrcForgeUnityTools",
+        )
+    }
+    return {
+        "ok": bool(health.get("ok", True)),
+        "version": health.get("version") or app.version,
+        "components": selected,
+        "unityStatus": health.get("unityStatus"),
+    }
+
+
+def scan_generated_asset_residue_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_value = str(params.get("projectPath") or params.get("project_path") or DASHBOARD_STATE.selected_project_path or "").strip()
+    project_path = _validation_resolve_project_path(project_value)
+    roots: list[dict[str, Any]] = []
+    total_files = 0
+    total_dirs = 0
+    if project_path is None:
+        return {
+            "ok": True,
+            "projectConfigured": bool(project_value),
+            "projectReadable": False,
+            "residueCount": 0,
+            "roots": roots,
+            "warning": "Project path is not configured or is not readable; generated asset residue scan skipped.",
+        }
+    for relative_root in GENERATED_ASSET_RESIDUE_DIRS:
+        root = project_path / relative_root
+        if not root.exists():
+            continue
+        file_count = 0
+        dir_count = 0
+        samples: list[str] = []
+        try:
+            for child in root.rglob("*"):
+                if child.is_dir():
+                    dir_count += 1
+                    continue
+                if not child.is_file():
+                    continue
+                file_count += 1
+                if len(samples) < 10:
+                    try:
+                        samples.append(child.relative_to(project_path).as_posix())
+                    except ValueError:
+                        samples.append(child.name)
+        except OSError as exc:
+            roots.append({"root": relative_root.as_posix(), "readable": False, "error": str(exc)})
+            continue
+        total_files += file_count
+        total_dirs += dir_count
+        roots.append(
+            {
+                "root": relative_root.as_posix(),
+                "readable": True,
+                "fileCount": file_count,
+                "dirCount": dir_count,
+                "samplePaths": samples,
+            }
+        )
+    return {
+        "ok": True,
+        "projectConfigured": True,
+        "projectReadable": True,
+        "residueCount": total_files + total_dirs,
+        "fileCount": total_files,
+        "dirCount": total_dirs,
+        "roots": roots,
+    }
+
+
+def _dependency_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "VRChat SDK", "dependencies", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    packages = payload.get("packages") if isinstance(payload.get("packages"), dict) else {}
+    vrchat_sdk = packages.get("vrchat_sdk") if isinstance(packages.get("vrchat_sdk"), dict) else {}
+    modular_avatar = packages.get("modular_avatar") if isinstance(packages.get("modular_avatar"), dict) else {}
+    vrcfury = packages.get("vrcfury") if isinstance(packages.get("vrcfury"), dict) else {}
+    if not payload.get("projectConfigured"):
+        _validation_add_finding(findings, "VRChat SDK", "Warning", "No Unity project selected", "VRChat SDK package detection needs a selected Unity project.", "dependencies")
+    elif not payload.get("projectReadable"):
+        _validation_add_finding(findings, "VRChat SDK", "Warning", "Unity project path is not readable", "VRChat SDK package detection could not read the configured Unity project.", "dependencies")
+    elif vrchat_sdk.get("installed"):
+        _validation_add_finding(findings, "VRChat SDK", "Info", "VRChat SDK detected", "VRChat SDK package metadata is present.", "dependencies", vrchat_sdk)
+    else:
+        _validation_add_finding(findings, "VRChat SDK", "Error", "VRChat SDK not detected", "Avatar validation and Build & Test require the VRChat Avatar SDK package.", "dependencies")
+
+    for section, label, package_info, source in (
+        ("Modular Avatar conflicts", "Modular Avatar", modular_avatar, "modular_avatar"),
+        ("VRCFury conflicts", "VRCFury", vrcfury, "vrcfury"),
+    ):
+        if package_info.get("installed"):
+            _validation_add_finding(findings, section, "Info", f"{label} package detected", f"{label} metadata is present; conflict scanners can use this context.", source, package_info)
+        else:
+            _validation_add_finding(findings, section, "Info", f"{label} package not detected", f"{label} is optional unless this avatar uses it.", source)
+
+
+def _environment_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "VRCForge Unity plugin", "environment", result, severity="Error")
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+
+    def component_status(key: str) -> tuple[str, dict[str, Any]]:
+        component = components.get(key) if isinstance(components.get(key), dict) else {}
+        return str(component.get("status") or "unknown").lower(), component
+
+    plugin_status, plugin = component_status("unityPluginInstalled")
+    if plugin_status == "ok":
+        _validation_add_finding(findings, "VRCForge Unity plugin", "Info", "VRCForge Unity plugin installed", "The Unity-side VRCForge tool surface is present.", "environment", plugin)
+    elif plugin_status in {"warning", "unknown"}:
+        _validation_add_finding(findings, "VRCForge Unity plugin", "Warning", "VRCForge Unity plugin needs attention", "Install or repair the VRCForge Unity plugin before live scans or Build & Test.", "environment", plugin)
+    else:
+        _validation_add_finding(findings, "VRCForge Unity plugin", "Error", "VRCForge Unity plugin unavailable", "VRCForge cannot rely on live Unity tools until the plugin is repaired.", "environment", plugin)
+
+    for key, title in (("mcpPackageConfigured", "Unity MCP package"), ("unityMcpBridgeReachable", "Unity MCP bridge"), ("unityMcpInstance", "Unity MCP instance"), ("vrcForgeUnityTools", "VRCForge Unity tools")):
+        status, component = component_status(key)
+        if status == "ok":
+            _validation_add_finding(findings, "MCP bridge", "Info", f"{title} available", f"{title} is available for read-only scans and supervised requests.", "environment", component)
+        elif status in {"warning", "unknown"}:
+            _validation_add_finding(findings, "MCP bridge", "Warning", f"{title} needs attention", f"{title} is not confirmed; Unity-facing validation may be incomplete.", "environment", component)
+        else:
+            _validation_add_finding(findings, "MCP bridge", "Error", f"{title} unavailable", f"{title} is required for live Unity validation.", "environment", component)
+
+
+def _package_manager_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Package manager", "package_manager", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    managers = payload.get("managers") if isinstance(payload.get("managers"), list) else []
+    if payload.get("preferredCli"):
+        _validation_add_finding(findings, "Package manager", "Info", "VPM CLI available", "A supported VPM CLI is available for supervised package repair plans.", "package_manager", payload.get("preferredCli"))
+    elif managers:
+        _validation_add_finding(findings, "Package manager", "Warning", "Package manager detected but not CLI-ready", "A package manager was detected, but VRCForge could not find a preferred CLI for automated repair plans.", "package_manager", {"managerCount": len(managers)})
+    else:
+        _validation_add_finding(findings, "Package manager", "Warning", "No VPM CLI detected", "Install vrc-get or use VCC/ALCOM UI for package install and repair workflows.", "package_manager")
+
+
+def _hierarchy_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Hierarchy paths", "avatar_items", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    item_count = _validation_max_number(payload, "itemCount", "count")
+    _validation_add_finding(
+        findings,
+        "Hierarchy paths",
+        "Info",
+        "Avatar hierarchy scan completed",
+        f"Hierarchy scan completed{f' with {int(item_count)} item(s)' if item_count else ''}.",
+        "avatar_items",
+        _validation_source_summary(payload),
+    )
+
+
+def _generated_residue_validation(findings: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    _validation_add_source_failure(findings, "Generated asset residue", "generated_residue", result)
+    if not result.get("ok"):
+        return
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    residue_count = int(payload.get("residueCount") or 0)
+    if not payload.get("projectReadable"):
+        _validation_add_finding(findings, "Generated asset residue", "Info", "Generated asset residue scan skipped", "A readable Unity project is required to scan generated residue directories.", "generated_residue")
+    elif residue_count:
+        _validation_add_finding(findings, "Generated asset residue", "Suggestion", "Generated asset residue found", f"{residue_count} generated file or folder item(s) were found in VRCForge-owned generated locations.", "generated_residue", payload)
+    else:
+        _validation_add_finding(findings, "Generated asset residue", "Info", "No generated asset residue found", "No VRCForge generated residue was found in known generated locations.", "generated_residue")
+
+
+def _coverage_gap_validation(findings: list[dict[str, Any]]) -> None:
+    for section in ("PhysBones", "Contacts", "Particles"):
+        _validation_add_finding(
+            findings,
+            section,
+            "Info",
+            f"{section} scanner pending",
+            f"{section} is reserved in vrcforge.validation.v1; this build reports section coverage but does not run a dedicated scanner yet.",
+            "coverage",
+        )
+
+
 def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
     project_path = str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
     include_quest = bool(params.get("include_quest", params.get("includeQuest", True)))
     include_sources = bool(params.get("include_sources", params.get("includeSources", False)))
+    include_readiness = bool(params.get("include_readiness", params.get("includeReadiness", True)))
+    gate_build = bool(params.get("gate_build", params.get("gateBuild", True)))
     max_errors = int(params.get("max_errors") or params.get("maxErrors") or 50)
     base_params = {
         "avatarPath": avatar_path,
@@ -10139,6 +10447,16 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         "wardrobe": _run_validation_source("wardrobe", lambda: scan_wardrobe_sync(base_params)),
         "performance_pc": _run_validation_source("performance_pc", lambda: scan_avatar_performance_sync({**base_params, "isMobile": False})),
     }
+    if include_readiness:
+        sources.update(
+            {
+                "dependencies": _run_validation_source("dependencies", lambda: validation_dependency_status_sync(base_params)),
+                "environment": _run_validation_source("environment", lambda: validation_environment_status_sync(base_params)),
+                "package_manager": _run_validation_source("package_manager", lambda: package_manager_status_sync(base_params)),
+                "avatar_items": _run_validation_source("avatar_items", lambda: scan_avatar_items_sync(base_params)),
+                "generated_residue": _run_validation_source("generated_residue", lambda: scan_generated_asset_residue_sync(base_params)),
+            }
+        )
     if include_quest:
         sources["performance_quest"] = _run_validation_source(
             "performance_quest",
@@ -10151,17 +10469,25 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         _validation_add_finding(findings, "Selected avatar", "Info", "Avatar path selected", "Validation ran against the selected avatar path.", "selected_avatar", {"avatarPath": avatar_path})
     else:
         _validation_add_finding(findings, "Selected avatar", "Warning", "No avatar path selected", "Validation could not confirm a selected avatar path. Some scanners may fall back to the current Unity selection or all avatars.", "selected_avatar")
+    if include_readiness:
+        _dependency_validation(findings, sources["dependencies"])
+        _environment_validation(findings, sources["environment"])
+        _package_manager_validation(findings, sources["package_manager"])
+        _hierarchy_validation(findings, sources["avatar_items"])
+        _generated_residue_validation(findings, sources["generated_residue"])
+        _coverage_gap_validation(findings)
     _parameters_validation(findings, sources["parameters"])
     _menu_validation(findings, sources["menu"])
     _fx_validation(findings, sources["fx"])
     _binding_validation(findings, sources["animation_bindings"])
     _material_validation(findings, sources["materials"])
     _wardrobe_validation(findings, sources["wardrobe"])
-    _performance_validation(findings, sources["performance_pc"], "Performance", "performance_pc")
+    _performance_validation(findings, sources["performance_pc"], "Performance PC", "performance_pc")
     if include_quest:
-        _performance_validation(findings, sources["performance_quest"], "Quest", "performance_quest")
+        _performance_validation(findings, sources["performance_quest"], "Performance Quest", "performance_quest")
 
     counts = _validation_severity_counts(findings)
+    gate = _validation_gate(findings, enabled=gate_build)
     source_summaries = {
         name: (
             {"ok": bool(result.get("ok")), "error": result.get("error")}
@@ -10186,16 +10512,157 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         "summary": {
             "findingCount": len(findings),
             "severityCounts": counts,
+            "gateStatus": gate["status"],
             "sourceCount": len(sources),
             "failedSourceCount": sum(1 for result in sources.values() if not result.get("ok")),
         },
         "sections": _validation_section_summaries(findings),
         "findings": findings,
         "sources": source_summaries,
+        "gate": gate,
+        "severitySystem": {
+            "Error": "Blocks Build & Test when the validation gate is enabled.",
+            "Warning": "Likely issue that should be reviewed before Build & Test.",
+            "Suggestion": "Optional optimization or cleanup.",
+            "Info": "Context only.",
+            "Ignored": "User-dismissed item.",
+        },
         "rules": {
             "validationIsReadOnly": True,
             "validationNeverFixes": True,
             "fixesRequirePlanPreviewApprovalCheckpointApplyValidateRestore": True,
+        },
+    }
+
+
+def _readiness_section_status(validation: dict[str, Any], section_name: str) -> dict[str, Any]:
+    for section in validation.get("sections") or []:
+        if isinstance(section, dict) and section.get("name") == section_name:
+            return section
+    return {
+        "name": section_name,
+        "id": VALIDATION_SECTION_IDS.get(section_name) or re.sub(r"[^a-z0-9]+", "_", section_name.lower()).strip("_"),
+        "status": "not_run",
+        "counts": _validation_severity_counts([]),
+        "findingIds": [],
+    }
+
+
+def _build_test_fix_suggestions(validation: dict[str, Any], package_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    gate = validation.get("gate") if isinstance(validation.get("gate"), dict) else {}
+    if gate.get("status") == "blocked":
+        suggestions.append(
+            {
+                "id": "resolve_validation_errors_request",
+                "title": "Create supervised fix plan for blocking validation errors",
+                "category": "validation",
+                "automatic": False,
+                "requiresPreviewApprovalCheckpointValidationRollback": True,
+                "findingIds": gate.get("blockingFindingIds") or [],
+            }
+        )
+    for item in package_diagnostics.get("suggestedFixPlans") or []:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        normalized.setdefault("automatic", False)
+        normalized["requiresPreviewApprovalCheckpointValidationRollback"] = True
+        suggestions.append(normalized)
+    return suggestions
+
+
+def build_test_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    project_path = str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
+    include_quest = bool(params.get("include_quest", params.get("includeQuest", True)))
+    max_errors = int(params.get("max_errors") or params.get("maxErrors") or 50)
+    validation = build_validation_report_sync(
+        {
+            "avatarPath": avatar_path,
+            "projectPath": project_path,
+            "includeQuest": include_quest,
+            "includeSources": False,
+            "includeReadiness": True,
+            "gateBuild": True,
+            "maxErrors": max_errors,
+        }
+    )
+    try:
+        package_diagnostics = diagnose_package_install_errors_sync(
+            {
+                "projectPath": project_path,
+                "maxCompileErrors": max_errors,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - readiness must stay diagnostic-only.
+        package_diagnostics = {
+            "ok": False,
+            "schema": "vrcforge.package_install_diagnostics.v1",
+            "error": str(exc),
+            "symptoms": [],
+            "suggestedFixPlans": [],
+        }
+
+    counts = validation.get("summary", {}).get("severityCounts", {}) if isinstance(validation.get("summary"), dict) else {}
+    gate = validation.get("gate") if isinstance(validation.get("gate"), dict) else {}
+    if gate.get("status") == "blocked":
+        status = "blocked"
+    elif counts.get("Warning", 0) or counts.get("Suggestion", 0):
+        status = "review"
+    else:
+        status = "ready"
+
+    checks = [
+        {
+            "id": "unity_compile",
+            "label": "Unity compile",
+            "section": _readiness_section_status(validation, "Unity compile"),
+        },
+        {
+            "id": "vrchat_sdk",
+            "label": "VRChat SDK",
+            "section": _readiness_section_status(validation, "VRChat SDK"),
+        },
+        {
+            "id": "selected_avatar",
+            "label": "Selected avatar",
+            "section": _readiness_section_status(validation, "Selected avatar"),
+        },
+        {
+            "id": "mcp_bridge",
+            "label": "MCP bridge",
+            "section": _readiness_section_status(validation, "MCP bridge"),
+        },
+        {
+            "id": "package_manager",
+            "label": "Package manager",
+            "section": _readiness_section_status(validation, "Package manager"),
+        },
+    ]
+    return {
+        "ok": status != "blocked",
+        "schema": "vrcforge.build_test_readiness.v1",
+        "readOnly": True,
+        "autoBuild": False,
+        "autoPublish": False,
+        "generatedAt": _validation_now(),
+        "status": status,
+        "avatarPath": avatar_path,
+        "projectPathConfigured": bool(project_path),
+        "gate": gate,
+        "checks": checks,
+        "validationSummary": validation.get("summary"),
+        "validationSections": validation.get("sections"),
+        "packageDiagnostics": redact_support_payload(package_diagnostics),
+        "suggestedFixPlans": _build_test_fix_suggestions(validation, package_diagnostics),
+        "rules": {
+            "readOnly": True,
+            "noAutomaticPublish": True,
+            "noHiddenAccountUploadAutomation": True,
+            "noUnattendedVrchatSdkPublish": True,
+            "fixesRequirePreviewApprovalCheckpointApplyValidateRestore": True,
         },
     }
 
@@ -10619,9 +11086,13 @@ def _resolve_unity_project_root_for_import(params: dict[str, Any], plan_payload:
     if not value:
         raise AgentGatewayError("projectPath is required for outfit import.", status_code=400)
     project_root = Path(value).expanduser().resolve()
-    if not is_unity_project_root(project_root):
+    if not _is_unity_project_root(project_root):
         raise AgentGatewayError("projectPath must point to a Unity project root.", status_code=400)
     return project_root
+
+
+def _is_unity_project_root(path: Path) -> bool:
+    return (path / "Assets").is_dir() and (path / "Packages").is_dir() and (path / "ProjectSettings").is_dir()
 
 
 def _copy_loose_outfit_assets(source_root: Path, project_root: Path, target_folder: str) -> dict[str, Any]:
@@ -11005,7 +11476,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", scan_wardrobe_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, avatar, parameters, menu, FX, bindings, materials, wardrobe, and performance scanners.", "read/debug", build_validation_report_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))

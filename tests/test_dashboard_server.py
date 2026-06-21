@@ -426,6 +426,35 @@ class DashboardServerTests(unittest.TestCase):
                 {"ok": True, "rank": "Poor"},
                 {"ok": True, "rank": "Excellent"},
             ]),
+            patch(
+                "dashboard_server.validation_dependency_status_sync",
+                return_value={
+                    "ok": True,
+                    "projectConfigured": True,
+                    "projectReadable": True,
+                    "packages": {
+                        "vrchat_sdk": {"installed": True, "packageId": "com.vrchat.avatars", "version": "3.0.0"},
+                        "modular_avatar": {"installed": True, "packageId": "nadena.dev.modular-avatar", "version": "1.0.0"},
+                        "vrcfury": {"installed": False},
+                    },
+                },
+            ),
+            patch(
+                "dashboard_server.validation_environment_status_sync",
+                return_value={
+                    "ok": True,
+                    "components": {
+                        "unityPluginInstalled": {"status": "ok"},
+                        "mcpPackageConfigured": {"status": "ok"},
+                        "unityMcpBridgeReachable": {"status": "ok"},
+                        "unityMcpInstance": {"status": "ok"},
+                        "vrcForgeUnityTools": {"status": "ok"},
+                    },
+                },
+            ),
+            patch("dashboard_server.package_manager_status_sync", return_value={"ok": True, "preferredCli": {"name": "vrc-get"}, "managers": [{"name": "vrc-get"}]}),
+            patch("dashboard_server.scan_avatar_items_sync", return_value={"ok": True, "itemCount": 4}),
+            patch("dashboard_server.scan_generated_asset_residue_sync", return_value={"ok": True, "projectReadable": True, "residueCount": 0}),
         ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post("/api/app/validation/report", json={"avatarPath": "Scene/Avatar", "projectPath": r"C:\Private\UnityProject"})
@@ -441,13 +470,21 @@ class DashboardServerTests(unittest.TestCase):
         self.assertGreaterEqual(payload["summary"]["severityCounts"]["Suggestion"], 1)
         self.assertIn("sections", payload)
         self.assertIn("findings", payload)
+        section_names = {section["name"] for section in payload["sections"]}
+        self.assertIn("VRChat SDK", section_names)
+        self.assertIn("MCP bridge", section_names)
+        self.assertIn("Generated asset residue", section_names)
+        self.assertEqual(payload["gate"]["status"], "pass")
+        self.assertEqual(payload["summary"]["gateStatus"], "pass")
         self.assertNotIn(r"C:\Private\UnityProject".lower(), json.dumps(payload).lower())
 
         manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
         tool_names = {tool["name"] for tool in manifest["tools"]}
         write_targets = {target["name"] for target in manifest["writeTargets"]}
         self.assertIn("vrcforge_run_validation_report", tool_names)
+        self.assertIn("vrcforge_build_test_readiness", tool_names)
         self.assertNotIn("vrcforge_run_validation_report", write_targets)
+        self.assertNotIn("vrcforge_build_test_readiness", write_targets)
 
     def test_validation_report_records_scanner_failures_as_findings(self) -> None:
         with (
@@ -464,14 +501,54 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.scan_avatar_performance_sync", return_value={"ok": True, "rank": "Good"}),
         ):
             with TestClient(dashboard_server.app) as client:
-                response = client.post("/api/app/validation/report", json={"includeQuest": False})
+                response = client.post("/api/app/validation/report", json={"includeQuest": False, "includeReadiness": False})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["ok"])
         self.assertEqual(payload["summary"]["failedSourceCount"], 1)
-        errors = [finding for finding in payload["findings"] if finding["severity"] == "Error"]
-        self.assertTrue(any("parameter scanner down" in finding["message"] for finding in errors))
+        warnings = [finding for finding in payload["findings"] if finding["severity"] == "Warning"]
+        self.assertTrue(any("parameter scanner down" in finding["message"] for finding in warnings))
+        self.assertEqual(payload["gate"]["status"], "pass")
+
+    def test_build_test_readiness_is_read_only_gate(self) -> None:
+        validation = {
+            "ok": False,
+            "schema": "vrcforge.validation.v1",
+            "summary": {"severityCounts": {"Error": 1, "Warning": 0, "Suggestion": 0, "Info": 2, "Ignored": 0}},
+            "sections": [
+                {"name": "Unity compile", "status": "error", "findingIds": ["compile.1"], "counts": {"Error": 1}},
+                {"name": "VRChat SDK", "status": "info", "findingIds": ["dependencies.2"], "counts": {"Info": 1}},
+                {"name": "Selected avatar", "status": "info", "findingIds": ["selected_avatar.3"], "counts": {"Info": 1}},
+                {"name": "MCP bridge", "status": "info", "findingIds": [], "counts": {"Info": 1}},
+                {"name": "Package manager", "status": "info", "findingIds": [], "counts": {"Info": 1}},
+            ],
+            "gate": {"enabled": True, "status": "blocked", "blockingFindingIds": ["compile.1"]},
+        }
+        diagnostics = {
+            "ok": True,
+            "schema": "vrcforge.package_install_diagnostics.v1",
+            "symptoms": [{"code": "compile"}],
+            "suggestedFixPlans": [{"id": "explain_compile_errors_request", "title": "Explain compile errors"}],
+        }
+        with (
+            patch("dashboard_server.build_validation_report_sync", return_value=validation),
+            patch("dashboard_server.diagnose_package_install_errors_sync", return_value=diagnostics),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/build-test/readiness", json={"avatarPath": "Scene/Avatar", "projectPath": r"C:\Private\UnityProject"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["schema"], "vrcforge.build_test_readiness.v1")
+        self.assertTrue(payload["readOnly"])
+        self.assertFalse(payload["autoBuild"])
+        self.assertFalse(payload["autoPublish"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertTrue(payload["rules"]["noUnattendedVrchatSdkPublish"])
+        self.assertTrue(all(item.get("requiresPreviewApprovalCheckpointValidationRollback") for item in payload["suggestedFixPlans"]))
+        self.assertNotIn(r"C:\Private\UnityProject".lower(), json.dumps(payload).lower())
 
     def test_provider_test_vision_is_explicit_skip_without_project_upload(self) -> None:
         with TestClient(dashboard_server.app) as client:
