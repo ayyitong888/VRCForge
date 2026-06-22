@@ -89,7 +89,9 @@ class OutfitImportRollbackSmoke:
             skipped_installed_support = [
                 item
                 for item in ensure_list(package_order.get("skippedInstalledSupportPackages") or package_order.get("skippedPackages"))
-                if isinstance(item, dict) and item.get("skippedBecause") == "installed_dependency"
+                if isinstance(item, dict)
+                and str(item.get("skipReason") or item.get("skippedBecause") or "")
+                in {"already_installed_dependency", "installed_dependency"}
             ]
             self.expected_assets = [str(item) for item in ensure_list(plan.get("expectedAssetPaths"))[: max(1, int(self.args.max_expected_assets))]]
             self.asset_state_before = self.read_asset_state(self.expected_assets)
