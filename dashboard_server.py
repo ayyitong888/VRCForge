@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, redact_sensitive
+from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, ensure_dict, redact_sensitive
 from external_agent_connector_installer import (
     ConnectorInstallError,
     connector_client_statuses,
@@ -43,8 +43,13 @@ from external_agent_connector_installer import (
 )
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
 from optimization_service import (
+    OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL,
+    OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY,
+    OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
+    OPTIMIZER_DEPENDENCIES,
     OPTIMIZATION_TOOL_DEFINITIONS,
+    STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     build_optimization_report,
     build_optimization_tool_result,
     normalize_tool_name,
@@ -611,6 +616,20 @@ class OptimizationToolRequest(OptimizationPlanRequest):
     model_config = {"populate_by_name": True}
 
 
+class OptimizationApplyRequest(BaseModel):
+    tool: str = Field(default="", alias="tool")
+    avatar_path: str = Field(default="", alias="avatarPath")
+    project_path: str = Field(default="", alias="projectPath")
+    target_profile: str = Field(default="pc_conservative", alias="targetProfile")
+    profile: str = Field(default="", alias="profile")
+    options: dict[str, Any] = Field(default_factory=dict)
+    install_missing_dependencies: bool = Field(default=False, alias="installMissingDependencies")
+    allow_experimental: bool = Field(default=False, alias="allowExperimental")
+    include_prerelease: bool = Field(default=False, alias="includePrerelease")
+
+    model_config = {"populate_by_name": True}
+
+
 class ProjectIndexScanRequest(BaseModel):
     project_path: str = Field(alias="projectPath")
     max_files: int = Field(default=100000, alias="maxFiles", ge=1, le=250000)
@@ -644,6 +663,17 @@ class PackageInstallDiagnosticsRequest(BaseModel):
     stderr_summary: str = Field(default="", alias="stderrSummary")
     log_text: str = Field(default="", alias="logText")
     max_compile_errors: int = Field(default=30, alias="maxCompileErrors", ge=1, le=200)
+
+    model_config = {"populate_by_name": True}
+
+
+class PackageInstallPlanRequest(BaseModel):
+    project_path: str = Field(default="", alias="projectPath")
+    package_id: str = Field(default="", alias="packageId")
+    repository: str = Field(default="", alias="repository")
+    preferred_manager: str = Field(default="", alias="preferredManager")
+    allow_agent_managed_download: bool = Field(default=False, alias="allowAgentManagedDownload")
+    include_prerelease: bool = Field(default=False, alias="includePrerelease")
 
     model_config = {"populate_by_name": True}
 
@@ -1948,6 +1978,20 @@ def app_optimization_tool(request: OptimizationToolRequest) -> dict[str, Any]:
     return build_optimization_tool_sync(tool_name, params)
 
 
+@app.post("/api/app/optimization/apply-request")
+async def app_optimization_apply_request(request: OptimizationApplyRequest) -> dict[str, Any]:
+    params = request.model_dump(by_alias=True)
+    try:
+        payload = request_optimization_apply_sync(params, agent_name="desktop-agent")
+    except (AgentGatewayError, ValueError) as exc:
+        status_code = exc.status_code if isinstance(exc, AgentGatewayError) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=payload)
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
 @app.post("/api/app/project-index/scan")
 def app_project_index_scan(request: ProjectIndexScanRequest) -> dict[str, Any]:
     return scan_project_index_sync(request.model_dump(by_alias=True))
@@ -1989,6 +2033,20 @@ async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[st
 @app.post("/api/app/package-install/diagnose")
 def app_package_install_diagnostics(request: PackageInstallDiagnosticsRequest) -> dict[str, Any]:
     return diagnose_package_install_errors_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/package-install/plan")
+def app_package_install_plan(request: PackageInstallPlanRequest) -> dict[str, Any]:
+    return package_install_plan_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/package-install/request")
+async def app_package_install_request(request: PackageInstallPlanRequest) -> dict[str, Any]:
+    payload = request_package_install_sync(request.model_dump(by_alias=True), agent_name="desktop-agent")
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=payload)
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
 
 
 @app.get("/api/app/sub-agents")
@@ -10213,15 +10271,152 @@ def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 VPM_PACKAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,100}$")
-KNOWN_VPM_CLI_NAMES = ("vrc-get", "vpm")
+KNOWN_VPM_CLI_NAMES = ("vpm", "vrc-get")
+PACKAGE_UI_MANAGER_NAMES = ("vcc", "alcom")
 
 
-def locate_vpm_package_managers() -> list[dict[str, str]]:
-    managers: list[dict[str, str]] = []
-    for name in ("vrc-get", "alcom", "vpm"):
+def _optimizer_package_catalog() -> dict[str, dict[str, str]]:
+    catalog: dict[str, dict[str, str]] = {}
+    for dependency in OPTIMIZER_DEPENDENCIES:
+        repository = str(dependency.get("vpmRepository") or "")
+        label = str(dependency.get("label") or dependency.get("displayName") or dependency.get("id") or "")
+        for package_id in dependency.get("packageIds") or []:
+            key = str(package_id or "").strip().lower()
+            if key:
+                catalog[key] = {
+                    "dependencyId": str(dependency.get("id") or ""),
+                    "label": label,
+                    "repository": repository,
+                    "docsLink": str(dependency.get("docsLink") or ""),
+                }
+    return catalog
+
+
+def _normalize_manager_path(path: str) -> str:
+    return str(path or "").replace("\\", "/")
+
+
+def _add_package_manager(
+    managers: list[dict[str, Any]],
+    *,
+    name: str,
+    path: str,
+    kind: str,
+    label: str,
+    supports_command_install: bool,
+    supports_ui_handoff: bool,
+    source: str,
+) -> None:
+    normalized = _normalize_manager_path(path)
+    if not normalized:
+        return
+    key = (name, normalized.lower(), kind)
+    if any((item.get("name"), str(item.get("path") or "").lower(), item.get("kind")) == key for item in managers):
+        return
+    managers.append(
+        {
+            "name": name,
+            "label": label,
+            "path": normalized,
+            "kind": kind,
+            "source": source,
+            "supportsCommandInstall": supports_command_install,
+            "supportsUiHandoff": supports_ui_handoff,
+        }
+    )
+
+
+def _existing_app_paths(candidates: list[Path]) -> list[str]:
+    paths: list[str] = []
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                paths.append(str(candidate))
+        except OSError:
+            continue
+    return paths
+
+
+def locate_vpm_package_managers() -> list[dict[str, Any]]:
+    managers: list[dict[str, Any]] = []
+    managed_vrc_get = Path(os.environ.get("VRCFORGE_VRC_GET_PATH") or "")
+    managed_candidates = [
+        managed_vrc_get,
+        Path(os.environ.get("LOCALAPPDATA") or "") / "VRCForge" / "package-tools" / "vrc-get" / "v1.9.1" / "vrc-get.exe",
+    ]
+    for candidate in managed_candidates:
+        try:
+            if candidate and candidate.is_file():
+                _add_package_manager(
+                    managers,
+                    name="vrc-get",
+                    path=str(candidate),
+                    kind="managed-cli",
+                    label="VRCForge managed vrc-get CLI",
+                    supports_command_install=True,
+                    supports_ui_handoff=False,
+                    source="vrcforge-managed",
+                )
+        except OSError:
+            continue
+    cli_specs = {
+        "vpm": ("VCC vpm CLI", True),
+        "vrc-get": ("vrc-get CLI", True),
+        "alcom": ("ALCOM CLI/UI", False),
+    }
+    for name, (label, supports_install) in cli_specs.items():
         path = shutil.which(name)
         if path:
-            managers.append({"name": name, "path": path.replace("\\", "/")})
+            _add_package_manager(
+                managers,
+                name=name,
+                path=path,
+                kind="cli",
+                label=label,
+                supports_command_install=supports_install,
+                supports_ui_handoff=name == "alcom",
+                source="PATH",
+            )
+
+    local_app_data = Path(os.environ.get("LOCALAPPDATA") or "")
+    program_files = Path(os.environ.get("ProgramFiles") or "")
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)") or "")
+    for path in _existing_app_paths(
+        [
+            local_app_data / "Programs" / "VRChat Creator Companion" / "CreatorCompanion.exe",
+            local_app_data / "VRChat Creator Companion" / "CreatorCompanion.exe",
+            program_files / "VRChat Creator Companion" / "CreatorCompanion.exe",
+            program_files_x86 / "VRChat Creator Companion" / "CreatorCompanion.exe",
+        ]
+    ):
+        _add_package_manager(
+            managers,
+            name="vcc",
+            path=path,
+            kind="app",
+            label="VRChat Creator Companion",
+            supports_command_install=False,
+            supports_ui_handoff=True,
+            source="well-known-path",
+        )
+    for path in _existing_app_paths(
+        [
+            local_app_data / "Programs" / "ALCOM" / "ALCOM.exe",
+            local_app_data / "ALCOM" / "ALCOM.exe",
+            program_files / "ALCOM" / "ALCOM.exe",
+            program_files_x86 / "ALCOM" / "ALCOM.exe",
+        ]
+    ):
+        _add_package_manager(
+            managers,
+            name="alcom",
+            path=path,
+            kind="app",
+            label="ALCOM",
+            supports_command_install=False,
+            supports_ui_handoff=True,
+            source="well-known-path",
+        )
     return managers
 
 
@@ -10237,22 +10432,144 @@ def package_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     project_path = Path(project_value) if project_value else None
     managers = locate_vpm_package_managers()
     packages = {
-        framework: detect_addon_package(project_path, list(spec["packageIds"]))
+            framework: detect_addon_package(project_path, list(spec["packageIds"]))
         for framework, spec in ADDON_FRAMEWORKS.items()
     }
-    usable = [manager for manager in managers if manager["name"] in KNOWN_VPM_CLI_NAMES]
+    usable = sorted(
+        [manager for manager in managers if manager.get("supportsCommandInstall")],
+        key=lambda item: {"vpm": 0, "vrc-get": 1}.get(str(item.get("name") or ""), 9),
+    )
+    ui_handoff = sorted(
+        [manager for manager in managers if manager.get("supportsUiHandoff")],
+        key=lambda item: {"vcc": 0, "alcom": 1}.get(str(item.get("name") or ""), 9),
+    )
+    package_catalog = _optimizer_package_catalog()
     return {
         "ok": True,
         "projectPath": project_value,
         "managers": managers,
         "preferredCli": usable[0] if usable else None,
+        "preferredCommandInstaller": usable[0] if usable else None,
+        "preferredUiHandoff": ui_handoff[0] if ui_handoff else None,
         "canInstall": bool(usable) and bool(project_value),
+        "canRequestInstall": bool(project_value),
         "packages": packages,
+        "knownOptimizationPackages": package_catalog,
+        "installPolicy": {
+            "managerPriority": [
+                "ALCOM/VCC UI handoff when a human wants to manage repositories visually",
+                "VCC vpm CLI for non-interactive supervised installs",
+                "vrc-get CLI for non-interactive supervised installs",
+                "agent-managed download/install plan when no package manager is available",
+            ],
+            "directManifestEditing": False,
+            "requiresApprovalCheckpoint": True,
+        },
         "hint": (
-            "vrc-get or the VCC vpm CLI can add VPM packages from the command line. "
-            "ALCOM is detected for diagnostics only; use its UI or install vrc-get for CLI installs."
+            "VRCForge detects ALCOM/VCC for user handoff first. Non-interactive installs use the VCC vpm CLI "
+            "or vrc-get after approval; if neither exists, VRCForge returns an agent-managed download plan."
         ),
     }
+
+
+def _select_package_install_strategy(params: dict[str, Any], managers: list[dict[str, Any]]) -> dict[str, Any]:
+    package_id = str(params.get("package_id") or params.get("packageId") or "").strip().lower()
+    preferred = str(params.get("preferredManager") or params.get("preferred_manager") or "").strip().lower()
+    allow_agent = bool(params.get("allowAgentManagedDownload") or params.get("allow_agent_managed_download"))
+    catalog = _optimizer_package_catalog()
+    package_meta = catalog.get(package_id, {})
+    command_installers = sorted(
+        [manager for manager in managers if manager.get("supportsCommandInstall")],
+        key=lambda item: {"vpm": 0, "vrc-get": 1}.get(str(item.get("name") or ""), 9),
+    )
+    ui_handoff = sorted(
+        [manager for manager in managers if manager.get("supportsUiHandoff")],
+        key=lambda item: {"vcc": 0, "alcom": 1}.get(str(item.get("name") or ""), 9),
+    )
+    if preferred:
+        command_installers.sort(key=lambda item: 0 if item.get("name") == preferred else 1)
+        ui_handoff.sort(key=lambda item: 0 if item.get("name") == preferred else 1)
+    selected_cli = command_installers[0] if command_installers else None
+    selected_handoff = ui_handoff[0] if ui_handoff else None
+    strategy = "command" if selected_cli else "agent_download" if allow_agent else "manual_handoff"
+    return {
+        "schema": "vrcforge.package_install_plan.v1",
+        "packageId": package_id,
+        "repository": str(params.get("repository") or params.get("vpmRepository") or package_meta.get("repository") or ""),
+        "package": package_meta,
+        "includePrerelease": bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")),
+        "strategy": strategy,
+        "commandInstaller": selected_cli,
+        "uiHandoff": selected_handoff,
+        "managers": managers,
+        "allowAgentManagedDownload": allow_agent,
+        "directManifestEditing": False,
+        "requiresApproval": True,
+        "requiresCheckpoint": True,
+        "message": (
+            "Use the selected VPM CLI after approval."
+            if selected_cli
+            else "No VPM CLI is available; use ALCOM/VCC UI or let an external agent prepare a supervised tool install/download plan."
+        ),
+        "agentManagedDownload": {
+            "available": allow_agent and selected_cli is None,
+            "allowedTargets": ["install VCC/vpm CLI", "install vrc-get", "download package manager from official source"],
+            "disallowedTargets": ["directly edit Packages/manifest.json", "copy optimizer source into VRCForge", "bypass approval/checkpoint"],
+            "nextTool": "vrcforge_request_apply",
+        },
+    }
+
+
+def package_install_plan_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    package_id = str(params.get("package_id") or params.get("packageId") or "").strip().lower()
+    if not VPM_PACKAGE_ID_RE.match(package_id):
+        return {"ok": False, "error": "packageId must be a valid VPM package id, for example nadena.dev.modular-avatar."}
+    project_value = resolve_addon_project_path(params)
+    managers = locate_vpm_package_managers()
+    strategy = _select_package_install_strategy(params, managers)
+    package_state = None
+    if project_value and Path(project_value).is_dir():
+        package_state = detect_addon_package(Path(project_value), [package_id])
+    return {
+        "ok": True,
+        **strategy,
+        "readOnly": True,
+        "planOnly": True,
+        "projectPath": project_value,
+        "packageState": package_state,
+        "canExecuteCommandInstall": bool(strategy.get("commandInstaller")) and bool(project_value),
+        "canCreateInstallRequest": bool(project_value),
+    }
+
+
+def request_package_install_sync(params: dict[str, Any], agent_name: str = "external-agent") -> dict[str, Any]:
+    params = params or {}
+    plan = package_install_plan_sync(params)
+    if not plan.get("ok"):
+        return plan
+    if not plan.get("canExecuteCommandInstall"):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "No supported non-interactive VPM CLI is available for package install. Use the UI handoff or prepare an agent-managed package-manager install first.",
+            "installPlan": plan,
+        }
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": "vrcforge_install_vpm_package",
+            "arguments": {
+                "projectPath": plan.get("projectPath"),
+                "packageId": plan.get("packageId"),
+                "repository": plan.get("repository") or "",
+                "preferredManager": str(params.get("preferredManager") or params.get("preferred_manager") or ""),
+                "includePrerelease": bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")),
+            },
+            "reason": f"Install VPM package {plan.get('packageId')} through VRCForge supervised package manager flow.",
+            "preview": plan,
+            "agent_name": agent_name,
+        }
+    )
 
 
 def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -10265,16 +10582,21 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "A valid Unity projectPath is required."}
 
     managers = locate_vpm_package_managers()
-    cli = next((manager for manager in managers if manager["name"] in KNOWN_VPM_CLI_NAMES), None)
+    strategy = _select_package_install_strategy(params, managers)
+    cli = strategy.get("commandInstaller") if isinstance(strategy.get("commandInstaller"), dict) else None
     if cli is None:
         return {
             "ok": False,
-            "error": "No VPM CLI was found. Install vrc-get (or the VCC vpm CLI), or add the package from the ALCOM UI.",
+            "error": "No supported non-interactive VPM CLI was found. Use ALCOM/VCC UI or ask the agent to prepare a supervised package-manager download/install request.",
             "managers": managers,
+            "installPlan": strategy,
         }
 
     if cli["name"] == "vrc-get":
-        command = [cli["path"], "add", package_id, "-y"]
+        command = [cli["path"], "install", "-p", project_value, "-y"]
+        if bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")):
+            command.append("--prerelease")
+        command.append(package_id)
     else:
         command = [cli["path"], "add", "package", package_id, "-p", project_value]
 
@@ -10307,6 +10629,7 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         "projectPath": project_value,
         "packageId": package_id,
         "package": package_state,
+        "installPlan": strategy,
         "hint": "Unity must refresh/resolve packages before new components are usable; reopen or focus the Unity project.",
     }
     emit_log(
@@ -10379,7 +10702,17 @@ def _classify_package_install_symptoms(
     compile_errors: dict[str, Any],
     package_status: dict[str, Any],
 ) -> list[dict[str, str]]:
-    haystack = f"{log_text}\n{json.dumps(compile_errors, ensure_ascii=False)}\n{json.dumps(package_status, ensure_ascii=False)}".lower()
+    status_error = ""
+    if not package_status.get("ok"):
+        status_error = json.dumps(
+            {
+                "error": package_status.get("error"),
+                "hint": package_status.get("hint"),
+                "output": package_status.get("output"),
+            },
+            ensure_ascii=False,
+        )
+    haystack = f"{log_text}\n{json.dumps(compile_errors, ensure_ascii=False)}\n{status_error}".lower()
     symptoms: list[dict[str, str]] = []
     for code, pattern, title, suggestion in PACKAGE_DIAGNOSTIC_PATTERNS:
         if re.search(pattern, haystack, flags=re.IGNORECASE):
@@ -11910,6 +12243,369 @@ def build_optimization_tool_sync(tool_name: str, params: dict[str, Any]) -> dict
     return build_optimization_tool_result(external_name, params, validation)
 
 
+def normalize_optimization_apply_request_name(tool_name: str) -> str:
+    value = str(tool_name or "").strip()
+    if value in OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL:
+        return value
+    definition = OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY.get(value)
+    if definition:
+        return str(definition["externalName"])
+    aliases = {
+        "lac": "optimization.lac.apply-request",
+        "lac_profile": "optimization.lac.apply-request",
+        "aao": "optimization.aao.trace-apply-request",
+        "aao_trace": "optimization.aao.trace-apply-request",
+        "ttt": "optimization.ttt.atlas-apply-request",
+        "textrans": "optimization.ttt.atlas-apply-request",
+        "textrans_tool": "optimization.ttt.atlas-apply-request",
+        "ma2bt": "optimization.ma2bt.convert-apply-request",
+        "ma2bt_pro": "optimization.ma2bt.convert-apply-request",
+        "meshia": "optimization.meshia.simplify-apply-request",
+    }
+    key = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    if key in aliases:
+        return aliases[key]
+    raise ValueError(f"Unknown optimization apply-request tool: {tool_name}")
+
+
+def _normalize_optimizer_profile_id(value: Any) -> str:
+    raw = str(value or "pc_conservative").strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    aliases = {
+        "conservative": "pc_conservative",
+        "conservative_pc": "pc_conservative",
+        "pc_conservative": "pc_conservative",
+        "medium": "pc_medium",
+        "balanced": "balanced",
+        "balanced_pc": "balanced_pc",
+        "pc_medium": "pc_medium",
+        "high_quality": "high_quality",
+        "quality": "high_quality",
+        "custom": "custom",
+    }
+    return aliases.get(key, key or "pc_conservative")
+
+
+def _find_optimizer_dependency(dependency_doctor: dict[str, Any], optimizer_id: str) -> dict[str, Any]:
+    for dependency in dependency_doctor.get("dependencies") or []:
+        if str(dependency.get("id") or "") == optimizer_id:
+            return dependency
+    return {}
+
+
+def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    tool = normalize_optimization_apply_request_name(str(params.get("tool") or params.get("externalName") or params.get("gatewayName") or ""))
+    definition = OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL[tool]
+    project_value = resolve_addon_project_path(params)
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    profile = _normalize_optimizer_profile_id(
+        params.get("profile") or params.get("targetProfile") or params.get("target_profile") or "pc_conservative"
+    )
+    dependency_doctor = build_optimization_tool_result(
+        "optimization.dependency.doctor",
+        {"projectPath": project_value},
+        {},
+    ).get("result") or {}
+    dependency = _find_optimizer_dependency(dependency_doctor, str(definition["optimizerId"]))
+    package_ids = [str(item) for item in dependency.get("packageIds") or [] if str(item or "").strip()]
+    dependency_status = str(dependency.get("status") or "unknown")
+    install_plan = None
+    if package_ids:
+        install_plan = package_install_plan_sync(
+            {
+                "projectPath": project_value,
+                "packageId": package_ids[0],
+                "repository": dependency.get("vpmRepository") or "",
+                "allowAgentManagedDownload": bool(params.get("installMissingDependencies") or params.get("allowAgentManagedDownload")),
+            }
+        )
+    supported_write = bool(definition.get("writeSupported"))
+    stable_callable = bool(definition.get("stableCallable"))
+    supported_profiles = [str(item) for item in definition.get("supportedProfiles") or []]
+    blocked_reasons: list[str] = []
+    if not project_value:
+        blocked_reasons.append("Unity projectPath is required.")
+    if not avatar_path and supported_write:
+        blocked_reasons.append("avatarPath is required so VRCForge can attach the optimizer component to the avatar root.")
+    if dependency_status != "installed":
+        blocked_reasons.append(f"{dependency.get('label') or definition['optimizerId']} is {dependency_status}; install or repair it first.")
+    if not supported_write:
+        blocked_reasons.append("This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet.")
+    if not stable_callable:
+        blocked_reasons.append("This optimizer is not yet part of the stable avatar optimization skill set.")
+    if supported_profiles and profile not in supported_profiles:
+        blocked_reasons.append(f"Profile '{profile}' is not enabled for stable delegated apply yet.")
+    apply_arguments = {
+        "projectPath": project_value,
+        "avatarPath": avatar_path,
+        "optimizerId": definition["optimizerId"],
+        "mode": definition["mode"],
+        "componentType": definition.get("componentType") or "",
+        "profile": profile,
+        "options": ensure_dict(params.get("options") or {}),
+        "sourceApplyRequestTool": definition["externalName"],
+    }
+    return {
+        "ok": True,
+        "schema": "vrcforge.optimization.apply_request.v1",
+        "externalName": definition["externalName"],
+        "gatewayName": definition["gatewayName"],
+        "targetTool": definition["targetTool"],
+        "versionStage": definition["versionStage"],
+        "directApplyExposed": False,
+        "requestOnly": True,
+        "requiresApproval": True,
+        "requiresCheckpoint": True,
+        "requiresValidation": True,
+        "requiresRollbackProof": True,
+        "writeSupported": supported_write,
+        "stableCallable": stable_callable,
+        "supportedProfiles": supported_profiles,
+        "readyToRequest": not blocked_reasons,
+        "blockedReasons": blocked_reasons,
+        "dependency": dependency,
+        "dependencyInstallPlan": install_plan,
+        "plan": build_optimization_tool_result(str(definition["planTool"]), params, {}),
+        "applyArguments": apply_arguments,
+        "policy": {
+            "oneOptimizerStepAtATime": True,
+            "noDirectExternalApply": True,
+            "noOneClickAllOptimizers": True,
+            "checkpointValidationRollbackRequired": True,
+        },
+    }
+
+
+def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "external-agent") -> dict[str, Any]:
+    params = params or {}
+    preview = build_optimization_apply_request_preview_sync(params)
+    install_missing = bool(params.get("installMissingDependencies") or params.get("install_missing_dependencies"))
+    dependency = ensure_dict(preview.get("dependency"))
+    package_ids = [str(item) for item in dependency.get("packageIds") or [] if str(item or "").strip()]
+    if preview.get("blockedReasons") and install_missing and package_ids:
+        install_plan = ensure_dict(preview.get("dependencyInstallPlan"))
+        if not install_plan.get("canExecuteCommandInstall"):
+            return {
+                "ok": False,
+                "status": "blocked",
+                "error": "Dependency is missing and no supported package-manager CLI is available for a supervised install request.",
+                "preview": preview,
+                "installPlan": install_plan,
+            }
+        return AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_install_vpm_package",
+                "arguments": {
+                    "projectPath": preview["applyArguments"].get("projectPath"),
+                    "packageId": package_ids[0],
+                    "repository": install_plan.get("repository") or dependency.get("vpmRepository") or "",
+                    "includePrerelease": bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")),
+                },
+                "reason": f"Install dependency for {preview['externalName']} before optimizer configuration.",
+                "preview": install_plan,
+                "agent_name": agent_name,
+            }
+        )
+    if not preview.get("readyToRequest"):
+        return {"ok": False, "status": "blocked", "preview": preview, "error": "; ".join(preview.get("blockedReasons") or [])}
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": str(preview["targetTool"]),
+            "arguments": preview["applyArguments"],
+            "reason": f"Request supervised optimizer configuration for {preview['externalName']}.",
+            "preview": preview,
+            "agent_name": agent_name,
+        }
+    )
+
+
+def _lac_component_properties(profile: str) -> dict[str, Any]:
+    profile_id = _normalize_optimizer_profile_id(profile)
+    if profile_id in {"pc_conservative", "high_quality"}:
+        return {
+            "Preset": "HighQuality",
+            "Strategy": "Combined",
+            "FastWeight": 0.1,
+            "HighAccuracyWeight": 0.5,
+            "PerceptualWeight": 0.4,
+            "HighComplexityThreshold": 0.3,
+            "LowComplexityThreshold": 0.1,
+            "MinDivisor": 1,
+            "MaxDivisor": 2,
+            "MaxResolution": 2048,
+            "MinResolution": 256,
+            "ForcePowerOfTwo": True,
+            "MinSourceSize": 1024,
+            "SkipIfSmallerThan": 512,
+            "TargetPlatform": "Auto",
+            "UseHighQualityFormatForHighComplexity": True,
+            "ProcessMainTextures": True,
+            "ProcessNormalMaps": True,
+            "ProcessEmissionMaps": True,
+            "ProcessOtherTextures": True,
+            "SkipUnknownUncompressedTextures": True,
+        }
+    return {
+        "Preset": "Balanced",
+        "Strategy": "Combined",
+        "FastWeight": 0.3,
+        "HighAccuracyWeight": 0.5,
+        "PerceptualWeight": 0.2,
+        "HighComplexityThreshold": 0.7,
+        "LowComplexityThreshold": 0.2,
+        "MinDivisor": 1,
+        "MaxDivisor": 8,
+        "MaxResolution": 2048,
+        "MinResolution": 64,
+        "ForcePowerOfTwo": True,
+        "MinSourceSize": 256,
+        "SkipIfSmallerThan": 128,
+        "TargetPlatform": "Auto",
+        "UseHighQualityFormatForHighComplexity": True,
+        "ProcessMainTextures": True,
+        "ProcessNormalMaps": True,
+        "ProcessEmissionMaps": True,
+        "ProcessOtherTextures": True,
+        "SkipUnknownUncompressedTextures": True,
+    }
+
+
+def _optimizer_component_properties(optimizer_id: str, profile: str) -> dict[str, Any]:
+    if optimizer_id == "lac":
+        return _lac_component_properties(profile)
+    if optimizer_id == "ma2bt_pro":
+        return {
+            "compactMode": True,
+            "convertMultiState": True,
+            "mergeIdenticalBlendTreesAndAnimations": True,
+            "scanAllLayers": False,
+            "maResponsivePrefixes": ["MA Responsive: ", "RC MA Responsive: "],
+        }
+    return {}
+
+
+def _component_already_present(project_path: str, avatar_path: str, component_type: str) -> tuple[bool, dict[str, Any]]:
+    try:
+        payload = get_gameobject_sync({"projectPath": project_path, "gameObjectPath": avatar_path})
+    except Exception as exc:  # noqa: BLE001 - best-effort idempotence check before the write.
+        return False, {"ok": False, "error": str(exc)}
+    components = payload.get("components") if isinstance(payload, dict) else None
+    if not isinstance(components, list):
+        return False, payload if isinstance(payload, dict) else {}
+    component_short = component_type.rsplit(".", 1)[-1]
+    for index, component in enumerate(components):
+        if not isinstance(component, dict):
+            continue
+        values = {
+            str(component.get("type") or ""),
+            str(component.get("fullName") or ""),
+            str(component.get("componentType") or ""),
+            str(component.get("name") or ""),
+        }
+        if component_type in values or component_short in values or any(value.endswith(f".{component_short}") for value in values):
+            return True, {"ok": True, "componentIndex": index, "component": component, "gameObject": payload}
+    return False, payload
+
+
+def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    optimizer_id = str(params.get("optimizerId") or params.get("optimizer_id") or "").strip()
+    mode = str(params.get("mode") or "").strip()
+    avatar_path = str(params.get("avatarPath") or params.get("avatar_path") or "").strip()
+    component_type = str(params.get("componentType") or params.get("component_type") or "").strip()
+    profile = _normalize_optimizer_profile_id(params.get("profile") or "pc_conservative")
+    project_path = resolve_addon_project_path(params)
+    if not optimizer_id or not mode:
+        return {"ok": False, "error": "optimizerId and mode are required."}
+    if not avatar_path:
+        return {"ok": False, "error": "avatarPath is required."}
+    if not component_type:
+        return {"ok": False, "error": "This optimizer does not yet have a validated component writer in VRCForge."}
+    steps: list[dict[str, Any]] = []
+    already_present, inspect_payload = _component_already_present(project_path, avatar_path, component_type)
+    if already_present:
+        added = {
+            "ok": True,
+            "action": "reuse_component",
+            "gameObjectPath": avatar_path,
+            "componentType": component_type,
+            "componentIndex": int(inspect_payload.get("componentIndex") or 0),
+        }
+    else:
+        request = {
+        "projectPath": project_path,
+        "gameObjectPath": avatar_path,
+        "componentType": component_type,
+        "preview": bool(params.get("preview", False)),
+        }
+        added = add_component_sync(request)
+    if not added.get("ok"):
+        return {
+            "ok": False,
+            "optimizerId": optimizer_id,
+            "mode": mode,
+            "componentType": component_type,
+            "error": added.get("error") or "Optimizer component setup failed.",
+            "addComponent": added,
+        }
+    steps.append(
+        {
+            "id": "add_or_reuse_component",
+            "status": "done",
+            "tool": "vrcforge_add_component" if not already_present else "vrcforge_get_gameobject",
+            "result": redact_support_payload(added),
+        }
+    )
+    properties = _optimizer_component_properties(optimizer_id, profile)
+    for property_path, value in properties.items():
+        result = set_component_property_sync(
+            {
+                "projectPath": project_path,
+                "gameObjectPath": avatar_path,
+                "componentType": component_type,
+                "componentIndex": 0,
+                "propertyPath": property_path,
+                "value": value,
+                "preview": bool(params.get("preview", False)),
+            }
+        )
+        steps.append(
+            {
+                "id": f"set_{property_path}",
+                "status": "done" if result.get("ok") else "failed",
+                "tool": "vrcforge_set_property",
+                "propertyPath": property_path,
+                "result": redact_support_payload(result),
+            }
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "optimizerId": optimizer_id,
+                "mode": mode,
+                "profile": profile,
+                "avatarPath": avatar_path,
+                "componentType": component_type,
+                "error": result.get("error") or f"Failed to configure {property_path}.",
+                "steps": steps,
+            }
+    emit_log("info", "optimization", "Optimizer component configured.", {"optimizerId": optimizer_id, "mode": mode})
+    return {
+        "ok": True,
+        "schema": "vrcforge.optimization.configure_component.v1",
+        "optimizerId": optimizer_id,
+        "mode": mode,
+        "profile": profile,
+        "avatarPath": avatar_path,
+        "componentType": component_type,
+        "steps": steps,
+        "validationRequired": True,
+        "rollbackProofRequired": True,
+        "note": "VRCForge delegates the optimizer algorithm to the installed package; this handler only adds and configures validated public component fields through the supervised write path.",
+    }
+
+
 def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
     return (
         str(
@@ -12836,6 +13532,19 @@ def register_agent_gateway_tools() -> None:
             definition["category"],
             lambda params, _tool=external_tool: build_optimization_tool_sync(_tool, params or {}),
         )
+    for definition in STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS:
+        gateway_tool = str(definition["gatewayName"])
+        external_tool = str(definition["externalName"])
+        AGENT_GATEWAY.register_tool(
+            gateway_tool,
+            str(definition["description"]),
+            "supervised-write",
+            lambda params, _tool=external_tool: request_optimization_apply_sync(
+                {**ensure_dict(params or {}), "tool": _tool},
+                agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
+            ),
+            write=True,
+        )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
@@ -12843,6 +13552,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_plan", "Plan a VPM package install using ALCOM/VCC UI handoff, VCC vpm CLI, vrc-get CLI, or agent-managed download fallback without writing.", "plan/preview", package_install_plan_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "Request supervised VPM package installation through the selected package manager; creates an approval request only.", "supervised-write", lambda params: request_package_install_sync(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", diagnose_package_install_errors_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
@@ -13050,9 +13761,15 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_install_vpm_package",
-        "Install a VPM package (for example Modular Avatar or VRCFury) through vrc-get or the vpm CLI.",
+        "Install a VPM package through the VRCForge package manager strategy: ALCOM/VCC UI handoff for humans, VCC vpm or vrc-get CLI for supervised non-interactive installs.",
         "medium",
         install_vpm_package_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_configure_optimizer_component",
+        "Configure one delegated optimizer component on an avatar after approval; no external agent direct apply is exposed.",
+        "high",
+        configure_optimizer_component_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_restore_safe_backup",

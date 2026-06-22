@@ -5449,6 +5449,33 @@ namespace VRCForge.Editor
         self.assertTrue(payload["repairPolicy"]["requiresPreviewApprovalCheckpointValidationRollback"])
         self.assertIn("retry_vpm_install_request", {item["id"] for item in payload["suggestedFixPlans"]})
 
+    def test_package_install_diagnostics_does_not_scan_status_snapshot_as_log(self) -> None:
+        with (
+            patch(
+                "dashboard_server.package_manager_status_sync",
+                return_value={
+                    "ok": True,
+                    "preferredCli": {"name": "vrc-get"},
+                    "sourceSummary": {"vpmManifest": True, "manifest": True},
+                },
+            ),
+            patch(
+                "dashboard_server.read_agent_compile_errors",
+                return_value={"ok": True, "result": {"payload": {"errors": []}}},
+            ),
+        ):
+            payload = dashboard_server.diagnose_package_install_errors_sync(
+                {
+                    "projectPath": "E:/unity/milltina",
+                    "packageId": "com.anatawa12.avatar-optimizer",
+                    "stdoutSummary": "",
+                    "stderrSummary": "",
+                }
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual({symptom["code"] for symptom in payload["symptoms"]}, {"unknown"})
+
 
 if __name__ == "__main__":
     unittest.main()

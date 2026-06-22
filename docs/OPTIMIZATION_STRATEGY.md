@@ -27,6 +27,25 @@ VRCForge does not copy optimizer source code, silently install packages, direct-
 - MA2BT-Pro: Modular Avatar responsive layer to BlendTree conversion.
 - VRC Avatar Performance Tools: optional editor-side performance and VRAM reference checks.
 
+## Stable callable matrix
+
+The avatar optimization skill group exposes stable read/plan tools plus stable `*-apply-request` tools only. A request tool creates an approval record; it does not bypass Desktop approval, checkpoint, validation, or rollback.
+
+Stable request tools:
+
+- `optimization.lac.apply-request`: adds/configures `dev.limitex.avatar.compressor.TextureCompressor` for conservative/balanced profiles.
+- `optimization.aao.trace-apply-request`: adds the public `Anatawa12.AvatarOptimizer.TraceAndOptimize` marker component. AAO documents the component type as the public API, so VRCForge does not script-configure internal AAO fields.
+- `optimization.ma2bt.convert-apply-request`: adds/configures `zhuozhi.MA2BTPro.MAToBlendTreePro` with conservative public settings.
+
+Plan-only or experimental until further sample-matrix validation:
+
+- `optimization.ttt.atlas-plan`: TexTransTool `AtlasTexture` is a stable component surface, but apply needs explicit user-confirmed material groups and object-reference field mapping before it becomes a stable request.
+- `optimization.meshia.simplify-plan`: Meshia apply remains experimental and low-risk-renderer scoped only.
+- `optimization.vrcfury.compatibility-report`: VRCFury optimizer internals stay compatibility/audit only; no direct optimizer writer is exposed.
+- VRC Avatar Performance Tools are consumed as optional read-only evidence only.
+
+Package dependency installs use the same safety model. VRCForge detects ALCOM/VCC for UI handoff, prefers a supervised VCC `vpm` or `vrc-get` CLI command for non-interactive installs, and falls back to an agent-managed package-manager download plan only when no supported manager is available. Direct manifest editing is not a default install path.
+
 ## Roadmap
 
 ### 0.7.2-beta - Model Optimization Planner

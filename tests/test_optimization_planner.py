@@ -4,7 +4,9 @@ from pathlib import Path
 
 import dashboard_server
 from optimization_service import (
+    OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
+    STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     build_dependency_doctor,
     build_optimization_report,
     build_optimization_tool_result,
@@ -125,12 +127,123 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
     assert not any(name.startswith("vrcforge_optimization_") for name in write_targets)
     assert "vrcforge_optimization_lac_apply" not in tool_names
     assert "vrcforge_optimization_aao_apply" not in tool_names
+    assert set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= tool_names
+    assert all(name.endswith("_apply_request") for name in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
+    assert "vrcforge_optimization_ttt_atlas_apply_request" not in tool_names
+    assert "vrcforge_optimization_meshia_simplify_apply_request" not in tool_names
+    assert "vrcforge_configure_optimizer_component" not in tool_names
+    assert "vrcforge_configure_optimizer_component" in write_targets
 
     registry = dashboard_server.AGENT_GATEWAY.build_tool_registry()
     optimization_entries = [entry for entry in registry["tools"] if entry["name"].startswith("vrcforge_optimization")]
     assert optimization_entries
     assert all(entry["category"] == "optimization" for entry in optimization_entries)
-    assert {entry["risk"] for entry in optimization_entries} <= {"read_only", "plan"}
+    apply_request_entries = [entry for entry in optimization_entries if entry["name"] in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES]
+    assert apply_request_entries
+    assert {entry["risk"] for entry in apply_request_entries} == {"write_request"}
+    read_plan_entries = [entry for entry in optimization_entries if entry["name"] not in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES]
+    assert {entry["risk"] for entry in read_plan_entries} <= {"read_only", "plan"}
+    direct_apply_names = {
+        name
+        for name in tool_names
+        if name.startswith("vrcforge_optimization_") and name.endswith("_apply") and not name.endswith("_apply_request")
+    }
+    assert direct_apply_names == set()
+
+
+def test_unstable_optimizer_apply_requests_are_not_mcp_direct_tools() -> None:
+    manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
+    tool_names = {tool["name"] for tool in manifest["tools"]}
+    unstable = set(OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) - set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
+
+    assert {"vrcforge_optimization_ttt_atlas_apply_request", "vrcforge_optimization_meshia_simplify_apply_request"} <= unstable
+    assert unstable.isdisjoint(tool_names)
+
+
+def test_avatar_optimization_skill_group_contains_stable_request_tools_only() -> None:
+    skills = dashboard_server.AGENT_GATEWAY.build_skill_registry()["skills"]
+    group = next(skill for skill in skills if skill["name"] == "avatar-optimization-skills")
+    allowed = set(group["allowedTools"])
+
+    assert set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= allowed
+    assert "vrcforge_optimization_ttt_atlas_apply_request" not in allowed
+    assert "vrcforge_optimization_meshia_simplify_apply_request" not in allowed
+    assert "vrcforge_package_install_plan" in allowed
+    assert "vrcforge_package_install_request" in allowed
+    assert "vrcforge_configure_optimizer_component" in allowed
+
+
+def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    package_dir = project / "Packages" / "dev.limitex.avatar-compressor"
+    package_dir.mkdir()
+    (package_dir / "package.json").write_text('{"name":"dev.limitex.avatar-compressor","version":"0.8.0"}', encoding="utf-8")
+
+    def fail_full_plan(_params):
+        raise AssertionError("apply-request preview must not run the full optimization plan")
+
+    monkeypatch.setattr(dashboard_server, "build_optimization_plan_sync", fail_full_plan)
+
+    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.lac.apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+
+    assert payload["readyToRequest"] is True
+    assert payload["stableCallable"] is True
+    assert payload["writeSupported"] is True
+    assert payload["applyArguments"]["componentType"] == "dev.limitex.avatar.compressor.TextureCompressor"
+
+
+def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "locate_vpm_package_managers",
+        lambda: [
+            {
+                "name": "vrc-get",
+                "path": "C:/tools/vrc-get.exe",
+                "kind": "managed-cli",
+                "supportsCommandInstall": True,
+                "supportsUiHandoff": False,
+            }
+        ],
+    )
+
+    class Proc:
+        returncode = 0
+        stdout = "installed"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Proc()
+
+    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
+
+    result = dashboard_server.install_vpm_package_sync(
+        {
+            "projectPath": str(project),
+            "packageId": "com.anatawa12.avatar-optimizer",
+            "includePrerelease": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert calls
+    command = calls[0]
+    assert command[:4] == ["C:/tools/vrc-get.exe", "install", "-p", str(project)]
+    assert "--prerelease" in command
+    assert command[-1] == "com.anatawa12.avatar-optimizer"
 
 
 def test_public_optimization_docs_include_roadmap_sequence() -> None:

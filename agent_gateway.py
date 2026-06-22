@@ -22,7 +22,11 @@ from typing import Any, Callable
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from optimization_service import OPTIMIZATION_GATEWAY_TOOL_NAMES, OPTIMIZATION_TOOL_DEFINITIONS
+from optimization_service import (
+    OPTIMIZATION_GATEWAY_TOOL_NAMES,
+    OPTIMIZATION_TOOL_DEFINITIONS,
+    STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
+)
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -390,10 +394,36 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_install_vpm_package": {
         "title": "VPM Package Install",
-        "inputs": ["VPM package id and Unity project path."],
-        "outputs": ["CLI command result and post-install package state."],
-        "sideEffects": "modifies project VPM manifest and Packages after approval",
+        "inputs": ["VPM package id, Unity project path, optional preferred package manager."],
+        "outputs": ["Selected package-manager strategy, command result, and post-install package state."],
+        "sideEffects": "modifies project VPM manifest and Packages through VCC vpm/vrc-get after approval and checkpoint",
         "tags": ["package", "vpm", "write"],
+    },
+    "vrcforge_package_install_plan": {
+        "title": "VPM Package Install Plan",
+        "permissionMode": "preview",
+        "inputs": ["VPM package id, Unity project path, optional preferred package manager."],
+        "outputs": ["ALCOM/VCC UI handoff, VCC vpm/vrc-get command installer, or agent-managed fallback plan."],
+        "sideEffects": "none",
+        "tags": ["package", "vpm", "preview"],
+    },
+    "vrcforge_package_install_request": {
+        "title": "VPM Package Install Request",
+        "permissionMode": "approval_required",
+        "inputs": ["VPM package id, Unity project path, optional preferred package manager."],
+        "outputs": ["Approval request for supervised package installation."],
+        "sideEffects": "creates an approval request only; approved execution uses checkpoint-gated package manager install",
+        "backupRestore": "requires approval, checkpoint, package resolve validation, and rollback proof where available",
+        "tags": ["package", "vpm", "write-request"],
+    },
+    "vrcforge_configure_optimizer_component": {
+        "title": "Configure Optimizer Component",
+        "permissionMode": "approval_required",
+        "inputs": ["Optimizer id, mode, avatar path, component type, target profile, and options."],
+        "outputs": ["Added delegated optimizer component result and validation/rollback requirements."],
+        "sideEffects": "adds one optimizer component to the avatar after approval and checkpoint",
+        "backupRestore": "requires approval, checkpoint, validation delta, and rollback proof",
+        "tags": ["optimization", "component", "write"],
     },
     "vrcforge_preview_restore_backup": {
         "title": "Backup Restore Preview",
@@ -489,6 +519,16 @@ for _optimization_definition in OPTIMIZATION_TOOL_DEFINITIONS:
         "sideEffects": "none",
         "backupRestore": "not required; this 0.7.2 tool never writes project assets",
         "tags": ["optimization", _level, "no-direct-apply"],
+    }
+for _optimization_apply_tool in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES:
+    BUILTIN_SKILL_OVERRIDES[_optimization_apply_tool] = {
+        "title": _optimization_apply_tool.replace("vrcforge_optimization_", "optimization.").replace("_", "."),
+        "permissionMode": "approval_required",
+        "inputs": ["Unity project path, avatar path, target profile, and optional installMissingDependencies flag."],
+        "outputs": ["Approval request for one optimizer step, or a dependency/package-install request when the optimizer is missing."],
+        "sideEffects": "creates an approval request only; execution still requires VRCForge approval, checkpoint, validation, and rollback",
+        "backupRestore": "required before any approved optimizer component configuration or dependency install",
+        "tags": ["optimization", "write-request", "no-direct-apply"],
     }
 
 BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
@@ -624,6 +664,33 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "allowedTools": ["vrcforge_optimization_plan", *OPTIMIZATION_GATEWAY_TOOL_NAMES],
         "entrypointTool": "vrcforge_optimization_plan",
         "tags": ["builtin", "group", "optimization", "read-only", "plan-only"],
+    },
+    {
+        "name": "avatar-optimization-skills",
+        "title": "Avatar Optimization Skills",
+        "description": "Scan, plan, install dependencies, and request one stable delegated avatar optimizer step at a time.",
+        "category": "optimization",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "request LAC apply, request AAO trace, request MA2BT conversion, install optimizer dependency, optimizer apply-request",
+        "inputs": ["Unity project path, avatar path, target profile, optimizer request tool, and optional dependency install flag."],
+        "outputs": ["Approval request for one optimizer configuration or dependency install step."],
+        "sideEffects": "creates approval requests; approved execution can add a delegated optimizer component or install a VPM package through checkpointed package manager flow",
+        "backupRestore": "approval, checkpoint, validation, and rollback proof are required before any approved write",
+        "allowedTools": [
+            "vrcforge_optimization_plan",
+            *OPTIMIZATION_GATEWAY_TOOL_NAMES,
+            *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
+            "vrcforge_package_manager_status",
+            "vrcforge_package_install_plan",
+            "vrcforge_package_install_request",
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_install_vpm_package",
+            "vrcforge_configure_optimizer_component",
+        ],
+        "entrypointTool": "vrcforge_optimization_plan",
+        "tags": ["builtin", "group", "optimization", "write-request", "no-direct-apply"],
     },
     {
         "name": "face-tuning-workflow",
@@ -916,17 +983,19 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     {
         "name": "package-maintenance",
         "title": "Package Maintenance",
-        "description": "Detect VPM CLIs, explain package/plugin install failures, and install addon packages such as Modular Avatar or VRCFury through approval.",
+        "description": "Detect ALCOM/VCC/vpm/vrc-get, explain package/plugin install failures, plan dependency installs, and request supervised package installs.",
         "category": "package",
         "permissionMode": "approval_required",
         "riskLevel": "medium",
-        "whenToUse": "install package, vpm, vrc-get, alcom, add modular avatar, add vrcfury",
+        "whenToUse": "install package, vpm, vrc-get, alcom, vcc, add optimizer dependency, add modular avatar, add vrcfury",
         "inputs": ["Unity project path and VPM package id."],
-        "outputs": ["CLI detection state, package install diagnostics, and package install result."],
-        "sideEffects": "can modify the project VPM manifest and Packages after approval",
-        "backupRestore": "vpm manifest changes are revertible via the package manager CLI",
+        "outputs": ["Package manager status, install strategy, approval request, diagnostics, and post-install result."],
+        "sideEffects": "can modify the project VPM manifest and Packages after approval/checkpoint through a supported package manager",
+        "backupRestore": "requires VRCForge checkpoint before approved package-manager writes",
         "allowedTools": [
             "vrcforge_package_manager_status",
+            "vrcforge_package_install_plan",
+            "vrcforge_package_install_request",
             "vrcforge_diagnose_package_install_errors",
             "vrcforge_scan_modular_avatar",
             "vrcforge_scan_vrcfury",
@@ -3862,12 +3931,15 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_build_test_readiness",
         "vrcforge_optimization_plan",
         *OPTIMIZATION_GATEWAY_TOOL_NAMES,
+        *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",
         "vrcforge_preview_restore_checkpoint",
         "vrcforge_scan_avatar_performance",
         "vrcforge_package_manager_status",
+        "vrcforge_package_install_plan",
+        "vrcforge_package_install_request",
         "vrcforge_diagnose_package_install_errors",
         "vrcforge_preview_setup_outfit",
         "vrcforge_preview_add_wardrobe_outfit",

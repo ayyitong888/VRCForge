@@ -834,6 +834,7 @@ export type OptimizationDependencyCard = {
   label?: string;
   status?: "installed" | "missing" | "unknown" | string;
   installed?: boolean;
+  packageIds?: string[];
   version?: string | null;
   matchedPackageId?: string;
   recommendedRole?: string;
@@ -888,6 +889,23 @@ export type OptimizationPlannerReport = {
   tools?: Array<{ externalName?: string; gatewayName?: string; level?: string; directApplyExposed?: boolean }>;
   futureWriteRequestTools?: Array<{ externalName?: string; versionStage?: string; directApplyExposed?: boolean }>;
   rules?: Record<string, unknown>;
+};
+
+export type PackageInstallRequestResult = {
+  ok: boolean;
+  status?: string;
+  approval?: AgentApproval;
+  error?: string;
+  installPlan?: Record<string, unknown>;
+};
+
+export type OptimizationApplyRequestResult = {
+  ok: boolean;
+  status?: string;
+  approval?: AgentApproval;
+  error?: string;
+  preview?: Record<string, unknown>;
+  installPlan?: Record<string, unknown>;
 };
 
 export type OutfitDependencyPreflight = {
@@ -1104,6 +1122,45 @@ export async function fetchOptimizationPlan(
   },
 ): Promise<OptimizationPlannerReport> {
   return requestJson<OptimizationPlannerReport>(`${endpoint}/api/app/optimization/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function requestPackageInstall(
+  endpoint: string,
+  request: {
+    projectPath?: string;
+    packageId: string;
+    repository?: string;
+    preferredManager?: string;
+    allowAgentManagedDownload?: boolean;
+    includePrerelease?: boolean;
+  },
+): Promise<PackageInstallRequestResult> {
+  return requestJson<PackageInstallRequestResult>(`${endpoint}/api/app/package-install/request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function requestOptimizationApply(
+  endpoint: string,
+  request: {
+    tool: string;
+    projectPath?: string;
+    avatarPath?: string;
+    targetProfile?: string;
+    profile?: string;
+    options?: Record<string, unknown>;
+    installMissingDependencies?: boolean;
+    allowExperimental?: boolean;
+    includePrerelease?: boolean;
+  },
+): Promise<OptimizationApplyRequestResult> {
+  return requestJson<OptimizationApplyRequestResult>(`${endpoint}/api/app/optimization/apply-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

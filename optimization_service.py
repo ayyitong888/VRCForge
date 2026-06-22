@@ -289,6 +289,102 @@ FUTURE_WRITE_REQUEST_TOOLS = [
 ]
 
 
+OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "externalName": "optimization.lac.apply-request",
+        "gatewayName": "vrcforge_optimization_lac_apply_request",
+        "optimizerId": "lac",
+        "planTool": "optimization.lac.profile-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "lac_profile",
+        "componentType": "dev.limitex.avatar.compressor.TextureCompressor",
+        "riskLevel": "medium",
+        "versionStage": "0.8.0-beta",
+        "writeSupported": True,
+        "stableCallable": True,
+        "supportedProfiles": ["pc_conservative", "conservative_pc", "high_quality", "pc_medium", "balanced_pc", "balanced"],
+        "description": "Request supervised LAC / Avatar Compressor component setup. Creates an approval request only; no direct apply is exposed.",
+    },
+    {
+        "externalName": "optimization.aao.trace-apply-request",
+        "gatewayName": "vrcforge_optimization_aao_trace_apply_request",
+        "optimizerId": "aao",
+        "planTool": "optimization.aao.trace-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "aao_trace",
+        "componentType": "Anatawa12.AvatarOptimizer.TraceAndOptimize",
+        "riskLevel": "medium",
+        "versionStage": "0.8.0-beta",
+        "writeSupported": True,
+        "stableCallable": True,
+        "supportedProfiles": ["pc_conservative", "conservative_pc", "pc_medium", "balanced_pc", "custom"],
+        "description": "Request supervised AAO Trace And Optimize setup. Creates an approval request only; no direct apply is exposed.",
+    },
+    {
+        "externalName": "optimization.ttt.atlas-apply-request",
+        "gatewayName": "vrcforge_optimization_ttt_atlas_apply_request",
+        "optimizerId": "textrans_tool",
+        "planTool": "optimization.ttt.atlas-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "ttt_atlas",
+        "componentType": "",
+        "riskLevel": "medium",
+        "versionStage": "0.8.0-beta",
+        "writeSupported": False,
+        "stableCallable": False,
+        "supportedProfiles": [],
+        "description": "Request supervised TexTransTool atlas setup after user-confirmed groups. This currently queues review only until field mapping is validated.",
+    },
+    {
+        "externalName": "optimization.ma2bt.convert-apply-request",
+        "gatewayName": "vrcforge_optimization_ma2bt_convert_apply_request",
+        "optimizerId": "ma2bt_pro",
+        "planTool": "optimization.ma2bt.convertibility-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "ma2bt_convert",
+        "componentType": "zhuozhi.MA2BTPro.MAToBlendTreePro",
+        "riskLevel": "medium",
+        "versionStage": "0.8.0-beta",
+        "writeSupported": True,
+        "stableCallable": True,
+        "supportedProfiles": ["pc_conservative", "conservative_pc", "pc_medium", "balanced_pc", "custom"],
+        "description": "Request supervised MA2BT-Pro component setup for MA-heavy avatars. Creates an approval request only; no direct apply is exposed.",
+    },
+    {
+        "externalName": "optimization.meshia.simplify-apply-request",
+        "gatewayName": "vrcforge_optimization_meshia_simplify_apply_request",
+        "optimizerId": "meshia",
+        "planTool": "optimization.meshia.simplify-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "meshia_simplify",
+        "componentType": "",
+        "riskLevel": "high",
+        "versionStage": "0.8.1-beta",
+        "writeSupported": False,
+        "stableCallable": False,
+        "supportedProfiles": [],
+        "description": "Request supervised Meshia simplification review. Apply remains experimental and disabled until sample-matrix validation exists.",
+    },
+]
+
+
+STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS = [
+    item for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS if item.get("stableCallable")
+]
+OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL = {
+    item["externalName"]: item for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS
+}
+OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY = {
+    item["gatewayName"]: item for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS
+}
+OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES = [
+    item["gatewayName"] for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS
+]
+STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES = [
+    item["gatewayName"] for item in STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS
+]
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -360,8 +456,9 @@ def build_dependency_doctor(params: dict[str, Any]) -> dict[str, Any]:
         "summary": counts,
         "installPolicy": {
             "automaticInstall": False,
-            "supervisedInstallRequestAvailable": False,
-            "message": "0.7.2 reports dependency cards and VPM repository hints only; package installation is not automatic.",
+            "supervisedInstallRequestAvailable": True,
+            "preferredManagers": ["ALCOM/VCC UI handoff", "VCC vpm CLI", "vrc-get CLI", "agent-managed download plan"],
+            "message": "Dependency installs are request-only: VRCForge plans package-manager use first, then any project write still requires approval and checkpoint.",
         },
     }
 
@@ -1223,7 +1320,7 @@ def _detect_dependency(definition: dict[str, Any], facts: dict[str, Any]) -> dic
             "kind": "vpm",
             "repository": definition.get("vpmRepository"),
             "automatic": False,
-            "supervisedRequestSupported": False,
+            "supervisedRequestSupported": True,
         },
         "componentSignals": definition.get("componentSignals") or [],
     }
