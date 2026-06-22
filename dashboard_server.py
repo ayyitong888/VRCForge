@@ -7711,6 +7711,40 @@ def list_running_unity_processes() -> list[dict[str, Any]]:
     return processes
 
 
+def extract_unity_project_path_from_command_line(command_line: str) -> str:
+    value = str(command_line or "")
+    if not value:
+        return ""
+    match = re.search(r"(?i)(?:^|\s)-projectPath(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))", value)
+    if not match:
+        return ""
+    return normalize_path_string(str(next((group for group in match.groups() if group), "")).strip())
+
+
+def discover_running_unity_projects() -> list[dict[str, str]]:
+    projects: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for process in list_running_unity_processes():
+        path = extract_unity_project_path_from_command_line(str(process.get("commandLine") or ""))
+        if not path:
+            continue
+        project_root = Path(path)
+        if not is_unity_project_path(project_root):
+            continue
+        key = normalize_path_string(str(project_root)).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        projects.append(
+            {
+                "name": project_root.name,
+                "path": normalize_path_string(str(project_root)),
+                "editorVersion": parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt"),
+            }
+        )
+    return projects
+
+
 def _project_path_token(path: Path) -> str:
     return normalize_path_string(str(path)).replace("\\", "/").casefold().strip()
 
@@ -8848,6 +8882,14 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
                 path=project.get("path") or "",
                 editor_version=project.get("editorVersion") or "Unknown",
                 source="unity-hub",
+            )
+
+        for project in discover_running_unity_projects():
+            upsert_project(
+                name=project.get("name") or Path(project.get("path") or "").name,
+                path=project.get("path") or "",
+                editor_version=project.get("editorVersion") or "Unknown",
+                source="running-unity",
             )
 
         if DASHBOARD_STATE.selected_project_path:

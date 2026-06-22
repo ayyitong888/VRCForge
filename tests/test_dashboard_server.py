@@ -3257,6 +3257,51 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(checks["unity.mcp.instance"]["fixable"])
         self.assertIn("repair_unity_bridge", checks["unity.mcp.instance"]["actions"])
 
+    def test_extract_unity_project_path_from_command_line(self) -> None:
+        command_line = r'"E:\unity\Unity 2022.3.22f1\Editor\Unity.exe" -projectPath "E:\unity\milltina"'
+
+        self.assertEqual(
+            dashboard_server.extract_unity_project_path_from_command_line(command_line),
+            "E:/unity/milltina",
+        )
+
+    def test_discover_projects_includes_running_unity_project_path(self) -> None:
+        previous_selected = dashboard_server.DASHBOARD_STATE.selected_project_path
+        previous_status = dashboard_server.CURRENT_UNITY_STATUS
+        try:
+            dashboard_server.DASHBOARD_STATE.selected_project_path = ""
+            dashboard_server.CURRENT_UNITY_STATUS = {"instances": []}
+            with tempfile.TemporaryDirectory() as temp_dir:
+                project = Path(temp_dir) / "Running Avatar"
+                (project / "Assets").mkdir(parents=True)
+                (project / "Packages").mkdir()
+                (project / "ProjectSettings").mkdir()
+                (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+                with (
+                    patch("dashboard_server.discover_vcc_projects", return_value=[]),
+                    patch("dashboard_server.discover_alcom_projects", return_value=[]),
+                    patch("dashboard_server.discover_unity_hub_projects", return_value=[]),
+                    patch("dashboard_server.load_project_prefs", return_value={"customPaths": [], "hiddenPaths": []}),
+                    patch(
+                        "dashboard_server.list_running_unity_processes",
+                        return_value=[
+                            {
+                                "processId": 123,
+                                "executablePath": r"E:\unity\Unity 2022.3.22f1\Editor\Unity.exe",
+                                "commandLine": f'"E:\\unity\\Unity 2022.3.22f1\\Editor\\Unity.exe" -projectPath "{project}"',
+                            }
+                        ],
+                    ),
+                ):
+                    projects = dashboard_server.discover_projects([], include_external=True)
+
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["path"], dashboard_server.normalize_path_string(str(project)))
+            self.assertIn("running-unity", projects[0]["sources"])
+        finally:
+            dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
+            dashboard_server.CURRENT_UNITY_STATUS = previous_status
+
     def test_repair_unity_mcp_bridge_already_healthy_noop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -4981,6 +5026,8 @@ namespace VRCForge.Editor
             try:
                 with patch("dashboard_server.discover_vcc_projects", return_value=[]), patch(
                     "dashboard_server.discover_unity_hub_projects", return_value=[]
+                ), patch(
+                    "dashboard_server.discover_running_unity_projects", return_value=[]
                 ):
                     projects = dashboard_server.discover_projects([root], include_external=True)
             finally:
@@ -5018,7 +5065,7 @@ namespace VRCForge.Editor
                 "dashboard_server.discover_alcom_projects", return_value=[str(project_dir)]
             ), patch("dashboard_server.discover_unity_hub_projects", return_value=[
                 {"name": "Avatar Project", "path": str(project_dir), "editorVersion": "2022.3.22f1"}
-            ]):
+            ]), patch("dashboard_server.discover_running_unity_projects", return_value=[]):
                 projects = dashboard_server.discover_projects([], include_external=True)
 
             self.assertEqual(len(projects), 1)
