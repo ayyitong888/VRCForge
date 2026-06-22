@@ -184,6 +184,11 @@ def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dep
         raise AssertionError("apply-request preview must not run the full optimization plan")
 
     monkeypatch.setattr(dashboard_server, "build_optimization_plan_sync", fail_full_plan)
+    monkeypatch.setattr(
+        dashboard_server,
+        "package_install_plan_sync",
+        lambda _params: (_ for _ in ()).throw(AssertionError("installed dependency must not build an install plan")),
+    )
 
     payload = dashboard_server.build_optimization_apply_request_preview_sync(
         {
@@ -197,6 +202,7 @@ def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dep
     assert payload["readyToRequest"] is True
     assert payload["stableCallable"] is True
     assert payload["writeSupported"] is True
+    assert payload["dependencyInstallPlan"] is None
     assert payload["applyArguments"]["componentType"] == "dev.limitex.avatar.compressor.TextureCompressor"
 
 

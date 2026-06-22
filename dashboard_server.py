@@ -761,8 +761,8 @@ class DashboardEventBus:
         stale_clients: list[WebSocket] = []
         for websocket in list(self._clients):
             try:
-                await websocket.send_json(message)
-            except (WebSocketDisconnect, RuntimeError):
+                await asyncio.wait_for(websocket.send_json(message), timeout=2.0)
+            except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
                 stale_clients.append(websocket)
             except Exception as exc:  # noqa: BLE001
                 emit_log("warn", "socket", "Dropped stale websocket client during broadcast.", {"error": str(exc)})
@@ -12311,7 +12311,13 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     package_ids = [str(item) for item in dependency.get("packageIds") or [] if str(item or "").strip()]
     dependency_status = str(dependency.get("status") or "unknown")
     install_plan = None
-    if package_ids:
+    wants_install_plan = bool(
+        params.get("installMissingDependencies")
+        or params.get("install_missing_dependencies")
+        or params.get("allowAgentManagedDownload")
+        or dependency_status != "installed"
+    )
+    if package_ids and wants_install_plan:
         install_plan = package_install_plan_sync(
             {
                 "projectPath": project_value,
