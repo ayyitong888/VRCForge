@@ -2067,6 +2067,84 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse((project / "Assets" / "generated.txt").exists())
             self.assertEqual(reloaded, [project.resolve()])
 
+    def test_failed_write_after_checkpoint_returns_checkpoint_for_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "existing.txt").write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+
+            def failing_write(args: dict) -> dict:
+                project_root = Path(args["projectRoot"])
+                (project_root / "Assets" / "generated-before-fail.txt").write_text("generated", encoding="utf-8")
+                raise RuntimeError("Unity MCP disconnected after checkpoint")
+
+            gateway.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
+            request = gateway.create_apply_request({
+                "target_tool": "vrcforge_test_failing_write",
+                "arguments": {"projectRoot": str(project)},
+            })
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertFalse(applied["ok"])
+            self.assertEqual(applied["status"], "failed")
+            self.assertIn("Unity MCP disconnected", applied["error"])
+            self.assertTrue(applied["checkpoint"]["ok"])
+            self.assertEqual(applied["approval"]["checkpoint"]["id"], applied["checkpoint"]["id"])
+
+            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+            self.assertTrue(restored["ok"])
+            self.assertFalse((project / "Assets" / "generated-before-fail.txt").exists())
+
+    def test_checkpoint_archive_restore_succeeds_when_unity_reload_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            existing = project / "Assets" / "existing.txt"
+            existing.write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_restore_handler = lambda _path: {"ok": False, "error": "Unity bridge unavailable"}
+
+            def write_handler(args: dict) -> dict:
+                project_root = Path(args["projectRoot"])
+                (project_root / "Assets" / "existing.txt").write_text("after", encoding="utf-8")
+                (project_root / "Assets" / "generated.txt").write_text("generated", encoding="utf-8")
+                return {"ok": True}
+
+            gateway.register_write_handler("vrcforge_test_reload_warning", "Reload warning write", "high", write_handler)
+            request = gateway.create_apply_request({
+                "target_tool": "vrcforge_test_reload_warning",
+                "arguments": {"projectRoot": str(project)},
+            })
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertTrue(applied["ok"])
+            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+
+            self.assertTrue(restored["ok"])
+            self.assertEqual(restored["status"], "restored_with_unity_reload_warning")
+            self.assertIn("Unity bridge unavailable", restored["unityReloadWarning"])
+            self.assertEqual(existing.read_text(encoding="utf-8"), "before")
+            self.assertFalse((project / "Assets" / "generated.txt").exists())
+
     def test_checkpoint_tools_registered_with_restore_as_write_target(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
@@ -3167,6 +3245,353 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(dashboard_server.DASHBOARD_STATE.unity_instance, "5d8ae8a25423705c")
         finally:
             dashboard_server.DASHBOARD_STATE.unity_instance = previous_instance
+
+    def test_doctor_marks_unity_bridge_checks_repairable(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.get("/api/app/doctor")
+
+        self.assertEqual(response.status_code, 200)
+        checks = {item["id"]: item for item in response.json()["checks"]}
+        self.assertTrue(checks["unity.mcp.bridge"]["fixable"])
+        self.assertIn("repair_unity_bridge", checks["unity.mcp.bridge"]["actions"])
+        self.assertTrue(checks["unity.mcp.instance"]["fixable"])
+        self.assertIn("repair_unity_bridge", checks["unity.mcp.instance"]["actions"])
+
+    def test_repair_unity_mcp_bridge_already_healthy_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            healthy = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy),
+                patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
+                patch("dashboard_server.subprocess.Popen") as mock_popen,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=True)
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "healthy")
+        mock_popen.assert_not_called()
+
+    def test_repair_unity_mcp_bridge_refuses_to_close_unmatched_unity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            other = root / "OtherProject"
+            editor = root / "Unity.exe"
+            for candidate in (project, other):
+                (candidate / "Assets").mkdir(parents=True)
+                (candidate / "Packages").mkdir()
+                (candidate / "ProjectSettings").mkdir()
+                (candidate / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            editor.write_text("", encoding="utf-8")
+            offline = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": False,
+                "selectedInstanceMatched": False,
+                "activeInstanceCount": 0,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=offline),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch("dashboard_server.wait_for_unity_project_registration", return_value=(False, {"instances": []})),
+                patch(
+                    "dashboard_server.list_running_unity_processes",
+                    return_value=[
+                        {
+                            "processId": 123,
+                            "executablePath": str(editor),
+                            "commandLine": f'"{editor}" -projectPath "{other}"',
+                        }
+                    ],
+                ),
+                patch("dashboard_server.launch_unity_project") as mock_launch,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), unityEditorPath=str(editor), allowUnityRelaunch=True)
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "needs_user_action")
+        self.assertIn("did not close any editor", json.dumps(result["phases"]))
+        mock_launch.assert_not_called()
+
+    def test_repair_unity_mcp_bridge_registered_without_tools_needs_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            registered_without_tools = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch("dashboard_server.wait_for_unity_project_registration", return_value=(True, {"instances": [{"project": project.name}]})),
+                patch("dashboard_server.restart_unity_mcp_server", return_value=False),
+                patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+                patch("dashboard_server.close_unity_project_gracefully") as mock_close,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=False, waitSeconds=5)
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "needs_user_action")
+        self.assertIn("unity_tools", {phase["id"] for phase in result["phases"]})
+        self.assertFalse(result["after"]["vrcForgeToolsRegistered"])
+        mock_close.assert_not_called()
+
+    def test_discover_vrcforge_unity_tool_definitions_reads_mcp_attributes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            editor = project / "Assets" / "VRCForge" / "Editor"
+            editor.mkdir(parents=True)
+            (editor / "SampleTool.cs").write_text(
+                """
+using MCPForUnity.Editor.Tools;
+
+namespace VRCForge.Editor
+{
+    [McpForUnityTool(
+        name: "vrc_sample_tool",
+        Description = "Sample VRCForge tool."
+    )]
+    public static class SampleTool {}
+}
+""",
+                encoding="utf-8",
+            )
+
+            definitions = dashboard_server.discover_vrcforge_unity_tool_definitions(project)
+
+        self.assertEqual([item["name"] for item in definitions], ["vrc_sample_tool"])
+        self.assertEqual(definitions[0]["description"], "Sample VRCForge tool.")
+        self.assertTrue(definitions[0]["structured_output"])
+
+    def test_repair_unity_mcp_bridge_reregisters_empty_tool_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            editor = project / "Assets" / "VRCForge" / "Editor"
+            editor.mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            (editor / "SampleTool.cs").write_text(
+                """
+using MCPForUnity.Editor.Tools;
+
+namespace VRCForge.Editor
+{
+    [McpForUnityTool(name: "vrc_export_blendshapes", Description = "Export blendshapes.")]
+    public static class SampleTool {}
+}
+""",
+                encoding="utf-8",
+            )
+            registered_without_tools = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "activeInstance": {"project": project.name, "hash": "abc123", "cliInstanceId": "abc123"},
+                "instances": [{"project": project.name, "hash": "abc123", "cliInstanceId": "abc123"}],
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            healthy_summary = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": True,
+                "totalTools": 78,
+                "vrcForgeToolsCount": 48,
+                "missingRequiredVrcForgeTools": [],
+                "toolsError": "",
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch("dashboard_server.wait_for_unity_project_registration", return_value=(True, {"instances": [{"project": project.name}]})),
+                patch("dashboard_server.wait_for_unity_tools_ready", side_effect=[(False, dashboard_server._unity_repair_status_summary(registered_without_tools)), (True, healthy_summary)]),
+                patch("dashboard_server.post_unity_http_json", return_value=(True, {"ok": True}, "", 200)) as mock_post,
+                patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
+                patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+                patch("dashboard_server.restart_unity_mcp_server") as mock_restart,
+                patch("dashboard_server.close_unity_project_gracefully") as mock_close,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=False, waitSeconds=5)
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recovered")
+        self.assertIn("unity_tool_registration", {phase["id"] for phase in result["phases"]})
+        self.assertEqual(mock_post.call_args.args[1], "/register-tools")
+        self.assertEqual(mock_post.call_args.args[2]["project_id"], "abc123")
+        self.assertEqual(mock_post.call_args.args[2]["tools"][0]["name"], "vrc_export_blendshapes")
+        mock_restart.assert_not_called()
+        mock_close.assert_not_called()
+
+    def test_unity_repair_tools_message_distinguishes_execution_disconnect(self) -> None:
+        message = dashboard_server.unity_repair_tools_message(
+            {
+                "unityInstanceRegistered": True,
+                "totalTools": 0,
+                "vrcForgeToolsRegistered": False,
+                "toolsError": "HTTP 503: No Unity instances connected.",
+            }
+        )
+
+        self.assertIn("execution connection", message)
+
+    def test_repair_unity_mcp_bridge_restart_recovers_empty_tool_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            registered_without_tools = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            healthy_summary = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": True,
+                "totalTools": 78,
+                "vrcForgeToolsCount": 48,
+                "missingRequiredVrcForgeTools": [],
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch(
+                    "dashboard_server.wait_for_unity_project_registration",
+                    side_effect=[
+                        (True, {"instances": [{"project": project.name}]}),
+                        (True, {"instances": [{"project": project.name}]}),
+                    ],
+                ),
+            patch("dashboard_server.wait_for_unity_tools_ready", side_effect=[(False, dashboard_server._unity_repair_status_summary(registered_without_tools)), (True, healthy_summary)]),
+            patch("dashboard_server.restart_unity_mcp_server", return_value=True) as mock_restart,
+            patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
+            patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+            patch("dashboard_server.close_unity_project_gracefully") as mock_close,
+        ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=False, waitSeconds=5)
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(result["after"]["totalTools"], 78)
+        mock_restart.assert_called_once()
+        mock_close.assert_not_called()
+
+    def test_repair_unity_mcp_bridge_relaunches_and_reconnects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            editor = root / "Unity.exe"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            editor.write_text("", encoding="utf-8")
+            offline = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": False,
+                "selectedInstanceMatched": False,
+                "activeInstanceCount": 0,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            healthy = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", side_effect=[offline, healthy]),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch(
+                    "dashboard_server.wait_for_unity_project_registration",
+                    side_effect=[
+                        (False, {"instances": []}),
+                        (True, {"instances": [{"project": project.name, "hash": "abc123"}]}),
+                    ],
+                ) as mock_wait,
+                patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
+                patch("dashboard_server.close_unity_project_gracefully", return_value=(True, "Unity closed cleanly.", {})) as mock_close,
+                patch("dashboard_server.launch_unity_project", return_value=(True, "")) as mock_launch,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), unityEditorPath=str(editor), allowUnityRelaunch=True)
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(mock_wait.call_count, 2)
+        mock_close.assert_called_once()
+        mock_launch.assert_called_once()
 
     def test_scene_capture_tool_supports_play_mode_game_view_status(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "SceneViewCaptureTool.cs").read_text(

@@ -30,7 +30,7 @@ def main() -> int:
     smoke = ExternalAgentBridgeSmoke(args)
     report = smoke.run()
     output_path = smoke.write_report(report)
-    print(json.dumps({"ok": report["ok"], "reportPath": str(output_path), "summary": report["summary"]}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": report["ok"], "reportPath": str(output_path), "summary": report["summary"]}, ensure_ascii=True, indent=2))
     return 0 if report["ok"] else 1
 
 
@@ -547,7 +547,7 @@ class ExternalAgentBridgeSmoke:
         root = Path.cwd() / "artifacts" / "external-agent-smoke"
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"external-agent-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-        path.write_text(json.dumps(redact_evidence(report), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(json.dumps(redact_evidence(report), ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return path
 
     def build_summary(self, ok: bool) -> dict[str, Any]:

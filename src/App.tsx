@@ -104,6 +104,7 @@ import {
   rejectAgentApproval,
   requestOutfitImport,
   requestRestoreCheckpoint,
+  repairUnityMcpBridge,
   retrySubAgent,
   saveChats,
   saveProjectPrefs,
@@ -401,6 +402,7 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
+  const [repairingUnityBridge, setRepairingUnityBridge] = useState(false);
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<DiagnosticsStatus | null>(null);
@@ -1540,6 +1542,37 @@ export default function App() {
     }
   }
 
+  async function repairUnityBridgeFromDoctor(target = endpoint) {
+    setRepairingUnityBridge(true);
+    setDoctorMessage("");
+    setError("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await repairUnityMcpBridge(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+        allowUnityRelaunch: true,
+        waitSeconds: 120,
+        closeTimeoutSeconds: 60,
+      });
+      const failedPhase = payload.phases.find((phase) => phase.status === "error" || phase.status === "warning");
+      const suffix = failedPhase && !payload.ok ? `: ${failedPhase.message}` : "";
+      await loadDoctor(targetEndpoint);
+      await refreshWithRetry(targetEndpoint);
+      setDoctorMessage(payload.ok ? `Unity bridge ${payload.status}` : `Unity bridge needs action${suffix}`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRepairingUnityBridge(false);
+    }
+  }
+
   async function openSkills() {
     setActiveView("skills");
     setError("");
@@ -2322,8 +2355,10 @@ export default function App() {
               report={doctorReport}
               loading={loadingDoctor}
               message={doctorMessage}
+              repairingUnityBridge={repairingUnityBridge}
               exportingSupportBundle={exportingSupportBundle}
               onRefresh={() => void loadDoctor()}
+              onRepairUnityBridge={() => void repairUnityBridgeFromDoctor()}
               onOpenSettings={() => void openSettings()}
               onExportSupportBundle={() => void createSupportBundle()}
               onCopy={() => {
@@ -3522,6 +3557,18 @@ function OutfitImportPanel({
   const tone: "ok" | "warn" | "danger" | "muted" = !hasResult ? "muted" : result?.ok && ready ? "ok" : result?.ok ? "warn" : "danger";
   const label = !hasResult ? "待检查" : ready ? "可请求" : result?.ok ? "需确认" : "受阻";
   const expected = plan?.expectedAssetPaths || [];
+  const dependencyPreflight = result?.dependencyPreflight || plan?.dependencyPreflight;
+  const dependencyEntries = dependencyPreflight?.entries || [];
+  const visibleDependencyEntries = dependencyEntries.filter((entry) => entry.status && entry.status !== "not_detected");
+  const packageOrder = dependencyPreflight?.packageOrder;
+  const importQueue = packageOrder?.importQueue || plan?.source?.importQueue || [];
+  const skippedInstalledSupportPackages = packageOrder?.skippedInstalledSupportPackages || [];
+  const compatibility = dependencyPreflight?.compatibility;
+  const dependencySummary = dependencyPreflight
+    ? `${dependencyPreflight.readyForImport ? "ready" : "blocked"} / ${dependencyPreflight.blockingIssueCount || dependencyPreflight.blockingMissingCount || 0} issue(s) / ${
+        dependencyPreflight.detectedCount || visibleDependencyEntries.length
+      } detected`
+    : "";
   return (
     <section className="mb-4 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
       <div className="flex min-w-0 items-center gap-2 px-3 py-2">
@@ -3574,6 +3621,51 @@ function OutfitImportPanel({
           </div>
           {status ? <DataLine label="Status" value={status} /> : null}
           {plan?.kind ? <DataLine label="Plan" value={plan.kind} /> : null}
+          {dependencySummary ? <DataLine label="Dependency preflight" value={dependencySummary} /> : null}
+          {compatibility ? (
+            <DataLine
+              label="Avatar compatibility"
+              value={`${compatibility.status || "unknown"}${compatibility.message ? ` - ${compatibility.message}` : ""}`}
+            />
+          ) : null}
+          {importQueue.length ? (
+            <OutputBlock
+              label="Import order"
+              value={importQueue
+                .map((item, index) => `${item.order || index + 1}. ${item.role || "package"} ${item.path || item.actualPackagePath || ""}`)
+                .join("\n")}
+            />
+          ) : null}
+          {skippedInstalledSupportPackages.length ? (
+            <OutputBlock
+              label="Skipped packages"
+              value={skippedInstalledSupportPackages
+                .map(
+                  (item) =>
+                    `${item.dependencyLabel || item.dependencyId || "dependency"}: ${item.path || item.actualPackagePath || ""}${
+                      item.message ? `\n  ${item.message}` : ""
+                    }`,
+                )
+                .join("\n")}
+            />
+          ) : null}
+          {visibleDependencyEntries.length ? (
+            <OutputBlock
+              label="Dependencies"
+              value={visibleDependencyEntries
+                .map((entry) => {
+                  const evidence = [
+                    ...(entry.evidence?.project || []),
+                    ...(entry.evidence?.packagePathnames || []),
+                    ...(entry.evidence?.hints || []),
+                  ];
+                  return `${entry.status || "unknown"} ${entry.label || entry.id || "dependency"}${entry.blockingBeforeImport ? " [before import]" : ""}${
+                    evidence.length ? `\n  ${evidence.slice(0, 3).join("\n  ")}` : ""
+                  }`;
+                })
+                .join("\n")}
+            />
+          ) : null}
           {plan?.targetFolder ? <DataLine label="Target" value={plan.targetFolder} mono /> : null}
           {plan?.selectedPrefab ? <DataLine label="Prefab" value={plan.selectedPrefab} mono /> : null}
           {expected.length ? <OutputBlock label="Expected assets" value={expected.slice(0, 20).join("\n")} /> : null}
@@ -5071,8 +5163,10 @@ function DoctorWorkspace({
   report,
   loading,
   message,
+  repairingUnityBridge,
   exportingSupportBundle,
   onRefresh,
+  onRepairUnityBridge,
   onOpenSettings,
   onExportSupportBundle,
   onCopy,
@@ -5080,8 +5174,10 @@ function DoctorWorkspace({
   report: DoctorReport | null;
   loading: boolean;
   message: string;
+  repairingUnityBridge: boolean;
   exportingSupportBundle: boolean;
   onRefresh: () => void;
+  onRepairUnityBridge: () => void;
   onOpenSettings: () => void;
   onExportSupportBundle: () => void;
   onCopy: () => void;
@@ -5179,7 +5275,12 @@ function DoctorWorkspace({
                 </Badge>
               </div>
               {group.items.map((check) => (
-                <DoctorCheckRow key={check.id} check={check} />
+                <DoctorCheckRow
+                  key={check.id}
+                  check={check}
+                  repairingUnityBridge={repairingUnityBridge}
+                  onRepairUnityBridge={onRepairUnityBridge}
+                />
               ))}
             </section>
           ))}
@@ -5241,10 +5342,19 @@ function DoctorSummaryTile({
   );
 }
 
-function DoctorCheckRow({ check }: { check: DoctorCheck }) {
+function DoctorCheckRow({
+  check,
+  repairingUnityBridge,
+  onRepairUnityBridge,
+}: {
+  check: DoctorCheck;
+  repairingUnityBridge: boolean;
+  onRepairUnityBridge: () => void;
+}) {
   const openByDefault = check.status === "error" || check.status === "warning";
   const [open, setOpen] = useState(openByDefault);
   const tone = doctorTone(check.status);
+  const canRepairUnityBridge = check.status !== "ok" && Boolean(check.fixable) && (check.actions || []).includes("repair_unity_bridge");
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
       <button
@@ -5268,6 +5378,14 @@ function DoctorCheckRow({ check }: { check: DoctorCheck }) {
           <DataLine label="Why" value={check.whyItMatters || "-"} />
           <DataLine label="How to fix" value={check.howToFix || "-"} />
           {check.fixCommand ? <DataLine label="Fix" value={check.fixCommand} /> : null}
+          {canRepairUnityBridge ? (
+            <div className="flex justify-end">
+              <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={onRepairUnityBridge} disabled={repairingUnityBridge}>
+                {repairingUnityBridge ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+                Repair bridge
+              </Button>
+            </div>
+          ) : null}
           <DataLine label="Message" value={check.message || "-"} />
           {check.detail !== undefined ? <OutputBlock label="Detail" value={formatPayload(check.detail)} /> : null}
         </div>

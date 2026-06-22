@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tarfile
 import time
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -31,6 +32,12 @@ def make_unitypackage(path: Path) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
         write_tar_member(archive, "abc/pathname", b"Assets/Outfits/Dress.prefab")
         write_tar_member(archive, "abc/asset", b"SECRET_ASSET_BYTES")
+
+
+def make_zip_with_unitypackages(path: Path) -> None:
+    with zipfile.ZipFile(path, mode="w") as archive:
+        archive.writestr("Product/MaterialPack.unitypackage", b"SECRET_MATERIAL_PACKAGE")
+        archive.writestr("Product/Dress_Milltina.unitypackage", b"SECRET_DRESS_PACKAGE")
 
 
 def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: Path) -> None:
@@ -111,6 +118,58 @@ def test_outfit_import_handler_resolves_unity_project_root(tmp_path: Path, monke
     assert payload["kind"] == "unitypackage_import"
     assert seen["projectPath"] == str(project.resolve())
     assert seen["unityPackagePath"] == str(package.resolve())
+
+
+def test_outfit_import_handler_extracts_zip_queue_in_order(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    package = tmp_path / "DressBundle.zip"
+    make_zip_with_unitypackages(package)
+    seen: list[tuple[str, str]] = []
+
+    def fake_import(params: dict[str, object]) -> dict[str, object]:
+        unity_package_path = Path(str(params.get("unityPackagePath") or ""))
+        seen.append((unity_package_path.name, unity_package_path.read_text(encoding="utf-8")))
+        return {"ok": True, "importedAssetCount": 1}
+
+    monkeypatch.setattr(dashboard_server, "import_unitypackage_sync", fake_import)
+
+    payload = dashboard_server.import_outfit_package_sync({"packagePath": str(package), "projectPath": str(project), "baseAvatarName": "Milltina"})
+
+    assert payload["ok"] is True
+    assert payload["kind"] == "unitypackage_import_sequence"
+    assert [item[1] for item in seen] == ["SECRET_MATERIAL_PACKAGE", "SECRET_DRESS_PACKAGE"]
+    assert [item["role"] for item in payload["unityImports"]] == ["support", "target"]
+
+
+def test_outfit_import_handler_skips_installed_shader_support_package(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    (project / "Packages" / "manifest.json").write_text('{"dependencies":{"jp.lilxyzw.liltoon":"1.8.0"}}', encoding="utf-8")
+    package = tmp_path / "Milltina_Slingshot_Swimsuit.zip"
+    material_zip = tmp_path / "Slingshot_Material_and_textures.zip"
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("Milltina Slingshot Swimsuit.unitypackage", b"SECRET_DRESS_PACKAGE")
+    with zipfile.ZipFile(material_zip, mode="w") as archive:
+        archive.writestr("lilToon_1.7.3.unitypackage", b"SECRET_SHADER_PACKAGE")
+        archive.writestr("Slingshot textures.unitypackage", b"SECRET_MATERIAL_PACKAGE")
+    seen: list[str] = []
+
+    def fake_import(params: dict[str, object]) -> dict[str, object]:
+        unity_package_path = Path(str(params.get("unityPackagePath") or ""))
+        seen.append(unity_package_path.read_text(encoding="utf-8"))
+        return {"ok": True, "importedAssetCount": 1}
+
+    monkeypatch.setattr(dashboard_server, "import_unitypackage_sync", fake_import)
+
+    payload = dashboard_server.import_outfit_package_sync({"packagePath": str(package), "projectPath": str(project), "baseAvatarName": "Milltina"})
+
+    assert payload["ok"] is True
+    assert [item["role"] for item in payload["unityImports"]] == ["support", "target"]
+    assert seen == ["SECRET_MATERIAL_PACKAGE", "SECRET_DRESS_PACKAGE"]
+    assert len(payload["skippedUnityImports"]) == 1
+    assert payload["skippedUnityImports"][0]["path"] == "lilToon_1.7.3.unitypackage"
+    assert payload["skippedUnityImports"][0]["dependencyId"] == "liltoon"
 
 
 def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatch) -> None:

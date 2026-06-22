@@ -329,6 +329,22 @@ export type DoctorReport = {
   checks: DoctorCheck[];
 };
 
+export type UnityMcpRepairResult = {
+  ok: boolean;
+  schema: "vrcforge.unity_mcp_repair.v1" | string;
+  status: "healthy" | "recovered" | "needs_user_action" | "failed" | string;
+  generatedAt: string;
+  projectPath?: string;
+  phases: Array<{
+    id: string;
+    status: "ok" | "warning" | "error" | "skipped" | string;
+    message: string;
+    detail?: unknown;
+  }>;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+};
+
 export type AppBootstrap = {
   ok: boolean;
   app: {
@@ -381,6 +397,17 @@ export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
 
 export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
   return requestJson<DoctorReport>(`${endpoint}/api/app/doctor`);
+}
+
+export async function repairUnityMcpBridge(
+  endpoint: string,
+  request: { projectPath?: string; allowUnityRelaunch?: boolean; waitSeconds?: number; closeTimeoutSeconds?: number } = {},
+): Promise<UnityMcpRepairResult> {
+  return requestJson<UnityMcpRepairResult>(`${endpoint}/api/app/doctor/unity-mcp/repair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
 }
 
 export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsStatus> {
@@ -794,12 +821,79 @@ export type ProjectIndexScanResult = {
   privacy?: Record<string, unknown>;
 };
 
+export type OutfitDependencyPreflight = {
+  schema?: string;
+  readyForImport?: boolean;
+  blockingMissingCount?: number;
+  blockingIssueCount?: number;
+  detectedCount?: number;
+  packageOrder?: {
+    importQueue?: Array<{
+      order?: number;
+      path?: string;
+      sourceType?: string;
+      role?: string;
+      reason?: string;
+      actualPackagePath?: string;
+      containerPath?: string;
+      selected?: boolean;
+    }>;
+    skippedInstalledSupportPackages?: Array<{
+      order?: number;
+      path?: string;
+      sourceType?: string;
+      role?: string;
+      reason?: string;
+      actualPackagePath?: string;
+      containerPath?: string;
+      selected?: boolean;
+      skipReason?: string;
+      dependencyId?: string;
+      dependencyLabel?: string;
+      message?: string;
+    }>;
+    skippedInstalledSupportCount?: number;
+    importCount?: number;
+    supportPackageCount?: number;
+    requiresManualExtract?: boolean;
+    blockingBeforeImport?: boolean;
+    warnings?: string[];
+  };
+  compatibility?: {
+    status?: string;
+    baseAvatarName?: string;
+    detectedAvatarNames?: string[];
+    blockingBeforeImport?: boolean;
+    message?: string;
+    evidence?: Record<string, string[]>;
+    warnings?: string[];
+  };
+  entries?: Array<{
+    id?: string;
+    label?: string;
+    kind?: string;
+    status?: string;
+    message?: string;
+    blockingBeforeImport?: boolean;
+    stage?: string;
+    packageIds?: string[];
+    evidence?: {
+      packagePathnames?: string[];
+      hints?: string[];
+      project?: string[];
+    };
+  }>;
+  warnings?: string[];
+  recommendedOrder?: string[];
+};
+
 export type OutfitImportPlanResult = {
   ok: boolean;
   schema?: string;
   preview?: boolean;
   plannedAt?: string;
   error?: string;
+  dependencyPreflight?: OutfitDependencyPreflight;
   inspection?: {
     ok?: boolean;
     summary?: {
@@ -830,8 +924,25 @@ export type OutfitImportPlanResult = {
     rollbackProofRequired?: boolean;
     projectPath?: string;
     targetFolder?: string;
+    source?: {
+      type?: string;
+      path?: string;
+      selectedUnityPackage?: string;
+      actualPackagePath?: string;
+      importQueue?: Array<{
+        order?: number;
+        path?: string;
+        sourceType?: string;
+        role?: string;
+        reason?: string;
+        actualPackagePath?: string;
+        containerPath?: string;
+        selected?: boolean;
+      }>;
+    };
     selectedPrefab?: string;
     expectedAssetPaths?: string[];
+    dependencyPreflight?: OutfitDependencyPreflight;
     writeTarget?: string;
     steps?: Array<{ id?: string; category?: string; tool?: string; description?: string; enabled?: boolean }>;
     warnings?: string[];

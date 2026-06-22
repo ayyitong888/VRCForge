@@ -1790,6 +1790,7 @@ class AgentGateway:
             self._approvals[approval_id] = approval
             self.append_audit({"event": "approval_applying", "approval": approval})
 
+        checkpoint: dict[str, Any] | None = None
         try:
             user_constraints = self.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -1819,7 +1820,10 @@ class AgentGateway:
                 approval["error"] = str(exc)
                 self._approvals[approval_id] = approval
                 self.append_audit({"event": "approval_failed", "approval": approval})
-            return {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
+            payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
+            if checkpoint:
+                payload["checkpoint"] = checkpoint
+            return payload
 
     def list_approvals(self, include_expired: bool = True) -> list[dict[str, Any]]:
         with self._lock:
@@ -1919,8 +1923,12 @@ class AgentGateway:
                 reload_result = {"ok": False, "error": str(exc)}
             payload["unityReload"] = reload_result
             if not reload_result.get("ok"):
-                payload["ok"] = False
-                payload["error"] = str(reload_result.get("error") or "Unity did not reload after checkpoint restore.")
+                payload["unityReloadWarning"] = str(
+                    reload_result.get("error") or "Unity did not reload after checkpoint restore."
+                )
+                payload["status"] = "restored_with_unity_reload_warning"
+            else:
+                payload["status"] = "restored"
         self.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 

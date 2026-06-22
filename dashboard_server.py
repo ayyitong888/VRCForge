@@ -43,7 +43,7 @@ from external_agent_connector_installer import (
 )
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
 from outfit_import_planner import build_outfit_import_plan
-from outfit_package_inspector import inspect_outfit_package
+from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from project_memory_index import scan_project_memory
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_tasks import CancelledError, SubAgentRole, SubAgentTaskRegistry
@@ -293,6 +293,16 @@ class ProjectActionRequest(BaseModel):
 class ProjectInstallRequest(BaseModel):
     project_path: str | None = None
     launch_unity: bool = False
+
+
+class UnityMcpRepairRequest(BaseModel):
+    project_path: str = Field(default="", alias="projectPath")
+    unity_editor_path: str = Field(default="", alias="unityEditorPath")
+    allow_unity_relaunch: bool = Field(default=False, alias="allowUnityRelaunch")
+    wait_seconds: int = Field(default=90, alias="waitSeconds", ge=5, le=360)
+    close_timeout_seconds: int = Field(default=60, alias="closeTimeoutSeconds", ge=5, le=180)
+
+    model_config = {"populate_by_name": True}
 
 
 class ApiConfigRequest(BaseModel):
@@ -2306,8 +2316,8 @@ def _doctor_fix_command_for_id(check_id: str) -> str:
         "unity.project_root": "Open Project Picker and select the Unity project root used by the bridge.",
         "unity.plugin": "Run Unity plugin install/repair for the selected project.",
         "unity.mcp.package": "Repair VRCForge Unity plugin install, or add the Unity MCP package through VCC/vrc-get/ALCOM.",
-        "unity.mcp.bridge": "Open the selected Unity project, start the MCP bridge, then Retry.",
-        "unity.mcp.instance": "Focus the correct Unity editor instance, then Retry.",
+        "unity.mcp.bridge": "Use Repair bridge to start the local MCP server and reconnect Unity, then Retry.",
+        "unity.mcp.instance": "Use Repair bridge to wait for or relaunch the selected Unity project, then Retry.",
         "unity.tools": "Wait for Unity compile, then repair/reinstall the VRCForge plugin if tools remain missing.",
         "package.vrchat_sdk": "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
         "package.modular_avatar": "Install Modular Avatar if this avatar or outfit workflow requires it.",
@@ -2371,6 +2381,7 @@ def _doctor_check(
     how_to_fix: str,
     detail: Any = None,
     actions: list[str] | None = None,
+    fixable: bool = False,
 ) -> dict[str, Any]:
     if status not in {"ok", "warning", "error", "unknown"}:
         status = "unknown"
@@ -2384,7 +2395,7 @@ def _doctor_check(
         "whyItMatters": why_it_matters,
         "howToFix": how_to_fix,
         "fixCommand": _doctor_fix_command_for_id(check_id),
-        "fixable": False,
+        "fixable": fixable,
         "actions": actions or ["retry", "open_logs", "copy_diagnostic_summary"],
         "detail": _redact_doctor_detail(detail),
     }
@@ -2397,6 +2408,8 @@ def _doctor_check_from_component(
     why_it_matters: str,
     how_to_fix: str,
     missing_status: str = "unknown",
+    actions: list[str] | None = None,
+    fixable: bool = False,
 ) -> dict[str, Any]:
     component = component if isinstance(component, dict) else {}
     status = str(component.get("status") or missing_status)
@@ -2409,6 +2422,8 @@ def _doctor_check_from_component(
         why_it_matters,
         how_to_fix,
         component.get("detail"),
+        actions=actions,
+        fixable=fixable,
     )
 
 
@@ -2577,6 +2592,8 @@ def build_app_doctor_report() -> dict[str, Any]:
             components.get("unityMcpBridgeReachable"),
             "Live scans and writes require the Unity editor bridge to be reachable.",
             "Open the selected Unity project, confirm the MCP server is running, then Retry.",
+            actions=["repair_unity_bridge", "retry", "open_logs", "copy_diagnostic_summary"],
+            fixable=True,
         ),
         _doctor_check_from_component(
             "unity.mcp.instance",
@@ -2584,6 +2601,8 @@ def build_app_doctor_report() -> dict[str, Any]:
             components.get("unityMcpInstance"),
             "The runtime must target the correct Unity editor instance before tool calls are reliable.",
             "Focus the Unity project, check MCP instance selection, or restart the bridge.",
+            actions=["repair_unity_bridge", "retry", "open_logs", "copy_diagnostic_summary"],
+            fixable=True,
         ),
         _doctor_check_from_component(
             "unity.tools",
@@ -2862,6 +2881,31 @@ def read_agentic_app_doctor() -> dict[str, Any]:
             },
             "checks": checks,
         }
+
+
+@app.post("/api/app/doctor/unity-mcp/repair")
+async def repair_agentic_app_unity_mcp(request: UnityMcpRepairRequest) -> dict[str, Any]:
+    await emit_log_async(
+        "info",
+        "doctor",
+        "Unity MCP bridge repair requested.",
+        {
+            "projectPath": request.project_path or DASHBOARD_STATE.selected_project_path,
+            "allowUnityRelaunch": request.allow_unity_relaunch,
+        },
+    )
+    result = await asyncio.to_thread(repair_unity_mcp_bridge_sync, request)
+    await emit_log_async(
+        "success" if result.get("ok") else "warn",
+        "doctor",
+        "Unity MCP bridge repair finished.",
+        {
+            "status": result.get("status"),
+            "ok": result.get("ok"),
+            "phaseCount": len(result.get("phases") or []),
+        },
+    )
+    return result
 
 
 @app.get("/api/app/diagnostics")
@@ -7012,6 +7056,32 @@ def fetch_unity_http_json(settings: Settings, path: str) -> tuple[bool, Any, str
         return False, None, str(exc), None
 
 
+def post_unity_http_json(settings: Settings, path: str, payload: dict[str, Any]) -> tuple[bool, Any, str, int | None]:
+    url = f"{unity_http_base(settings)}{path}"
+    timeout = max(1.0, min(float(settings.unity_mcp_timeout_seconds or 5), 20.0))
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback diagnostic URL from local settings.
+            status_code = int(getattr(response, "status", 200))
+            raw = response.read().decode("utf-8", errors="replace")
+            parsed = try_parse_json(raw)
+            return 200 <= status_code < 300, parsed if parsed is not None else raw, "", status_code
+    except urllib.error.HTTPError as exc:
+        try:
+            body_text = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            body_text = ""
+        return False, try_parse_json(body_text) or body_text, f"HTTP {exc.code}", int(exc.code)
+    except Exception as exc:  # noqa: BLE001
+        return False, None, str(exc), None
+
+
 def normalize_unity_instance(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -7224,6 +7294,16 @@ def build_unity_status_snapshot(settings: Settings | None = None) -> dict[str, A
     settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
     instances = build_unity_instances_diagnostics(settings)
     tools = build_unity_tools_diagnostics(settings)
+    mcp_health = fetch_mcp_server_health(settings)
+    unity_mcp_package_version = ""
+    selected_project = normalize_path_string(DASHBOARD_STATE.selected_project_path)
+    if selected_project:
+        try:
+            selected_project_path = Path(selected_project)
+            if is_unity_project_path(selected_project_path):
+                unity_mcp_package_version = read_unity_mcp_package_version(selected_project_path)
+        except Exception:  # noqa: BLE001 - status diagnostics should stay best effort.
+            unity_mcp_package_version = ""
 
     try:
         output = run_unity_mcp_passthrough(settings, ["-f", "json", "status"])
@@ -7256,12 +7336,1106 @@ def build_unity_status_snapshot(settings: Settings | None = None) -> dict[str, A
         "instances": instances.get("instances") or [],
         "activeInstanceCount": instances.get("activeCount") or 0,
         "tools": tools,
+        "mcpHealth": mcp_health,
+        "unityMcpPackageVersion": unity_mcp_package_version,
         "vrcForgeToolsRegistered": bool(tools.get("vrcForgeToolsCount")),
         "missingRequiredVrcForgeTools": tools.get("missingRequiredVrcForgeTools") or [],
         "output": output,
         "parsed": parsed,
         "error": "\n".join(errors),
     }
+
+
+def _repair_phase(phase_id: str, status: str, message: str, detail: Any = None) -> dict[str, Any]:
+    if status not in {"ok", "warning", "error", "skipped"}:
+        status = "warning"
+    return {
+        "id": phase_id,
+        "status": status,
+        "message": message,
+        "detail": _redact_doctor_detail(detail),
+    }
+
+
+def _unity_repair_status_summary(status: dict[str, Any]) -> dict[str, Any]:
+    tools = status.get("tools") if isinstance(status.get("tools"), dict) else {}
+    mcp_health = status.get("mcpHealth") if isinstance(status.get("mcpHealth"), dict) else {}
+    return {
+        "connected": bool(status.get("connected")),
+        "mcpServerReachable": bool(status.get("mcpServerReachable")),
+        "mcpServerVersion": str(mcp_health.get("version") or mcp_health.get("serverVersion") or ""),
+        "unityMcpPackageVersion": str(status.get("unityMcpPackageVersion") or ""),
+        "unityInstanceRegistered": bool(status.get("unityInstanceRegistered")),
+        "selectedInstanceMatched": bool(status.get("selectedInstanceMatched")),
+        "activeInstanceCount": int(status.get("activeInstanceCount") or 0),
+        "vrcForgeToolsRegistered": bool(status.get("vrcForgeToolsRegistered")),
+        "totalTools": int(tools.get("totalTools") or 0),
+        "vrcForgeToolsCount": int(tools.get("vrcForgeToolsCount") or 0),
+        "missingRequiredVrcForgeTools": status.get("missingRequiredVrcForgeTools") or [],
+        "toolsError": str(tools.get("error") or ""),
+        "error": str(status.get("error") or ""),
+    }
+
+
+def read_unity_mcp_package_version(project_root: Path) -> str:
+    candidates = [
+        project_root / "Packages" / "com.coplaydev.unity-mcp" / "package.json",
+        project_root / "Packages" / "com.gamelovers.mcp-unity" / "package.json",
+    ]
+    package_cache = project_root / "Library" / "PackageCache"
+    if package_cache.is_dir():
+        candidates.extend(sorted(package_cache.glob("com.coplaydev.unity-mcp*/package.json")))
+        candidates.extend(sorted(package_cache.glob("com.gamelovers.mcp-unity*/package.json")))
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            version = str(payload.get("version") or "").strip()
+            if version:
+                return version
+        except Exception:  # noqa: BLE001 - Doctor version read is best effort.
+            continue
+    return ""
+
+
+def fetch_mcp_server_health(settings: Settings) -> dict[str, Any]:
+    ok, payload, error, status_code = fetch_unity_http_json(settings, "/health")
+    result: dict[str, Any] = {
+        "ok": ok,
+        "statusCode": status_code,
+        "error": error,
+    }
+    if isinstance(payload, dict):
+        result.update(payload)
+    elif payload not in (None, ""):
+        result["payload"] = payload
+    return result
+
+
+def _decode_csharp_string_literal(value: str) -> str:
+    try:
+        return bytes(value, "utf-8").decode("unicode_escape")
+    except Exception:  # noqa: BLE001
+        return value
+
+
+def discover_vrcforge_unity_tool_definitions(project_root: Path) -> list[dict[str, Any]]:
+    editor_root = project_root / "Assets" / "VRCForge" / "Editor"
+    if not editor_root.is_dir():
+        return []
+
+    attribute_pattern = re.compile(r"\[\s*McpForUnityTool\s*\((?P<body>.*?)\)\s*\]", re.DOTALL)
+    name_pattern = re.compile(r"\bname\s*:\s*\"(?P<value>(?:\\.|[^\"\\])*)\"", re.DOTALL)
+    first_string_pattern = re.compile(r"\"(?P<value>(?:\\.|[^\"\\])*)\"", re.DOTALL)
+    description_pattern = re.compile(r"\bDescription\s*=\s*\"(?P<value>(?:\\.|[^\"\\])*)\"", re.DOTALL)
+
+    definitions: dict[str, dict[str, Any]] = {}
+    for source_path in sorted(editor_root.rglob("*.cs")):
+        try:
+            source = source_path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        for match in attribute_pattern.finditer(source):
+            body = match.group("body") or ""
+            name_match = name_pattern.search(body) or first_string_pattern.search(body)
+            if not name_match:
+                continue
+            name = _decode_csharp_string_literal(name_match.group("value")).strip()
+            if not (name.startswith("vrc_") or name.startswith("vrcforge_")):
+                continue
+            description_match = description_pattern.search(body)
+            description = (
+                _decode_csharp_string_literal(description_match.group("value")).strip()
+                if description_match
+                else f"VRCForge Unity tool {name}."
+            )
+            definitions[name] = {
+                "name": name,
+                "description": description,
+                "structured_output": True,
+                "requires_polling": False,
+                "poll_action": "status",
+                "max_poll_seconds": 0,
+                "parameters": [],
+                "source": str(source_path.relative_to(project_root)).replace("\\", "/"),
+            }
+    return [definitions[name] for name in sorted(definitions)]
+
+
+def unity_repair_active_instance_for_registration(settings: Settings, project_root: Path) -> dict[str, Any]:
+    status = build_unity_status_snapshot(settings)
+    active = status.get("activeInstance") if isinstance(status.get("activeInstance"), dict) else {}
+    if active and unity_instance_matches_project(active, project_root):
+        return active
+    instances = status.get("instances") if isinstance(status.get("instances"), list) else []
+    for instance in instances:
+        if isinstance(instance, dict) and unity_instance_matches_project(instance, project_root):
+            return instance
+    return {}
+
+
+def register_vrcforge_unity_tools_from_project(
+    project_root: Path,
+    settings: Settings,
+    phases: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any]]:
+    tool_definitions = discover_vrcforge_unity_tool_definitions(project_root)
+    if not tool_definitions:
+        detail = {"editorRoot": str(project_root / "Assets" / "VRCForge" / "Editor")}
+        phases.append(
+            _repair_phase(
+                "unity_tool_registration",
+                "warning",
+                "VRCForge Unity tool declarations were not found in the selected project.",
+                detail,
+            )
+        )
+        return False, detail
+
+    active_instance = unity_repair_active_instance_for_registration(settings, project_root)
+    project_id = str(
+        active_instance.get("cliInstanceId")
+        or active_instance.get("hash")
+        or settings.unity_mcp_instance
+        or active_instance.get("project")
+        or project_root.name
+    ).strip()
+    if not project_id:
+        detail = {"toolCount": len(tool_definitions)}
+        phases.append(
+            _repair_phase(
+                "unity_tool_registration",
+                "warning",
+                "Unity has no active MCP instance id, so VRCForge could not re-register tools.",
+                detail,
+            )
+        )
+        return False, detail
+
+    payload = {
+        "project_id": project_id,
+        "project_hash": str(active_instance.get("hash") or project_id),
+        "tools": [
+            {key: value for key, value in definition.items() if key != "source"}
+            for definition in tool_definitions
+        ],
+    }
+    ok, response, error, status_code = post_unity_http_json(settings, "/register-tools", payload)
+    detail = {
+        "toolCount": len(tool_definitions),
+        "projectId": project_id,
+        "statusCode": status_code,
+        "response": response,
+        "error": error,
+        "sources": [definition.get("source") for definition in tool_definitions[:10]],
+    }
+    phases.append(
+        _repair_phase(
+            "unity_tool_registration",
+            "ok" if ok else "warning",
+            f"Re-registered {len(tool_definitions)} VRCForge Unity tool(s) with the MCP server."
+            if ok
+            else f"VRCForge Unity tool re-registration failed: {error or response}",
+            detail,
+        )
+    )
+    return ok, detail
+
+
+def _repair_process_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
+def _powershell_json(script: str, timeout_seconds: int = 10) -> tuple[bool, Any, str]:
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            **_repair_process_kwargs(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, None, str(exc)
+
+    raw = (completed.stdout or "").strip()
+    parsed = try_parse_json(raw) if raw else None
+    if completed.returncode != 0:
+        return False, parsed, (completed.stderr or completed.stdout or f"PowerShell exited {completed.returncode}").strip()
+    return True, parsed, ""
+
+
+def list_running_unity_processes() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+    ok, payload, _error = _powershell_json(
+        "@(Get-CimInstance Win32_Process -Filter \"Name = 'Unity.exe'\" "
+        "| Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Depth 4",
+        timeout_seconds=10,
+    )
+    if not ok or payload is None:
+        return []
+    raw_items = payload if isinstance(payload, list) else [payload]
+    processes: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            process_id = int(item.get("ProcessId"))
+        except (TypeError, ValueError):
+            continue
+        processes.append(
+            {
+                "processId": process_id,
+                "executablePath": normalize_path_string(str(item.get("ExecutablePath") or "")),
+                "commandLine": str(item.get("CommandLine") or ""),
+            }
+        )
+    return processes
+
+
+def _project_path_token(path: Path) -> str:
+    return normalize_path_string(str(path)).replace("\\", "/").casefold().strip()
+
+
+def unity_process_matches_project(process: dict[str, Any], project_root: Path) -> bool:
+    command_line = str(process.get("commandLine") or "").replace("\\", "/").casefold()
+    project_token = _project_path_token(project_root)
+    if project_token and project_token in command_line:
+        return True
+    project_name = project_root.name.casefold()
+    return bool(project_name and "-projectpath" in command_line and project_name in command_line)
+
+
+def unity_instance_matches_project(instance: dict[str, Any], project_root: Path) -> bool:
+    instance_path = normalize_path_string(str(instance.get("projectPath") or "")).casefold()
+    project_path = normalize_path_string(str(project_root)).casefold()
+    if instance_path and instance_path == project_path:
+        return True
+    project_name = project_root.name.casefold()
+    candidates = [
+        instance.get("project"),
+        instance.get("projectName"),
+        instance.get("cliInstanceId"),
+        Path(str(instance.get("projectPath") or "")).name if instance.get("projectPath") else "",
+    ]
+    return any(str(candidate or "").strip().casefold() == project_name for candidate in candidates)
+
+
+def find_mcp_for_unity_executable() -> Path | None:
+    candidates: list[Path] = []
+    appdata = os.environ.get("APPDATA", "").strip()
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if appdata:
+        candidates.extend(sorted(Path(appdata).glob("Python/Python*/Scripts/mcp-for-unity.exe")))
+        candidates.append(Path(appdata) / "Python" / "Python314" / "Scripts" / "mcp-for-unity.exe")
+    if local_appdata:
+        candidates.extend(sorted(Path(local_appdata).glob("Programs/Python/Python*/Scripts/mcp-for-unity.exe")))
+    for command_name in ("mcp-for-unity.exe", "mcp-for-unity"):
+        resolved = shutil.which(command_name)
+        if resolved:
+            candidates.append(Path(resolved))
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def wait_for_mcp_health(settings: Settings, wait_seconds: int) -> bool:
+    deadline = time.monotonic() + max(1, wait_seconds)
+    while time.monotonic() < deadline:
+        ok, _payload, _error, _status_code = fetch_unity_http_json(settings, "/health")
+        if ok:
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def ensure_unity_mcp_server_running(
+    settings: Settings,
+    phases: list[dict[str, Any]],
+    wait_seconds: int,
+    *,
+    force_start: bool = False,
+    preferred_executable: Path | None = None,
+) -> bool:
+    ok, _payload, error, _status_code = fetch_unity_http_json(settings, "/health")
+    if ok and not force_start:
+        phases.append(_repair_phase("mcp_server", "ok", "MCP server is already reachable.", {"url": f"{unity_http_base(settings)}/health"}))
+        return True
+
+    mcp_exe = preferred_executable if preferred_executable and preferred_executable.exists() else find_mcp_for_unity_executable()
+    if mcp_exe is None:
+        phases.append(
+            _repair_phase(
+                "mcp_server",
+                "error",
+                "MCP server is not reachable and mcp-for-unity.exe was not found.",
+                {"error": error},
+            )
+        )
+        return False
+
+    try:
+        subprocess.Popen(
+            [
+                str(mcp_exe),
+                "--transport",
+                "http",
+                "--http-url",
+                unity_http_base(settings),
+                "--project-scoped-tools",
+            ],
+            cwd=str(ROOT_DIR),
+            **_repair_process_kwargs(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        phases.append(_repair_phase("mcp_server", "error", f"Failed to start MCP server: {exc}", {"executable": str(mcp_exe)}))
+        return False
+
+    if wait_for_mcp_health(settings, min(max(wait_seconds, 5), 45)):
+        phases.append(_repair_phase("mcp_server", "ok", "MCP server started and is reachable.", {"executable": str(mcp_exe)}))
+        return True
+
+    phases.append(_repair_phase("mcp_server", "error", "MCP server was started but did not become reachable.", {"executable": str(mcp_exe)}))
+    return False
+
+
+def list_running_unity_mcp_processes(settings: Settings) -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+    port = int(settings.unity_mcp_port or 8080)
+    script = (
+        "$port = "
+        f"{port}; "
+        "@(Get-CimInstance Win32_Process | Where-Object { "
+        "$_.Name -notlike 'powershell*' -and "
+        "$_.CommandLine -like '*mcp-for-unity*' -and "
+        "$_.CommandLine -like ('*--http-url*:' + $port + '*') "
+        "} | Select-Object ProcessId,Name,ExecutablePath,CommandLine) | ConvertTo-Json -Depth 4"
+    )
+    ok, payload, _error = _powershell_json(script, timeout_seconds=10)
+    if not ok or payload is None:
+        return []
+    raw_items = payload if isinstance(payload, list) else [payload]
+    processes: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            process_id = int(item.get("ProcessId"))
+        except (TypeError, ValueError):
+            continue
+        processes.append(
+            {
+                "processId": process_id,
+                "name": str(item.get("Name") or ""),
+                "executablePath": normalize_path_string(str(item.get("ExecutablePath") or "")),
+                "commandLine": str(item.get("CommandLine") or ""),
+            }
+        )
+    return processes
+
+
+def _preferred_mcp_executable_from_processes(processes: list[dict[str, Any]]) -> Path | None:
+    for process in processes:
+        executable = str(process.get("executablePath") or "").strip()
+        if executable and Path(executable).name.casefold() == "mcp-for-unity.exe":
+            candidate = Path(executable)
+            try:
+                if candidate.exists():
+                    return candidate.resolve()
+            except OSError:
+                continue
+    return None
+
+
+def stop_unity_mcp_processes(processes: list[dict[str, Any]]) -> tuple[bool, dict[str, Any], str]:
+    ids = sorted({int(process["processId"]) for process in processes if process.get("processId")})
+    if not ids:
+        return True, {"stopped": [], "stillRunning": []}, ""
+    id_literal = ",".join(str(process_id) for process_id in ids)
+    script = (
+        f"$ids = @({id_literal}); "
+        "$stopped = @(); "
+        "foreach ($id in $ids) { "
+        "  $proc = Get-Process -Id $id -ErrorAction SilentlyContinue; "
+        "  if ($null -ne $proc) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue; $stopped += $id } "
+        "}; "
+        "Start-Sleep -Milliseconds 800; "
+        "$still = @(); "
+        "foreach ($id in $ids) { if ($null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $still += $id } }; "
+        "[pscustomobject]@{ ok=($still.Count -eq 0); stopped=$stopped; stillRunning=$still } | ConvertTo-Json -Depth 4; "
+        "if ($still.Count -ne 0) { exit 2 }"
+    )
+    ok, payload, error = _powershell_json(script, timeout_seconds=20)
+    return ok, payload if isinstance(payload, dict) else {"stopped": ids, "stillRunning": []}, error
+
+
+def start_project_mcp_terminal_script(project_root: Path, settings: Settings, phases: list[dict[str, Any]], wait_seconds: int) -> bool | None:
+    terminal_script = project_root / "Library" / "MCPForUnity" / "TerminalScripts" / "mcp-terminal.cmd"
+    if not terminal_script.is_file():
+        return None
+    try:
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(terminal_script)],
+            cwd=str(terminal_script.parent),
+            **_repair_process_kwargs(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        phases.append(
+            _repair_phase(
+                "mcp_server",
+                "error",
+                f"Failed to start MCP bridge from the Unity-generated terminal script: {exc}",
+                {"script": str(terminal_script)},
+            )
+        )
+        return False
+    if wait_for_mcp_health(settings, min(max(wait_seconds, 5), 60)):
+        phases.append(
+            _repair_phase(
+                "mcp_server",
+                "ok",
+                "MCP server started from the Unity-generated terminal script.",
+                {"script": str(terminal_script)},
+            )
+        )
+        return True
+    phases.append(
+        _repair_phase(
+            "mcp_server",
+            "error",
+            "The Unity-generated MCP terminal script started but did not become reachable.",
+            {"script": str(terminal_script)},
+        )
+    )
+    return False
+
+
+def restart_unity_mcp_server(settings: Settings, phases: list[dict[str, Any]], wait_seconds: int, project_root: Path | None = None) -> bool:
+    processes = list_running_unity_mcp_processes(settings)
+    preferred_executable = _preferred_mcp_executable_from_processes(processes)
+    if processes:
+        stopped, stop_detail, stop_error = stop_unity_mcp_processes(processes)
+        phases.append(
+            _repair_phase(
+                "mcp_server_restart",
+                "ok" if stopped else "error",
+                "Restarted the MCP bridge process." if stopped else "Could not stop the existing MCP bridge process.",
+                {
+                    "processCount": len(processes),
+                    "stopped": stop_detail,
+                    "error": stop_error,
+                },
+            )
+        )
+        if not stopped:
+            return False
+    else:
+        phases.append(_repair_phase("mcp_server_restart", "warning", "No MCP bridge process was found; VRCForge will try to start one."))
+    if project_root is not None:
+        started_from_project = start_project_mcp_terminal_script(project_root, settings, phases, wait_seconds)
+        if started_from_project is not None:
+            return started_from_project
+    return ensure_unity_mcp_server_running(
+        settings,
+        phases,
+        max(wait_seconds, 15),
+        force_start=True,
+        preferred_executable=preferred_executable,
+    )
+
+
+def wait_for_unity_project_registration(settings: Settings, project_root: Path, wait_seconds: int) -> tuple[bool, dict[str, Any]]:
+    deadline = time.monotonic() + max(1, wait_seconds)
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        latest = build_unity_instances_diagnostics(settings)
+        instances = latest.get("instances") if isinstance(latest.get("instances"), list) else []
+        matched = next((instance for instance in instances if unity_instance_matches_project(instance, project_root)), None)
+        if matched:
+            cli_selector = str(matched.get("cliInstanceId") or matched.get("hash") or matched.get("project") or "").strip()
+            if cli_selector:
+                DASHBOARD_STATE.unity_instance = cli_selector
+                settings.unity_mcp_instance = cli_selector
+            return True, latest
+        time.sleep(2.0)
+    return False, latest
+
+
+def unity_repair_tools_ready(summary: dict[str, Any]) -> bool:
+    return bool(
+        summary.get("unityInstanceRegistered")
+        and summary.get("vrcForgeToolsRegistered")
+        and int(summary.get("totalTools") or 0) > 0
+        and not summary.get("missingRequiredVrcForgeTools")
+    )
+
+
+def unity_repair_tools_message(summary: dict[str, Any]) -> str:
+    tools_error = str(summary.get("toolsError") or summary.get("error") or "")
+    if "No Unity instances connected" in tools_error:
+        return "MCP server is reachable, but Unity's execution connection is not active."
+    if not summary.get("unityInstanceRegistered"):
+        return "Unity has not registered with the MCP server yet."
+    if int(summary.get("totalTools") or 0) <= 0:
+        return "Unity registered, but the MCP tool list is still empty."
+    if not summary.get("vrcForgeToolsRegistered"):
+        return "Unity registered, but VRCForge Unity tools are not registered yet."
+    missing = summary.get("missingRequiredVrcForgeTools") or []
+    if missing:
+        return f"Unity registered, but {len(missing)} required VRCForge tool(s) are missing."
+    return "Unity MCP tools are ready."
+
+
+def recent_unity_mcp_execution_error(window_seconds: int = 300) -> dict[str, Any]:
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(30, window_seconds))
+    patterns = (
+        "disconnected while awaiting command_result",
+        "No Unity instances connected",
+        "Unity plugin session",
+        "Unity MCP disconnected",
+    )
+    entries = read_jsonl_tail(LOCAL_LOG_PATH, 250)
+    entries.extend(recent_log_snapshot())
+    for entry in reversed(entries):
+        timestamp = parse_log_timestamp(entry.get("timestamp"))
+        if timestamp is not None and timestamp < cutoff:
+            continue
+        message = str(entry.get("message") or "")
+        data_text = json.dumps(entry.get("data") or {}, ensure_ascii=False)
+        haystack = f"{message}\n{data_text}"
+        if any(pattern in haystack for pattern in patterns):
+            return {
+                "timestamp": entry.get("timestamp"),
+                "level": entry.get("level"),
+                "scope": entry.get("scope"),
+                "message": message,
+                "detail": entry.get("data") or {},
+            }
+    return {}
+
+
+def build_unity_repair_quick_summary(settings: Settings, project_root: Path) -> dict[str, Any]:
+    health = fetch_mcp_server_health(settings)
+    instances = build_unity_instances_diagnostics(settings)
+    active_instance = instances.get("activeInstance") if isinstance(instances.get("activeInstance"), dict) else {}
+    matched = bool(active_instance and unity_instance_matches_project(active_instance, project_root))
+    active_count = int(instances.get("activeCount") or 0)
+    recent_error = recent_unity_mcp_execution_error()
+    return {
+        "connected": bool(health.get("ok") and active_count),
+        "mcpServerReachable": bool(health.get("ok")),
+        "mcpServerVersion": str(health.get("version") or ""),
+        "unityMcpPackageVersion": read_unity_mcp_package_version(project_root),
+        "unityInstanceRegistered": bool(active_count),
+        "selectedInstanceMatched": matched,
+        "activeInstanceCount": active_count,
+        "vrcForgeToolsRegistered": False,
+        "totalTools": 0,
+        "vrcForgeToolsCount": 0,
+        "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
+        "toolsError": str(recent_error.get("message") or recent_error.get("detail") or ""),
+        "error": str(health.get("error") or instances.get("error") or ""),
+    }
+
+
+def verify_unity_mcp_execution_connection(settings: Settings) -> tuple[bool, dict[str, Any]]:
+    _ = settings
+    recent_error = recent_unity_mcp_execution_error()
+    if recent_error:
+        return False, {
+            "mode": "recent-log-scan",
+            "error": "Recent Unity MCP execution disconnect detected.",
+            "recentError": recent_error,
+        }
+    return True, {
+        "mode": "recent-log-scan",
+        "message": "No recent Unity MCP execution disconnect was recorded.",
+    }
+
+
+def unity_repair_execution_ready(
+    settings: Settings,
+    summary: dict[str, Any],
+    phases: list[dict[str, Any]],
+    phase_id: str,
+) -> bool:
+    if not unity_repair_tools_ready(summary):
+        return False
+    probe_ok, probe_detail = verify_unity_mcp_execution_connection(settings)
+    phases.append(
+        _repair_phase(
+            phase_id,
+            "ok" if probe_ok else "warning",
+            "Unity MCP tool execution probe succeeded."
+            if probe_ok
+            else "Unity MCP tool list is available, but executing a VRCForge read-only tool failed.",
+            probe_detail,
+        )
+    )
+    return probe_ok
+
+
+def wait_for_unity_tools_ready(settings: Settings, project_root: Path, wait_seconds: int) -> tuple[bool, dict[str, Any]]:
+    deadline = time.monotonic() + max(1, wait_seconds)
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        status = build_unity_status_snapshot(settings)
+        latest = _unity_repair_status_summary(status)
+        active = status.get("activeInstance") if isinstance(status.get("activeInstance"), dict) else {}
+        if active and not unity_instance_matches_project(active, project_root):
+            latest["selectedInstanceMatched"] = False
+        if unity_repair_tools_ready(latest):
+            return True, latest
+        time.sleep(2.0)
+    if not latest:
+        latest = _unity_repair_status_summary(build_unity_status_snapshot(settings))
+    return False, latest
+
+
+def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str = "") -> tuple[Path | None, str]:
+    candidates: list[tuple[str, Path]] = []
+    if requested_path.strip():
+        candidates.append(("request", Path(requested_path.strip()).expanduser()))
+    if DASHBOARD_STATE.unity_editor_path.strip():
+        candidates.append(("settings", Path(DASHBOARD_STATE.unity_editor_path.strip()).expanduser()))
+
+    running_processes = list_running_unity_processes()
+    for process in running_processes:
+        executable = str(process.get("executablePath") or "").strip()
+        if executable and unity_process_matches_project(process, project_root):
+            candidates.append(("running-unity-project", Path(executable)))
+    if len(running_processes) == 1:
+        executable = str(running_processes[0].get("executablePath") or "").strip()
+        if executable:
+            candidates.append(("single-running-unity", Path(executable)))
+
+    editor_version = parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt")
+    if editor_version and editor_version != "Unknown":
+        for base_value in [
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+            os.environ.get("LOCALAPPDATA", ""),
+        ]:
+            if not base_value:
+                continue
+            base = Path(base_value)
+            candidates.extend(
+                [
+                    ("unity-hub", base / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
+                    ("unity-hub", base / "Programs" / "Unity" / "Hub" / "Editor" / editor_version / "Editor" / "Unity.exe"),
+                ]
+            )
+
+    seen: set[str] = set()
+    for source, candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.exists():
+            return resolved, source
+    return None, "not-found"
+
+
+def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> tuple[bool, str, dict[str, Any]]:
+    processes = list_running_unity_processes()
+    matching = [process for process in processes if unity_process_matches_project(process, project_root)]
+    if not processes:
+        return True, "Unity is not currently running; launch can proceed.", {"processCount": 0}
+    if not matching:
+        return False, "No running Unity process clearly matched the selected project, so VRCForge did not close any editor.", {"processCount": len(processes)}
+
+    results: list[dict[str, Any]] = []
+    for process in matching:
+        process_id = int(process["processId"])
+        ok, payload, error = _powershell_json(
+            "$proc = Get-Process -Id "
+            f"{process_id} "
+            "-ErrorAction SilentlyContinue; "
+            "if ($null -eq $proc) { [pscustomobject]@{ ok=$true; exited=$true; reason='not_running' } | ConvertTo-Json -Depth 3; exit 0 }; "
+            "$closed = $proc.CloseMainWindow(); "
+            f"$exited = $proc.WaitForExit({max(1, int(timeout_seconds)) * 1000}); "
+            "[pscustomobject]@{ ok=$exited; closeRequested=$closed; exited=$exited; pid=$proc.Id } | ConvertTo-Json -Depth 3; "
+            "if (-not $exited) { exit 2 }",
+            timeout_seconds=max(10, int(timeout_seconds) + 5),
+        )
+        result = payload if isinstance(payload, dict) else {"pid": process_id, "ok": ok, "error": error}
+        results.append(result)
+        if not ok or not bool(result.get("exited")):
+            return False, "Unity did not exit after a normal close request. Save or close Unity manually, then Retry.", {"processes": results, "error": error}
+
+    return True, "Unity closed cleanly.", {"processes": results}
+
+
+def launch_unity_project(editor_path: Path, project_root: Path) -> tuple[bool, str]:
+    try:
+        subprocess.Popen([str(editor_path), "-projectPath", str(project_root)], cwd=str(ROOT_DIR))
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+    return True, ""
+
+
+def resolve_unity_mcp_repair_project(project_path: str) -> Path:
+    candidate_text = project_path.strip() or DASHBOARD_STATE.selected_project_path.strip()
+    if not candidate_text:
+        raise RuntimeError("No Unity project is selected. Select a Unity project first, then run Repair bridge.")
+    candidate = Path(normalize_path_string(candidate_text))
+    if not is_unity_project_path(candidate):
+        raise RuntimeError("Selected path is not a Unity project root. Select the project root containing Assets, Packages, and ProjectSettings.")
+    return candidate
+
+
+def repair_unity_mcp_bridge_sync(request: UnityMcpRepairRequest) -> dict[str, Any]:
+    phases: list[dict[str, Any]] = []
+    generated_at = utc_now_iso()
+    try:
+        project_root = resolve_unity_mcp_repair_project(request.project_path)
+        settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
+        settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 3)
+        settings.unity_mcp_retries = 1
+        settings.unity_mcp_retry_backoff_seconds = 0.0
+        registration_wait = min(request.wait_seconds, 30 if request.allow_unity_relaunch else 10)
+        tools_wait = min(request.wait_seconds, 60 if request.allow_unity_relaunch else 10)
+        short_tools_wait = min(request.wait_seconds, 30 if request.allow_unity_relaunch else 6)
+        restart_wait = min(request.wait_seconds, 90 if request.allow_unity_relaunch else 20)
+        recent_execution_error = recent_unity_mcp_execution_error()
+        if recent_execution_error and not request.allow_unity_relaunch:
+            before = build_unity_repair_quick_summary(settings, project_root)
+            phases.append(
+                _repair_phase(
+                    "unity_recent_execution_disconnect",
+                    "warning",
+                    "Recent Unity MCP execution disconnect was found; VRCForge will not claim the bridge is healthy.",
+                    recent_execution_error,
+                )
+            )
+            phases.append(
+                _repair_phase(
+                    "unity_relaunch",
+                    "skipped",
+                    "Allow a graceful Unity relaunch or restart the MCP bridge from Unity, then retry.",
+                    {"unityEditorPathResolved": bool(resolve_unity_editor_path_for_repair(project_root, request.unity_editor_path)[0])},
+                )
+            )
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "needs_user_action",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": before,
+            }
+        before_status = build_unity_status_snapshot(settings)
+        before = _unity_repair_status_summary(before_status)
+
+        if unity_repair_tools_ready(before) and unity_repair_execution_ready(settings, before, phases, "unity_execution_probe_initial"):
+            phases.append(_repair_phase("already_healthy", "ok", "Unity bridge is already registered and VRCForge tools are available."))
+            return {
+                "ok": True,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "healthy",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": before,
+            }
+
+        if not ensure_unity_mcp_server_running(settings, phases, request.wait_seconds):
+            after_status = build_unity_status_snapshot(settings)
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "failed",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": _unity_repair_status_summary(after_status),
+            }
+
+        registered, instance_payload = wait_for_unity_project_registration(settings, project_root, registration_wait)
+        if registered:
+            phases.append(_repair_phase("unity_registration", "ok", "Unity registered with the MCP server.", instance_payload))
+            tools_ready, tools_after = wait_for_unity_tools_ready(settings, project_root, tools_wait)
+            phases.append(
+                _repair_phase(
+                    "unity_tools",
+                    "ok" if tools_ready else "warning",
+                    "Unity MCP tools are ready." if tools_ready else unity_repair_tools_message(tools_after),
+                    tools_after,
+                )
+            )
+            if tools_ready and unity_repair_execution_ready(settings, tools_after, phases, "unity_execution_probe"):
+                return {
+                    "ok": True,
+                    "schema": "vrcforge.unity_mcp_repair.v1",
+                    "status": "recovered",
+                    "generatedAt": generated_at,
+                    "projectPath": str(project_root),
+                    "phases": phases,
+                    "before": before,
+                    "after": tools_after,
+                }
+            registered_tools, _registration_detail = register_vrcforge_unity_tools_from_project(project_root, settings, phases)
+            if registered_tools:
+                tools_ready_after_registration, registration_after = wait_for_unity_tools_ready(settings, project_root, short_tools_wait)
+                phases.append(
+                    _repair_phase(
+                        "unity_tools_after_registration",
+                        "ok" if tools_ready_after_registration else "warning",
+                        "Unity MCP tools are ready after VRCForge tool re-registration."
+                        if tools_ready_after_registration
+                        else unity_repair_tools_message(registration_after),
+                        registration_after,
+                    )
+                )
+                if tools_ready_after_registration and unity_repair_execution_ready(
+                    settings,
+                    registration_after,
+                    phases,
+                    "unity_execution_probe_after_registration",
+                ):
+                    return {
+                        "ok": True,
+                        "schema": "vrcforge.unity_mcp_repair.v1",
+                        "status": "recovered",
+                        "generatedAt": generated_at,
+                        "projectPath": str(project_root),
+                        "phases": phases,
+                        "before": before,
+                        "after": registration_after,
+                    }
+            if restart_unity_mcp_server(settings, phases, restart_wait, project_root):
+                registered_after_restart, restart_instances = wait_for_unity_project_registration(settings, project_root, registration_wait)
+                phases.append(
+                    _repair_phase(
+                        "unity_registration_after_mcp_restart",
+                        "ok" if registered_after_restart else "warning",
+                        "Unity registered after MCP bridge restart."
+                        if registered_after_restart
+                        else "MCP bridge restarted, but Unity did not register before the timeout.",
+                        restart_instances,
+                    )
+                )
+                if registered_after_restart:
+                    tools_ready_after_restart, restart_after = wait_for_unity_tools_ready(settings, project_root, tools_wait)
+                    phases.append(
+                        _repair_phase(
+                            "unity_tools_after_mcp_restart",
+                            "ok" if tools_ready_after_restart else "warning",
+                            "Unity MCP tools are ready after MCP bridge restart."
+                            if tools_ready_after_restart
+                            else unity_repair_tools_message(restart_after),
+                            restart_after,
+                        )
+                    )
+                    if tools_ready_after_restart and unity_repair_execution_ready(
+                        settings,
+                        restart_after,
+                        phases,
+                        "unity_execution_probe_after_mcp_restart",
+                    ):
+                        return {
+                            "ok": True,
+                            "schema": "vrcforge.unity_mcp_repair.v1",
+                            "status": "recovered",
+                            "generatedAt": generated_at,
+                            "projectPath": str(project_root),
+                            "phases": phases,
+                            "before": before,
+                            "after": restart_after,
+                        }
+                    registered_tools_after_restart, _restart_registration_detail = register_vrcforge_unity_tools_from_project(project_root, settings, phases)
+                    if registered_tools_after_restart:
+                        tools_ready_after_restart_registration, restart_registration_after = wait_for_unity_tools_ready(
+                            settings,
+                            project_root,
+                            short_tools_wait,
+                        )
+                        phases.append(
+                            _repair_phase(
+                                "unity_tools_after_mcp_restart_registration",
+                                "ok" if tools_ready_after_restart_registration else "warning",
+                                "Unity MCP tools are ready after bridge restart and VRCForge tool re-registration."
+                                if tools_ready_after_restart_registration
+                                else unity_repair_tools_message(restart_registration_after),
+                                restart_registration_after,
+                            )
+                        )
+                        if tools_ready_after_restart_registration and unity_repair_execution_ready(
+                            settings,
+                            restart_registration_after,
+                            phases,
+                            "unity_execution_probe_after_mcp_restart_registration",
+                        ):
+                            return {
+                                "ok": True,
+                                "schema": "vrcforge.unity_mcp_repair.v1",
+                                "status": "recovered",
+                                "generatedAt": generated_at,
+                                "projectPath": str(project_root),
+                                "phases": phases,
+                                "before": before,
+                                "after": restart_registration_after,
+                            }
+        else:
+            phases.append(_repair_phase("unity_registration", "warning", "MCP server is reachable, but Unity did not register yet.", instance_payload))
+
+        editor_path, editor_source = resolve_unity_editor_path_for_repair(project_root, request.unity_editor_path)
+        if not request.allow_unity_relaunch:
+            phases.append(
+                _repair_phase(
+                    "unity_relaunch",
+                    "skipped",
+                    "Unity relaunch was not requested. Run Repair bridge from Doctor to allow a graceful relaunch.",
+                    {"unityEditorPathResolved": bool(editor_path), "source": editor_source},
+                )
+            )
+            after_status = build_unity_status_snapshot(settings)
+            after = _unity_repair_status_summary(after_status)
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "needs_user_action",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": after,
+            }
+
+        if editor_path is None:
+            phases.append(
+                _repair_phase(
+                    "unity_editor",
+                    "error",
+                    "Unity editor path could not be resolved. Configure the Unity editor path or open this project once, then retry.",
+                    {"source": editor_source},
+                )
+            )
+            after_status = build_unity_status_snapshot(settings)
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "needs_user_action",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": _unity_repair_status_summary(after_status),
+            }
+
+        closed, close_message, close_detail = close_unity_project_gracefully(project_root, request.close_timeout_seconds)
+        phases.append(_repair_phase("unity_close", "ok" if closed else "warning", close_message, close_detail))
+        if not closed:
+            after_status = build_unity_status_snapshot(settings)
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "needs_user_action",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": _unity_repair_status_summary(after_status),
+            }
+
+        launched, launch_error = launch_unity_project(editor_path, project_root)
+        if not launched:
+            phases.append(_repair_phase("unity_launch", "error", f"Unity launch failed: {launch_error}", {"unityEditorPath": str(editor_path)}))
+            after_status = build_unity_status_snapshot(settings)
+            return {
+                "ok": False,
+                "schema": "vrcforge.unity_mcp_repair.v1",
+                "status": "failed",
+                "generatedAt": generated_at,
+                "projectPath": str(project_root),
+                "phases": phases,
+                "before": before,
+                "after": _unity_repair_status_summary(after_status),
+            }
+
+        phases.append(_repair_phase("unity_launch", "ok", "Unity launch requested for the selected project.", {"unityEditorPath": str(editor_path), "source": editor_source}))
+        registered_after_launch, launch_instances = wait_for_unity_project_registration(settings, project_root, request.wait_seconds)
+        phases.append(
+            _repair_phase(
+                "unity_registration_after_launch",
+                "ok" if registered_after_launch else "error",
+                "Unity registered after relaunch." if registered_after_launch else "Unity did not register before the timeout.",
+                launch_instances,
+            )
+        )
+        tools_ready_after_launch = False
+        after: dict[str, Any] = {}
+        if registered_after_launch:
+            tools_ready_after_launch, after = wait_for_unity_tools_ready(settings, project_root, min(request.wait_seconds, 90))
+            phases.append(
+                _repair_phase(
+                    "unity_tools_after_launch",
+                    "ok" if tools_ready_after_launch else "error",
+                    "Unity MCP tools are ready after relaunch." if tools_ready_after_launch else unity_repair_tools_message(after),
+                    after,
+                )
+            )
+            if not tools_ready_after_launch:
+                registered_tools_after_launch, _launch_registration_detail = register_vrcforge_unity_tools_from_project(project_root, settings, phases)
+                if registered_tools_after_launch:
+                    tools_ready_after_launch_registration, after = wait_for_unity_tools_ready(settings, project_root, min(request.wait_seconds, 30))
+                    phases.append(
+                        _repair_phase(
+                            "unity_tools_after_launch_registration",
+                            "ok" if tools_ready_after_launch_registration else "error",
+                            "Unity MCP tools are ready after relaunch and VRCForge tool re-registration."
+                            if tools_ready_after_launch_registration
+                            else unity_repair_tools_message(after),
+                            after,
+                        )
+                    )
+                    tools_ready_after_launch = tools_ready_after_launch_registration
+        else:
+            after = _unity_repair_status_summary(build_unity_status_snapshot(settings))
+        recovered = unity_repair_execution_ready(settings, after, phases, "unity_execution_probe_after_launch") if unity_repair_tools_ready(after) else False
+        return {
+            "ok": bool(recovered),
+            "schema": "vrcforge.unity_mcp_repair.v1",
+            "status": "recovered" if recovered else ("needs_user_action" if registered_after_launch or tools_ready_after_launch else "failed"),
+            "generatedAt": generated_at,
+            "projectPath": str(project_root),
+            "phases": phases,
+            "before": before,
+            "after": after,
+        }
+    except Exception as exc:  # noqa: BLE001 - Doctor repair should report actionable failure instead of crashing the UI.
+        phases.append(_repair_phase("repair", "error", str(exc)))
+        return {
+            "ok": False,
+            "schema": "vrcforge.unity_mcp_repair.v1",
+            "status": "failed",
+            "generatedAt": generated_at,
+            "projectPath": request.project_path,
+            "phases": phases,
+            "before": {},
+            "after": {},
+        }
 
 
 def health_component(status: str, message: str, detail: Any = "") -> dict[str, Any]:
@@ -8384,6 +9558,7 @@ def acknowledge_unity_roslyn_risk_sync() -> dict[str, Any]:
 
 def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request({}))
+    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
         settings,
         "vrc_prepare_checkpoint",
@@ -8399,6 +9574,7 @@ def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
 
 def reload_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request({}))
+    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
         settings,
         "vrc_reload_after_checkpoint_restore",
@@ -11025,13 +12201,40 @@ def import_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "plan": plan_payload, "error": "Outfit import plan is not ready to apply."}
     project_root = _resolve_unity_project_root_for_import(params, plan_payload)
     kind = str(plan_payload.get("kind") or "")
-    if kind == "unitypackage_import":
-        result = import_unitypackage_sync({**params, "projectPath": str(project_root), "unityPackagePath": ensure_dict_payload(plan_payload.get("source"), "outfit import source").get("actualPackagePath")})
+    if kind in {"unitypackage_import", "unitypackage_import_sequence"}:
+        import_results: list[dict[str, Any]] = []
+        dependency = plan_payload.get("dependencyPreflight") if isinstance(plan_payload.get("dependencyPreflight"), dict) else {}
+        package_order = dependency.get("packageOrder") if isinstance(dependency.get("packageOrder"), dict) else {}
+        skipped_imports = package_order.get("skippedInstalledSupportPackages") if isinstance(package_order.get("skippedInstalledSupportPackages"), list) else []
+        with tempfile.TemporaryDirectory(prefix="vrcforge-outfit-import-", dir=str(_outfit_import_temp_dir())) as temp_dir:
+            queue = _resolve_outfit_import_queue(plan_payload, Path(temp_dir))
+            if not queue:
+                source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
+                queue = [{"path": source.get("actualPackagePath"), "role": "target", "order": 1}]
+            for item in queue:
+                package_path = str(item.get("resolvedPackagePath") or item.get("path") or "").strip()
+                if not package_path:
+                    return {"ok": False, "kind": kind, "plan": plan_payload, "unityImports": import_results, "error": "Import queue contains an empty UnityPackage path."}
+                result = import_unitypackage_sync({**params, "projectPath": str(project_root), "unityPackagePath": package_path})
+                import_results.append(
+                    {
+                        "ok": bool(result.get("ok")),
+                        "order": item.get("order"),
+                        "role": item.get("role"),
+                        "path": item.get("path"),
+                        "sourceType": item.get("sourceType"),
+                        "unityImport": result,
+                    }
+                )
+                if not result.get("ok"):
+                    return {"ok": False, "kind": kind, "plan": plan_payload, "unityImports": import_results, "error": result.get("error") or "UnityPackage import failed."}
         return {
-            "ok": bool(result.get("ok")),
+            "ok": all(bool(item.get("ok")) for item in import_results),
             "kind": kind,
             "plan": plan_payload,
-            "unityImport": result,
+            "unityImports": import_results,
+            "skippedUnityImports": skipped_imports,
+            "unityImport": import_results[-1]["unityImport"] if import_results else {},
             "importedPrefabCandidates": _expected_prefab_assets(plan_payload),
             "nextTool": "vrcforge_add_outfit",
         }
@@ -11051,12 +12254,89 @@ def import_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": False, "plan": plan_payload, "error": f"Unsupported outfit import plan kind: {kind}"}
 
 
+def _outfit_import_temp_dir() -> Path:
+    path = DASHBOARD_ARTIFACTS_DIR / "outfit-imports" / "temp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_outfit_import_queue(plan_payload: dict[str, Any], temp_root: Path) -> list[dict[str, Any]]:
+    source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
+    raw_queue = source.get("importQueue")
+    if not isinstance(raw_queue, list) or not raw_queue:
+        dependency = plan_payload.get("dependencyPreflight") if isinstance(plan_payload.get("dependencyPreflight"), dict) else {}
+        package_order = dependency.get("packageOrder") if isinstance(dependency.get("packageOrder"), dict) else {}
+        raw_queue = package_order.get("importQueue") if isinstance(package_order.get("importQueue"), list) else []
+    resolved: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_queue, start=1):
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        item.setdefault("order", index)
+        item["resolvedPackagePath"] = str(_resolve_import_queue_package(item, source, temp_root))
+        resolved.append(item)
+    return sorted(resolved, key=lambda item: int(item.get("order") or 0))
+
+
+def _resolve_import_queue_package(item: dict[str, Any], plan_source: dict[str, Any], temp_root: Path) -> Path:
+    source_type = str(item.get("sourceType") or "").strip()
+    actual = str(item.get("actualPackagePath") or "").strip()
+    if actual:
+        package_path = Path(actual).expanduser().resolve()
+        if not package_path.is_file() or package_path.suffix.lower() != ".unitypackage":
+            raise AgentGatewayError(f"Import queue item is not a UnityPackage: {package_path}", status_code=400)
+        return package_path
+
+    if source_type == "zip":
+        container_path = Path(str(item.get("containerPath") or plan_source.get("path") or "")).expanduser().resolve()
+        entry_path = str(item.get("path") or "").replace("\\", "/").strip("/")
+        return _extract_unitypackage_from_zip(container_path, entry_path, temp_root)
+
+    if source_type == "folder":
+        source_root = Path(str(plan_source.get("path") or "")).expanduser().resolve()
+        entry_path = str(item.get("path") or "").replace("\\", "/").strip("/")
+        package_path = (source_root / entry_path).resolve()
+        try:
+            package_path.relative_to(source_root)
+        except ValueError as exc:
+            raise AgentGatewayError("Import queue item escapes the selected folder.", status_code=400) from exc
+        if not package_path.is_file() or package_path.suffix.lower() != ".unitypackage":
+            raise AgentGatewayError(f"Import queue item is not a UnityPackage: {entry_path}", status_code=400)
+        return package_path
+
+    direct_path = str(plan_source.get("actualPackagePath") or plan_source.get("path") or "").strip()
+    package_path = Path(direct_path).expanduser().resolve()
+    if not package_path.is_file() or package_path.suffix.lower() != ".unitypackage":
+        raise AgentGatewayError(f"Import queue item is not a UnityPackage: {direct_path}", status_code=400)
+    return package_path
+
+
+def _extract_unitypackage_from_zip(container_path: Path, entry_path: str, temp_root: Path) -> Path:
+    if not container_path.is_file() or container_path.suffix.lower() != ".zip":
+        raise AgentGatewayError(f"ZIP container does not exist: {container_path}", status_code=400)
+    normalized_entry = normalize_archive_name(entry_path)
+    if not normalized_entry.lower().endswith(".unitypackage") or not is_safe_archive_path(normalized_entry):
+        raise AgentGatewayError("ZIP import queue entry is not a safe UnityPackage path.", status_code=400)
+    with zipfile.ZipFile(container_path) as archive:
+        names = {normalize_archive_name(name): name for name in archive.namelist()}
+        raw_name = names.get(normalized_entry)
+        if raw_name is None:
+            raise AgentGatewayError(f"UnityPackage entry was not found in ZIP: {normalized_entry}", status_code=400)
+        info = archive.getinfo(raw_name)
+        safe_name = sanitize_artifact_name(Path(normalized_entry).stem) or "package"
+        target = (temp_root / f"{safe_name}_{int(time.time() * 1000)}.unitypackage").resolve()
+        with archive.open(info) as source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+    return target
+
+
 def import_unitypackage_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     package_path = str(params.get("unityPackagePath") or params.get("unity_package_path") or "").strip()
     if not package_path:
         return {"ok": False, "error": "unityPackagePath is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
+    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 300)
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_import_unitypackage", {
             "projectPath": str(params.get("projectPath") or params.get("project_path") or ""),
@@ -11071,6 +12351,7 @@ def import_unitypackage_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params or {}))
+    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 120)
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_refresh_asset_database", {
             "projectPath": str((params or {}).get("projectPath") or (params or {}).get("project_path") or ""),

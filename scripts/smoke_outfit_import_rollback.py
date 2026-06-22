@@ -22,7 +22,7 @@ def main() -> int:
     smoke = OutfitImportRollbackSmoke(args)
     report = smoke.run()
     path = smoke.write_report(report)
-    print(json.dumps({"ok": report["ok"], "reportPath": str(path), "summary": report["summary"]}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": report["ok"], "reportPath": str(path), "summary": report["summary"]}, ensure_ascii=True, indent=2))
     return 0 if report["ok"] else 1
 
 
@@ -83,6 +83,14 @@ class OutfitImportRollbackSmoke:
                 },
             )
             plan = ensure_dict(plan_payload.get("plan"))
+            dependency_preflight = ensure_dict(plan.get("dependencyPreflight") or plan_payload.get("dependencyPreflight"))
+            package_order = ensure_dict(dependency_preflight.get("packageOrder"))
+            import_queue = ensure_list(package_order.get("importQueue") or ensure_dict(plan.get("source")).get("importQueue"))
+            skipped_installed_support = [
+                item
+                for item in ensure_list(package_order.get("skippedInstalledSupportPackages") or package_order.get("skippedPackages"))
+                if isinstance(item, dict) and item.get("skippedBecause") == "installed_dependency"
+            ]
             self.expected_assets = [str(item) for item in ensure_list(plan.get("expectedAssetPaths"))[: max(1, int(self.args.max_expected_assets))]]
             self.asset_state_before = self.read_asset_state(self.expected_assets)
             self.step(
@@ -94,6 +102,26 @@ class OutfitImportRollbackSmoke:
                     "requiresApproval": plan.get("requiresApproval"),
                     "requiresCheckpoint": plan.get("requiresCheckpoint"),
                     "rollbackProofRequired": plan.get("rollbackProofRequired"),
+                    "importQueue": [
+                        {
+                            "order": item.get("order"),
+                            "role": item.get("role"),
+                            "path": item.get("path") or item.get("actualPackagePath"),
+                            "sourceType": item.get("sourceType"),
+                        }
+                        for item in import_queue
+                        if isinstance(item, dict)
+                    ],
+                    "skippedInstalledSupportPackages": [
+                        {
+                            "dependencyId": item.get("dependencyId"),
+                            "dependencyLabel": item.get("dependencyLabel"),
+                            "path": item.get("path") or item.get("actualPackagePath"),
+                            "reason": item.get("skipReason") or item.get("reason"),
+                        }
+                        for item in skipped_installed_support
+                        if isinstance(item, dict)
+                    ],
                     "expectedAssetCount": len(self.expected_assets),
                 },
             )
@@ -114,20 +142,26 @@ class OutfitImportRollbackSmoke:
 
             applied = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/approve", {})
             execution = ensure_dict(applied.get("execution"))
-            checkpoint = ensure_dict(execution.get("checkpoint"))
-            self.checkpoint_id = str(checkpoint.get("id") or "")
+            checkpoint = ensure_dict(execution.get("checkpoint") or applied.get("checkpoint") or ensure_dict(applied.get("approval")).get("checkpoint"))
+            checkpoint_id = str(checkpoint.get("id") or "")
+            checkpoint_usable = bool(checkpoint.get("ok")) and str(checkpoint.get("status") or "") == "ready" and bool(checkpoint_id)
+            if checkpoint_usable:
+                self.checkpoint_id = checkpoint_id
             self.step(
                 "import.approve_apply_checkpoint",
                 {
-                    "ok": bool(applied.get("ok")) and execution.get("status") == "applied" and bool(self.checkpoint_id),
+                    "ok": bool(applied.get("ok")) and execution.get("status") == "applied" and checkpoint_usable,
                     "approvalId": approval_id,
                     "executionStatus": execution.get("status"),
-                    "checkpointId": self.checkpoint_id,
+                    "checkpointId": checkpoint_id,
+                    "checkpointOk": checkpoint.get("ok"),
+                    "checkpointStatus": checkpoint.get("status"),
                     "checkpointStrategy": checkpoint.get("strategy"),
+                    "error": execution.get("error") or applied.get("error") or ensure_dict(applied.get("approval")).get("error"),
                 },
             )
-            if not self.checkpoint_id:
-                raise RuntimeError("Approved import did not return a checkpoint id.")
+            if not checkpoint_usable:
+                raise RuntimeError("Approved import did not create a usable checkpoint.")
 
             changed = self.request_app_json("POST", f"/api/app/checkpoints/{self.checkpoint_id}/preview", {})
             changed_files = ensure_list(changed.get("changedFiles"))
@@ -276,7 +310,7 @@ class OutfitImportRollbackSmoke:
         root = Path.cwd() / "artifacts" / "outfit-import-smoke"
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"outfit-import-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-        path.write_text(json.dumps(redact_evidence(report), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(json.dumps(redact_evidence(report), ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return path
 
     def build_summary(self, ok: bool) -> dict[str, Any]:
