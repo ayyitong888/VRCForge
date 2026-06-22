@@ -594,6 +594,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["executionMode"], "live-unity")
         self.assertEqual(payload["avatarCount"], 1)
 
+    def test_app_avatars_endpoint_uses_live_avatar_builder(self) -> None:
+        export_payload = {"summary": {"avatarCount": 1}}
+        seen: dict[str, object] = {}
+
+        def fake_export(_settings: object, request: dashboard_server.DashboardRequest) -> tuple[dict[str, object], str, bool]:
+            seen["source_mode"] = request.source_mode
+            seen["mock_execute"] = request.mock_execute
+            seen["save_artifacts"] = request.save_artifacts
+            return export_payload, "unit-test", False
+
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.load_dashboard_export_payload", side_effect=fake_export),
+            patch(
+                "dashboard_server.serialize_avatar_list",
+                return_value=[
+                    {
+                        "avatarName": "Hero",
+                        "avatarPath": "Scene/Hero",
+                        "sceneName": "Scene",
+                        "rendererCount": 3,
+                        "blendshapeCount": 8,
+                    }
+                ],
+            ),
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.post("/api/app/avatars", json={"projectPath": r"C:\Unity\Hero"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["executed"])
+        self.assertEqual(payload["executionMode"], "live-unity")
+        self.assertEqual(payload["avatars"][0]["avatarPath"], "Scene/Hero")
+        self.assertEqual(payload["avatarCount"], 1)
+        self.assertEqual(seen["source_mode"], "unity_live_export")
+        self.assertIs(seen["mock_execute"], False)
+        self.assertIs(seen["save_artifacts"], True)
+
     def test_app_auth_validation_checks_loopback_origin_and_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN

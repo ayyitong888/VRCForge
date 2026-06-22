@@ -57,6 +57,7 @@ import {
   AgentSkillRegistry,
   AgentSkillResult,
   AgentShellResult,
+  AvatarListItem,
   SubAgentTask,
   SubAgentTaskList,
   ApiError,
@@ -93,6 +94,7 @@ import {
   ExecutionMode,
   PermissionState,
   fetchAgentNotes,
+  fetchAvatars,
   fetchChats,
   fetchProjectPrefs,
   fetchProviderModels,
@@ -379,6 +381,9 @@ export default function App() {
   const [optimizationReport, setOptimizationReport] = useState<OptimizationPlannerReport | null>(null);
   const [optimizationTargetProfile, setOptimizationTargetProfile] = useState("pc_conservative");
   const [optimizationAvatarPath, setOptimizationAvatarPath] = useState("");
+  const [optimizationAvatars, setOptimizationAvatars] = useState<AvatarListItem[]>([]);
+  const [loadingOptimizationAvatars, setLoadingOptimizationAvatars] = useState(false);
+  const [optimizationAvatarMessage, setOptimizationAvatarMessage] = useState("");
   const [loadingOptimization, setLoadingOptimization] = useState(false);
   const [optimizationMessage, setOptimizationMessage] = useState("");
   const [requestingOptimizationAction, setRequestingOptimizationAction] = useState("");
@@ -756,6 +761,12 @@ export default function App() {
       void loadOptimizationPlan();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath, optimizationTargetProfile]);
+
+  useEffect(() => {
+    if (activeView === "optimization" && runtimeConnected) {
+      void loadOptimizationAvatars();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
     if (!runtimeConnected || !activeProjectPath) {
@@ -1608,6 +1619,7 @@ export default function App() {
     setActiveView("optimization");
     setError("");
     await loadOptimizationPlan();
+    await loadOptimizationAvatars();
   }
 
   async function loadOptimizationPlan(target = endpoint, profile = optimizationTargetProfile) {
@@ -1634,6 +1646,40 @@ export default function App() {
       setOptimizationMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingOptimization(false);
+    }
+  }
+
+  async function loadOptimizationAvatars(target = endpoint) {
+    setLoadingOptimizationAvatars(true);
+    setOptimizationAvatarMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchAvatars(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+      });
+      const avatars = (payload.avatars ?? []).filter((item) => Boolean(item.avatarPath));
+      setOptimizationAvatars(avatars);
+      if (!optimizationAvatarPath.trim() && avatars.length === 1 && avatars[0].avatarPath) {
+        setOptimizationAvatarPath(avatars[0].avatarPath);
+      }
+      if (payload.ok) {
+        setOptimizationAvatarMessage(
+          avatars.length ? `${avatars.length} avatar${avatars.length === 1 ? "" : "s"} found` : "No scene avatars found",
+        );
+      } else {
+        setOptimizationAvatarMessage("Avatar scan returned warnings");
+      }
+    } catch (cause) {
+      setOptimizationAvatarMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingOptimizationAvatars(false);
     }
   }
 
@@ -2590,14 +2636,18 @@ export default function App() {
               report={optimizationReport}
               selectedProjectPath={activeProjectPath}
               avatarPath={optimizationAvatarPath}
+              avatars={optimizationAvatars}
               targetProfile={optimizationTargetProfile}
               loading={loadingOptimization}
+              loadingAvatars={loadingOptimizationAvatars}
               message={optimizationMessage}
+              avatarMessage={optimizationAvatarMessage}
               requestingActionId={requestingOptimizationAction}
               requestingDependencyId={requestingOptimizationDependency}
               onAvatarPathChange={setOptimizationAvatarPath}
               onTargetProfileChange={setOptimizationTargetProfile}
               onRefresh={() => void loadOptimizationPlan()}
+              onRefreshAvatars={() => void loadOptimizationAvatars()}
               onRequestAction={(card) => void requestOptimizationAction(card)}
               onRequestDependency={(dependency) => void requestOptimizationDependencyInstall(dependency)}
             />
@@ -4539,28 +4589,36 @@ function OptimizationWorkspace({
   report,
   selectedProjectPath,
   avatarPath,
+  avatars,
   targetProfile,
   loading,
+  loadingAvatars,
   message,
+  avatarMessage,
   requestingActionId,
   requestingDependencyId,
   onAvatarPathChange,
   onTargetProfileChange,
   onRefresh,
+  onRefreshAvatars,
   onRequestAction,
   onRequestDependency,
 }: {
   report: OptimizationPlannerReport | null;
   selectedProjectPath: string;
   avatarPath: string;
+  avatars: AvatarListItem[];
   targetProfile: string;
   loading: boolean;
+  loadingAvatars: boolean;
   message: string;
+  avatarMessage: string;
   requestingActionId: string;
   requestingDependencyId: string;
   onAvatarPathChange: (value: string) => void;
   onTargetProfileChange: (profile: string) => void;
   onRefresh: () => void;
+  onRefreshAvatars: () => void;
   onRequestAction: (card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) => void;
   onRequestDependency: (dependency: NonNullable<NonNullable<OptimizationPlannerReport["dependencyDoctor"]>["dependencies"]>[number]) => void;
 }) {
@@ -4621,7 +4679,29 @@ function OptimizationWorkspace({
                 </button>
               ))}
             </div>
-            <div className="mt-3 flex min-w-0 items-center gap-2">
+            <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <select
+                value={avatars.some((item) => item.avatarPath === avatarPath) ? avatarPath : ""}
+                onChange={(event) => onAvatarPathChange(event.target.value)}
+                disabled={loadingAvatars || avatars.length === 0}
+                className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:text-muted-foreground"
+              >
+                <option value="">{loadingAvatars ? "Scanning avatars" : avatars.length ? "Select avatar" : "No scene avatars"}</option>
+                {avatars.map((avatar, index) => {
+                  const value = avatar.avatarPath || "";
+                  return (
+                    <option key={`${value}-${index}`} value={value}>
+                      {avatarOptionLabel(avatar)}
+                    </option>
+                  );
+                })}
+              </select>
+              <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loadingAvatars} onClick={onRefreshAvatars}>
+                {loadingAvatars ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Avatars
+              </Button>
+            </div>
+            <div className="mt-2 flex min-w-0 items-center gap-2">
               <input
                 value={avatarPath}
                 onChange={(event) => onAvatarPathChange(event.target.value)}
@@ -4633,6 +4713,7 @@ function OptimizationWorkspace({
                 Scan
               </Button>
             </div>
+            {avatarMessage ? <div className="mt-2 truncate text-xs text-muted-foreground">{avatarMessage}</div> : null}
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <OptimizationMetric label="PC rank" value={report?.baseline?.performanceHeadline?.pc?.rank || "unknown"} />
               <OptimizationMetric label="Quest rank" value={report?.baseline?.performanceHeadline?.quest?.rank || "unknown"} />
@@ -6496,6 +6577,25 @@ function formatOptimizationMetric(value: unknown): string {
     return value;
   }
   return "unknown";
+}
+
+function avatarOptionLabel(avatar: AvatarListItem): string {
+  const name = avatar.avatarName || shortPath(avatar.avatarPath || "") || "Avatar";
+  const parts = [name];
+  if (avatar.sceneName) {
+    parts.push(avatar.sceneName);
+  }
+  const stats: string[] = [];
+  if (typeof avatar.rendererCount === "number") {
+    stats.push(`${avatar.rendererCount} renderers`);
+  }
+  if (typeof avatar.blendshapeCount === "number") {
+    stats.push(`${avatar.blendshapeCount} blendshapes`);
+  }
+  if (stats.length) {
+    parts.push(stats.join(", "));
+  }
+  return parts.join(" - ");
 }
 
 function dependencyTone(status?: string) {

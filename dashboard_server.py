@@ -293,10 +293,12 @@ class ConnectionRequest(BaseModel):
 
 class DashboardStateRequest(BaseModel):
     settings_path: str = Field(default_factory=runtime_settings_path)
-    project_path: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
     unity_host: str | None = None
     unity_port: int | None = None
     unity_instance: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class ProjectActionRequest(BaseModel):
@@ -1976,6 +1978,12 @@ def app_validation_report(request: ValidationReportRequest) -> dict[str, Any]:
 @app.post("/api/app/build-test/readiness")
 def app_build_test_readiness(request: BuildTestReadinessRequest) -> dict[str, Any]:
     return build_test_readiness_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/avatars")
+def app_list_avatars(request: DashboardStateRequest) -> dict[str, Any]:
+    params = request.model_dump(by_alias=True)
+    return read_avatars_sync(build_agent_dashboard_request(params))
 
 
 @app.post("/api/app/optimization/plan")

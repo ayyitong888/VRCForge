@@ -893,6 +893,25 @@ export type OptimizationPlannerReport = {
   rules?: Record<string, unknown>;
 };
 
+export type AvatarListItem = {
+  avatarName?: string;
+  avatarPath?: string;
+  sceneName?: string;
+  rendererCount?: number;
+  blendshapeCount?: number;
+  isVrChatAvatar?: boolean;
+};
+
+export type AvatarListResult = {
+  ok: boolean;
+  executed?: boolean;
+  exportSource?: string;
+  executionMode?: string;
+  summary?: Record<string, unknown>;
+  avatars?: AvatarListItem[];
+  avatarCount?: number;
+};
+
 export type PackageInstallRequestResult = {
   ok: boolean;
   status?: string;
@@ -1124,6 +1143,17 @@ export async function fetchOptimizationPlan(
   },
 ): Promise<OptimizationPlannerReport> {
   return requestJson<OptimizationPlannerReport>(`${endpoint}/api/app/optimization/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchAvatars(
+  endpoint: string,
+  request: { projectPath?: string } = {},
+): Promise<AvatarListResult> {
+  return requestJson<AvatarListResult>(`${endpoint}/api/app/avatars`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
