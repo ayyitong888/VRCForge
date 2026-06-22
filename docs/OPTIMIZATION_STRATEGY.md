@@ -22,7 +22,9 @@ VRCForge does not copy optimizer source code, silently install packages, direct-
 - AAO / Avatar Optimizer: non-destructive avatar optimization, conservative Trace And Optimize, merge planning, cleanup transforms.
 - Avatar Compressor / LAC: NDMF texture compression profiles.
 - TexTransTool: atlas and texture transform components.
-- Meshia Mesh Simplification: mesh simplification and preview/apply components.
+- Meshia Mesh Simplification: mesh simplification planning and a conservative
+  request surface for one explicit renderer; broader low-risk apply proof stays
+  in the 0.8.x sample matrix.
 - VRCFury: VRCFury-specific controller, parameter, Direct Tree, and build-hook transforms.
 - MA2BT-Pro: Modular Avatar responsive layer to BlendTree conversion.
 - VRC Avatar Performance Tools: optional editor-side performance and VRAM reference checks.
@@ -39,7 +41,7 @@ Stable request tools:
 - `optimization.aao.trace-apply-request`: adds the public `Anatawa12.AvatarOptimizer.TraceAndOptimize` marker component. AAO documents the component type as the public API, so VRCForge does not script-configure internal AAO fields.
 - `optimization.ttt.atlas-apply-request`: adds/configures `net.rs64.TexTransTool.TextureAtlas.AtlasTexture` only when the request includes user-confirmed `Assets/...` material asset paths for `AtlasTargetMaterials`.
 - `optimization.ma2bt.convert-apply-request`: adds/configures `zhuozhi.MA2BTPro.MAToBlendTreePro` with conservative public settings.
-- `optimization.meshia.simplify-apply-request`: adds/configures `Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier` on one user-selected renderer path only. Stable requests are limited to conservative relative vertex counts from `0.75` to `1.0`.
+- `optimization.meshia.simplify-apply-request`: stable request surface for one user-selected renderer path only. It refuses missing or unsafe renderer input, limits conservative relative vertex counts to `0.75` through `1.0`, and stays out of default/stable apply flows until the low-risk Meshia proof matrix is complete.
 - `optimization.vrcfury.parameter-compressor-apply-request`: stable request name, but currently returns a blocked preview because inspected VRCFury parameter-compressor feature models are internal and do not provide a validated public writer path for VRCForge.
 - `optimization.vrcfury.direct-tree-apply-request`: stable request name, but currently returns a blocked preview by default because Direct Tree remains experimental and must not be enabled by external agents.
 
@@ -89,7 +91,7 @@ Done when:
 
 - The user can see top performance offenders without modifying the project.
 - The user can get a step-by-step optimization plan.
-- Codex and Claude Code can request the same read-only plan through MCP.
+- MCP-capable external agents can request the same read-only plan through MCP.
 - VRCForge recommends one optimization step at a time.
 
 ### 0.8.0-beta - Delegated Optimizer Skill Pack v1

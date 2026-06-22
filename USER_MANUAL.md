@@ -28,7 +28,12 @@ This manual explains the public workflow and feature status without project-spec
 | Project memory / incremental scan | Local index shows added, modified, and deleted project files in the desktop workspace | 已可用 / Available |
 | Outfit package import planning | Inspect `.unitypackage`, Booth folders, and loose prefab/texture folders, then request a supervised import | Beta, approval/checkpoint required |
 | Package/plugin install diagnostics | Read VPM/ALCOM/vrc-get status, install output, and compile-error context before planning repairs | Beta, read-only diagnostics |
-| Named sub-agent sessions | Independent chat sessions can use random VRChat avatar names as agent identities | Beta |
+| Delegated sub-agent workers | Independent read-only/plan workers with lifecycle state, cancel/retry/inspect, redacted logs, and parent-thread summaries | Beta |
+| Tool Registry v1 | Standard tool metadata exposed to desktop, MCP/gateway, and CLI surfaces | Available |
+| CLI diagnostics and readiness | Packaged `vrcforge` CLI covers doctor, provider test, Unity/project/avatar scans, validation, Build/Test readiness, checkpoints, skill/tool registry, and request-based apply/rollback | Available |
+| Full Validator and Build/Test readiness | `vrcforge.validation.v1` plus Build/Test readiness gates for compile, SDK/plugin/package, expression, animator, material, performance, and generated-residue findings | Available |
+| Model Optimization Planner | Read-only optimization dashboard, baseline scan, target profiles, dependency doctor, VRAM/material/mesh/parameter audits, and step-by-step plan output | Available |
+| Optimizer request surfaces | LAC, AAO, TTT, MA2BT-Pro, and Meshia use named apply-request tools; VRCFury risky writers return blocked previews until validated | Beta, approval/checkpoint required |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |

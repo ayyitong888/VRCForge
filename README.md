@@ -1,11 +1,11 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.7.1--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.1-beta)
+[![Version](https://img.shields.io/badge/version-v0.7.2--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.2-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current source version: `0.7.2-beta`. The latest published installer release remains linked below until a 0.7.2 release is cut.
+Current source and latest published installer release: `0.7.2-beta`.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -22,7 +22,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.1-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.2-beta
 
 Recommended:
 
@@ -46,7 +46,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.7.1-beta.zip`
+- `VRCForge_Windows_x64_0.7.2-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
