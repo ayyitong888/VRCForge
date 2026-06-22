@@ -289,7 +289,16 @@ def command_rollback_request(client: VRCForgeClient, args: argparse.Namespace, s
 
 
 def command_optimization_plan(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
-    return client.request("POST", "/api/parameters/optimize", {"avatar_path": args.avatar or None})
+    return client.request(
+        "POST",
+        "/api/app/optimization/plan",
+        {
+            "avatarPath": args.avatar or "",
+            "projectPath": args.project or "",
+            "targetProfile": args.target_profile,
+            "includeQuest": not args.no_quest,
+        },
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -399,7 +408,10 @@ def build_parser() -> argparse.ArgumentParser:
     optimization = sub.add_parser("optimization")
     optimization_sub = optimization.add_subparsers(dest="optimization_command", required=True)
     optimization_plan = optimization_sub.add_parser("plan")
+    optimization_plan.add_argument("--project", default="")
     optimization_plan.add_argument("--avatar", default="")
+    optimization_plan.add_argument("--target-profile", default="pc_conservative")
+    optimization_plan.add_argument("--no-quest", action="store_true")
     optimization_plan.set_defaults(handler=command_optimization_plan)
 
     return parser

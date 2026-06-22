@@ -13,6 +13,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Gauge,
   History,
   Loader2,
   MessageSquare,
@@ -67,6 +68,7 @@ import {
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
   OutfitImportPlanResult,
+  OptimizationPlannerReport,
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
@@ -84,6 +86,7 @@ import {
   fetchDiagnostics,
   fetchDoctor,
   fetchExternalAgentConnectors,
+  fetchOptimizationPlan,
   fetchSkillPackages,
   fetchSkills,
   AgentSkillCheck,
@@ -139,6 +142,14 @@ const CONNECTOR_CLIENT_LABELS: Record<ExternalAgentConnectorClient, string> = {
   claudeCowork: "Claude Cowork App",
 };
 
+const OPTIMIZATION_TARGET_PROFILES = [
+  { id: "pc_conservative", label: "PC Conservative" },
+  { id: "pc_medium", label: "PC Medium" },
+  { id: "quest_medium", label: "Quest Medium" },
+  { id: "event_light", label: "Event Light" },
+  { id: "custom", label: "Custom" },
+];
+
 function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
   if (client === "codex") {
     return "codexApp";
@@ -171,7 +182,7 @@ type ConversationItem =
   | { id: string; type: "compact"; text: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 
-type ActiveView = "chat" | "doctor" | "skills" | "checkpoints" | "settings";
+type ActiveView = "chat" | "doctor" | "optimization" | "skills" | "checkpoints" | "settings";
 
 type ChatThread = {
   id: string;
@@ -358,6 +369,10 @@ export default function App() {
   const [projectIndexProject, setProjectIndexProject] = useState("");
   const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
   const [projectIndexError, setProjectIndexError] = useState("");
+  const [optimizationReport, setOptimizationReport] = useState<OptimizationPlannerReport | null>(null);
+  const [optimizationTargetProfile, setOptimizationTargetProfile] = useState("pc_conservative");
+  const [loadingOptimization, setLoadingOptimization] = useState(false);
+  const [optimizationMessage, setOptimizationMessage] = useState("");
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
@@ -726,6 +741,12 @@ export default function App() {
       void loadDoctor();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (activeView === "optimization" && runtimeConnected) {
+      void loadOptimizationPlan();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath, optimizationTargetProfile]);
 
   useEffect(() => {
     if (!runtimeConnected || !activeProjectPath) {
@@ -1542,6 +1563,38 @@ export default function App() {
     }
   }
 
+  async function openOptimization() {
+    setActiveView("optimization");
+    setError("");
+    await loadOptimizationPlan();
+  }
+
+  async function loadOptimizationPlan(target = endpoint, profile = optimizationTargetProfile) {
+    setLoadingOptimization(true);
+    setOptimizationMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchOptimizationPlan(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+        targetProfile: profile,
+        includeQuest: true,
+      });
+      setOptimizationReport(payload);
+      setOptimizationMessage(payload.ok ? "Plan refreshed" : "Planner returned warnings");
+    } catch (cause) {
+      setOptimizationMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingOptimization(false);
+    }
+  }
+
   async function repairUnityBridgeFromDoctor(target = endpoint) {
     setRepairingUnityBridge(true);
     setDoctorMessage("");
@@ -2134,6 +2187,18 @@ export default function App() {
               <span className="truncate">Doctor</span>
             </button>
             <button
+              onClick={() => void openOptimization()}
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "optimization"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <Gauge className="h-4 w-4 shrink-0" />
+              <span className="truncate">Optimization</span>
+            </button>
+            <button
               onClick={() => void openSkills()}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
@@ -2274,6 +2339,8 @@ export default function App() {
               <span className="truncate font-medium">
                 {activeView === "doctor"
                   ? "Doctor"
+                  : activeView === "optimization"
+                    ? "Optimization"
                   : activeView === "skills"
                     ? "能力库"
                     : activeView === "settings"
@@ -2406,6 +2473,16 @@ export default function App() {
               onRefresh={() => void loadCheckpoints()}
               onPreview={previewCheckpoint}
               onRestore={restoreCheckpoint}
+            />
+          ) : activeView === "optimization" ? (
+            <OptimizationWorkspace
+              report={optimizationReport}
+              selectedProjectPath={activeProjectPath}
+              targetProfile={optimizationTargetProfile}
+              loading={loadingOptimization}
+              message={optimizationMessage}
+              onTargetProfileChange={setOptimizationTargetProfile}
+              onRefresh={() => void loadOptimizationPlan()}
             />
           ) : activeView === "settings" ? (
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
@@ -4341,6 +4418,193 @@ function ConnectorToggle({
   );
 }
 
+function OptimizationWorkspace({
+  report,
+  selectedProjectPath,
+  targetProfile,
+  loading,
+  message,
+  onTargetProfileChange,
+  onRefresh,
+}: {
+  report: OptimizationPlannerReport | null;
+  selectedProjectPath: string;
+  targetProfile: string;
+  loading: boolean;
+  message: string;
+  onTargetProfileChange: (profile: string) => void;
+  onRefresh: () => void;
+}) {
+  const dependencies = report?.dependencyDoctor?.dependencies ?? [];
+  const actions = report?.actionCards ?? [];
+  const offenders = report?.topOffenders ?? [];
+  const metrics = report?.baseline?.metrics ?? {};
+  const profile = report?.targetProfile;
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+      <div className="mx-auto grid max-w-6xl gap-6">
+        <section className="flex min-w-0 flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <Gauge className="h-4 w-4 shrink-0 text-primary" />
+              <h1 className="truncate text-lg font-semibold">Optimization Dashboard</h1>
+              <Badge tone="muted" className="shrink-0">
+                {report?.versionStage || "0.7.2-beta"}
+              </Badge>
+            </div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || "No Unity project selected"}</div>
+          </div>
+          <Badge tone={report?.readOnly && report?.noProjectWrites ? "ok" : "warn"} className="shrink-0">
+            {report?.readOnly && report?.noProjectWrites ? "read-only" : "needs review"}
+          </Badge>
+          <Badge tone={report?.directApplyExposed ? "danger" : "muted"} className="shrink-0">
+            {report?.directApplyExposed ? "direct apply exposed" : "no direct apply"}
+          </Badge>
+          <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Refresh
+          </Button>
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+          <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-3 flex min-w-0 items-center gap-2">
+              <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Target profile</div>
+              {profile?.label ? (
+                <Badge tone="default" className="ml-auto shrink-0">
+                  {profile.label}
+                </Badge>
+              ) : null}
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              {OPTIMIZATION_TARGET_PROFILES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onTargetProfileChange(item.id)}
+                  className={cn(
+                    "h-10 min-w-0 rounded-md border px-3 text-sm transition-colors",
+                    targetProfile === item.id ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:bg-muted",
+                  )}
+                >
+                  <span className="block truncate">{item.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <OptimizationMetric label="PC rank" value={report?.baseline?.performanceHeadline?.pc?.rank || "unknown"} />
+              <OptimizationMetric label="Quest rank" value={report?.baseline?.performanceHeadline?.quest?.rank || "unknown"} />
+              <OptimizationMetric label="Triangles" value={formatOptimizationMetric(metrics.triangleCount)} />
+              <OptimizationMetric label="Parameter bits" value={formatOptimizationMetric(metrics.expressionParameterBits)} />
+            </div>
+          </div>
+
+          <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-3 flex min-w-0 items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Top offenders</div>
+              <Badge tone="muted" className="ml-auto shrink-0">
+                {offenders.length}
+              </Badge>
+            </div>
+            <div className="grid gap-2">
+              {offenders.map((item) => (
+                <div key={item.id || item.label} className="flex min-w-0 items-center gap-2 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0 flex-1 truncate text-sm">{item.label || item.id}</div>
+                  <Badge tone={offenderTone(item.severity)} className="shrink-0">
+                    {item.count ?? 0}
+                  </Badge>
+                </div>
+              ))}
+              {message ? <div className="truncate text-xs text-muted-foreground">{message}</div> : null}
+            </div>
+          </div>
+        </section>
+
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <OptimizationMetric label="Texture bytes" value={formatOptimizationMetric(metrics.textureMemoryBytes)} />
+          <OptimizationMetric label="Material slots" value={formatOptimizationMetric(metrics.materialSlots)} />
+          <OptimizationMetric label="Skinned meshes" value={formatOptimizationMetric(metrics.skinnedMeshCount)} />
+          <OptimizationMetric label="PhysBones" value={formatOptimizationMetric(metrics.physBones)} />
+          <OptimizationMetric label="Generated residue" value={formatOptimizationMetric(metrics.generatedResidueCount)} />
+        </section>
+
+        <section>
+          <div className="mb-3 flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-sm font-semibold">Dependency status</h2>
+            <Badge tone="muted" className="shrink-0">
+              {dependencies.length}
+            </Badge>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {dependencies.map((item) => (
+              <div key={item.id || item.label} className="min-w-0 rounded-lg border border-border bg-card p-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="min-w-0 flex-1 truncate text-sm font-medium">{item.label || item.id}</div>
+                  <Badge tone={dependencyTone(item.status)} className="shrink-0">
+                    {item.status || "unknown"}
+                  </Badge>
+                </div>
+                <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                  <DataLine label="Package" value={item.matchedPackageId || "-"} />
+                  <DataLine label="Version" value={item.version || "-"} />
+                  <DataLine label="Risk" value={item.riskLevel || "-"} />
+                </div>
+                <div className="mt-2 max-h-10 overflow-hidden text-xs text-muted-foreground">{item.recommendedRole || "-"}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <div className="mb-3 flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-sm font-semibold">Recommended optimization order</h2>
+            <Badge tone="muted" className="shrink-0">
+              {report?.recommendedOrder?.length ?? 0}
+            </Badge>
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {actions.map((card) => (
+              <div key={card.id} className={cn("min-w-0 rounded-lg border bg-card p-4", card.enabled ? "border-border" : "border-border opacity-70")}>
+                <div className="flex min-w-0 items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold">{card.title}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{card.description}</div>
+                  </div>
+                  <Badge tone={optimizationRiskTone(card.riskLevel)} className="shrink-0">
+                    {card.riskLevel || "unknown"}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex min-w-0 flex-wrap gap-2">
+                  <Badge tone={card.level === "read-only" ? "ok" : "muted"}>{card.level || "plan-only"}</Badge>
+                  <Badge tone="muted">{card.dependency || "VRCForge"}</Badge>
+                  <Badge tone="muted">{card.recommendedVersionStage || "0.7.2-beta"}</Badge>
+                </div>
+                <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
+                  <DataLine label="Benefit" value={card.expectedBenefit || "unknown"} />
+                  <DataLine label="Why" value={card.whyRecommended || "-"} />
+                  <DataLine label="Next" value={card.nextSafeAction || "-"} />
+                  {card.blockedReason ? <DataLine label="Blocked" value={card.blockedReason} /> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function OptimizationMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border bg-card px-3 py-2">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate text-sm font-semibold">{value}</div>
+    </div>
+  );
+}
+
 function CheckpointWorkspace({
   checkpoints,
   selectedProjectPath,
@@ -6056,6 +6320,55 @@ function isStoredChat(value: unknown): value is ChatThread {
   }
   const chat = value as Partial<ChatThread>;
   return typeof chat.id === "string" && chat.id.length > 0 && Array.isArray(chat.items);
+}
+
+function formatOptimizationMetric(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value >= 1000 ? Math.round(value).toLocaleString() : String(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  return "unknown";
+}
+
+function dependencyTone(status?: string) {
+  const value = String(status || "").toLowerCase();
+  if (value === "installed") {
+    return "ok" as const;
+  }
+  if (value === "missing") {
+    return "warn" as const;
+  }
+  return "muted" as const;
+}
+
+function optimizationRiskTone(risk?: string) {
+  const value = String(risk || "").toLowerCase();
+  if (value === "high" || value.includes("danger")) {
+    return "danger" as const;
+  }
+  if (value === "medium") {
+    return "warn" as const;
+  }
+  if (value === "low") {
+    return "ok" as const;
+  }
+  return "muted" as const;
+}
+
+function offenderTone(severity?: string) {
+  const value = String(severity || "").toLowerCase();
+  if (value.includes("error") || value.includes("danger")) {
+    return "danger" as const;
+  }
+  if (value.includes("warn")) {
+    return "warn" as const;
+  }
+  if (value.includes("suggest")) {
+    return "ok" as const;
+  }
+  return "muted" as const;
 }
 
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {

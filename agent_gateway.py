@@ -22,6 +22,8 @@ from typing import Any, Callable
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from optimization_service import OPTIMIZATION_GATEWAY_TOOL_NAMES, OPTIMIZATION_TOOL_DEFINITIONS
+
 
 ToolHandler = Callable[[dict[str, Any]], Any]
 
@@ -468,6 +470,27 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
 }
 
+BUILTIN_SKILL_OVERRIDES["vrcforge_optimization_plan"] = {
+    "title": "Model Optimization Planner",
+    "permissionMode": "preview",
+    "inputs": ["Optional Unity project path, avatar path, target profile, and Quest toggle."],
+    "outputs": ["vrcforge.optimization.v1 baseline, dependency doctor, audits, plans, action cards, and recommended order."],
+    "sideEffects": "none",
+    "backupRestore": "not required for planning; future applies require preview, approval, checkpoint, validation, and rollback",
+    "tags": ["optimization", "planner", "read-only", "plan-only"],
+}
+for _optimization_definition in OPTIMIZATION_TOOL_DEFINITIONS:
+    _level = "plan-only" if _optimization_definition["category"] == "plan/preview" else "read-only"
+    BUILTIN_SKILL_OVERRIDES[_optimization_definition["gatewayName"]] = {
+        "title": _optimization_definition["externalName"],
+        "permissionMode": "preview" if _optimization_definition["category"] == "plan/preview" else "read_only",
+        "inputs": ["Optional Unity project path, avatar path, target profile, and scanner limits."],
+        "outputs": [f"{_optimization_definition['externalName']} {_level} result under vrcforge.optimization.v1."],
+        "sideEffects": "none",
+        "backupRestore": "not required; this 0.7.2 tool never writes project assets",
+        "tags": ["optimization", _level, "no-direct-apply"],
+    }
+
 BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     {
         "name": "runtime-diagnostics",
@@ -585,6 +608,22 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "allowedTools": ["vrcforge_run_validation_report", "vrcforge_build_test_readiness", "vrcforge_diagnose_package_install_errors"],
         "entrypointTool": "vrcforge_build_test_readiness",
         "tags": ["builtin", "group", "validation", "build-test", "readiness"],
+    },
+    {
+        "name": "model-optimization-planner",
+        "title": "Model Optimization Planner",
+        "description": "Scan, audit, and plan model optimization steps without modifying the avatar or Unity project.",
+        "category": "optimization",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "model optimization baseline, dependency doctor, VRAM/material/mesh/parameter audits, AAO/LAC/TTT/Meshia/MA2BT/VRCFury planning",
+        "inputs": ["Optional avatar path, Unity project path, target profile, and Quest toggle."],
+        "outputs": ["Stable vrcforge.optimization.v1 baseline, dependency status cards, action cards, and one-step-at-a-time optimization plan."],
+        "sideEffects": "none",
+        "backupRestore": "not required for 0.7.2 planning; future optimizer applies must use approval, checkpoint, validation, and rollback",
+        "allowedTools": ["vrcforge_optimization_plan", *OPTIMIZATION_GATEWAY_TOOL_NAMES],
+        "entrypointTool": "vrcforge_optimization_plan",
+        "tags": ["builtin", "group", "optimization", "read-only", "plan-only"],
     },
     {
         "name": "face-tuning-workflow",
@@ -3643,6 +3682,8 @@ class AgentGateway:
 
     def _registry_category(self, category: str, name: str) -> str:
         text = f"{category} {name}".lower()
+        if "optimization" in text or "optimizer" in text or "vram" in text:
+            return "optimization"
         if "health" in text or "status" in text:
             return "health"
         if "project" in text or "package_manager" in text:
@@ -3819,6 +3860,8 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_scan_parameters",
         "vrcforge_run_validation_report",
         "vrcforge_build_test_readiness",
+        "vrcforge_optimization_plan",
+        *OPTIMIZATION_GATEWAY_TOOL_NAMES,
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",

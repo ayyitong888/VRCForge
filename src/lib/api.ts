@@ -821,6 +821,75 @@ export type ProjectIndexScanResult = {
   privacy?: Record<string, unknown>;
 };
 
+export type OptimizationTargetProfile = {
+  id?: string;
+  label?: string;
+  platform?: string;
+  riskTolerance?: string;
+  weights?: Record<string, number>;
+};
+
+export type OptimizationDependencyCard = {
+  id?: string;
+  label?: string;
+  status?: "installed" | "missing" | "unknown" | string;
+  installed?: boolean;
+  version?: string | null;
+  matchedPackageId?: string;
+  recommendedRole?: string;
+  riskLevel?: string;
+  docsLink?: string;
+  installMethod?: { kind?: string; repository?: string; automatic?: boolean; supervisedRequestSupported?: boolean };
+};
+
+export type OptimizationActionCard = {
+  id: string;
+  title: string;
+  description?: string;
+  riskLevel?: string;
+  dependency?: string;
+  recommendedVersionStage?: string;
+  level?: string;
+  enabled?: boolean;
+  blockedReason?: string | null;
+  expectedBenefit?: string;
+  whyRecommended?: string;
+  nextSafeAction?: string;
+  affectedAssetsOrRenderers?: unknown[];
+  directApplyExposed?: boolean;
+};
+
+export type OptimizationPlannerReport = {
+  ok: boolean;
+  schema: string;
+  versionStage?: string;
+  generatedAt?: string;
+  readOnly?: boolean;
+  planOnly?: boolean;
+  noProjectWrites?: boolean;
+  directApplyExposed?: boolean;
+  targetProfile?: OptimizationTargetProfile;
+  baseline?: {
+    performanceHeadline?: Record<string, { rank?: string; triangleCount?: number; materialSlots?: number; textureMemoryBytes?: number }>;
+    metrics?: Record<string, number | null | undefined>;
+    validationSummary?: Record<string, unknown>;
+  };
+  dependencyDoctor?: {
+    dependencies?: OptimizationDependencyCard[];
+    summary?: Record<string, number>;
+    installPolicy?: Record<string, unknown>;
+  };
+  audits?: Record<string, unknown>;
+  plans?: Record<string, unknown>;
+  topOffenders?: Array<{ id?: string; label?: string; severity?: string; count?: number }>;
+  actionCards?: OptimizationActionCard[];
+  recommendedOrder?: string[];
+  nextSafeAction?: OptimizationActionCard | null;
+  tools?: Array<{ externalName?: string; gatewayName?: string; level?: string; directApplyExposed?: boolean }>;
+  futureWriteRequestTools?: Array<{ externalName?: string; versionStage?: string; directApplyExposed?: boolean }>;
+  rules?: Record<string, unknown>;
+};
+
 export type OutfitDependencyPreflight = {
   schema?: string;
   readyForImport?: boolean;
@@ -1017,6 +1086,24 @@ export async function scanProjectIndex(
   request: { projectPath: string; maxFiles?: number },
 ): Promise<ProjectIndexScanResult> {
   return requestJson<ProjectIndexScanResult>(`${endpoint}/api/app/project-index/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchOptimizationPlan(
+  endpoint: string,
+  request: {
+    projectPath?: string;
+    avatarPath?: string;
+    targetProfile?: string;
+    customProfile?: Record<string, unknown>;
+    includeQuest?: boolean;
+    maxErrors?: number;
+  },
+): Promise<OptimizationPlannerReport> {
+  return requestJson<OptimizationPlannerReport>(`${endpoint}/api/app/optimization/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

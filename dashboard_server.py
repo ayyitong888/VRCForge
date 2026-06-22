@@ -42,6 +42,13 @@ from external_agent_connector_installer import (
     uninstall_connector,
 )
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
+from optimization_service import (
+    OPTIMIZATION_GATEWAY_TOOL_NAMES,
+    OPTIMIZATION_TOOL_DEFINITIONS,
+    build_optimization_report,
+    build_optimization_tool_result,
+    normalize_tool_name,
+)
 from outfit_import_planner import build_outfit_import_plan
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from project_memory_index import scan_project_memory
@@ -583,6 +590,23 @@ class BuildTestReadinessRequest(BaseModel):
     project_path: str = Field(default="", alias="projectPath")
     include_quest: bool = Field(default=True, alias="includeQuest")
     max_errors: int = Field(default=50, alias="maxErrors")
+
+    model_config = {"populate_by_name": True}
+
+
+class OptimizationPlanRequest(BaseModel):
+    avatar_path: str = Field(default="", alias="avatarPath")
+    project_path: str = Field(default="", alias="projectPath")
+    target_profile: str = Field(default="pc_conservative", alias="targetProfile")
+    custom_profile: dict[str, Any] = Field(default_factory=dict, alias="customProfile")
+    include_quest: bool = Field(default=True, alias="includeQuest")
+    max_errors: int = Field(default=50, alias="maxErrors")
+
+    model_config = {"populate_by_name": True}
+
+
+class OptimizationToolRequest(OptimizationPlanRequest):
+    tool: str = Field(default="", alias="tool")
 
     model_config = {"populate_by_name": True}
 
@@ -1910,6 +1934,18 @@ def app_validation_report(request: ValidationReportRequest) -> dict[str, Any]:
 @app.post("/api/app/build-test/readiness")
 def app_build_test_readiness(request: BuildTestReadinessRequest) -> dict[str, Any]:
     return build_test_readiness_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/optimization/plan")
+def app_optimization_plan(request: OptimizationPlanRequest) -> dict[str, Any]:
+    return build_optimization_plan_sync(request.model_dump(by_alias=True))
+
+
+@app.post("/api/app/optimization/tool")
+def app_optimization_tool(request: OptimizationToolRequest) -> dict[str, Any]:
+    params = request.model_dump(by_alias=True)
+    tool_name = str(params.pop("tool", "") or "")
+    return build_optimization_tool_sync(tool_name, params)
 
 
 @app.post("/api/app/project-index/scan")
@@ -11843,6 +11879,37 @@ def build_test_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_optimization_validation_context(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return build_validation_report_sync(
+        {
+            "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+            "projectPath": str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip(),
+            "includeQuest": bool(params.get("include_quest", params.get("includeQuest", True))),
+            "includeSources": True,
+            "includeReadiness": True,
+            "gateBuild": False,
+            "maxErrors": int(params.get("max_errors") or params.get("maxErrors") or 50),
+        }
+    )
+
+
+def build_optimization_plan_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    validation = build_optimization_validation_context(params)
+    return build_optimization_report(params, validation)
+
+
+def build_optimization_tool_sync(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    external_name = normalize_tool_name(tool_name)
+    if external_name in {"optimization.target.profile", "optimization.dependency.doctor"}:
+        validation: dict[str, Any] = {}
+    else:
+        validation = build_optimization_validation_context(params)
+    return build_optimization_tool_result(external_name, params, validation)
+
+
 def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
     return (
         str(
@@ -12759,6 +12826,16 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", build_optimization_plan_sync)
+    for definition in OPTIMIZATION_TOOL_DEFINITIONS:
+        gateway_tool = definition["gatewayName"]
+        external_tool = definition["externalName"]
+        AGENT_GATEWAY.register_tool(
+            gateway_tool,
+            definition["description"],
+            definition["category"],
+            lambda params, _tool=external_tool: build_optimization_tool_sync(_tool, params or {}),
+        )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
