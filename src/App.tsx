@@ -513,8 +513,7 @@ export default function App() {
     () =>
       projects
         .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
-        .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a)))))
-        .slice(0, 24),
+        .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a))))),
     [projects, hiddenPathSet, pinnedProjectSet],
   );
   const hiddenProjects = useMemo(
