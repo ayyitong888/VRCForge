@@ -154,6 +154,14 @@ const OPTIMIZATION_TARGET_PROFILES = [
   { id: "custom", label: "Custom" },
 ];
 
+type OptimizationActionOptions = {
+  atlasTargetMaterials?: string;
+  rendererPath?: string;
+  relativeVertexCount?: string;
+};
+
+type OptimizationActionCardItem = NonNullable<OptimizationPlannerReport["actionCards"]>[number];
+
 function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
   if (client === "codex") {
     return "codexApp";
@@ -388,6 +396,7 @@ export default function App() {
   const [optimizationMessage, setOptimizationMessage] = useState("");
   const [requestingOptimizationAction, setRequestingOptimizationAction] = useState("");
   const [requestingOptimizationDependency, setRequestingOptimizationDependency] = useState("");
+  const [optimizationActionOptions, setOptimizationActionOptions] = useState<Record<string, OptimizationActionOptions>>({});
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
@@ -1683,6 +1692,16 @@ export default function App() {
     }
   }
 
+  function updateOptimizationActionOption(actionId: string, key: keyof OptimizationActionOptions, value: string) {
+    setOptimizationActionOptions((current) => ({
+      ...current,
+      [actionId]: {
+        ...(current[actionId] ?? {}),
+        [key]: value,
+      },
+    }));
+  }
+
   async function requestOptimizationAction(card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) {
     if (!card.requestTool) {
       return;
@@ -1695,6 +1714,7 @@ export default function App() {
     setRequestingOptimizationAction(card.id);
     setOptimizationMessage("");
     try {
+      const requestOptions = buildOptimizationRequestOptions(card, optimizationActionOptions[card.id] ?? {});
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
@@ -1708,6 +1728,7 @@ export default function App() {
         projectPath: activeProjectPath || undefined,
         avatarPath,
         targetProfile: optimizationTargetProfile,
+        options: requestOptions,
         installMissingDependencies: true,
       });
       setOptimizationMessage(payload.approval ? `Approval queued: ${payload.approval.id}` : payload.error || "Request queued.");
@@ -2642,12 +2663,14 @@ export default function App() {
               loadingAvatars={loadingOptimizationAvatars}
               message={optimizationMessage}
               avatarMessage={optimizationAvatarMessage}
+              actionOptions={optimizationActionOptions}
               requestingActionId={requestingOptimizationAction}
               requestingDependencyId={requestingOptimizationDependency}
               onAvatarPathChange={setOptimizationAvatarPath}
               onTargetProfileChange={setOptimizationTargetProfile}
               onRefresh={() => void loadOptimizationPlan()}
               onRefreshAvatars={() => void loadOptimizationAvatars()}
+              onActionOptionChange={updateOptimizationActionOption}
               onRequestAction={(card) => void requestOptimizationAction(card)}
               onRequestDependency={(dependency) => void requestOptimizationDependencyInstall(dependency)}
             />
@@ -4595,12 +4618,14 @@ function OptimizationWorkspace({
   loadingAvatars,
   message,
   avatarMessage,
+  actionOptions,
   requestingActionId,
   requestingDependencyId,
   onAvatarPathChange,
   onTargetProfileChange,
   onRefresh,
   onRefreshAvatars,
+  onActionOptionChange,
   onRequestAction,
   onRequestDependency,
 }: {
@@ -4613,12 +4638,14 @@ function OptimizationWorkspace({
   loadingAvatars: boolean;
   message: string;
   avatarMessage: string;
+  actionOptions: Record<string, OptimizationActionOptions>;
   requestingActionId: string;
   requestingDependencyId: string;
   onAvatarPathChange: (value: string) => void;
   onTargetProfileChange: (profile: string) => void;
   onRefresh: () => void;
   onRefreshAvatars: () => void;
+  onActionOptionChange: (actionId: string, key: keyof OptimizationActionOptions, value: string) => void;
   onRequestAction: (card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) => void;
   onRequestDependency: (dependency: NonNullable<NonNullable<OptimizationPlannerReport["dependencyDoctor"]>["dependencies"]>[number]) => void;
 }) {
@@ -4822,12 +4849,46 @@ function OptimizationWorkspace({
                   {card.requestTool ? <DataLine label="Request" value={card.requestTool} /> : null}
                   {card.blockedReason ? <DataLine label="Blocked" value={card.blockedReason} /> : null}
                 </div>
+                {isTttOptimizationRequest(card) ? (
+                  <textarea
+                    value={actionOptions[card.id]?.atlasTargetMaterials ?? ""}
+                    onChange={(event) => onActionOptionChange(card.id, "atlasTargetMaterials", event.target.value)}
+                    placeholder="Assets/.../Material.mat"
+                    rows={2}
+                    className="mt-3 min-h-16 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-xs outline-none focus:border-primary"
+                  />
+                ) : null}
+                {isMeshiaOptimizationRequest(card) ? (
+                  <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem]">
+                    <input
+                      value={actionOptions[card.id]?.rendererPath ?? ""}
+                      onChange={(event) => onActionOptionChange(card.id, "rendererPath", event.target.value)}
+                      placeholder="Renderer path"
+                      className="h-8 min-w-0 rounded-md border border-border bg-background px-3 text-xs outline-none focus:border-primary"
+                    />
+                    <input
+                      value={actionOptions[card.id]?.relativeVertexCount ?? "0.9"}
+                      onChange={(event) => onActionOptionChange(card.id, "relativeVertexCount", event.target.value)}
+                      type="number"
+                      min="0.75"
+                      max="1"
+                      step="0.05"
+                      className="h-8 min-w-0 rounded-md border border-border bg-background px-3 text-xs outline-none focus:border-primary"
+                    />
+                  </div>
+                ) : null}
                 {card.requestTool ? (
                   <Button
                     type="button"
                     variant="outline"
                     className="mt-3 h-8 px-3 text-xs"
-                    disabled={loading || !selectedProjectPath || !avatarPath.trim() || requestingActionId === card.id}
+                    disabled={
+                      loading ||
+                      !selectedProjectPath ||
+                      !avatarPath.trim() ||
+                      optimizationActionMissingRequiredOptions(card, actionOptions[card.id] ?? {}) ||
+                      requestingActionId === card.id
+                    }
                     onClick={() => onRequestAction(card)}
                   >
                     {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
@@ -6596,6 +6657,51 @@ function avatarOptionLabel(avatar: AvatarListItem): string {
     parts.push(stats.join(", "));
   }
   return parts.join(" - ");
+}
+
+function optimizationRequestSignature(card: OptimizationActionCardItem): string {
+  return `${card.id || ""} ${card.requestTool || ""} ${card.title || ""}`.toLowerCase();
+}
+
+function isTttOptimizationRequest(card: OptimizationActionCardItem): boolean {
+  const signature = optimizationRequestSignature(card);
+  return signature.includes("ttt") || signature.includes("textrans") || signature.includes("atlas");
+}
+
+function isMeshiaOptimizationRequest(card: OptimizationActionCardItem): boolean {
+  return optimizationRequestSignature(card).includes("meshia");
+}
+
+function splitOptimizationOptionLines(value?: string): string[] {
+  return String(value || "")
+    .split(/[\n,;]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildOptimizationRequestOptions(card: OptimizationActionCardItem, options: OptimizationActionOptions): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  if (isTttOptimizationRequest(card)) {
+    payload.atlasTargetMaterials = splitOptimizationOptionLines(options.atlasTargetMaterials);
+  }
+  if (isMeshiaOptimizationRequest(card)) {
+    payload.rendererPath = String(options.rendererPath || "").trim();
+    const ratio = Number(options.relativeVertexCount || "0.9");
+    if (Number.isFinite(ratio)) {
+      payload.relativeVertexCount = ratio;
+    }
+  }
+  return payload;
+}
+
+function optimizationActionMissingRequiredOptions(card: OptimizationActionCardItem, options: OptimizationActionOptions): boolean {
+  if (isTttOptimizationRequest(card)) {
+    return splitOptimizationOptionLines(options.atlasTargetMaterials).length === 0;
+  }
+  if (isMeshiaOptimizationRequest(card)) {
+    return !String(options.rendererPath || "").trim();
+  }
+  return false;
 }
 
 function dependencyTone(status?: string) {
