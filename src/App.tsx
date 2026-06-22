@@ -1370,8 +1370,35 @@ export default function App() {
     setProjectRenameDraft("");
   }
 
+  function resolveOpenableProjectPath(path: string): string {
+    const raw = path.trim();
+    const normalized = normalizeProjectPathKey(raw);
+    const candidates: string[] = [raw];
+    const pushCandidate = (candidate?: string) => {
+      const value = (candidate || "").trim();
+      if (value && !candidates.some((item) => normalizeProjectPathKey(item) === normalizeProjectPathKey(value))) {
+        candidates.push(value);
+      }
+    };
+    const matchingProject = projectItems.find((project) => {
+      const identifiers = [project.path, project.name, projectKey(project), projectDisplayName(project)];
+      return identifiers.some((identifier) => normalizeProjectPathKey(identifier || "") === normalized);
+    });
+    pushCandidate(matchingProject?.path);
+    if (normalized && normalized === normalizeProjectPathKey(activeProjectPath)) {
+      pushCandidate(activeProjectPath);
+    }
+    if (!isAbsoluteLocalPath(raw)) {
+      const activeMcpProjects = projectItems.filter((project) => Boolean((project as { activeMcp?: boolean }).activeMcp && project.path));
+      if (activeMcpProjects.length === 1) {
+        pushCandidate(activeMcpProjects[0].path);
+      }
+    }
+    return candidates.find(isAbsoluteLocalPath) || raw;
+  }
+
   async function openProjectFolder(path: string) {
-    const targetPath = path.trim();
+    const targetPath = resolveOpenableProjectPath(path);
     if (!targetPath) {
       return;
     }
