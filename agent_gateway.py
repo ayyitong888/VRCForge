@@ -249,6 +249,13 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["validation", "build-test", "readiness"],
     },
+    "vrcforge_optimization_validation_delta": {
+        "title": "Optimization Validation Delta",
+        "inputs": ["Before, after, and optional rollback vrcforge.validation.v1 reports."],
+        "outputs": ["Severity, finding, section, gate, and rollback drift delta for one optimizer step."],
+        "sideEffects": "none",
+        "tags": ["optimization", "validation", "rollback-proof"],
+    },
     "vrcforge_preview_setup_outfit": {
         "title": "Setup Outfit Preview",
         "inputs": ["Avatar path and outfit object path."],
@@ -666,7 +673,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "outputs": ["Stable vrcforge.optimization.v1 baseline, dependency status cards, action cards, and one-step-at-a-time optimization plan."],
         "sideEffects": "none",
         "backupRestore": "not required for 0.7.2 planning; future optimizer applies must use approval, checkpoint, validation, and rollback",
-        "allowedTools": ["vrcforge_optimization_plan", *OPTIMIZATION_GATEWAY_TOOL_NAMES],
+        "allowedTools": ["vrcforge_optimization_plan", "vrcforge_optimization_validation_delta", *OPTIMIZATION_GATEWAY_TOOL_NAMES],
         "entrypointTool": "vrcforge_optimization_plan",
         "tags": ["builtin", "group", "optimization", "read-only", "plan-only"],
     },
@@ -684,6 +691,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "backupRestore": "approval, checkpoint, validation, and rollback proof are required before any approved write",
         "allowedTools": [
             "vrcforge_optimization_plan",
+            "vrcforge_optimization_validation_delta",
             *OPTIMIZATION_GATEWAY_TOOL_NAMES,
             *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
             "vrcforge_scan_thry_avatar_performance",
@@ -3938,6 +3946,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_run_validation_report",
         "vrcforge_build_test_readiness",
         "vrcforge_optimization_plan",
+        "vrcforge_optimization_validation_delta",
         *OPTIMIZATION_GATEWAY_TOOL_NAMES,
         *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
         "vrcforge_create_safe_backup",

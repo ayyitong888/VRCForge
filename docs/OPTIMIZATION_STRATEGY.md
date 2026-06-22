@@ -48,6 +48,11 @@ Stable read-only plugin calls:
 - `optimization.performance-tools.report`: reports the VRC Avatar Performance Tools integration surface.
 - `vrcforge_scan_thry_avatar_performance`: calls Thry's read-only VRAM/mesh calculator helpers when the package is installed. VRCForge does not invoke Thry UI actions that change texture import settings.
 
+Stable workflow proof calls:
+
+- `optimization.validation-delta` / `vrcforge_optimization_validation_delta`: compares before, after, and optional rollback `vrcforge.validation.v1` reports for one optimizer step. It reports severity deltas, finding deltas, section deltas, gate changes, and rollback drift without scanning or writing by itself.
+- `scripts/smoke_optimizer_apply_rollback.py`: reusable live proof harness for one optimizer request. It forces approval mode, captures before/after/rollback validation reports, optionally captures screenshots, computes validation delta, requests rollback, and writes evidence under `artifacts/optimizer-apply-smoke/`.
+
 Still blocked or experimental until further sample-matrix validation:
 
 - TTT automatic group selection, atlas execution without user-confirmed materials, and material-slot reduction that requires mesh/material coordination.
@@ -100,6 +105,7 @@ P0:
 - Before/after validation delta
 - Before/after screenshot comparison
 - Rollback proof after each step
+- Reusable optimizer apply/rollback proof script
 
 Rules:
 

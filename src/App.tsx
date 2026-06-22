@@ -277,6 +277,11 @@ function normalizeProjectPathKey(path?: string): string {
   return (path || "").replace(/\//g, "\\").trim().toLowerCase();
 }
 
+function isAbsoluteLocalPath(path?: string): boolean {
+  const value = (path || "").trim();
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("/");
+}
+
 function pickSubAgentName(): string {
   const index = Math.floor(Math.random() * VRCHAT_AVATAR_AGENT_NAMES.length);
   return VRCHAT_AVATAR_AGENT_NAMES[index] || "Manuka";
@@ -373,6 +378,7 @@ export default function App() {
   const [projectIndexError, setProjectIndexError] = useState("");
   const [optimizationReport, setOptimizationReport] = useState<OptimizationPlannerReport | null>(null);
   const [optimizationTargetProfile, setOptimizationTargetProfile] = useState("pc_conservative");
+  const [optimizationAvatarPath, setOptimizationAvatarPath] = useState("");
   const [loadingOptimization, setLoadingOptimization] = useState(false);
   const [optimizationMessage, setOptimizationMessage] = useState("");
   const [requestingOptimizationAction, setRequestingOptimizationAction] = useState("");
@@ -1366,14 +1372,19 @@ export default function App() {
   }
 
   async function openProjectFolder(path: string) {
-    if (!path) {
+    const targetPath = path.trim();
+    if (!targetPath) {
+      return;
+    }
+    if (!isAbsoluteLocalPath(targetPath)) {
+      setError("Cannot open this project because it does not have an absolute Unity project path.");
       return;
     }
     try {
       if (!isTauriRuntime()) {
         throw new Error("Open folder is available in the desktop app.");
       }
-      await invoke("open_folder", { path });
+      await invoke("open_folder", { path: targetPath });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -1587,6 +1598,7 @@ export default function App() {
       }
       const payload = await fetchOptimizationPlan(targetEndpoint, {
         projectPath: activeProjectPath || undefined,
+        avatarPath: optimizationAvatarPath.trim() || undefined,
         targetProfile: profile,
         includeQuest: true,
       });
@@ -1603,6 +1615,11 @@ export default function App() {
     if (!card.requestTool) {
       return;
     }
+    const avatarPath = optimizationAvatarPath.trim();
+    if (!avatarPath) {
+      setOptimizationMessage("Set avatar path before requesting an optimizer step.");
+      return;
+    }
     setRequestingOptimizationAction(card.id);
     setOptimizationMessage("");
     try {
@@ -1617,6 +1634,7 @@ export default function App() {
       const payload = await requestOptimizationApply(targetEndpoint, {
         tool: card.requestTool,
         projectPath: activeProjectPath || undefined,
+        avatarPath,
         targetProfile: optimizationTargetProfile,
         installMissingDependencies: true,
       });
@@ -2545,11 +2563,13 @@ export default function App() {
             <OptimizationWorkspace
               report={optimizationReport}
               selectedProjectPath={activeProjectPath}
+              avatarPath={optimizationAvatarPath}
               targetProfile={optimizationTargetProfile}
               loading={loadingOptimization}
               message={optimizationMessage}
               requestingActionId={requestingOptimizationAction}
               requestingDependencyId={requestingOptimizationDependency}
+              onAvatarPathChange={setOptimizationAvatarPath}
               onTargetProfileChange={setOptimizationTargetProfile}
               onRefresh={() => void loadOptimizationPlan()}
               onRequestAction={(card) => void requestOptimizationAction(card)}
@@ -4492,11 +4512,13 @@ function ConnectorToggle({
 function OptimizationWorkspace({
   report,
   selectedProjectPath,
+  avatarPath,
   targetProfile,
   loading,
   message,
   requestingActionId,
   requestingDependencyId,
+  onAvatarPathChange,
   onTargetProfileChange,
   onRefresh,
   onRequestAction,
@@ -4504,11 +4526,13 @@ function OptimizationWorkspace({
 }: {
   report: OptimizationPlannerReport | null;
   selectedProjectPath: string;
+  avatarPath: string;
   targetProfile: string;
   loading: boolean;
   message: string;
   requestingActionId: string;
   requestingDependencyId: string;
+  onAvatarPathChange: (value: string) => void;
   onTargetProfileChange: (profile: string) => void;
   onRefresh: () => void;
   onRequestAction: (card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) => void;
@@ -4570,6 +4594,18 @@ function OptimizationWorkspace({
                   <span className="block truncate">{item.label}</span>
                 </button>
               ))}
+            </div>
+            <div className="mt-3 flex min-w-0 items-center gap-2">
+              <input
+                value={avatarPath}
+                onChange={(event) => onAvatarPathChange(event.target.value)}
+                placeholder="Avatar scene path"
+                className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              />
+              <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Scan
+              </Button>
             </div>
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <OptimizationMetric label="PC rank" value={report?.baseline?.performanceHeadline?.pc?.rank || "unknown"} />
@@ -4684,7 +4720,7 @@ function OptimizationWorkspace({
                     type="button"
                     variant="outline"
                     className="mt-3 h-8 px-3 text-xs"
-                    disabled={loading || !selectedProjectPath || requestingActionId === card.id}
+                    disabled={loading || !selectedProjectPath || !avatarPath.trim() || requestingActionId === card.id}
                     onClick={() => onRequestAction(card)}
                   >
                     {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}

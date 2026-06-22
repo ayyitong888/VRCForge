@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import copy
+import hashlib
 import hmac
 import json
 import math
@@ -626,6 +627,17 @@ class OptimizationApplyRequest(BaseModel):
     install_missing_dependencies: bool = Field(default=False, alias="installMissingDependencies")
     allow_experimental: bool = Field(default=False, alias="allowExperimental")
     include_prerelease: bool = Field(default=False, alias="includePrerelease")
+
+    model_config = {"populate_by_name": True}
+
+
+class OptimizationValidationDeltaRequest(BaseModel):
+    before_validation: dict[str, Any] = Field(default_factory=dict, alias="beforeValidation")
+    after_validation: dict[str, Any] = Field(default_factory=dict, alias="afterValidation")
+    rollback_validation: dict[str, Any] = Field(default_factory=dict, alias="rollbackValidation")
+    optimizer_tool: str = Field(default="", alias="optimizerTool")
+    approval_id: str = Field(default="", alias="approvalId")
+    checkpoint_id: str = Field(default="", alias="checkpointId")
 
     model_config = {"populate_by_name": True}
 
@@ -1990,6 +2002,11 @@ async def app_optimization_apply_request(request: OptimizationApplyRequest) -> d
         raise HTTPException(status_code=400, detail=payload)
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
+
+
+@app.post("/api/app/optimization/validation-delta")
+def app_optimization_validation_delta(request: OptimizationValidationDeltaRequest) -> dict[str, Any]:
+    return build_optimization_validation_delta_sync(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/project-index/scan")
@@ -12246,6 +12263,171 @@ def build_optimization_validation_context(params: dict[str, Any]) -> dict[str, A
     )
 
 
+VALIDATION_DELTA_SEVERITIES = ("Error", "Warning", "Suggestion", "Info", "Ignored")
+
+
+def _validation_delta_counts(report: dict[str, Any]) -> dict[str, int]:
+    summary = ensure_dict(report.get("summary"))
+    counts = ensure_dict(summary.get("severityCounts"))
+    return {severity: int(counts.get(severity) or 0) for severity in VALIDATION_DELTA_SEVERITIES}
+
+
+def _validation_delta_sections(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    sections: dict[str, dict[str, Any]] = {}
+    for item in report.get("sections") or []:
+        if not isinstance(item, dict):
+            continue
+        section_id = str(item.get("id") or item.get("name") or "").strip()
+        if not section_id:
+            continue
+        sections[section_id] = {
+            "id": section_id,
+            "name": item.get("name") or section_id,
+            "status": item.get("status") or "unknown",
+            "counts": {severity: int(ensure_dict(item.get("counts")).get(severity) or 0) for severity in VALIDATION_DELTA_SEVERITIES},
+        }
+    return sections
+
+
+def _validation_delta_finding_key(finding: dict[str, Any]) -> str:
+    parts = [
+        str(finding.get("id") or ""),
+        str(finding.get("section") or finding.get("sectionId") or ""),
+        str(finding.get("severity") or ""),
+        str(finding.get("title") or finding.get("message") or ""),
+        str(finding.get("source") or ""),
+    ]
+    normalized = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in parts)
+    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _validation_delta_findings(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in report.get("findings") or []:
+        if not isinstance(item, dict):
+            continue
+        key = _validation_delta_finding_key(item)
+        result[key] = {
+            "key": key,
+            "id": item.get("id"),
+            "section": item.get("section") or item.get("sectionId"),
+            "severity": item.get("severity"),
+            "title": item.get("title") or item.get("message"),
+            "source": item.get("source"),
+        }
+    return result
+
+
+def _validation_delta_summary(report: dict[str, Any]) -> dict[str, Any]:
+    summary = ensure_dict(report.get("summary"))
+    return {
+        "schema": report.get("schema"),
+        "ok": bool(report.get("ok", True)),
+        "gateStatus": ensure_dict(report.get("gate")).get("status") or summary.get("gateStatus"),
+        "severityCounts": _validation_delta_counts(report),
+        "findingCount": int(summary.get("findingCount") or len(report.get("findings") or [])),
+        "failedSourceCount": int(summary.get("failedSourceCount") or 0),
+        "generatedAt": report.get("generatedAt"),
+    }
+
+
+def _validation_delta_count_change(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {severity: int(after.get(severity, 0)) - int(before.get(severity, 0)) for severity in VALIDATION_DELTA_SEVERITIES}
+
+
+def _validation_delta_status(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any]) -> str:
+    before_counts = ensure_dict(before.get("severityCounts"))
+    after_counts = ensure_dict(after.get("severityCounts"))
+    before_gate = str(before.get("gateStatus") or "")
+    after_gate = str(after.get("gateStatus") or "")
+    rollback_counts = ensure_dict(rollback.get("severityCounts"))
+    error_delta = int(after_counts.get("Error") or 0) - int(before_counts.get("Error") or 0)
+    warning_delta = int(after_counts.get("Warning") or 0) - int(before_counts.get("Warning") or 0)
+    suggestion_delta = int(after_counts.get("Suggestion") or 0) - int(before_counts.get("Suggestion") or 0)
+    if after_gate == "blocked" and before_gate != "blocked":
+        return "regressed"
+    if error_delta > 0 or warning_delta > 0:
+        return "regressed"
+    if error_delta < 0 or warning_delta < 0 or suggestion_delta < 0:
+        return "improved"
+    if rollback_counts and rollback_counts != before_counts:
+        return "rollback-drift"
+    return "unchanged"
+
+
+def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    before_report = ensure_dict(params.get("beforeValidation") or params.get("before_validation") or params.get("before") or {})
+    after_report = ensure_dict(params.get("afterValidation") or params.get("after_validation") or params.get("after") or {})
+    rollback_report = ensure_dict(params.get("rollbackValidation") or params.get("rollback_validation") or params.get("rollback") or {})
+    before = _validation_delta_summary(before_report)
+    after = _validation_delta_summary(after_report)
+    rollback = _validation_delta_summary(rollback_report) if rollback_report else {}
+    before_findings = _validation_delta_findings(before_report)
+    after_findings = _validation_delta_findings(after_report)
+    rollback_findings = _validation_delta_findings(rollback_report) if rollback_report else {}
+    before_sections = _validation_delta_sections(before_report)
+    after_sections = _validation_delta_sections(after_report)
+    section_deltas = []
+    for section_id in sorted(set(before_sections) | set(after_sections)):
+        before_section = before_sections.get(section_id) or {"id": section_id, "counts": {}}
+        after_section = after_sections.get(section_id) or {"id": section_id, "counts": {}}
+        section_deltas.append(
+            {
+                "id": section_id,
+                "name": after_section.get("name") or before_section.get("name") or section_id,
+                "beforeStatus": before_section.get("status"),
+                "afterStatus": after_section.get("status"),
+                "severityDelta": _validation_delta_count_change(
+                    ensure_dict(before_section.get("counts")),
+                    ensure_dict(after_section.get("counts")),
+                ),
+            }
+        )
+    added_keys = sorted(set(after_findings) - set(before_findings))
+    removed_keys = sorted(set(before_findings) - set(after_findings))
+    persistent_keys = sorted(set(before_findings) & set(after_findings))
+    rollback_matches_before = bool(rollback_report) and rollback.get("severityCounts") == before.get("severityCounts") and rollback.get("gateStatus") == before.get("gateStatus")
+    status = _validation_delta_status(before, after, rollback)
+    return {
+        "ok": status not in {"regressed", "rollback-drift"},
+        "schema": "vrcforge.optimization.validation_delta.v1",
+        "readOnly": True,
+        "noProjectWrites": True,
+        "generatedAt": _validation_now(),
+        "optimizerTool": str(params.get("optimizerTool") or params.get("optimizer_tool") or ""),
+        "approvalId": str(params.get("approvalId") or params.get("approval_id") or ""),
+        "checkpointId": str(params.get("checkpointId") or params.get("checkpoint_id") or ""),
+        "status": status,
+        "before": before,
+        "after": after,
+        "rollback": rollback,
+        "severityDelta": _validation_delta_count_change(
+            ensure_dict(before.get("severityCounts")),
+            ensure_dict(after.get("severityCounts")),
+        ),
+        "findingDelta": {
+            "addedCount": len(added_keys),
+            "removedCount": len(removed_keys),
+            "persistentCount": len(persistent_keys),
+            "added": [after_findings[key] for key in added_keys[:50]],
+            "removed": [before_findings[key] for key in removed_keys[:50]],
+        },
+        "sectionDeltas": section_deltas,
+        "rollbackProof": {
+            "provided": bool(rollback_report),
+            "matchesBeforeSeverityAndGate": rollback_matches_before,
+            "remainingFindingCount": len(rollback_findings) if rollback_report else None,
+        },
+        "policy": {
+            "deltaIsReadOnly": True,
+            "optimizerApplyStillRequiresApprovalCheckpointValidationRollback": True,
+            "externalAgentsMayGenerateReports": True,
+            "externalAgentsMustNotApplyDirectly": True,
+        },
+    }
+
+
 def build_optimization_plan_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     validation = build_optimization_validation_context(params)
@@ -13663,6 +13845,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
     AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", build_optimization_plan_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", build_optimization_validation_delta_sync)
     for definition in OPTIMIZATION_TOOL_DEFINITIONS:
         gateway_tool = definition["gatewayName"]
         external_tool = definition["externalName"]

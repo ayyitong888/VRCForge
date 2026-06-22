@@ -176,10 +176,7 @@ fn ensure_agent_notes_file() -> String {
 
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
-    let folder = PathBuf::from(path);
-    if !folder.is_dir() {
-        return Err(format!("Folder does not exist: {}", folder.display()));
-    }
+    let folder = validate_project_folder_to_open(&path)?;
 
     #[cfg(windows)]
     {
@@ -205,6 +202,32 @@ fn open_folder(path: String) -> Result<(), String> {
             .map_err(|error| format!("unable to open folder: {error}"))?;
         Ok(())
     }
+}
+
+fn validate_project_folder_to_open(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Project folder path is empty.".to_string());
+    }
+    let folder = PathBuf::from(trimmed);
+    if !folder.is_absolute() {
+        return Err(format!("Project folder must be an absolute path: {trimmed}"));
+    }
+    let folder = fs::canonicalize(&folder)
+        .map_err(|error| format!("Folder does not exist: {} ({error})", folder.display()))?;
+    if !folder.is_dir() {
+        return Err(format!("Folder does not exist: {}", folder.display()));
+    }
+    if !(folder.join("Assets").is_dir()
+        && folder.join("Packages").is_dir()
+        && folder.join("ProjectSettings").is_dir())
+    {
+        return Err(format!(
+            "Not a Unity project root: {}",
+            folder.display()
+        ));
+    }
+    Ok(folder)
 }
 
 fn try_ensure_agent_notes_file(user_data: &Path) -> Result<PathBuf, String> {
@@ -463,7 +486,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_http_status_ok, prepare_runtime_files, try_ensure_agent_notes_file};
+    use super::{
+        parse_http_status_ok, prepare_runtime_files, try_ensure_agent_notes_file,
+        validate_project_folder_to_open,
+    };
     use std::{
         env, fs,
         path::{Path, PathBuf},
@@ -539,5 +565,32 @@ mod tests {
         assert!(!parse_http_status_ok(b"HTTP/1.1 401 Unauthorized\r\n"));
         assert!(!parse_http_status_ok(b"HTTP/1.1 404 Not Found\r\n"));
         assert!(!parse_http_status_ok(b"not http"));
+    }
+
+    #[test]
+    fn open_folder_validation_rejects_empty_and_relative_paths() {
+        assert!(validate_project_folder_to_open("").is_err());
+        assert!(validate_project_folder_to_open("Documents").is_err());
+    }
+
+    #[test]
+    fn open_folder_validation_requires_unity_project_root() {
+        let base = test_dir("open-folder-validation");
+        let not_project = base.join("not-project");
+        fs::create_dir_all(&not_project).expect("test directory should be created");
+
+        let error = validate_project_folder_to_open(&not_project.display().to_string())
+            .expect_err("non-project folder must be rejected");
+        assert!(error.contains("Not a Unity project root"));
+
+        let project = base.join("unity-project");
+        fs::create_dir_all(project.join("Assets")).expect("Assets directory should be created");
+        fs::create_dir_all(project.join("Packages")).expect("Packages directory should be created");
+        fs::create_dir_all(project.join("ProjectSettings")).expect("ProjectSettings directory should be created");
+
+        let resolved = validate_project_folder_to_open(&project.display().to_string())
+            .expect("Unity project root should be accepted");
+        assert!(resolved.ends_with("unity-project"));
+        let _ = fs::remove_dir_all(base);
     }
 }

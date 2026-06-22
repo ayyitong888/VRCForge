@@ -145,6 +145,8 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
     assert "vrcforge_optimization_meshia_simplify_apply_request" in tool_names
     assert "vrcforge_optimization_vrcfury_parameter_compressor_apply_request" in tool_names
     assert "vrcforge_optimization_vrcfury_direct_tree_apply_request" in tool_names
+    assert "vrcforge_optimization_validation_delta" in tool_names
+    assert "vrcforge_optimization_validation_delta" not in write_targets
     assert "vrcforge_scan_thry_avatar_performance" in tool_names
     assert "vrcforge_configure_optimizer_component" not in tool_names
     assert "vrcforge_configure_optimizer_component" not in write_targets
@@ -186,6 +188,7 @@ def test_avatar_optimization_skill_group_contains_stable_request_tools_only() ->
     allowed = set(group["allowedTools"])
 
     assert set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= allowed
+    assert "vrcforge_optimization_validation_delta" in allowed
     assert "vrcforge_optimization_ttt_atlas_apply_request" in allowed
     assert "vrcforge_optimization_meshia_simplify_apply_request" in allowed
     assert "vrcforge_scan_thry_avatar_performance" in allowed
@@ -193,6 +196,91 @@ def test_avatar_optimization_skill_group_contains_stable_request_tools_only() ->
     assert "vrcforge_package_install_request" in allowed
     assert "vrcforge_configure_optimizer_component" not in allowed
     assert "vrcforge_install_vpm_package" not in allowed
+
+
+def test_optimization_validation_delta_reports_improvement_and_rollback_match() -> None:
+    before = {
+        "schema": "vrcforge.validation.v1",
+        "ok": True,
+        "summary": {"severityCounts": {"Error": 0, "Warning": 1, "Suggestion": 1, "Info": 0, "Ignored": 0}, "findingCount": 2, "gateStatus": "pass"},
+        "gate": {"status": "pass"},
+        "sections": [
+            {"id": "materials", "name": "Materials", "status": "warning", "counts": {"Error": 0, "Warning": 1, "Suggestion": 1, "Info": 0, "Ignored": 0}},
+        ],
+        "findings": [
+            {"section": "Materials", "severity": "Warning", "title": "Large texture", "source": "materials"},
+            {"section": "Materials", "severity": "Suggestion", "title": "Atlas candidate", "source": "materials"},
+        ],
+    }
+    after = {
+        "schema": "vrcforge.validation.v1",
+        "ok": True,
+        "summary": {"severityCounts": {"Error": 0, "Warning": 0, "Suggestion": 1, "Info": 0, "Ignored": 0}, "findingCount": 1, "gateStatus": "pass"},
+        "gate": {"status": "pass"},
+        "sections": [
+            {"id": "materials", "name": "Materials", "status": "review", "counts": {"Error": 0, "Warning": 0, "Suggestion": 1, "Info": 0, "Ignored": 0}},
+        ],
+        "findings": [
+            {"section": "Materials", "severity": "Suggestion", "title": "Atlas candidate", "source": "materials"},
+        ],
+    }
+
+    delta = dashboard_server.build_optimization_validation_delta_sync(
+        {
+            "optimizerTool": "optimization.lac.apply-request",
+            "checkpointId": "ckpt_test",
+            "beforeValidation": before,
+            "afterValidation": after,
+            "rollbackValidation": before,
+        }
+    )
+
+    assert delta["schema"] == "vrcforge.optimization.validation_delta.v1"
+    assert delta["readOnly"] is True
+    assert delta["noProjectWrites"] is True
+    assert delta["ok"] is True
+    assert delta["status"] == "improved"
+    assert delta["severityDelta"]["Warning"] == -1
+    assert delta["findingDelta"]["removedCount"] == 1
+    assert delta["rollbackProof"]["matchesBeforeSeverityAndGate"] is True
+
+
+def test_optimization_validation_delta_flags_regression_and_rollback_drift() -> None:
+    before = {
+        "schema": "vrcforge.validation.v1",
+        "ok": True,
+        "summary": {"severityCounts": {"Error": 0, "Warning": 0, "Suggestion": 0, "Info": 0, "Ignored": 0}, "findingCount": 0, "gateStatus": "pass"},
+        "gate": {"status": "pass"},
+        "findings": [],
+    }
+    after = {
+        "schema": "vrcforge.validation.v1",
+        "ok": False,
+        "summary": {"severityCounts": {"Error": 1, "Warning": 0, "Suggestion": 0, "Info": 0, "Ignored": 0}, "findingCount": 1, "gateStatus": "blocked"},
+        "gate": {"status": "blocked"},
+        "findings": [{"section": "Unity compile", "severity": "Error", "title": "Compile error", "source": "compile"}],
+    }
+    rollback = {
+        "schema": "vrcforge.validation.v1",
+        "ok": True,
+        "summary": {"severityCounts": {"Error": 0, "Warning": 1, "Suggestion": 0, "Info": 0, "Ignored": 0}, "findingCount": 1, "gateStatus": "pass"},
+        "gate": {"status": "pass"},
+        "findings": [{"section": "Materials", "severity": "Warning", "title": "New rollback warning", "source": "materials"}],
+    }
+
+    delta = dashboard_server.build_optimization_validation_delta_sync(
+        {
+            "optimizerTool": "optimization.meshia.simplify-apply-request",
+            "beforeValidation": before,
+            "afterValidation": after,
+            "rollbackValidation": rollback,
+        }
+    )
+
+    assert delta["ok"] is False
+    assert delta["status"] == "regressed"
+    assert delta["severityDelta"]["Error"] == 1
+    assert delta["rollbackProof"]["matchesBeforeSeverityAndGate"] is False
 
 
 def test_wrapper_only_optimizer_targets_reject_generic_apply_request(monkeypatch) -> None:
@@ -477,3 +565,11 @@ def test_public_optimization_docs_include_roadmap_sequence() -> None:
         assert marker in text
     assert "Calling third-party tools vs first-class VRCForge capabilities" in text
     assert "No direct apply" in text
+
+
+def test_optimizer_apply_rollback_smoke_script_uses_validation_delta_endpoint() -> None:
+    text = Path("scripts/smoke_optimizer_apply_rollback.py").read_text(encoding="utf-8")
+    assert "vrcforge.optimizer_apply_rollback_smoke.v1" in text
+    assert "/api/app/optimization/apply-request" in text
+    assert "/api/app/optimization/validation-delta" in text
+    assert "/api/app/checkpoints/{self.checkpoint_id}/restore" in text
