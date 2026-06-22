@@ -856,6 +856,8 @@ export type OptimizationActionCard = {
   expectedBenefit?: string;
   whyRecommended?: string;
   nextSafeAction?: string;
+  requestTool?: string;
+  requestOnly?: boolean;
   affectedAssetsOrRenderers?: unknown[];
   directApplyExposed?: boolean;
 };

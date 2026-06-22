@@ -10491,7 +10491,8 @@ def _select_package_install_strategy(params: dict[str, Any], managers: list[dict
         ui_handoff.sort(key=lambda item: 0 if item.get("name") == preferred else 1)
     selected_cli = command_installers[0] if command_installers else None
     selected_handoff = ui_handoff[0] if ui_handoff else None
-    strategy = "command" if selected_cli else "agent_download" if allow_agent else "manual_handoff"
+    execution_strategy = "command" if selected_cli else "agent_download" if allow_agent and not selected_handoff else "manual_handoff"
+    strategy = "ui_handoff" if selected_handoff else execution_strategy
     return {
         "schema": "vrcforge.package_install_plan.v1",
         "packageId": package_id,
@@ -10499,6 +10500,8 @@ def _select_package_install_strategy(params: dict[str, Any], managers: list[dict
         "package": package_meta,
         "includePrerelease": bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")),
         "strategy": strategy,
+        "executionStrategy": execution_strategy,
+        "preferredManager": selected_handoff or selected_cli,
         "commandInstaller": selected_cli,
         "uiHandoff": selected_handoff,
         "managers": managers,
@@ -10507,13 +10510,17 @@ def _select_package_install_strategy(params: dict[str, Any], managers: list[dict
         "requiresApproval": True,
         "requiresCheckpoint": True,
         "message": (
-            "Use the selected VPM CLI after approval."
+            "Use the selected ALCOM/VCC handoff first; supervised command install is also available after approval."
+            if selected_handoff and selected_cli
+            else "Use the selected ALCOM/VCC handoff first."
+            if selected_handoff
+            else "Use the selected VPM CLI after approval."
             if selected_cli
-            else "No VPM CLI is available; use ALCOM/VCC UI or let an external agent prepare a supervised tool install/download plan."
+            else "No VPM package manager is available; let an external agent prepare a supervised package-manager download/install plan."
         ),
         "agentManagedDownload": {
-            "available": allow_agent and selected_cli is None,
-            "allowedTargets": ["install VCC/vpm CLI", "install vrc-get", "download package manager from official source"],
+            "available": allow_agent and selected_cli is None and selected_handoff is None,
+            "allowedTargets": ["install ALCOM or VCC", "install VCC/vpm CLI", "install vrc-get", "download package manager from official source"],
             "disallowedTargets": ["directly edit Packages/manifest.json", "copy optimizer source into VRCForge", "bypass approval/checkpoint"],
             "nextTool": "vrcforge_request_apply",
         },
@@ -10568,7 +10575,8 @@ def request_package_install_sync(params: dict[str, Any], agent_name: str = "exte
             "reason": f"Install VPM package {plan.get('packageId')} through VRCForge supervised package manager flow.",
             "preview": plan,
             "agent_name": agent_name,
-        }
+        },
+        internal_wrapper=True,
     )
 
 
@@ -11375,6 +11383,17 @@ def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
         "avatar_performance",
         {"isMobile": bool(params.get("is_mobile") or params.get("isMobile") or False)},
         "avatar performance scan",
+    )
+
+
+def scan_thry_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    return run_unity_artifact_scan_sync(
+        params,
+        "vrc_scan_thry_avatar_performance",
+        "thry_avatar_performance",
+        {},
+        "Thry avatar performance scan",
     )
 
 
@@ -12261,6 +12280,9 @@ def normalize_optimization_apply_request_name(tool_name: str) -> str:
         "ma2bt": "optimization.ma2bt.convert-apply-request",
         "ma2bt_pro": "optimization.ma2bt.convert-apply-request",
         "meshia": "optimization.meshia.simplify-apply-request",
+        "vrcfury_parameter": "optimization.vrcfury.parameter-compressor-apply-request",
+        "vrcfury_parameter_compressor": "optimization.vrcfury.parameter-compressor-apply-request",
+        "vrcfury_direct_tree": "optimization.vrcfury.direct-tree-apply-request",
     }
     key = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     if key in aliases:
@@ -12286,6 +12308,68 @@ def _normalize_optimizer_profile_id(value: Any) -> str:
     return aliases.get(key, key or "pc_conservative")
 
 
+def _option_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _confirmed_ttt_material_paths(params: dict[str, Any], options: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in (
+        "atlasTargetMaterials",
+        "materialPaths",
+        "materials",
+        "targetMaterialPaths",
+        "confirmedMaterialPaths",
+        "userConfirmedMaterialPaths",
+    ):
+        values.extend(_option_string_list(options.get(key)))
+        values.extend(_option_string_list(params.get(key)))
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = value.replace("\\", "/").strip()
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
+
+
+def _meshia_renderer_path(params: dict[str, Any], options: dict[str, Any]) -> str:
+    return str(
+        options.get("rendererPath")
+        or options.get("targetRendererPath")
+        or params.get("rendererPath")
+        or params.get("targetRendererPath")
+        or params.get("targetPath")
+        or ""
+    ).strip()
+
+
+def _meshia_relative_vertex_count(profile: str, options: dict[str, Any]) -> tuple[float, str]:
+    raw = (
+        options.get("relativeVertexCount")
+        or options.get("targetRatio")
+        or options.get("ratio")
+        or options.get("vertexRatio")
+        or ""
+    )
+    if raw == "":
+        return (0.9 if profile in {"pc_conservative", "conservative_pc"} else 0.85), ""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0, "Meshia relativeVertexCount must be a number between 0.75 and 1.0 for the stable request path."
+    if value < 0.75 or value > 1.0:
+        return value, "Meshia stable request path only allows relativeVertexCount between 0.75 and 1.0. Lower ratios remain experimental."
+    return value, ""
+
+
 def _find_optimizer_dependency(dependency_doctor: dict[str, Any], optimizer_id: str) -> dict[str, Any]:
     for dependency in dependency_doctor.get("dependencies") or []:
         if str(dependency.get("id") or "") == optimizer_id:
@@ -12302,6 +12386,8 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     profile = _normalize_optimizer_profile_id(
         params.get("profile") or params.get("targetProfile") or params.get("target_profile") or "pc_conservative"
     )
+    options = ensure_dict(params.get("options") or {})
+    target_path = avatar_path
     dependency_doctor = build_optimization_tool_result(
         "optimization.dependency.doctor",
         {"projectPath": project_value},
@@ -12333,23 +12419,45 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     if not project_value:
         blocked_reasons.append("Unity projectPath is required.")
     if not avatar_path and supported_write:
-        blocked_reasons.append("avatarPath is required so VRCForge can attach the optimizer component to the avatar root.")
+        blocked_reasons.append("avatarPath is required for supervised optimizer context and rollback proof.")
     if dependency_status != "installed":
         blocked_reasons.append(f"{dependency.get('label') or definition['optimizerId']} is {dependency_status}; install or repair it first.")
     if not supported_write:
-        blocked_reasons.append("This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet.")
+        if str(definition.get("optimizerId")) == "vrcfury":
+            blocked_reasons.append("VRCFury optimizer writes use internal feature models/menu settings in the inspected package; VRCForge exposes a stable request surface but blocks the write until a public validated writer path exists.")
+        else:
+            blocked_reasons.append("This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet.")
     if not stable_callable:
         blocked_reasons.append("This optimizer is not yet part of the stable avatar optimization skill set.")
     if supported_profiles and profile not in supported_profiles:
         blocked_reasons.append(f"Profile '{profile}' is not enabled for stable delegated apply yet.")
+    mode = str(definition.get("mode") or "")
+    if mode == "ttt_atlas":
+        material_paths = _confirmed_ttt_material_paths(params, options)
+        if not material_paths:
+            blocked_reasons.append("TexTransTool atlas setup requires user-confirmed material asset paths in options.atlasTargetMaterials.")
+        invalid_material_paths = [item for item in material_paths if not item.replace("\\", "/").startswith("Assets/")]
+        if invalid_material_paths:
+            blocked_reasons.append("TexTransTool material references must be Unity asset paths under Assets/.")
+        options = {**options, "atlasTargetMaterials": material_paths}
+    elif mode == "meshia_simplify":
+        renderer_path = _meshia_renderer_path(params, options)
+        if not renderer_path:
+            blocked_reasons.append("Meshia stable setup requires options.rendererPath for one user-selected low-risk Renderer object.")
+        target_path = renderer_path or avatar_path
+        ratio, ratio_error = _meshia_relative_vertex_count(profile, options)
+        if ratio_error:
+            blocked_reasons.append(ratio_error)
+        options = {**options, "rendererPath": renderer_path, "relativeVertexCount": ratio}
     apply_arguments = {
         "projectPath": project_value,
         "avatarPath": avatar_path,
+        "targetPath": target_path,
         "optimizerId": definition["optimizerId"],
         "mode": definition["mode"],
         "componentType": definition.get("componentType") or "",
         "profile": profile,
-        "options": ensure_dict(params.get("options") or {}),
+        "options": options,
         "sourceApplyRequestTool": definition["externalName"],
     }
     return {
@@ -12411,7 +12519,8 @@ def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "e
                 "reason": f"Install dependency for {preview['externalName']} before optimizer configuration.",
                 "preview": install_plan,
                 "agent_name": agent_name,
-            }
+            },
+            internal_wrapper=True,
         )
     if not preview.get("readyToRequest"):
         return {"ok": False, "status": "blocked", "preview": preview, "error": "; ".join(preview.get("blockedReasons") or [])}
@@ -12422,7 +12531,8 @@ def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "e
             "reason": f"Request supervised optimizer configuration for {preview['externalName']}.",
             "preview": preview,
             "agent_name": agent_name,
-        }
+        },
+        internal_wrapper=True,
     )
 
 
@@ -12477,7 +12587,8 @@ def _lac_component_properties(profile: str) -> dict[str, Any]:
     }
 
 
-def _optimizer_component_properties(optimizer_id: str, profile: str) -> dict[str, Any]:
+def _optimizer_component_properties(optimizer_id: str, profile: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    options = ensure_dict(options or {})
     if optimizer_id == "lac":
         return _lac_component_properties(profile)
     if optimizer_id == "ma2bt_pro":
@@ -12487,6 +12598,23 @@ def _optimizer_component_properties(optimizer_id: str, profile: str) -> dict[str
             "mergeIdenticalBlendTreesAndAnimations": True,
             "scanAllLayers": False,
             "maResponsivePrefixes": ["MA Responsive: ", "RC MA Responsive: "],
+        }
+    if optimizer_id == "textrans_tool":
+        material_paths = _confirmed_ttt_material_paths({}, options)
+        properties: dict[str, Any] = {}
+        if material_paths:
+            properties["AtlasTargetMaterials"] = material_paths
+        reference = str(options.get("allMaterialMergeReference") or options.get("mergeReference") or "").strip()
+        if reference:
+            properties["AllMaterialMergeReference"] = reference.replace("\\", "/")
+        return properties
+    if optimizer_id == "meshia":
+        ratio, _ratio_error = _meshia_relative_vertex_count(_normalize_optimizer_profile_id(profile), options)
+        return {
+            "target": {
+                "Kind": "RelativeVertexCount",
+                "Value": ratio,
+            }
         }
     return {}
 
@@ -12519,29 +12647,33 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
     optimizer_id = str(params.get("optimizerId") or params.get("optimizer_id") or "").strip()
     mode = str(params.get("mode") or "").strip()
     avatar_path = str(params.get("avatarPath") or params.get("avatar_path") or "").strip()
+    target_path = str(params.get("targetPath") or params.get("target_path") or "").strip() or avatar_path
     component_type = str(params.get("componentType") or params.get("component_type") or "").strip()
     profile = _normalize_optimizer_profile_id(params.get("profile") or "pc_conservative")
+    options = ensure_dict(params.get("options") or {})
     project_path = resolve_addon_project_path(params)
     if not optimizer_id or not mode:
         return {"ok": False, "error": "optimizerId and mode are required."}
     if not avatar_path:
         return {"ok": False, "error": "avatarPath is required."}
+    if not target_path:
+        return {"ok": False, "error": "targetPath is required."}
     if not component_type:
         return {"ok": False, "error": "This optimizer does not yet have a validated component writer in VRCForge."}
     steps: list[dict[str, Any]] = []
-    already_present, inspect_payload = _component_already_present(project_path, avatar_path, component_type)
+    already_present, inspect_payload = _component_already_present(project_path, target_path, component_type)
     if already_present:
         added = {
             "ok": True,
             "action": "reuse_component",
-            "gameObjectPath": avatar_path,
+            "gameObjectPath": target_path,
             "componentType": component_type,
             "componentIndex": int(inspect_payload.get("componentIndex") or 0),
         }
     else:
         request = {
         "projectPath": project_path,
-        "gameObjectPath": avatar_path,
+        "gameObjectPath": target_path,
         "componentType": component_type,
         "preview": bool(params.get("preview", False)),
         }
@@ -12563,12 +12695,12 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
             "result": redact_support_payload(added),
         }
     )
-    properties = _optimizer_component_properties(optimizer_id, profile)
+    properties = _optimizer_component_properties(optimizer_id, profile, options)
     for property_path, value in properties.items():
         result = set_component_property_sync(
             {
                 "projectPath": project_path,
-                "gameObjectPath": avatar_path,
+                "gameObjectPath": target_path,
                 "componentType": component_type,
                 "componentIndex": 0,
                 "propertyPath": property_path,
@@ -12592,6 +12724,7 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
                 "mode": mode,
                 "profile": profile,
                 "avatarPath": avatar_path,
+                "targetPath": target_path,
                 "componentType": component_type,
                 "error": result.get("error") or f"Failed to configure {property_path}.",
                 "steps": steps,
@@ -12604,6 +12737,7 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
         "mode": mode,
         "profile": profile,
         "avatarPath": avatar_path,
+        "targetPath": target_path,
         "componentType": component_type,
         "steps": steps,
         "validationRequired": True,
@@ -13573,6 +13707,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
     AGENT_GATEWAY.register_tool("vrcforge_roslyn_status", "Read Roslyn Advanced Power Mode diagnostics from Unity.", "read/debug", read_agent_roslyn_status)
     AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)

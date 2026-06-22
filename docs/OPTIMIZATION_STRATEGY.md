@@ -31,18 +31,29 @@ VRCForge does not copy optimizer source code, silently install packages, direct-
 
 The avatar optimization skill group exposes stable read/plan tools plus stable `*-apply-request` tools only. A request tool creates an approval record; it does not bypass Desktop approval, checkpoint, validation, or rollback.
 
+The internal executor targets `vrcforge_configure_optimizer_component` and `vrcforge_install_vpm_package` are wrapper-only. They are not listed as external write targets, and generic `vrcforge_request_apply` calls cannot target them directly; callers must use the named optimizer or package install request tools.
+
 Stable request tools:
 
 - `optimization.lac.apply-request`: adds/configures `dev.limitex.avatar.compressor.TextureCompressor` for conservative/balanced profiles.
 - `optimization.aao.trace-apply-request`: adds the public `Anatawa12.AvatarOptimizer.TraceAndOptimize` marker component. AAO documents the component type as the public API, so VRCForge does not script-configure internal AAO fields.
+- `optimization.ttt.atlas-apply-request`: adds/configures `net.rs64.TexTransTool.TextureAtlas.AtlasTexture` only when the request includes user-confirmed `Assets/...` material asset paths for `AtlasTargetMaterials`.
 - `optimization.ma2bt.convert-apply-request`: adds/configures `zhuozhi.MA2BTPro.MAToBlendTreePro` with conservative public settings.
+- `optimization.meshia.simplify-apply-request`: adds/configures `Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier` on one user-selected renderer path only. Stable requests are limited to conservative relative vertex counts from `0.75` to `1.0`.
+- `optimization.vrcfury.parameter-compressor-apply-request`: stable request name, but currently returns a blocked preview because inspected VRCFury parameter-compressor feature models are internal and do not provide a validated public writer path for VRCForge.
+- `optimization.vrcfury.direct-tree-apply-request`: stable request name, but currently returns a blocked preview by default because Direct Tree remains experimental and must not be enabled by external agents.
 
-Plan-only or experimental until further sample-matrix validation:
+Stable read-only plugin calls:
 
-- `optimization.ttt.atlas-plan`: TexTransTool `AtlasTexture` is a stable component surface, but apply needs explicit user-confirmed material groups and object-reference field mapping before it becomes a stable request.
-- `optimization.meshia.simplify-plan`: Meshia apply remains experimental and low-risk-renderer scoped only.
-- `optimization.vrcfury.compatibility-report`: VRCFury optimizer internals stay compatibility/audit only; no direct optimizer writer is exposed.
-- VRC Avatar Performance Tools are consumed as optional read-only evidence only.
+- `optimization.performance-tools.report`: reports the VRC Avatar Performance Tools integration surface.
+- `vrcforge_scan_thry_avatar_performance`: calls Thry's read-only VRAM/mesh calculator helpers when the package is installed. VRCForge does not invoke Thry UI actions that change texture import settings.
+
+Still blocked or experimental until further sample-matrix validation:
+
+- TTT automatic group selection, atlas execution without user-confirmed materials, and material-slot reduction that requires mesh/material coordination.
+- Meshia aggressive simplification, body/face/eyes/mouth/hands simplification, and auto-selected renderer writes.
+- VRCFury Parameter Compressor and Direct Tree writes until a public, validated writer path and rollback proof exist.
+- One-click multi-optimizer execution.
 
 Package dependency installs use the same safety model. VRCForge detects ALCOM/VCC for UI handoff, prefers a supervised VCC `vpm` or `vrc-get` CLI command for non-interactive installs, and falls back to an agent-managed package-manager download plan only when no supported manager is available. Direct manifest editing is not a default install path.
 
@@ -84,6 +95,8 @@ P0:
 - AAO conservative Trace And Optimize apply
 - TTT atlas apply with user-confirmed groups
 - MA2BT-Pro apply for MA Responsive layers
+- Stable request names for Meshia and VRCFury that block unsafe writes with actionable reasons
+- Read-only Thry performance/VRAM calculator bridge
 - Before/after validation delta
 - Before/after screenshot comparison
 - Rollback proof after each step

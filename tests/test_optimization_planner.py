@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import dashboard_server
+from agent_gateway import AgentGatewayConfig
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
@@ -19,6 +22,15 @@ def make_unity_project(root: Path) -> None:
     (root / "ProjectSettings").mkdir()
     (root / "Packages" / "manifest.json").write_text('{"dependencies":{}}', encoding="utf-8")
     (root / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
+
+
+def install_package(root: Path, package_id: str, version: str = "1.0.0") -> None:
+    package_dir = root / "Packages" / package_id
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "package.json").write_text(
+        f'{{"name":"{package_id}","version":"{version}"}}',
+        encoding="utf-8",
+    )
 
 
 def fake_validation() -> dict:
@@ -129,10 +141,14 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
     assert "vrcforge_optimization_aao_apply" not in tool_names
     assert set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= tool_names
     assert all(name.endswith("_apply_request") for name in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
-    assert "vrcforge_optimization_ttt_atlas_apply_request" not in tool_names
-    assert "vrcforge_optimization_meshia_simplify_apply_request" not in tool_names
+    assert "vrcforge_optimization_ttt_atlas_apply_request" in tool_names
+    assert "vrcforge_optimization_meshia_simplify_apply_request" in tool_names
+    assert "vrcforge_optimization_vrcfury_parameter_compressor_apply_request" in tool_names
+    assert "vrcforge_optimization_vrcfury_direct_tree_apply_request" in tool_names
+    assert "vrcforge_scan_thry_avatar_performance" in tool_names
     assert "vrcforge_configure_optimizer_component" not in tool_names
-    assert "vrcforge_configure_optimizer_component" in write_targets
+    assert "vrcforge_configure_optimizer_component" not in write_targets
+    assert "vrcforge_install_vpm_package" not in write_targets
 
     registry = dashboard_server.AGENT_GATEWAY.build_tool_registry()
     optimization_entries = [entry for entry in registry["tools"] if entry["name"].startswith("vrcforge_optimization")]
@@ -151,13 +167,17 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
     assert direct_apply_names == set()
 
 
-def test_unstable_optimizer_apply_requests_are_not_mcp_direct_tools() -> None:
+def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply() -> None:
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     unstable = set(OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) - set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
 
-    assert {"vrcforge_optimization_ttt_atlas_apply_request", "vrcforge_optimization_meshia_simplify_apply_request"} <= unstable
-    assert unstable.isdisjoint(tool_names)
+    assert unstable == set()
+    assert set(OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= tool_names
+    assert not any(
+        name.startswith("vrcforge_optimization_") and name.endswith("_apply") and not name.endswith("_apply_request")
+        for name in tool_names
+    )
 
 
 def test_avatar_optimization_skill_group_contains_stable_request_tools_only() -> None:
@@ -166,19 +186,36 @@ def test_avatar_optimization_skill_group_contains_stable_request_tools_only() ->
     allowed = set(group["allowedTools"])
 
     assert set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) <= allowed
-    assert "vrcforge_optimization_ttt_atlas_apply_request" not in allowed
-    assert "vrcforge_optimization_meshia_simplify_apply_request" not in allowed
+    assert "vrcforge_optimization_ttt_atlas_apply_request" in allowed
+    assert "vrcforge_optimization_meshia_simplify_apply_request" in allowed
+    assert "vrcforge_scan_thry_avatar_performance" in allowed
     assert "vrcforge_package_install_plan" in allowed
     assert "vrcforge_package_install_request" in allowed
-    assert "vrcforge_configure_optimizer_component" in allowed
+    assert "vrcforge_configure_optimizer_component" not in allowed
+    assert "vrcforge_install_vpm_package" not in allowed
+
+
+def test_wrapper_only_optimizer_targets_reject_generic_apply_request(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True),
+    )
+    with pytest.raises(dashboard_server.AgentGatewayError, match="dedicated VRCForge request tool"):
+        dashboard_server.AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_configure_optimizer_component",
+                "arguments": {},
+                "reason": "direct optimizer write should not be requestable",
+                "preview": {},
+            }
+        )
 
 
 def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
-    package_dir = project / "Packages" / "dev.limitex.avatar-compressor"
-    package_dir.mkdir()
-    (package_dir / "package.json").write_text('{"name":"dev.limitex.avatar-compressor","version":"0.8.0"}', encoding="utf-8")
+    install_package(project, "dev.limitex.avatar-compressor", "0.8.0")
 
     def fail_full_plan(_params):
         raise AssertionError("apply-request preview must not run the full optimization plan")
@@ -204,6 +241,188 @@ def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dep
     assert payload["writeSupported"] is True
     assert payload["dependencyInstallPlan"] is None
     assert payload["applyArguments"]["componentType"] == "dev.limitex.avatar.compressor.TextureCompressor"
+
+
+def test_ttt_apply_request_is_stable_but_requires_confirmed_material_paths(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "net.rs64.tex-trans-tool", "1.1.0-beta.8")
+
+    blocked = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.ttt.atlas-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+
+    assert blocked["stableCallable"] is True
+    assert blocked["writeSupported"] is True
+    assert blocked["readyToRequest"] is False
+    assert any("material asset paths" in reason for reason in blocked["blockedReasons"])
+
+    ready = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.ttt.atlas-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+            "options": {"atlasTargetMaterials": ["Assets/Avatar/Materials/Body.mat"]},
+        }
+    )
+
+    assert ready["readyToRequest"] is True
+    assert ready["applyArguments"]["componentType"] == "net.rs64.TexTransTool.TextureAtlas.AtlasTexture"
+    assert ready["applyArguments"]["options"]["atlasTargetMaterials"] == ["Assets/Avatar/Materials/Body.mat"]
+
+
+def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.ramtype0.meshia.mesh-simplification", "3.2.0")
+
+    missing_renderer = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.meshia.simplify-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+    assert missing_renderer["stableCallable"] is True
+    assert missing_renderer["readyToRequest"] is False
+    assert any("rendererPath" in reason for reason in missing_renderer["blockedReasons"])
+
+    aggressive = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.meshia.simplify-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+            "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.4},
+        }
+    )
+    assert aggressive["readyToRequest"] is False
+    assert any("experimental" in reason for reason in aggressive["blockedReasons"])
+
+    ready = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.meshia.simplify-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+            "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
+        }
+    )
+    assert ready["readyToRequest"] is True
+    assert ready["applyArguments"]["targetPath"] == "Avatar/HatAccessory"
+    assert ready["applyArguments"]["componentType"] == "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier"
+
+
+def test_vrcfury_apply_requests_are_stable_blocked_surfaces(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+
+    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.vrcfury.parameter-compressor-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+
+    assert payload["stableCallable"] is True
+    assert payload["writeSupported"] is False
+    assert payload["readyToRequest"] is False
+    assert any("public validated writer path" in reason for reason in payload["blockedReasons"])
+
+
+def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    monkeypatch.setattr(
+        dashboard_server,
+        "locate_vpm_package_managers",
+        lambda: [
+            {
+                "name": "vcc",
+                "path": "C:/Program Files/VRChat Creator Companion/CreatorCompanion.exe",
+                "kind": "app",
+                "label": "VRChat Creator Companion",
+                "supportsCommandInstall": False,
+                "supportsUiHandoff": True,
+            }
+        ],
+    )
+
+    plan = dashboard_server.package_install_plan_sync(
+        {
+            "projectPath": str(project),
+            "packageId": "com.anatawa12.avatar-optimizer",
+            "allowAgentManagedDownload": True,
+        }
+    )
+
+    assert plan["ok"] is True
+    assert plan["strategy"] == "ui_handoff"
+    assert plan["preferredManager"]["name"] == "vcc"
+    assert plan["agentManagedDownload"]["available"] is False
+    assert plan["canExecuteCommandInstall"] is False
+    assert plan["canCreateInstallRequest"] is True
+
+
+def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    monkeypatch.setattr(
+        dashboard_server,
+        "locate_vpm_package_managers",
+        lambda: [
+            {
+                "name": "vpm",
+                "path": "C:/tools/vpm.exe",
+                "kind": "cli",
+                "label": "VCC vpm CLI",
+                "supportsCommandInstall": True,
+                "supportsUiHandoff": False,
+            }
+        ],
+    )
+    captured: dict[str, object] = {}
+
+    def fake_create_apply_request(params, *, internal_wrapper=False):
+        captured["params"] = params
+        captured["internalWrapper"] = internal_wrapper
+        return {
+            "ok": True,
+            "approval": {
+                "status": "pending",
+                "targetTool": params["target_tool"],
+                "arguments": params["arguments"],
+                "preview": params["preview"],
+            },
+        }
+
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "create_apply_request", fake_create_apply_request)
+
+    payload = dashboard_server.request_package_install_sync(
+        {
+            "projectPath": str(project),
+            "packageId": "com.anatawa12.avatar-optimizer",
+        },
+        agent_name="test-agent",
+    )
+
+    assert payload["ok"] is True
+    approval = payload["approval"]
+    assert approval["status"] in {"pending", "auto_approved"}
+    assert approval["targetTool"] == "vrcforge_install_vpm_package"
+    assert approval["arguments"]["packageId"] == "com.anatawa12.avatar-optimizer"
+    assert approval["preview"]["requiresCheckpoint"] is True
+    assert captured["internalWrapper"] is True
 
 
 def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp_path: Path) -> None:

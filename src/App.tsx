@@ -105,7 +105,9 @@ import {
   ProjectPrefs,
   previewRestoreCheckpoint,
   rejectAgentApproval,
+  requestOptimizationApply,
   requestOutfitImport,
+  requestPackageInstall,
   requestRestoreCheckpoint,
   repairUnityMcpBridge,
   retrySubAgent,
@@ -373,6 +375,8 @@ export default function App() {
   const [optimizationTargetProfile, setOptimizationTargetProfile] = useState("pc_conservative");
   const [loadingOptimization, setLoadingOptimization] = useState(false);
   const [optimizationMessage, setOptimizationMessage] = useState("");
+  const [requestingOptimizationAction, setRequestingOptimizationAction] = useState("");
+  const [requestingOptimizationDependency, setRequestingOptimizationDependency] = useState("");
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
@@ -1595,6 +1599,69 @@ export default function App() {
     }
   }
 
+  async function requestOptimizationAction(card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) {
+    if (!card.requestTool) {
+      return;
+    }
+    setRequestingOptimizationAction(card.id);
+    setOptimizationMessage("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await requestOptimizationApply(targetEndpoint, {
+        tool: card.requestTool,
+        projectPath: activeProjectPath || undefined,
+        targetProfile: optimizationTargetProfile,
+        installMissingDependencies: true,
+      });
+      setOptimizationMessage(payload.approval ? `Approval queued: ${payload.approval.id}` : payload.error || "Request queued.");
+      await refreshSilently(targetEndpoint);
+      await loadOptimizationPlan(targetEndpoint);
+    } catch (cause) {
+      setOptimizationMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRequestingOptimizationAction("");
+    }
+  }
+
+  async function requestOptimizationDependencyInstall(dependency: NonNullable<NonNullable<OptimizationPlannerReport["dependencyDoctor"]>["dependencies"]>[number]) {
+    const packageId = dependency.packageIds?.find((item) => item);
+    if (!packageId) {
+      return;
+    }
+    setRequestingOptimizationDependency(dependency.id || packageId);
+    setOptimizationMessage("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await requestPackageInstall(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+        packageId,
+        repository: dependency.installMethod?.repository || undefined,
+        allowAgentManagedDownload: true,
+      });
+      setOptimizationMessage(payload.approval ? `Install approval queued: ${payload.approval.id}` : payload.error || "Install request queued.");
+      await refreshSilently(targetEndpoint);
+      await loadOptimizationPlan(targetEndpoint);
+    } catch (cause) {
+      setOptimizationMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRequestingOptimizationDependency("");
+    }
+  }
+
   async function repairUnityBridgeFromDoctor(target = endpoint) {
     setRepairingUnityBridge(true);
     setDoctorMessage("");
@@ -2481,8 +2548,12 @@ export default function App() {
               targetProfile={optimizationTargetProfile}
               loading={loadingOptimization}
               message={optimizationMessage}
+              requestingActionId={requestingOptimizationAction}
+              requestingDependencyId={requestingOptimizationDependency}
               onTargetProfileChange={setOptimizationTargetProfile}
               onRefresh={() => void loadOptimizationPlan()}
+              onRequestAction={(card) => void requestOptimizationAction(card)}
+              onRequestDependency={(dependency) => void requestOptimizationDependencyInstall(dependency)}
             />
           ) : activeView === "settings" ? (
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
@@ -4424,16 +4495,24 @@ function OptimizationWorkspace({
   targetProfile,
   loading,
   message,
+  requestingActionId,
+  requestingDependencyId,
   onTargetProfileChange,
   onRefresh,
+  onRequestAction,
+  onRequestDependency,
 }: {
   report: OptimizationPlannerReport | null;
   selectedProjectPath: string;
   targetProfile: string;
   loading: boolean;
   message: string;
+  requestingActionId: string;
+  requestingDependencyId: string;
   onTargetProfileChange: (profile: string) => void;
   onRefresh: () => void;
+  onRequestAction: (card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) => void;
+  onRequestDependency: (dependency: NonNullable<NonNullable<OptimizationPlannerReport["dependencyDoctor"]>["dependencies"]>[number]) => void;
 }) {
   const dependencies = report?.dependencyDoctor?.dependencies ?? [];
   const actions = report?.actionCards ?? [];
@@ -4552,6 +4631,18 @@ function OptimizationWorkspace({
                   <DataLine label="Risk" value={item.riskLevel || "-"} />
                 </div>
                 <div className="mt-2 max-h-10 overflow-hidden text-xs text-muted-foreground">{item.recommendedRole || "-"}</div>
+                {item.status !== "installed" && item.packageIds?.length ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-3 h-8 px-3 text-xs"
+                    disabled={loading || !selectedProjectPath || requestingDependencyId === (item.id || item.packageIds[0])}
+                    onClick={() => onRequestDependency(item)}
+                  >
+                    {requestingDependencyId === (item.id || item.packageIds[0]) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                    Install request
+                  </Button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -4585,8 +4676,21 @@ function OptimizationWorkspace({
                   <DataLine label="Benefit" value={card.expectedBenefit || "unknown"} />
                   <DataLine label="Why" value={card.whyRecommended || "-"} />
                   <DataLine label="Next" value={card.nextSafeAction || "-"} />
+                  {card.requestTool ? <DataLine label="Request" value={card.requestTool} /> : null}
                   {card.blockedReason ? <DataLine label="Blocked" value={card.blockedReason} /> : null}
                 </div>
+                {card.requestTool ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-3 h-8 px-3 text-xs"
+                    disabled={loading || !selectedProjectPath || requestingActionId === card.id}
+                    onClick={() => onRequestAction(card)}
+                  >
+                    {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
+                    Request
+                  </Button>
+                ) : null}
               </div>
             ))}
           </div>

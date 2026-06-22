@@ -11,6 +11,8 @@ namespace VRCForge.Editor
     {
         private const string AutoConnectKey = "VRCForge.McpBridgeBootstrap.AutoConnect";
         private const string HttpBaseUrl = "http://127.0.0.1:8080";
+        private const int MaxStartAttempts = 60;
+        private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
 
         private static bool startInProgress;
 
@@ -61,14 +63,14 @@ namespace VRCForge.Editor
             startInProgress = true;
             try
             {
-                for (var attempt = 1; attempt <= 10; attempt++)
+                for (var attempt = 1; attempt <= MaxStartAttempts; attempt++)
                 {
                     if (await TryStartBridgeAsync(source, attempt))
                     {
                         return;
                     }
 
-                    await Task.Delay(TimeSpan.FromSeconds(3));
+                    await Task.Delay(RetryDelay);
                 }
             }
             finally

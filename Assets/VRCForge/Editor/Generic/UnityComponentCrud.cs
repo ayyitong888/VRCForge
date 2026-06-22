@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -266,6 +267,11 @@ namespace VRCForge.Editor
                 return new Color(v[0], v[1], v[2], v[3]);
             }
 
+            if (typeof(IList).IsAssignableFrom(targetType) && token.Type == JTokenType.Array)
+            {
+                return ConvertListValue((JArray)token, targetType);
+            }
+
             if (typeof(UnityEngine.Object).IsAssignableFrom(targetType))
             {
                 return ResolveObjectReference(token, targetType);
@@ -375,6 +381,48 @@ namespace VRCForge.Editor
                 $"Cannot resolve an object reference of type '{targetType.Name}' from '{raw}'.");
         }
 
+        private static object ConvertListValue(JArray array, Type targetType)
+        {
+            var elementType = ResolveListElementType(targetType);
+            if (elementType == null)
+            {
+                throw new InvalidOperationException($"Cannot determine list element type for '{targetType.FullName}'.");
+            }
+
+            IList list;
+            if (targetType.IsInterface || targetType.IsAbstract)
+            {
+                var concrete = typeof(List<>).MakeGenericType(elementType);
+                list = (IList)Activator.CreateInstance(concrete);
+            }
+            else
+            {
+                list = (IList)Activator.CreateInstance(targetType);
+            }
+
+            foreach (var item in array)
+            {
+                list.Add(ConvertValue(item, elementType));
+            }
+            return list;
+        }
+
+        private static Type ResolveListElementType(Type targetType)
+        {
+            if (targetType.IsGenericType)
+            {
+                return targetType.GetGenericArguments()[0];
+            }
+            foreach (var iface in targetType.GetInterfaces())
+            {
+                if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IList<>))
+                {
+                    return iface.GetGenericArguments()[0];
+                }
+            }
+            return typeof(object);
+        }
+
         internal static object DescribeValue(object value)
         {
             switch (value)
@@ -404,6 +452,22 @@ namespace VRCForge.Editor
                         type = uo == null ? null : uo.GetType().FullName,
                         instanceId = uo == null ? 0 : uo.GetInstanceID()
                     };
+            }
+
+            if (value is IEnumerable enumerable && !(value is string))
+            {
+                var items = new List<object>();
+                var count = 0;
+                foreach (var item in enumerable)
+                {
+                    if (count >= 50)
+                    {
+                        break;
+                    }
+                    items.Add(DescribeValue(item));
+                    count++;
+                }
+                return items;
             }
 
             if (value.GetType().IsPrimitive)

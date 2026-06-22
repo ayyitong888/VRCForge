@@ -93,6 +93,10 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
 }
+WRAPPER_ONLY_WRITE_TARGETS = {
+    "vrcforge_configure_optimizer_component",
+    "vrcforge_install_vpm_package",
+}
 
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
@@ -609,6 +613,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_scan_wardrobe",
             "vrcforge_scan_parameters",
             "vrcforge_scan_avatar_performance",
+            "vrcforge_scan_thry_avatar_performance",
         ],
         "entrypointTool": "vrcforge_list_avatars",
         "tags": ["builtin", "group", "avatar", "scan"],
@@ -681,13 +686,11 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_optimization_plan",
             *OPTIMIZATION_GATEWAY_TOOL_NAMES,
             *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
+            "vrcforge_scan_thry_avatar_performance",
             "vrcforge_package_manager_status",
             "vrcforge_package_install_plan",
             "vrcforge_package_install_request",
             "vrcforge_request_apply",
-            "vrcforge_apply_approved",
-            "vrcforge_install_vpm_package",
-            "vrcforge_configure_optimizer_component",
         ],
         "entrypointTool": "vrcforge_optimization_plan",
         "tags": ["builtin", "group", "optimization", "write-request", "no-direct-apply"],
@@ -1000,8 +1003,6 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_scan_modular_avatar",
             "vrcforge_scan_vrcfury",
             "vrcforge_request_apply",
-            "vrcforge_apply_approved",
-            "vrcforge_install_vpm_package",
         ],
         "entrypointTool": "vrcforge_package_manager_status",
         "tags": ["builtin", "group", "package", "vpm", "write"],
@@ -1208,6 +1209,8 @@ class AgentGateway:
                 continue
             tools.append(self._serialize_tool_registry_entry(tool, config))
         for handler in self._write_handlers.values():
+            if handler.name in WRAPPER_ONLY_WRITE_TARGETS:
+                continue
             tools.append(self._serialize_write_registry_entry(handler, config))
         tools.sort(key=lambda item: (str(item.get("category") or ""), str(item.get("id") or "")))
         categories = sorted({str(item.get("category") or "misc") for item in tools})
@@ -1788,7 +1791,7 @@ class AgentGateway:
         )
         return result
 
-    def create_apply_request(self, params: dict[str, Any]) -> dict[str, Any]:
+    def create_apply_request(self, params: dict[str, Any], *, internal_wrapper: bool = False) -> dict[str, Any]:
         config = self.ensure_config()
         if not config.allow_write_requests:
             raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
@@ -1796,6 +1799,11 @@ class AgentGateway:
         target_tool = str(params.get("target_tool") or params.get("targetTool") or "").strip()
         if not target_tool:
             raise AgentGatewayError("target_tool is required.")
+        if target_tool in WRAPPER_ONLY_WRITE_TARGETS and not internal_wrapper:
+            raise AgentGatewayError(
+                f"{target_tool} can only be requested through its dedicated VRCForge request tool.",
+                status_code=403,
+            )
 
         write_handler = self._write_handlers.get(target_tool)
         if not write_handler or not self._write_handler_visible(write_handler, config):
@@ -2879,7 +2887,7 @@ class AgentGateway:
                 "advanced": handler.advanced,
             }
             for handler in self._write_handlers.values()
-            if self._write_handler_visible(handler, config)
+            if self._write_handler_visible(handler, config) and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
         ]
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
@@ -3937,6 +3945,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_list_checkpoints",
         "vrcforge_preview_restore_checkpoint",
         "vrcforge_scan_avatar_performance",
+        "vrcforge_scan_thry_avatar_performance",
         "vrcforge_package_manager_status",
         "vrcforge_package_install_plan",
         "vrcforge_package_install_request",

@@ -108,6 +108,12 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "category": "read/debug",
         "description": "Report whether future optimization applies can produce rollback proof.",
     },
+    {
+        "externalName": "optimization.performance-tools.report",
+        "gatewayName": "vrcforge_optimization_performance_tools_report",
+        "category": "read/debug",
+        "description": "Report how VRCForge can call VRC Avatar Performance Tools and expose the read-only Thry VRAM/mesh calculator surface.",
+    },
 ]
 
 
@@ -286,6 +292,8 @@ FUTURE_WRITE_REQUEST_TOOLS = [
     {"externalName": "optimization.ttt.atlas-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
     {"externalName": "optimization.ma2bt.convert-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
     {"externalName": "optimization.meshia.simplify-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
+    {"externalName": "optimization.vrcfury.parameter-compressor-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
+    {"externalName": "optimization.vrcfury.direct-tree-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
 ]
 
 
@@ -327,13 +335,14 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "planTool": "optimization.ttt.atlas-plan",
         "targetTool": "vrcforge_configure_optimizer_component",
         "mode": "ttt_atlas",
-        "componentType": "",
+        "componentType": "net.rs64.TexTransTool.TextureAtlas.AtlasTexture",
         "riskLevel": "medium",
         "versionStage": "0.8.0-beta",
-        "writeSupported": False,
-        "stableCallable": False,
-        "supportedProfiles": [],
-        "description": "Request supervised TexTransTool atlas setup after user-confirmed groups. This currently queues review only until field mapping is validated.",
+        "writeSupported": True,
+        "stableCallable": True,
+        "supportedProfiles": ["pc_conservative", "conservative_pc", "pc_medium", "balanced_pc", "custom"],
+        "requiresUserConfirmedMaterials": True,
+        "description": "Request supervised TexTransTool AtlasTexture setup with user-confirmed material asset paths. Creates an approval request only; no direct apply is exposed.",
     },
     {
         "externalName": "optimization.ma2bt.convert-apply-request",
@@ -357,13 +366,44 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "planTool": "optimization.meshia.simplify-plan",
         "targetTool": "vrcforge_configure_optimizer_component",
         "mode": "meshia_simplify",
+        "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
+        "riskLevel": "high",
+        "versionStage": "0.8.1-beta",
+        "writeSupported": True,
+        "stableCallable": True,
+        "supportedProfiles": ["pc_conservative", "conservative_pc", "pc_medium", "balanced_pc", "custom"],
+        "requiresRendererPath": True,
+        "description": "Request supervised Meshia simplifier setup on one user-selected low-risk Renderer. Creates an approval request only; no direct apply is exposed.",
+    },
+    {
+        "externalName": "optimization.vrcfury.parameter-compressor-apply-request",
+        "gatewayName": "vrcforge_optimization_vrcfury_parameter_compressor_apply_request",
+        "optimizerId": "vrcfury",
+        "planTool": "optimization.vrcfury.compatibility-report",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "vrcfury_parameter_compressor",
         "componentType": "",
         "riskLevel": "high",
         "versionStage": "0.8.1-beta",
         "writeSupported": False,
-        "stableCallable": False,
+        "stableCallable": True,
         "supportedProfiles": [],
-        "description": "Request supervised Meshia simplification review. Apply remains experimental and disabled until sample-matrix validation exists.",
+        "description": "Stable request surface for VRCFury Parameter Compressor. It returns a blocked preview until a public, validated VRCFury writer path exists.",
+    },
+    {
+        "externalName": "optimization.vrcfury.direct-tree-apply-request",
+        "gatewayName": "vrcforge_optimization_vrcfury_direct_tree_apply_request",
+        "optimizerId": "vrcfury",
+        "planTool": "optimization.vrcfury.compatibility-report",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "vrcfury_direct_tree",
+        "componentType": "",
+        "riskLevel": "high",
+        "versionStage": "0.8.1-beta",
+        "writeSupported": False,
+        "stableCallable": True,
+        "supportedProfiles": [],
+        "description": "Stable request surface for VRCFury Direct Tree. It returns a blocked preview by default because Direct Tree remains experimental.",
     },
 ]
 
@@ -482,6 +522,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
     ma2bt_plan = build_ma2bt_convertibility_plan(dependency_doctor, ma_audit)
     visual_plan = build_visual_regression_plan(params)
     rollback = build_rollback_verify(params, validation)
+    performance_tools_report = build_performance_tools_report(dependency_doctor, validation)
     action_cards = build_action_cards(
         profile,
         dependency_doctor,
@@ -499,6 +540,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
         ma2bt_plan,
         visual_plan,
         rollback,
+        performance_tools_report,
     )
     recommended = [card for card in action_cards if card.get("enabled")]
     return {
@@ -529,6 +571,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "ma2btConvertibility": ma2bt_plan,
             "visualRegression": visual_plan,
             "rollbackVerify": rollback,
+            "performanceTools": performance_tools_report,
         },
         "topOffenders": build_top_offenders(baseline, texture_audit, material_audit, mesh_audit, parameter_audit),
         "actionCards": action_cards,
@@ -591,6 +634,8 @@ def build_optimization_tool_result(
         result = build_visual_regression_plan(params)
     elif external_name == "optimization.rollback.verify":
         result = build_rollback_verify(params, validation)
+    elif external_name == "optimization.performance-tools.report":
+        result = build_performance_tools_report(dependency_doctor, validation)
     else:
         raise ValueError(f"Unknown optimization tool: {tool_name}")
     return {
@@ -915,7 +960,27 @@ def build_vrcfury_compatibility_report(dependency_doctor: dict[str, Any], valida
         "componentsDetected": [],
         "possibleConflicts": warnings,
         "directTreeHints": _dedupe_labels(direct_tree_hints)[:40],
-        "applyPolicy": "VRCFury Parameter Compressor and Direct Tree apply remain experimental and are not enabled in 0.7.2.",
+        "applyPolicy": "VRCFury Parameter Compressor and Direct Tree have stable request surfaces, but VRCForge blocks writes until a public, validated VRCFury writer path exists.",
+    }
+
+
+def build_performance_tools_report(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    dep = _dependency_by_id(dependency_doctor, "vrc_avatar_performance_tools")
+    sources = _validation_sources(validation)
+    pc = _source_payload(sources, "performance_pc")
+    materials = _source_payload(sources, "materials")
+    return {
+        "readOnly": True,
+        "dependency": dep,
+        "present": dep.get("status") == "installed",
+        "stableGatewayTool": "vrcforge_scan_thry_avatar_performance",
+        "unityMcpTool": "vrc_scan_thry_avatar_performance",
+        "callPolicy": "Call read-only Thry VRAM/mesh calculator helpers when the package is installed; never alter texture import settings from this report.",
+        "availableFallbacks": ["vrcforge_scan_avatar_performance", "optimization.texture-vram-audit", "optimization.mesh.triangle-audit"],
+        "baselineSignals": {
+            "pcRank": _performance_headline(pc).get("rank"),
+            "textureMemoryBytes": _first_numeric(materials, ("textureMemoryBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")),
+        },
     }
 
 
@@ -1009,6 +1074,7 @@ def build_action_cards(
     ma2bt_plan: dict[str, Any],
     visual_plan: dict[str, Any],
     rollback: dict[str, Any],
+    performance_tools_report: dict[str, Any],
 ) -> list[dict[str, Any]]:
     del baseline, visual_plan, rollback
     cards = [
@@ -1025,6 +1091,7 @@ def build_action_cards(
             "Texture memory is often the first conservative optimization target.",
             "Run optimization.texture-vram-audit, then optimization.lac.profile-plan.",
             texture_audit.get("textures") or [],
+            "optimization.lac.apply-request",
         ),
         _action_card(
             "reduce_material_slots",
@@ -1039,6 +1106,7 @@ def build_action_cards(
             "Material slot reduction needs atlas planning and later mesh/material coordination.",
             "Run optimization.material-slot-audit, then optimization.ttt.atlas-plan.",
             material_audit.get("atlasGroupHints") or [],
+            "optimization.ttt.atlas-apply-request",
         ),
         _action_card(
             "clean_unused_blendshapes",
@@ -1053,6 +1121,7 @@ def build_action_cards(
             "Unused BlendShapes can affect memory and build complexity.",
             "Run optimization.aao.trace-plan and review BlendShape candidates.",
             aao_plan.get("unusedBlendShapes") or [],
+            "optimization.aao.trace-apply-request",
         ),
         _action_card(
             "reduce_physbone_overhead",
@@ -1067,6 +1136,7 @@ def build_action_cards(
             "Physics overhead should be reviewed separately from visual mesh changes.",
             "Review PhysBone candidates in optimization.aao.trace-plan.",
             aao_plan.get("physBoneCleanupCandidates") or [],
+            "optimization.aao.trace-apply-request",
         ),
         _action_card(
             "merge_safe_skinned_meshes",
@@ -1081,6 +1151,7 @@ def build_action_cards(
             "Skinned mesh merging can help draw calls but needs visual and rig validation.",
             "Use the trace plan only; apply is deferred to 0.8.0.",
             aao_plan.get("skinnedMeshMergeCandidates") or [],
+            "optimization.aao.trace-apply-request",
         ),
         _action_card(
             "optimize_ma_animation_layers",
@@ -1095,6 +1166,7 @@ def build_action_cards(
             "MA-heavy avatars often accumulate FX layers that can be converted safely only when eligible.",
             "Run optimization.ma-responsive-layer-audit, then optimization.ma2bt.convertibility-plan.",
             ma2bt_plan.get("convertibleLayers") or [],
+            "optimization.ma2bt.convert-apply-request",
         ),
         _action_card(
             "check_parameter_budget",
@@ -1123,6 +1195,7 @@ def build_action_cards(
             "Triangle reduction has high visual and weighting risk, so default planning is conservative.",
             "Run optimization.mesh.triangle-audit, then optimization.meshia.simplify-plan.",
             meshia_plan.get("candidates") or [],
+            "optimization.meshia.simplify-apply-request",
         ),
         _action_card(
             "check_vrcfury_compatibility",
@@ -1137,6 +1210,21 @@ def build_action_cards(
             "VRCFury can perform its own build-time controller and parameter transformations.",
             "Run optimization.vrcfury.compatibility-report before optimizer apply planning.",
             vrcfury_report.get("possibleConflicts") or [],
+            "optimization.vrcfury.parameter-compressor-apply-request",
+        ),
+        _action_card(
+            "run_performance_tools_report",
+            "Run performance tools report",
+            "Call the read-only VRC Avatar Performance Tools VRAM/mesh calculator when installed.",
+            "low",
+            "VRC Avatar Performance Tools",
+            "0.8.1-beta",
+            "read-only",
+            None if performance_tools_report.get("present") else "VRC Avatar Performance Tools is not detected.",
+            "risk-reduction",
+            "Thry's tool provides an independent editor-side VRAM/mesh reference for optimization planning.",
+            "Run vrcforge_scan_thry_avatar_performance or optimization.performance-tools.report.",
+            [performance_tools_report],
         ),
         _action_card(
             "prepare_quest_event_light",
@@ -1186,7 +1274,7 @@ def build_top_offenders(
 
 def optimization_rules() -> dict[str, Any]:
     return {
-        "releaseScope": "0.7.2-beta planner",
+        "releaseScope": "0.8.1-beta stable optimization skill surfaces",
         "readOnly": True,
         "planOnly": True,
         "noProjectWrites": True,
@@ -1586,6 +1674,7 @@ def _action_card(
     why: str,
     next_action: str,
     affected: list[Any],
+    request_tool: str = "",
 ) -> dict[str, Any]:
     return {
         "id": card_id,
@@ -1600,6 +1689,8 @@ def _action_card(
         "expectedBenefit": expected_benefit,
         "whyRecommended": why,
         "nextSafeAction": next_action,
+        "requestTool": request_tool,
+        "requestOnly": bool(request_tool),
         "affectedAssetsOrRenderers": affected[:12],
         "directApplyExposed": False,
     }
