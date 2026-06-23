@@ -959,7 +959,7 @@ def test_vrc_get_install_tolerates_existing_repository_before_install(monkeypatc
 
 def test_public_optimization_docs_include_roadmap_sequence() -> None:
     text = Path("docs/OPTIMIZATION_STRATEGY.md").read_text(encoding="utf-8")
-    for marker in ["0.7.2-beta", "0.8.0-beta", "0.8.1-beta", "0.9.0-beta", "0.9.5-rc", "1.0 Public Stable"]:
+    for marker in ["0.7.2-beta", "0.8.0-beta", "0.9.0-beta", "0.9.x", "0.9.5-rc", "1.0 Public Stable"]:
         assert marker in text
     assert "Calling third-party tools vs first-class VRCForge capabilities" in text
     assert "No direct apply" in text

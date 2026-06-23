@@ -23,8 +23,8 @@ VRCForge does not copy optimizer source code, silently install packages, direct-
 - Avatar Compressor / LAC: NDMF texture compression profiles.
 - TexTransTool: atlas and texture transform components.
 - Meshia Mesh Simplification: mesh simplification planning and a conservative
-  request surface for one explicit renderer; broader low-risk apply proof stays
-  in the 0.8.x sample matrix.
+  request surface for one explicit renderer; 0.8.0 proof covers a low-risk
+  clothing/accessory renderer with rollback and screenshots.
 - VRCFury: VRCFury-specific controller, parameter, Direct Tree, and build-hook transforms.
 - MA2BT-Pro: Modular Avatar responsive layer to BlendTree conversion.
 - VRC Avatar Performance Tools: optional editor-side performance and VRAM reference checks.
@@ -41,7 +41,7 @@ Stable request tools:
 - `optimization.aao.trace-apply-request`: adds the public `Anatawa12.AvatarOptimizer.TraceAndOptimize` marker component. AAO documents the component type as the public API, so VRCForge does not script-configure internal AAO fields.
 - `optimization.ttt.atlas-apply-request`: adds/configures `net.rs64.TexTransTool.TextureAtlas.AtlasTexture` only when the request includes user-confirmed `Assets/...` material asset paths for `AtlasTargetMaterials`.
 - `optimization.ma2bt.convert-apply-request`: adds/configures `zhuozhi.MA2BTPro.MAToBlendTreePro` with conservative public settings.
-- `optimization.meshia.simplify-apply-request`: stable request surface for one user-selected renderer path only. It refuses missing or unsafe renderer input, limits conservative relative vertex counts to `0.75` through `1.0`, and stays out of default/stable apply flows until the low-risk Meshia proof matrix is complete.
+- `optimization.meshia.simplify-apply-request`: stable request surface for one user-selected renderer path only. It refuses missing or unsafe renderer input, limits conservative relative vertex counts to `0.75` through `1.0`, and is limited to conservative low-risk renderer workflows.
 - `optimization.vrcfury.parameter-compressor-apply-request`: stable request name, but currently returns a blocked preview because inspected VRCFury parameter-compressor feature models are internal and do not provide a validated public writer path for VRCForge.
 - `optimization.vrcfury.direct-tree-apply-request`: stable request name, but currently returns a blocked preview by default because Direct Tree remains experimental and must not be enabled by external agents.
 
@@ -94,7 +94,7 @@ Done when:
 - MCP-capable external agents can request the same read-only plan through MCP.
 - VRCForge recommends one optimization step at a time.
 
-### 0.8.0-beta - Delegated Optimizer Skill Pack v1
+### 0.8.0-beta - Optimizer Proof Release
 
 P0:
 
@@ -102,12 +102,16 @@ P0:
 - AAO conservative Trace And Optimize apply
 - TTT atlas apply with user-confirmed groups
 - MA2BT-Pro apply for MA Responsive layers
-- Stable request names for Meshia and VRCFury that block unsafe writes with actionable reasons
+- Meshia conservative single-renderer apply with explicit renderer path
+- Stable blocked request names for VRCFury risky writers
 - Read-only Thry performance/VRAM calculator bridge
 - Before/after validation delta
-- Before/after screenshot comparison
+- Persistent before/after/rollback screenshots
 - Rollback proof after each step
 - Reusable optimizer apply/rollback proof script
+- Optimizer execution-mode guard so stale/global `auto` cannot silently apply
+  optimizer requests
+- Upload and parameter hard-gate audit read/plan surfaces
 
 Rules:
 
@@ -116,7 +120,14 @@ Rules:
 - No external agent direct apply
 - No one-click all optimizers
 
-### 0.8.1-beta - Advanced Optimization
+Status:
+
+- 0.8.0 is the conservative proof closure for the optimizer line. Broader
+  multi-avatar public beta coverage, automated visual scoring, aggressive
+  Meshia, hidden body cut auto-apply, VRCFury apply, and one-click Quest
+  optimization move to the 0.9+ roadmap.
+
+### 0.9.0-beta - End-to-end Optimization Workflow
 
 P0/P1:
 
@@ -133,7 +144,7 @@ Experimental:
 - VRCFury Direct Tree apply
 - Aggressive Quest profile
 
-### 0.9.0-beta - End-to-end Optimization Workflow
+### 0.9.x - Public Beta Optimization Matrix
 
 P0:
 

@@ -51,7 +51,6 @@ function Write-UnityPackageEntry {
     Write-Utf8NoBom (Join-Path $entryDir "pathname") $PathName
 
     if ($IsDirectory) {
-        New-Item -ItemType File -Force -Path (Join-Path $entryDir "asset") | Out-Null
         $meta = @"
 fileFormatVersion: 2
 guid: $(New-UnityGuid)

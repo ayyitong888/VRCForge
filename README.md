@@ -1,11 +1,11 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.7.2--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.2-beta)
+[![Version](https://img.shields.io/badge/version-v0.8.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.8.0-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current source and latest published installer release: `0.7.2-beta`.
+Current source and latest packaged release line: `0.8.0-beta`.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -22,7 +22,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.7.2-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.8.0-beta
 
 Recommended:
 
@@ -46,7 +46,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.7.2-beta.zip`
+- `VRCForge_Windows_x64_0.8.0-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -70,7 +70,7 @@ Before changing Unity files, VRCForge backs up old plugin folders and `Packages/
 
 在修改 Unity 文件前，VRCForge 会把旧插件目录和 `Packages/manifest.json` 备份到项目根目录 `.vrcforge/backups/`。
 
-If automatic install fails, the desktop app shows the error and log path, then offers a fallback `VRCForge.unitypackage` manual import flow and a re-check button.
+If automatic install fails, the desktop app shows the error and log path, then offers a fallback `VRCForge.unitypackage` manual import flow and a re-check button. The 0.8.0 package builder is regression-tested so folder entries import into a fresh Unity project instead of being copied as empty asset files.
 
 如果自动安装失败，桌面 app 会显示错误原因和日志路径，并提供 `VRCForge.unitypackage` 手动导入 fallback 与重新检测按钮。
 
@@ -88,7 +88,7 @@ The desktop app also includes uninstall actions:
 
 ## CLI / 命令行
 
-VRCForge 0.7.2-beta includes a local CLI for diagnostics, read-only scans, and
+VRCForge 0.8.0-beta includes a local CLI for diagnostics, read-only scans, and
 request-based write flows. It talks to the same local desktop runtime at
 `http://127.0.0.1:8757`; open VRCForge Desktop first so the backend and app
 session token are available.
@@ -138,7 +138,7 @@ Model optimization integration strategy and release sequencing are documented in
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
-| Model Optimization Planner | VRAM / material / mesh / parameter audits and one-step optimization planning | Available: read-only / plan-only |
+| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.8.0 proof line |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
@@ -147,7 +147,7 @@ Model optimization integration strategy and release sequencing are documented in
 | Provider/BYOK test surface | Provider capability badges plus explicit text / JSON / vision-safe tests; no API key required for manual/read-only mode | Available / 可用 |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items are passed through to chat as a default-collapsed row | Available / 可用 |
 | Project memory / incremental scan | Local project index for `Assets`, `Packages`, and `ProjectSettings`, surfaced in the desktop chat as added / modified / deleted deltas | Available / 可用 |
-| Outfit package import planning | Local `.unitypackage`, Booth folder, and loose prefab/texture folder inspection plus supervised import request UI | Beta, approval/checkpoint required |
+| Outfit package import planning | Local `.unitypackage`, Booth folder, and loose prefab/texture folder inspection plus supervised import request UI; direct `VRCForge.unitypackage` import is covered by a fresh-project regression smoke | Beta, approval/checkpoint required |
 | Package/plugin install diagnostics | Read-only VPM/ALCOM/vrc-get status, install-output classification, and Unity compile-error context for repair planning | Beta, fixes remain supervised plans |
 | Delegated sub-agent workers | Parallel read-only / plan-only workers with avatar-name display labels, lifecycle logs, cancel/retry/inspect, and parent-thread summary merge | Beta |
 | Tool Registry v1 | Standardized metadata for Desktop, MCP, and future CLI surfaces, including risk, approval/checkpoint requirements, schemas, and fallbacks | Beta |

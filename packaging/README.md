@@ -72,9 +72,11 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.7.2-beta/VRCForge_Windows_x64_0.7.2-beta.zip
+  -Version 0.8.0-beta `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.8.0-beta/VRCForge_Windows_x64_0.8.0-beta.zip
 
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
+  -Version 0.8.0-beta
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -99,6 +101,12 @@ Release smoke should also verify first-run resilience: optional failures in
 user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
 loading, or external-agent MCP startup must not prevent the backend and ordinary
 agent chat from opening.
+
+Manual Unity package fallback smoke should import `VRCForge.unitypackage` into a
+fresh Unity project and verify `Assets/VRCForge/Editor` plus a representative
+editor script exist. Folder entries in the `.unitypackage` must contain only
+folder metadata and no empty `asset` payload, otherwise Unity can fail with
+`Failed to copy package file to Assets/VRCForge/Editor` on first import.
 
 External-agent release smoke must verify both config generation and the
 supervised write/rollback path. The preflight smoke temporarily enables the

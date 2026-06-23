@@ -36,4 +36,10 @@ Before publishing a release package:
       `rollback.verify_no_residue_after_emergency` evidence before treating the
       Unity project as clean.
 * [ ] If external-agent rollback fails, fix rollback before publishing.
+* [ ] For optimizer releases, update the proof matrix with artifact paths for
+      request guard, direct-apply exposure, validation delta, screenshots, and
+      rollback proof.
+* [ ] For releases that ship `VRCForge.unitypackage`, run a fresh-project
+      direct import smoke and confirm folder entries do not contain empty
+      `asset` payloads.
 * [ ] Do not remove GPL-3.0 notices from redistributed or modified versions.
