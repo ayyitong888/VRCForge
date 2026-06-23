@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import copy
+import ctypes
 import hashlib
 import hmac
 import json
@@ -3488,11 +3489,7 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
             detail="Unity editor path is empty or does not exist. Update dashboard settings before opening a project.",
         )
 
-    subprocess.Popen(
-        [editor_path, "-projectPath", project_path],
-        cwd=unity_launch_working_directory(Path(editor_path), Path(project_path)),
-        env=unity_launch_environment(),
-    )
+    launch_unity_subprocess([editor_path, "-projectPath", project_path], Path(editor_path), Path(project_path))
     DASHBOARD_STATE.selected_project_path = project_path
     DASHBOARD_STATE.unity_instance = Path(project_path).name
     payload = serialize_dashboard_state()
@@ -8336,14 +8333,25 @@ def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> 
 
 def launch_unity_project(editor_path: Path, project_root: Path) -> tuple[bool, str]:
     try:
-        subprocess.Popen(
-            [str(editor_path), "-projectPath", str(project_root)],
-            cwd=unity_launch_working_directory(editor_path, project_root),
-            env=unity_launch_environment(),
-        )
+        launch_unity_subprocess([str(editor_path), "-projectPath", str(project_root)], editor_path, project_root)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
     return True, ""
+
+
+def launch_unity_subprocess(command: list[str], editor_path: Path, project_root: Path) -> subprocess.Popen[str]:
+    internal_dir = pyinstaller_internal_dir()
+    if internal_dir:
+        set_windows_dll_directory(None)
+    try:
+        return subprocess.Popen(
+            command,
+            cwd=unity_launch_working_directory(editor_path, project_root),
+            env=unity_launch_environment(),
+        )
+    finally:
+        if internal_dir:
+            set_windows_dll_directory(str(internal_dir))
 
 
 def unity_launch_working_directory(editor_path: Path, project_root: Path) -> str:
@@ -8352,6 +8360,24 @@ def unity_launch_working_directory(editor_path: Path, project_root: Path) -> str
     if project_root.is_dir():
         return str(project_root)
     return str(Path.home())
+
+
+def pyinstaller_internal_dir() -> Path | None:
+    candidates = []
+    if getattr(sys, "_MEIPASS", ""):
+        candidates.append(Path(str(getattr(sys, "_MEIPASS"))))
+    candidates.append(ROOT_DIR / "backend" / "_internal")
+    candidates.append(Path(sys.executable).resolve().parent / "_internal")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def set_windows_dll_directory(path: str | None) -> None:
+    if os.name != "nt":
+        return
+    ctypes.windll.kernel32.SetDllDirectoryW(path)
 
 
 def unity_launch_environment() -> dict[str, str]:

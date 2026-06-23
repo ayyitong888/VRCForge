@@ -3603,6 +3603,8 @@ class DashboardServerTests(unittest.TestCase):
             internal_dir = str(dashboard_server.ROOT_DIR / "backend" / "_internal")
             with (
                 patch.dict(dashboard_server.os.environ, {"PATH": internal_dir + os.pathsep + r"C:\Windows"}),
+                patch("dashboard_server.pyinstaller_internal_dir", return_value=Path(internal_dir)),
+                patch("dashboard_server.set_windows_dll_directory") as mock_set_dll_directory,
                 patch("dashboard_server.subprocess.Popen") as mock_popen,
             ):
                 ok, error = dashboard_server.launch_unity_project(editor, project)
@@ -3611,6 +3613,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(error, "")
             mock_popen.assert_called_once_with([str(editor), "-projectPath", str(project)], cwd=str(editor_dir), env=ANY)
             self.assertNotIn(internal_dir, mock_popen.call_args.kwargs["env"]["PATH"])
+            self.assertEqual([call.args[0] for call in mock_set_dll_directory.call_args_list], [None, internal_dir])
 
     def test_open_project_route_accepts_project_path_alias_and_uses_editor_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
