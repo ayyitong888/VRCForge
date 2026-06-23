@@ -2655,6 +2655,7 @@ export default function App() {
           ) : activeView === "optimization" ? (
             <OptimizationWorkspace
               report={optimizationReport}
+              permission={permission}
               selectedProjectPath={activeProjectPath}
               avatarPath={optimizationAvatarPath}
               avatars={optimizationAvatars}
@@ -4610,6 +4611,7 @@ function ConnectorToggle({
 
 function OptimizationWorkspace({
   report,
+  permission,
   selectedProjectPath,
   avatarPath,
   avatars,
@@ -4630,6 +4632,7 @@ function OptimizationWorkspace({
   onRequestDependency,
 }: {
   report: OptimizationPlannerReport | null;
+  permission?: PermissionState;
   selectedProjectPath: string;
   avatarPath: string;
   avatars: AvatarListItem[];
@@ -4654,6 +4657,7 @@ function OptimizationWorkspace({
   const offenders = report?.topOffenders ?? [];
   const metrics = report?.baseline?.metrics ?? {};
   const profile = report?.targetProfile;
+  const optimizerApproval = optimizerApprovalBadge(permission);
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
       <div className="mx-auto grid max-w-6xl gap-6">
@@ -4673,6 +4677,9 @@ function OptimizationWorkspace({
           </Badge>
           <Badge tone={report?.directApplyExposed ? "danger" : "muted"} className="shrink-0">
             {report?.directApplyExposed ? "direct apply exposed" : "no direct apply"}
+          </Badge>
+          <Badge tone={optimizerApproval.modeTone} className="shrink-0">
+            mode: {permission?.executionMode || "approval"}
           </Badge>
           <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -4841,6 +4848,7 @@ function OptimizationWorkspace({
                   <Badge tone={card.level === "read-only" ? "ok" : "muted"}>{card.level || "plan-only"}</Badge>
                   <Badge tone="muted">{card.dependency || "VRCForge"}</Badge>
                   <Badge tone="muted">{card.recommendedVersionStage || "0.7.2-beta"}</Badge>
+                  {card.requestTool ? <Badge tone={optimizerApproval.requestTone}>{optimizerApproval.requestLabel}</Badge> : null}
                 </div>
                 <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
                   <DataLine label="Benefit" value={card.expectedBenefit || "unknown"} />
@@ -4878,22 +4886,27 @@ function OptimizationWorkspace({
                   </div>
                 ) : null}
                 {card.requestTool ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="mt-3 h-8 px-3 text-xs"
-                    disabled={
-                      loading ||
-                      !selectedProjectPath ||
-                      !avatarPath.trim() ||
-                      optimizationActionMissingRequiredOptions(card, actionOptions[card.id] ?? {}) ||
-                      requestingActionId === card.id
-                    }
-                    onClick={() => onRequestAction(card)}
-                  >
-                    {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
-                    Request
-                  </Button>
+                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-8 px-3 text-xs"
+                      disabled={
+                        loading ||
+                        !selectedProjectPath ||
+                        !avatarPath.trim() ||
+                        optimizationActionMissingRequiredOptions(card, actionOptions[card.id] ?? {}) ||
+                        requestingActionId === card.id
+                      }
+                      onClick={() => onRequestAction(card)}
+                    >
+                      {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
+                      Request
+                    </Button>
+                    <Badge tone={optimizerApproval.requestTone} className="h-8 shrink-0">
+                      {optimizerApproval.requestLabel}
+                    </Badge>
+                  </div>
                 ) : null}
               </div>
             ))}
@@ -4902,6 +4915,28 @@ function OptimizationWorkspace({
       </div>
     </div>
   );
+}
+
+function optimizerApprovalBadge(permission?: PermissionState) {
+  if (permission?.roslynFullAuto) {
+    return {
+      modeTone: "danger" as const,
+      requestTone: "danger" as const,
+      requestLabel: "explicit approval",
+    };
+  }
+  if (permission?.autoApprove || permission?.executionMode === "auto") {
+    return {
+      modeTone: "warn" as const,
+      requestTone: "warn" as const,
+      requestLabel: "explicit approval",
+    };
+  }
+  return {
+    modeTone: "muted" as const,
+    requestTone: "muted" as const,
+    requestLabel: "approval required",
+  };
 }
 
 function OptimizationMetric({ label, value }: { label: string; value: string }) {
