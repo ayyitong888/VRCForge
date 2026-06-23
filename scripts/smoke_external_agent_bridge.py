@@ -41,6 +41,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-token-file", default=os.environ.get("VRCFORGE_APP_TOKEN_FILE", ""))
     parser.add_argument("--project-root", default=os.environ.get("VRCFORGE_SMOKE_PROJECT_ROOT", ""))
     parser.add_argument("--live-write-rollback", action="store_true")
+    parser.add_argument("--optimizer-write-request", action="store_true", help="Request one optimizer apply through MCP and verify it remains pending; does not approve/apply it.")
+    parser.add_argument("--optimizer-tool", default="vrcforge_optimization_lac_apply_request")
+    parser.add_argument("--avatar-path", default="")
+    parser.add_argument("--target-profile", default="pc_conservative")
+    parser.add_argument("--execution-mode", choices=("approval", "auto", "roslyn_full_auto"), default="approval")
+    parser.add_argument("--optimizer-option", action="append", default=[], help="Optimizer option as key=value. JSON values are accepted.")
+    parser.add_argument("--material", action="append", default=[], help="Append a TexTransTool atlas target material path under Assets/.")
+    parser.add_argument("--renderer-path", default="", help="Meshia renderer GameObject path for conservative simplify setup.")
+    parser.add_argument("--relative-vertex-count", type=float, default=None, help="Meshia relative vertex target in the stable 0.75..1.0 range.")
+    parser.add_argument("--install-missing-dependencies", action="store_true")
+    parser.add_argument("--include-prerelease", action="store_true")
     parser.add_argument("--enable-gateway", action="store_true", help="Temporarily enable the Agent Gateway for the smoke.")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--agent-name", default="vrcforge-external-smoke")
@@ -88,6 +99,9 @@ class ExternalAgentBridgeSmoke:
             self.step("stdio.mcp_tools_list", self.check_stdio_mcp_tools())
             self.step("gateway.manifest", self.check_manifest())
             self.step("mcp.tools_list", self.check_mcp_tools())
+            if self.args.optimizer_write_request:
+                self.step("permission.set_for_optimizer_request", self.set_execution_mode(self.args.execution_mode))
+                self.optimizer_write_request()
             if self.args.live_write_rollback:
                 self.live_write_rollback()
             report["ok"] = all(bool(step.get("ok")) for step in self.steps)
@@ -161,13 +175,28 @@ class ExternalAgentBridgeSmoke:
         )
         permission = self.request_app_json("GET", "/api/app/permission")
         self.previous_permission = str(ensure_dict(permission.get("permission")).get("executionMode") or "")
-        set_approval = self.request_app_json("POST", "/api/app/permission", {"execution_mode": "approval"})
+        set_approval = self.request_app_json("POST", "/api/app/permission", {"execution_mode": self.args.execution_mode})
         return {
-            "ok": bool(enabled.get("gateway", {}).get("enabled")) and bool(set_approval.get("permission", {}).get("perActionApproval")),
+            "ok": bool(enabled.get("gateway", {}).get("enabled")) and ensure_dict(set_approval.get("permission")).get("executionMode") == self.args.execution_mode,
             "previousEnabled": self.previous_gateway.get("enabled"),
             "previousAllowWriteRequests": self.previous_gateway.get("allowWriteRequests"),
             "previousPermission": self.previous_permission,
             "currentPermission": ensure_dict(set_approval.get("permission")).get("executionMode"),
+        }
+
+    def set_execution_mode(self, mode: str) -> dict[str, Any]:
+        if not self.app_token:
+            return {"ok": False, "error": "App session token is required to set execution mode."}
+        if not self.previous_permission:
+            permission = self.request_app_json("GET", "/api/app/permission")
+            self.previous_permission = str(ensure_dict(permission.get("permission")).get("executionMode") or "")
+        updated = self.request_app_json("POST", "/api/app/permission", {"execution_mode": mode})
+        permission = ensure_dict(updated.get("permission"))
+        return {
+            "ok": permission.get("executionMode") == mode,
+            "previousPermission": self.previous_permission,
+            "executionMode": permission.get("executionMode"),
+            "autoApprove": permission.get("autoApprove"),
         }
 
     def check_stdio_bridge_preflight(self) -> dict[str, Any]:
@@ -398,6 +427,58 @@ class ExternalAgentBridgeSmoke:
         compile_after = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
         self.step("unity.compile_after_rollback", compile_result_summary(compile_after))
 
+    def optimizer_write_request(self) -> None:
+        project_root = self.resolve_project_root()
+        if not self.args.avatar_path:
+            raise RuntimeError("--avatar-path is required for --optimizer-write-request.")
+        request = self.mcp_call_tool(
+            self.args.optimizer_tool,
+            {
+                "projectPath": project_root,
+                "avatarPath": self.args.avatar_path,
+                "targetProfile": self.args.target_profile,
+                "installMissingDependencies": bool(self.args.install_missing_dependencies),
+                "includePrerelease": bool(self.args.include_prerelease),
+                "options": build_optimizer_options(self.args),
+            },
+        )
+        payload = ensure_dict(request.get("result", request))
+        approval = ensure_dict(payload.get("approval"))
+        approval_id = str(approval.get("id") or "")
+        self.step(
+            "optimizer.write_request",
+            {
+                "ok": bool(approval_id)
+                and payload.get("status") == "pending"
+                and approval.get("status") == "pending"
+                and approval.get("requiresExplicitApproval") is True
+                and approval.get("autoApprovalBlocked") is True
+                and payload.get("autoApproved") is not True,
+                "tool": self.args.optimizer_tool,
+                "approvalId": approval_id,
+                "requestStatus": payload.get("status"),
+                "approvalStatus": approval.get("status"),
+                "targetTool": approval.get("targetTool"),
+                "requiresExplicitApproval": approval.get("requiresExplicitApproval"),
+                "autoApprovalBlocked": approval.get("autoApprovalBlocked"),
+                "autoApproved": payload.get("autoApproved"),
+                "explicitApprovalReason": approval.get("explicitApprovalReason"),
+                "error": payload.get("error") or request.get("error"),
+            },
+        )
+        if not approval_id:
+            raise RuntimeError("Optimizer MCP write request did not produce a pending approval.")
+        rejected = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/reject", {})
+        rejected_approval = ensure_dict(rejected.get("approval"))
+        self.step(
+            "optimizer.write_request_reject",
+            {
+                "ok": bool(rejected.get("ok")) and rejected_approval.get("status") == "rejected",
+                "approvalId": approval_id,
+                "status": rejected_approval.get("status"),
+            },
+        )
+
     def record_validation_after_write(self, project_root: str) -> None:
         try:
             validation = self.mcp_call_tool("vrcforge_run_validation_report", {"projectPath": project_root, "maxErrors": 20})
@@ -590,6 +671,34 @@ def request_json(
             raise RuntimeError(f"HTTP {exc.code} from {path}: {text}") from exc
         return {"ok": False, "status": exc.code, "error": text}
     return json.loads(text or "{}")
+
+
+def build_optimizer_options(args: argparse.Namespace) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    for entry in args.optimizer_option:
+        key, value = parse_optimizer_option(entry)
+        options[key] = value
+    if args.material:
+        options["atlasTargetMaterials"] = [str(item).replace("\\", "/") for item in args.material]
+    if args.renderer_path:
+        options["rendererPath"] = str(args.renderer_path)
+    if args.relative_vertex_count is not None:
+        options["relativeVertexCount"] = float(args.relative_vertex_count)
+    return options
+
+
+def parse_optimizer_option(entry: str) -> tuple[str, Any]:
+    if "=" not in entry:
+        raise ValueError(f"Optimizer option must be key=value: {entry}")
+    key, raw = entry.split("=", 1)
+    key = key.strip()
+    if not key:
+        raise ValueError(f"Optimizer option key is empty: {entry}")
+    raw = raw.strip()
+    try:
+        return key, json.loads(raw)
+    except json.JSONDecodeError:
+        return key, raw
 
 
 def probe_codex_cli() -> dict[str, Any]:
