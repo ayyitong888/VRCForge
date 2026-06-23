@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,10 @@ class OptimizerApplyRollbackSmoke:
         self.app_token_path = resolve_app_token_path(args.app_token_file)
         self.app_token = read_text_file(self.app_token_path).strip()
         self.project_root = Path(args.project_root).expanduser().resolve() if args.project_root else None
+        self.run_id = f"optimizer-apply-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        self.artifact_root = Path.cwd() / "artifacts" / "optimizer-apply-smoke"
+        self.run_dir = self.artifact_root / self.run_id
+        self.screenshot_dir = self.run_dir / "screenshots"
         self.steps: list[dict[str, Any]] = []
         self.checkpoint_id = ""
         self.rollback_done = False
@@ -74,6 +79,9 @@ class OptimizerApplyRollbackSmoke:
             "projectRoot": str(self.project_root) if self.project_root else "",
             "avatarPath": self.args.avatar_path,
             "tool": self.args.tool,
+            "artifactRunId": self.run_id,
+            "artifactRunDir": str(self.run_dir),
+            "screenshotDir": str(self.screenshot_dir) if self.args.capture_screenshots else "",
             "steps": self.steps,
             "summary": {},
         }
@@ -249,9 +257,38 @@ class OptimizerApplyRollbackSmoke:
                     "require_play_mode": False,
                 },
             )
-            self.step(step_name, {"ok": True, "captureOk": bool(payload.get("ok")), "optional": True, "imagePath": payload.get("imagePath"), "imageUrl": payload.get("imageUrl"), "warnings": payload.get("warnings")})
+            if bool(payload.get("ok")):
+                artifact = self.persist_screenshot(step_name, str(payload.get("imagePath") or ""))
+            else:
+                artifact = {"ok": False, "error": "capture returned ok=false"}
+            self.step(
+                step_name,
+                {
+                    "ok": True,
+                    "captureOk": bool(payload.get("ok")),
+                    "artifactOk": bool(artifact.get("ok")),
+                    "optional": True,
+                    "sourceImagePath": payload.get("imagePath"),
+                    "artifactImagePath": artifact.get("artifactImagePath"),
+                    "imageUrl": payload.get("imageUrl"),
+                    "warnings": payload.get("warnings"),
+                    "artifactError": artifact.get("error"),
+                },
+            )
         except Exception as exc:  # noqa: BLE001 - screenshots are optional evidence.
             self.step(step_name, {"ok": True, "captureOk": False, "optional": True, "error": str(exc)})
+
+    def persist_screenshot(self, step_name: str, source_image_path: str) -> dict[str, Any]:
+        if not source_image_path:
+            return {"ok": False, "error": "capture did not return imagePath"}
+        source = Path(source_image_path).expanduser()
+        if not source.exists() or not source.is_file():
+            return {"ok": False, "error": f"capture image does not exist: {source}"}
+        stage = screenshot_stage_name(step_name)
+        destination = self.screenshot_dir / f"{stage}.png"
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return {"ok": True, "artifactImagePath": str(destination)}
 
     def try_emergency_rollback(self) -> None:
         try:
@@ -281,9 +318,8 @@ class OptimizerApplyRollbackSmoke:
         self.steps.append({"name": name, **redact_evidence(payload)})
 
     def write_report(self, report: dict[str, Any]) -> Path:
-        root = Path.cwd() / "artifacts" / "optimizer-apply-smoke"
-        root.mkdir(parents=True, exist_ok=True)
-        path = root / f"optimizer-apply-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        path = self.artifact_root / f"{self.run_id}.json"
         path.write_text(json.dumps(redact_evidence(report), ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return path
 
@@ -293,6 +329,7 @@ class OptimizerApplyRollbackSmoke:
             "tool": self.args.tool,
             "checkpointId": self.checkpoint_id,
             "rollbackDone": self.rollback_done,
+            "screenshotDir": str(self.screenshot_dir) if self.args.capture_screenshots else "",
             "failedSteps": [step["name"] for step in self.steps if not step.get("ok")],
         }
 
@@ -323,6 +360,12 @@ def parse_option(entry: str) -> tuple[str, Any]:
         return key, json.loads(raw)
     except json.JSONDecodeError:
         return key, raw
+
+
+def screenshot_stage_name(step_name: str) -> str:
+    stage = step_name.split(".", 1)[-1].strip().lower()
+    safe = "".join(char if char.isalnum() else "_" for char in stage).strip("_")
+    return safe or "screenshot"
 
 
 def validation_summary(payload: dict[str, Any]) -> dict[str, Any]:
