@@ -606,6 +606,82 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert ready["applyArguments"]["componentType"] == "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier"
 
 
+def test_configure_optimizer_component_saves_dirty_scene_assets(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    added_requests: list[dict] = []
+    property_requests: list[dict] = []
+    save_requests: list[Path] = []
+
+    monkeypatch.setattr(dashboard_server, "_component_already_present", lambda *_args: (False, {}))
+    monkeypatch.setattr(
+        dashboard_server,
+        "add_component_sync",
+        lambda request: added_requests.append(request) or {"ok": True, "componentIndex": 0},
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "set_component_property_sync",
+        lambda request: property_requests.append(request) or {"ok": True, "propertyPath": request["propertyPath"]},
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "prepare_unity_checkpoint_sync",
+        lambda path: save_requests.append(path) or {"ok": True, "projectPath": str(path), "stdout": "saved", "stderr": ""},
+    )
+
+    result = dashboard_server.configure_optimizer_component_sync(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetPath": "Avatar/HatAccessory",
+            "optimizerId": "meshia",
+            "mode": "meshia_simplify",
+            "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
+            "profile": "pc_conservative",
+            "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
+        }
+    )
+
+    assert result["ok"] is True
+    assert added_requests[0]["gameObjectPath"] == "Avatar/HatAccessory"
+    assert property_requests[0]["propertyPath"] == "target"
+    assert save_requests == [project]
+    assert result["save"]["ok"] is True
+    assert any(step["id"] == "save_dirty_scene_assets" and step["status"] == "done" for step in result["steps"])
+
+
+def test_configure_optimizer_component_fails_when_dirty_scene_save_fails(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+
+    monkeypatch.setattr(dashboard_server, "_component_already_present", lambda *_args: (False, {}))
+    monkeypatch.setattr(dashboard_server, "add_component_sync", lambda _request: {"ok": True, "componentIndex": 0})
+    monkeypatch.setattr(dashboard_server, "set_component_property_sync", lambda request: {"ok": True, "propertyPath": request["propertyPath"]})
+    monkeypatch.setattr(
+        dashboard_server,
+        "prepare_unity_checkpoint_sync",
+        lambda _path: {"ok": False, "stderr": "could not save scene"},
+    )
+
+    result = dashboard_server.configure_optimizer_component_sync(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetPath": "Avatar/HatAccessory",
+            "optimizerId": "meshia",
+            "mode": "meshia_simplify",
+            "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
+            "profile": "pc_conservative",
+            "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
+        }
+    )
+
+    assert result["ok"] is False
+    assert "could not save scene" in result["error"]
+    assert any(step["id"] == "save_dirty_scene_assets" and step["status"] == "failed" for step in result["steps"])
+
+
 def test_vrcfury_apply_requests_are_stable_blocked_surfaces(tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)

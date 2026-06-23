@@ -12974,6 +12974,43 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
                 "steps": steps,
             }
     emit_log("info", "optimization", "Optimizer component configured.", {"optimizerId": optimizer_id, "mode": mode})
+    save_project_value = project_path if Path(project_path).is_absolute() else str(DASHBOARD_STATE.selected_project_path or project_path)
+    save_result: dict[str, Any] = {"ok": True, "skipped": bool(params.get("preview", False))}
+    if not params.get("preview", False):
+        if not save_project_value:
+            return {
+                "ok": False,
+                "optimizerId": optimizer_id,
+                "mode": mode,
+                "profile": profile,
+                "avatarPath": avatar_path,
+                "targetPath": target_path,
+                "componentType": component_type,
+                "error": "Could not resolve Unity project path for saving optimizer component changes.",
+                "steps": steps,
+            }
+        save_result = prepare_unity_checkpoint_sync(Path(save_project_value))
+        steps.append(
+            {
+                "id": "save_dirty_scene_assets",
+                "status": "done" if save_result.get("ok") else "failed",
+                "tool": "vrc_prepare_checkpoint",
+                "result": redact_support_payload(save_result),
+            }
+        )
+        if not save_result.get("ok"):
+            return {
+                "ok": False,
+                "optimizerId": optimizer_id,
+                "mode": mode,
+                "profile": profile,
+                "avatarPath": avatar_path,
+                "targetPath": target_path,
+                "componentType": component_type,
+                "error": save_result.get("stderr") or save_result.get("error") or "Failed to save optimizer component changes.",
+                "steps": steps,
+                "save": save_result,
+            }
     return {
         "ok": True,
         "schema": "vrcforge.optimization.configure_component.v1",
@@ -12984,6 +13021,7 @@ def configure_optimizer_component_sync(params: dict[str, Any]) -> dict[str, Any]
         "targetPath": target_path,
         "componentType": component_type,
         "steps": steps,
+        "save": save_result,
         "validationRequired": True,
         "rollbackProofRequired": True,
         "note": "VRCForge delegates the optimizer algorithm to the installed package; this handler only adds and configures validated public component fields through the supervised write path.",
