@@ -8235,7 +8235,21 @@ def unity_repair_execution_ready(
     return probe_ok
 
 
-def wait_for_unity_tools_ready(settings: Settings, project_root: Path, wait_seconds: int) -> tuple[bool, dict[str, Any]]:
+def unity_repair_stable_tool_poll_settings(settings: Settings, wait_seconds: int) -> Settings:
+    poll_settings = copy.copy(settings)
+    current_timeout = int(getattr(poll_settings, "unity_mcp_timeout_seconds", 0) or 0)
+    stable_timeout = min(max(int(wait_seconds or 0), 8), 10)
+    poll_settings.unity_mcp_timeout_seconds = min(max(current_timeout, stable_timeout), 10)
+    return poll_settings
+
+
+def wait_for_unity_tools_ready(
+    settings: Settings,
+    project_root: Path,
+    wait_seconds: int,
+    *,
+    poll_interval_seconds: float = 2.0,
+) -> tuple[bool, dict[str, Any]]:
     deadline = time.monotonic() + max(1, wait_seconds)
     latest: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -8246,7 +8260,8 @@ def wait_for_unity_tools_ready(settings: Settings, project_root: Path, wait_seco
             latest["selectedInstanceMatched"] = False
         if unity_repair_tools_ready(latest):
             return True, latest
-        time.sleep(2.0)
+        if poll_interval_seconds > 0:
+            time.sleep(min(poll_interval_seconds, max(0.0, deadline - time.monotonic())))
     if not latest:
         latest = _unity_repair_status_summary(build_unity_status_snapshot(settings))
     return False, latest
@@ -8714,7 +8729,8 @@ def repair_unity_mcp_bridge_sync(request: UnityMcpRepairRequest) -> dict[str, An
         tools_ready_after_launch = False
         after: dict[str, Any] = {}
         if registered_after_launch:
-            tools_ready_after_launch, after = wait_for_unity_tools_ready(settings, project_root, min(request.wait_seconds, 90))
+            launch_poll_settings = unity_repair_stable_tool_poll_settings(settings, request.wait_seconds)
+            tools_ready_after_launch, after = wait_for_unity_tools_ready(launch_poll_settings, project_root, request.wait_seconds)
             phases.append(
                 _repair_phase(
                     "unity_tools_after_launch",
@@ -8726,7 +8742,11 @@ def repair_unity_mcp_bridge_sync(request: UnityMcpRepairRequest) -> dict[str, An
             if not tools_ready_after_launch:
                 registered_tools_after_launch, _launch_registration_detail = register_vrcforge_unity_tools_from_project(project_root, settings, phases)
                 if registered_tools_after_launch:
-                    tools_ready_after_launch_registration, after = wait_for_unity_tools_ready(settings, project_root, min(request.wait_seconds, 30))
+                    tools_ready_after_launch_registration, after = wait_for_unity_tools_ready(
+                        launch_poll_settings,
+                        project_root,
+                        request.wait_seconds,
+                    )
                     phases.append(
                         _repair_phase(
                             "unity_tools_after_launch_registration",

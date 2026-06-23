@@ -50,6 +50,10 @@ def fake_validation() -> dict:
                     "textureMemoryBytes": 96 * 1024 * 1024,
                     "materialSlotCount": 12,
                     "skinnedMeshCount": 3,
+                    "physBoneCount": 36,
+                    "physBoneAffectedTransforms": 290,
+                    "physBoneColliderCount": 12,
+                    "physBoneCollisionCheckCount": 540,
                     "meshReadWriteWarning": "Mesh Read/Write Disabled",
                 },
             },
@@ -109,10 +113,14 @@ def fake_validation() -> dict:
                             "gameObjectPath": "Avatar/HatAccessory",
                             "triangleCount": 3200,
                             "componentTypes": ["SkinnedMeshRenderer", "VRCPhysBone", "VRCContactReceiver"],
+                            "physBoneAffectedTransforms": 18,
+                            "physBoneColliderCount": 1,
+                            "physBoneCollisionCheckCount": 12,
                             "renderer_count": 1,
                             "skinned_renderer_count": 1,
                             "material_summary": {"material_slot_count": 1},
                         },
+                        {"gameObjectPath": "Avatar/Body Skin", "triangleCount": 22000, "componentTypes": ["SkinnedMeshRenderer"]},
                         {"gameObjectPath": "Avatar/Face", "triangleCount": 18000, "blendShapeCount": 80},
                         {"gameObjectPath": "Avatar/Sparkle", "componentTypes": ["ParticleSystem"], "renderer_count": 1, "skinned_renderer_count": 0},
                     ]
@@ -245,6 +253,43 @@ def test_parameter_hard_gate_surfaces_are_read_only_and_conservative(tmp_path: P
     assert "Wardrobe" in {item["name"] for item in categories["safe_to_int_exclusive"]}
     assert vrcfury_plan["result"]["experimentalOnly"] is True
     assert vrcfury_plan["result"]["applyBlocked"] is True
+
+
+def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    validation = fake_validation()
+    params = {"projectPath": str(project), "targetProfile": "event_light"}
+
+    report = build_optimization_report(params, validation)
+    physbone = build_optimization_tool_result("optimization.physbone.audit", params, validation)
+    physbone_plan = build_optimization_tool_result("optimization.physbone.reduce-plan", params, validation)
+    hidden_body = build_optimization_tool_result("optimization.aao.hidden-body-cut-plan", params, validation)
+    regression = build_optimization_tool_result("optimization.parameter.behavior-regression", params, validation)
+    path_to_skill = build_optimization_tool_result("optimization.parameter.path-to-skill", params, validation)
+
+    assert report["audits"]["physBones"]["summary"]["reportedComponentCount"] == 36
+    assert report["plans"]["physBoneReduce"]["planOnly"] is True
+    assert report["plans"]["hiddenBodyCut"]["applyBlocked"] is True
+    assert report["plans"]["parameterBehaviorRegression"]["proofReady"] is False
+    assert report["plans"]["parameterPathToSkill"]["applyBlocked"] is True
+    assert physbone["readOnly"] is True
+    assert physbone["planOnly"] is False
+    assert {row["id"] for row in physbone["result"]["metrics"] if row["status"] == "offender"} >= {
+        "physbone_components",
+        "physbone_affected_transforms",
+        "physbone_collision_checks",
+    }
+    assert physbone_plan["result"]["requiredProof"]
+    assert hidden_body["planOnly"] is True
+    assert hidden_body["result"]["candidateCount"] >= 1
+    assert hidden_body["result"]["applyRequestTool"] is None
+    assert regression["result"]["summary"]["testCaseCount"] >= 3
+    assert regression["result"]["summary"]["dangerParameterCount"] >= 2
+    assert "optimization.parameter.behavior-regression" in {
+        step["tool"] for step in path_to_skill["result"]["skillPath"]
+    }
+    assert path_to_skill["result"]["hardGates"]["blockedParameterCount"] >= 2
 
 
 def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:

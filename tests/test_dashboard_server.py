@@ -3877,6 +3877,159 @@ namespace VRCForge.Editor
         mock_close.assert_called_once()
         mock_launch.assert_called_once()
 
+    def test_repair_unity_mcp_bridge_relaunch_recovers_after_slow_tool_list_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            editor = root / "Unity.exe"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            editor.write_text("", encoding="utf-8")
+            settings = SimpleNamespace(unity_mcp_timeout_seconds=30, unity_mcp_retries=3, unity_mcp_retry_backoff_seconds=1.0)
+            offline = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": False,
+                "selectedInstanceMatched": False,
+                "activeInstanceCount": 0,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            tool_list_timeout = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "activeInstance": {"project": project.name, "hash": "abc123"},
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0, "error": "tool list timed out"},
+                "error": "tool list timed out",
+            }
+            healthy = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "activeInstance": {"project": project.name, "hash": "abc123"},
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
+                "error": "",
+            }
+            status_snapshots = [offline, tool_list_timeout, healthy]
+            observed_timeouts: list[int] = []
+
+            def fake_status_snapshot(snapshot_settings: SimpleNamespace) -> dict[str, object]:
+                observed_timeouts.append(snapshot_settings.unity_mcp_timeout_seconds)
+                return status_snapshots.pop(0)
+
+            with (
+                patch("dashboard_server.load_dashboard_settings", return_value=settings),
+                patch("dashboard_server.build_unity_status_snapshot", side_effect=fake_status_snapshot),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch(
+                    "dashboard_server.wait_for_unity_project_registration",
+                    side_effect=[
+                        (False, {"instances": []}),
+                        (True, {"instances": [{"project": project.name, "hash": "abc123"}]}),
+                    ],
+                ),
+                patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
+                patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+                patch("dashboard_server.close_unity_project_gracefully", return_value=(True, "Unity closed cleanly.", {})),
+                patch("dashboard_server.launch_unity_project", return_value=(True, "")),
+                patch("dashboard_server.time.sleep"),
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(
+                        projectPath=str(project),
+                        unityEditorPath=str(editor),
+                        allowUnityRelaunch=True,
+                        waitSeconds=12,
+                    )
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(result["after"]["totalTools"], 78)
+        self.assertEqual(observed_timeouts, [3, 10, 10])
+        self.assertEqual(settings.unity_mcp_timeout_seconds, 3)
+
+    def test_repair_unity_mcp_bridge_relaunch_keeps_actionable_error_when_tools_still_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            editor = root / "Unity.exe"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            editor.write_text("", encoding="utf-8")
+            settings = SimpleNamespace(unity_mcp_timeout_seconds=30, unity_mcp_retries=3, unity_mcp_retry_backoff_seconds=1.0)
+            offline = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": False,
+                "selectedInstanceMatched": False,
+                "activeInstanceCount": 0,
+                "vrcForgeToolsRegistered": False,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
+                "error": "",
+            }
+            registered_without_tools = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": False,
+                "totalTools": 0,
+                "vrcForgeToolsCount": 0,
+                "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
+                "toolsError": "tool list timed out",
+                "error": "tool list timed out",
+            }
+
+            with (
+                patch("dashboard_server.load_dashboard_settings", return_value=settings),
+                patch("dashboard_server.build_unity_status_snapshot", return_value=offline),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
+                patch(
+                    "dashboard_server.wait_for_unity_project_registration",
+                    side_effect=[
+                        (False, {"instances": []}),
+                        (True, {"instances": [{"project": project.name, "hash": "abc123"}]}),
+                    ],
+                ),
+                patch("dashboard_server.wait_for_unity_tools_ready", return_value=(False, registered_without_tools)) as mock_wait_tools,
+                patch("dashboard_server.register_vrcforge_unity_tools_from_project", return_value=(False, {"error": "no tools"})),
+                patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+                patch("dashboard_server.close_unity_project_gracefully", return_value=(True, "Unity closed cleanly.", {})),
+                patch("dashboard_server.launch_unity_project", return_value=(True, "")),
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(
+                        projectPath=str(project),
+                        unityEditorPath=str(editor),
+                        allowUnityRelaunch=True,
+                        waitSeconds=12,
+                    )
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "needs_user_action")
+        self.assertFalse(result["after"]["vrcForgeToolsRegistered"])
+        self.assertIn("unity_tools_after_launch", {phase["id"] for phase in result["phases"]})
+        self.assertEqual(mock_wait_tools.call_args.args[0].unity_mcp_timeout_seconds, 10)
+
     def test_scene_capture_tool_supports_play_mode_game_view_status(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "SceneViewCaptureTool.cs").read_text(
             encoding="utf-8"

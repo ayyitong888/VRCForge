@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -178,6 +179,7 @@ class OptimizerApplyRollbackSmoke:
             report["finishedAt"] = utc_now()
             report["steps"] = self.steps
             report["summary"] = self.build_summary(report["ok"])
+            report["visualRegression"] = build_visual_regression_artifact(self.steps, source="optimizer_apply_rollback", proof_passed=bool(report["ok"]))
         return report
 
     def bootstrap(self) -> dict[str, Any]:
@@ -393,6 +395,53 @@ def delta_summary(payload: dict[str, Any], *, require_rollback: bool) -> dict[st
             "removedCount": ensure_dict(payload.get("findingDelta")).get("removedCount"),
         },
         "rollbackProof": rollback,
+    }
+
+
+def build_visual_regression_artifact(steps: list[dict[str, Any]], *, source: str, proof_passed: bool) -> dict[str, Any]:
+    screenshots: dict[str, dict[str, Any]] = {}
+    for stage in ("before", "after_apply", "after_rollback"):
+        step = next((item for item in steps if item.get("name") == f"screenshot.{stage}"), {})
+        path = str(step.get("artifactImagePath") or "")
+        entry: dict[str, Any] = {
+            "stage": stage,
+            "captured": bool(step.get("captureOk")),
+            "artifactOk": bool(step.get("artifactOk")),
+            "artifactImagePath": path,
+        }
+        if path:
+            entry.update(file_digest(path))
+        if step.get("error") or step.get("artifactError"):
+            entry["warning"] = step.get("error") or step.get("artifactError")
+        screenshots[stage] = entry
+    captured = [item for item in screenshots.values() if item.get("artifactOk")]
+    if not any(item.get("captured") or item.get("artifactImagePath") for item in screenshots.values()):
+        status = "skipped"
+    elif len(captured) == len(screenshots):
+        status = "captured"
+    else:
+        status = "partial"
+    return {
+        "schema": "vrcforge.visual_regression.v1",
+        "source": source,
+        "status": status,
+        "proofPassed": bool(proof_passed),
+        "requiresHumanReview": status in {"captured", "partial"},
+        "scoring": {"mode": "not-run", "reason": "0.9 baseline records screenshot evidence only; automated scoring is not enabled."},
+        "screenshots": screenshots,
+    }
+
+
+def file_digest(path: str) -> dict[str, Any]:
+    file_path = Path(path)
+    try:
+        data = file_path.read_bytes()
+    except OSError as exc:
+        return {"exists": False, "error": str(exc)}
+    return {
+        "exists": True,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
     }
 
 

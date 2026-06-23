@@ -130,6 +130,24 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "description": "Plan conservative AAO Trace And Optimize usage without adding or configuring AAO components.",
     },
     {
+        "externalName": "optimization.physbone.audit",
+        "gatewayName": "vrcforge_optimization_physbone_audit",
+        "category": "read/debug",
+        "description": "Audit PhysBone counts, affected transforms, colliders, and collision checks without changing physics components.",
+    },
+    {
+        "externalName": "optimization.physbone.reduce-plan",
+        "gatewayName": "vrcforge_optimization_physbone_reduce_plan",
+        "category": "plan/preview",
+        "description": "Plan conservative PhysBone overhead reduction gates without merging, removing, or disabling components.",
+    },
+    {
+        "externalName": "optimization.aao.hidden-body-cut-plan",
+        "gatewayName": "vrcforge_optimization_aao_hidden_body_cut_plan",
+        "category": "plan/preview",
+        "description": "Plan high-risk hidden body cut review gates without adding AAO Remove Mesh components.",
+    },
+    {
         "externalName": "optimization.mesh.triangle-audit",
         "gatewayName": "vrcforge_optimization_mesh_triangle_audit",
         "category": "read/debug",
@@ -188,6 +206,18 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "gatewayName": "vrcforge_optimization_parameter_vrcfury_compressor_plan",
         "category": "plan/preview",
         "description": "Plan VRCFury Parameter Compressor usage as an experimental request-only path with behavior-regression gates.",
+    },
+    {
+        "externalName": "optimization.parameter.behavior-regression",
+        "gatewayName": "vrcforge_optimization_parameter_behavior_regression",
+        "category": "plan/preview",
+        "description": "Plan menu, FX, puppet, OSC, and face-tracking behavior regression checks before any parameter compression.",
+    },
+    {
+        "externalName": "optimization.parameter.path-to-skill",
+        "gatewayName": "vrcforge_optimization_parameter_path_to_skill",
+        "category": "plan/preview",
+        "description": "Map parameter compression candidates into the future request-only skill path and hard gates.",
     },
     {
         "externalName": "optimization.vrcfury.compatibility-report",
@@ -623,13 +653,18 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
     texture_audit = build_texture_vram_audit(validation)
     material_audit = build_material_slot_audit(validation)
     mesh_audit = build_mesh_triangle_audit(validation)
+    physbone_audit = build_physbone_audit(validation)
     parameter_audit = build_parameter_budget_audit(validation)
     upload_gate_audit = build_upload_gate_audit(validation)
     parameter_inventory = build_parameter_inventory(validation)
     parameter_menu_map = build_parameter_menu_map(validation)
     parameter_animator_usage = build_parameter_animator_usage(validation)
     parameter_compressibility = build_parameter_compressibility_plan(validation)
+    parameter_behavior_regression = build_parameter_behavior_regression_plan(validation)
+    parameter_path_to_skill = build_parameter_path_to_skill_plan(dependency_doctor, validation)
     aao_plan = build_aao_trace_plan(dependency_doctor, validation)
+    physbone_reduce_plan = build_physbone_reduce_plan(dependency_doctor, physbone_audit)
+    hidden_body_cut_plan = build_aao_hidden_body_cut_plan(dependency_doctor, validation)
     lac_plan = build_lac_profile_plan(profile, dependency_doctor, texture_audit)
     ttt_plan = build_ttt_atlas_plan(dependency_doctor, material_audit, texture_audit)
     meshia_plan = build_meshia_simplify_plan(dependency_doctor, mesh_audit)
@@ -675,6 +710,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "textureVram": texture_audit,
             "materialSlots": material_audit,
             "meshTriangles": mesh_audit,
+            "physBones": physbone_audit,
             "parameterBudget": parameter_audit,
             "uploadGate": upload_gate_audit,
             "parameterInventory": parameter_inventory,
@@ -687,9 +723,13 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "lacProfile": lac_plan,
             "tttAtlas": ttt_plan,
             "aaoTrace": aao_plan,
+            "physBoneReduce": physbone_reduce_plan,
+            "hiddenBodyCut": hidden_body_cut_plan,
             "meshiaSimplify": meshia_plan,
             "vrcfuryCompatibility": vrcfury_report,
             "ma2btConvertibility": ma2bt_plan,
+            "parameterBehaviorRegression": parameter_behavior_regression,
+            "parameterPathToSkill": parameter_path_to_skill,
             "visualRegression": visual_plan,
             "rollbackVerify": rollback,
             "performanceTools": performance_tools_report,
@@ -739,6 +779,12 @@ def build_optimization_tool_result(
         result = build_ttt_atlas_plan(dependency_doctor, build_material_slot_audit(validation), build_texture_vram_audit(validation))
     elif external_name == "optimization.aao.trace-plan":
         result = build_aao_trace_plan(dependency_doctor, validation)
+    elif external_name == "optimization.physbone.audit":
+        result = build_physbone_audit(validation)
+    elif external_name == "optimization.physbone.reduce-plan":
+        result = build_physbone_reduce_plan(dependency_doctor, build_physbone_audit(validation))
+    elif external_name == "optimization.aao.hidden-body-cut-plan":
+        result = build_aao_hidden_body_cut_plan(dependency_doctor, validation)
     elif external_name == "optimization.mesh.triangle-audit":
         result = build_mesh_triangle_audit(validation)
     elif external_name == "optimization.meshia.simplify-plan":
@@ -759,6 +805,10 @@ def build_optimization_tool_result(
         result = build_parameter_compressibility_plan(validation)
     elif external_name == "optimization.parameter.vrcfury-compressor-plan":
         result = build_vrcfury_parameter_compressor_plan(dependency_doctor, validation)
+    elif external_name == "optimization.parameter.behavior-regression":
+        result = build_parameter_behavior_regression_plan(validation)
+    elif external_name == "optimization.parameter.path-to-skill":
+        result = build_parameter_path_to_skill_plan(dependency_doctor, validation)
     elif external_name == "optimization.vrcfury.compatibility-report":
         result = build_vrcfury_compatibility_report(dependency_doctor, validation)
     elif external_name == "optimization.ma-responsive-layer-audit":
@@ -1353,6 +1403,114 @@ def build_vrcfury_parameter_compressor_plan(dependency_doctor: dict[str, Any], v
     }
 
 
+def build_parameter_behavior_regression_plan(validation: dict[str, Any]) -> dict[str, Any]:
+    menu_map = build_parameter_menu_map(validation)
+    animator_usage = build_parameter_animator_usage(validation)
+    compressibility = build_parameter_compressibility_plan(validation)
+    usage_by_name = {str(item.get("parameterName") or ""): item for item in animator_usage.get("parameters") or []}
+    cases = []
+    for control in menu_map.get("controls") or []:
+        parameter_name = str(control.get("parameterName") or "").strip()
+        if not parameter_name:
+            continue
+        control_type = str(control.get("controlType") or "unknown")
+        usage = usage_by_name.get(parameter_name) or {}
+        risk_flags = _parameter_regression_risk_flags(parameter_name, control_type, usage)
+        cases.append(
+            {
+                "id": f"menu_{_normalize_key(parameter_name)[:60]}_{len(cases) + 1}",
+                "parameterName": parameter_name,
+                "source": "expression_menu",
+                "controlType": control_type,
+                "menuPath": control.get("menuPath"),
+                "expectedProbe": _parameter_expected_probe(control_type),
+                "riskFlags": risk_flags,
+                "status": "required",
+            }
+        )
+    menu_case_parameters = {case["parameterName"] for case in cases}
+    for usage in animator_usage.get("parameters") or []:
+        parameter_name = str(usage.get("parameterName") or "").strip()
+        if not parameter_name or parameter_name in menu_case_parameters or not usage.get("conditionCount"):
+            continue
+        cases.append(
+            {
+                "id": f"fx_{_normalize_key(parameter_name)[:60]}_{len(cases) + 1}",
+                "parameterName": parameter_name,
+                "source": "fx_animator",
+                "controlType": "condition",
+                "menuPath": None,
+                "expectedProbe": "Toggle or set the parameter in a controlled scene and verify the same FX state transition before/after.",
+                "riskFlags": _parameter_regression_risk_flags(parameter_name, "condition", usage),
+                "status": "required",
+            }
+        )
+    danger_categories = []
+    categories = compressibility.get("categories") if isinstance(compressibility.get("categories"), dict) else {}
+    for category in ("danger_osc_or_face_tracking", "danger_puppet", "danger_continuous_float", "unknown_do_not_touch"):
+        for item in categories.get(category) or []:
+            danger_categories.append({"category": category, "name": item.get("name"), "reason": item.get("reason")})
+    return {
+        "planOnly": True,
+        "proofReady": False,
+        "summary": {
+            "testCaseCount": len(cases),
+            "menuControlCount": menu_map.get("summary", {}).get("knownControlCount"),
+            "conditionParameterCount": animator_usage.get("summary", {}).get("conditionParameterCount"),
+            "dangerParameterCount": len(danger_categories),
+            "scannerCoverage": "metadata" if cases or danger_categories else "unknown",
+        },
+        "testCases": cases[:240],
+        "blockedParameters": danger_categories[:160],
+        "requiredArtifacts": [
+            "before menu/FX behavior evidence",
+            "after behavior evidence for every touched parameter",
+            "validation delta",
+            "rollback behavior spot-check",
+        ],
+        "notes": ["This regression plan is a gate; it does not prove behavior by itself."],
+    }
+
+
+def build_parameter_path_to_skill_plan(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    dep = _dependency_by_id(dependency_doctor, "vrcfury")
+    compressibility = build_parameter_compressibility_plan(validation)
+    regression = build_parameter_behavior_regression_plan(validation)
+    categories = compressibility.get("categories") if isinstance(compressibility.get("categories"), dict) else {}
+    candidate_categories = ("safe_to_pack", "safe_to_int_exclusive", "safe_to_unsync", "unused_candidate", "duplicate_candidate")
+    candidates = []
+    for category in candidate_categories:
+        for item in categories.get(category) or []:
+            candidates.append({**item, "category": category})
+    hard_gate_failures = []
+    for key in ("danger_puppet", "danger_osc_or_face_tracking", "danger_continuous_float", "unknown_do_not_touch"):
+        count = len(categories.get(key) or [])
+        if count:
+            hard_gate_failures.append({"id": key, "count": count, "status": "manual_review_required"})
+    return {
+        "planOnly": True,
+        "dependency": dep,
+        "candidateCount": len(candidates),
+        "candidates": candidates[:120],
+        "skillPath": [
+            {"step": "inventory", "tool": "optimization.parameter.inventory", "status": "available"},
+            {"step": "menu-map", "tool": "optimization.parameter.menu-map", "status": "available"},
+            {"step": "animator-usage", "tool": "optimization.parameter.animator-usage", "status": "available"},
+            {"step": "compressibility", "tool": "optimization.parameter.compressibility-plan", "status": "available"},
+            {"step": "behavior-regression", "tool": "optimization.parameter.behavior-regression", "status": "required_before_write"},
+            {"step": "future-request", "tool": "optimization.vrcfury.parameter-compressor-apply-request", "status": "blocked_preview"},
+        ],
+        "hardGates": {
+            "behaviorRegressionCaseCount": regression.get("summary", {}).get("testCaseCount"),
+            "blockedParameterCount": regression.get("summary", {}).get("dangerParameterCount"),
+            "failures": hard_gate_failures,
+        },
+        "applyBlocked": True,
+        "blockedReason": "Parameter compression remains request-only/blocked until behavior-regression proof and rollback proof are public.",
+        "notes": ["This path converts planner evidence into future skill gates; it does not call VRCFury or rewrite parameters."],
+    }
+
+
 def build_lac_profile_plan(profile: dict[str, Any], dependency_doctor: dict[str, Any], texture_audit: dict[str, Any]) -> dict[str, Any]:
     dep = _dependency_by_id(dependency_doctor, "lac")
     profiles = [
@@ -1437,6 +1595,160 @@ def build_aao_trace_plan(dependency_doctor: dict[str, Any], validation: dict[str
         "skinnedMeshMergeCandidates": _dedupe_labels(merge_candidates)[:80],
         "hiddenBodyCutCandidates": [{"name": item, "risk": "high", "status": "plan-only"} for item in _dedupe_labels(hidden_body_candidates)[:40]],
         "riskNotes": ["Hidden body cut is high-risk and remains plan-only in 0.7.2."],
+    }
+
+
+def build_physbone_audit(validation: dict[str, Any]) -> dict[str, Any]:
+    sources = _validation_sources(validation)
+    pc = _source_payload(sources, "performance_pc")
+    android = _source_payload(sources, "performance_quest")
+    avatar_items = _source_payload(sources, "avatar_items")
+    components = []
+    for entry in _walk_dicts(avatar_items):
+        raw_components = _coerce_list(entry.get("component_types") or entry.get("componentTypes") or entry.get("components"))
+        joined_components = " ".join(str(item).replace(" ", "").lower() for item in raw_components)
+        entry_text = json.dumps(entry, ensure_ascii=False, default=str).lower()
+        if "physbone" not in joined_components and "phys bone" not in entry_text and "physbone" not in entry_text:
+            continue
+        object_path = _direct_text(entry, ("gameObjectPath", "objectPath", "path", "name")) or "unknown"
+        affected = _direct_numeric(entry, ("physBoneAffectedTransforms", "affectedTransforms", "affectedTransformCount"))
+        colliders = _direct_numeric(entry, ("physBoneColliders", "physBoneColliderCount", "colliderCount", "colliders"))
+        collision_checks = _direct_numeric(entry, ("physBoneCollisionCheckCount", "collisionCheckCount", "collisionChecks"))
+        flags = []
+        if affected is not None and affected > PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneAffectedTransforms"]:
+            flags.append("pc_affected_transform_over_limit")
+        if colliders is not None and colliders > PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneColliders"]:
+            flags.append("pc_collider_over_limit")
+        if collision_checks is not None and collision_checks > PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneCollisionCheckCount"]:
+            flags.append("pc_collision_check_over_limit")
+        if any(token in str(object_path).lower() for token in ("hair", "skirt", "tail", "sleeve", "cloth")):
+            flags.append("visual_motion_review")
+        components.append(
+            {
+                "objectPath": _safe_asset_label(object_path),
+                "componentTypes": [str(item)[:120] for item in raw_components],
+                "affectedTransforms": affected,
+                "colliders": colliders,
+                "collisionCheckCount": collision_checks,
+                "flags": flags,
+            }
+        )
+    unique_components = _unique_by(components, "objectPath")
+    metric_rows = [
+        _physbone_metric_row("physbone_components", "PhysBone components", _first_numeric(pc, ("physBoneCount", "physBones", "physBoneComponents")) or len(unique_components) or None, "physBoneComponents"),
+        _physbone_metric_row("physbone_affected_transforms", "PhysBone affected transforms", _first_numeric(pc, ("physBoneAffectedTransforms", "affectedTransforms")), "physBoneAffectedTransforms"),
+        _physbone_metric_row("physbone_colliders", "PhysBone colliders", _first_numeric(pc, ("physBoneColliderCount", "physBoneColliders")), "physBoneColliders"),
+        _physbone_metric_row("physbone_collision_checks", "PhysBone collision checks", _first_numeric(pc, ("physBoneCollisionCheckCount", "collisionCheckCount")), "physBoneCollisionCheckCount"),
+    ]
+    android_metric_rows = [
+        _physbone_metric_row("android_physbone_components", "Android PhysBone components", _first_numeric(android, ("physBoneCount", "physBones", "physBoneComponents")), "physBoneComponents", platform="android"),
+        _physbone_metric_row("android_physbone_affected_transforms", "Android PhysBone affected transforms", _first_numeric(android, ("physBoneAffectedTransforms", "affectedTransforms")), "physBoneAffectedTransforms", platform="android"),
+        _physbone_metric_row("android_physbone_colliders", "Android PhysBone colliders", _first_numeric(android, ("physBoneColliderCount", "physBoneColliders")), "physBoneColliders", platform="android"),
+        _physbone_metric_row("android_physbone_collision_checks", "Android PhysBone collision checks", _first_numeric(android, ("physBoneCollisionCheckCount", "collisionCheckCount")), "physBoneCollisionCheckCount", platform="android"),
+    ]
+    review_rows = [row for row in metric_rows + android_metric_rows if row["status"] in {"review", "offender", "unknown"}]
+    return {
+        "readOnly": True,
+        "limits": {
+            "pc": {
+                key: PERFORMANCE_REVIEW_LIMITS["pc"][key]
+                for key in ("physBoneComponents", "physBoneAffectedTransforms", "physBoneColliders", "physBoneCollisionCheckCount")
+            },
+            "android": UPLOAD_GATE_LIMITS["android"]["mobileComponentLimits"],
+        },
+        "summary": {
+            "knownComponentCount": len(unique_components),
+            "reportedComponentCount": metric_rows[0]["value"],
+            "reviewMetricCount": len([row for row in review_rows if row["status"] != "unknown"]),
+            "unknownMetricCount": len([row for row in review_rows if row["status"] == "unknown"]),
+            "scannerCoverage": "metadata" if unique_components or any(row["value"] is not None for row in metric_rows + android_metric_rows) else "unknown",
+        },
+        "metrics": metric_rows + android_metric_rows,
+        "components": unique_components[:160],
+        "notes": ["This audit does not merge, delete, disable, or retarget PhysBone components."],
+    }
+
+
+def build_physbone_reduce_plan(dependency_doctor: dict[str, Any], physbone_audit: dict[str, Any]) -> dict[str, Any]:
+    dep = _dependency_by_id(dependency_doctor, "aao")
+    review_metrics = [row for row in physbone_audit.get("metrics") or [] if row.get("status") in {"review", "offender"}]
+    candidates = []
+    for component in physbone_audit.get("components") or []:
+        flags = list(component.get("flags") or [])
+        risk = "medium" if flags else "review"
+        if "visual_motion_review" in flags:
+            risk = "high"
+        candidates.append(
+            {
+                "objectPath": component.get("objectPath"),
+                "risk": risk,
+                "flags": flags,
+                "suggestedAction": "review merge/simplify settings only after visual motion proof",
+            }
+        )
+    return {
+        "planOnly": True,
+        "dependency": dep,
+        "blocked": dep.get("status") != "installed",
+        "blockedReason": None if dep.get("status") == "installed" else "AAO / Avatar Optimizer is not detected.",
+        "summary": {
+            "candidateCount": len(candidates),
+            "reviewMetricCount": len(review_metrics),
+            "scannerCoverage": physbone_audit.get("summary", {}).get("scannerCoverage"),
+        },
+        "reviewMetrics": review_metrics,
+        "candidates": candidates[:120],
+        "writePolicy": "No PhysBone merge/remove writer is exposed in this plan.",
+        "requiredProof": [
+            "baseline PhysBone metrics",
+            "Play Mode motion screenshot/video review",
+            "before/after validation delta",
+            "checkpoint restore proof",
+            "Quest/mobile component limit review when targeting Android",
+        ],
+    }
+
+
+def build_aao_hidden_body_cut_plan(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    dep = _dependency_by_id(dependency_doctor, "aao")
+    avatar_items = _source_payload(_validation_sources(validation), "avatar_items")
+    aao_plan = build_aao_trace_plan(dependency_doctor, validation)
+    candidates = []
+    for item in aao_plan.get("hiddenBodyCutCandidates") or []:
+        name = str(item.get("name") or "")
+        if name:
+            candidates.append(_hidden_body_candidate(name, "aao_trace_hint"))
+    for entry in _walk_dicts(avatar_items):
+        name = _direct_text(entry, ("gameObjectPath", "objectPath", "rendererPath", "path", "name"))
+        if not name:
+            continue
+        lower = name.lower()
+        raw_components = _coerce_list(entry.get("component_types") or entry.get("componentTypes") or entry.get("components"))
+        component_text = " ".join(str(item).lower() for item in raw_components)
+        if not any(token in lower for token in ("body", "skin", "torso", "chest", "leg", "arm")):
+            continue
+        if raw_components and "renderer" not in component_text and "mesh" not in component_text:
+            continue
+        candidates.append(_hidden_body_candidate(name, "avatar_item"))
+    unique = _unique_by(candidates, "objectPath")
+    return {
+        "planOnly": True,
+        "dependency": dep,
+        "blocked": True,
+        "blockedReason": "Hidden body cut remains blocked until occlusion evidence, visual proof, and rollback proof are captured.",
+        "applyBlocked": True,
+        "applyRequestTool": None,
+        "candidateCount": len(unique),
+        "candidates": unique[:120],
+        "requiredEvidence": [
+            "clothing coverage or mask evidence",
+            "front/side/back before screenshots",
+            "front/side/back after screenshots",
+            "gesture and crouch/sit clipping review",
+            "validation delta with no new errors",
+            "checkpoint rollback proof",
+        ],
+        "notes": ["This plan does not add AAO Remove Mesh By Mask or Remove Mesh By BlendShape components."],
     }
 
 
@@ -2196,6 +2508,75 @@ def _detect_mesh_read_write_disabled(*payloads: dict[str, Any]) -> bool | None:
         if "mesh read/write disabled" in text or "mesh readwrite disabled" in text or "read/write disabled" in text:
             return True
     return None if saw_payload else None
+
+
+def _physbone_metric_row(
+    metric_id: str,
+    label: str,
+    value: int | float | None,
+    limit_key: str,
+    *,
+    platform: str = "pc",
+) -> dict[str, Any]:
+    limits = UPLOAD_GATE_LIMITS["android"]["mobileComponentLimits"] if platform == "android" else PERFORMANCE_REVIEW_LIMITS["pc"]
+    limit = limits.get(limit_key)
+    if value is None or limit is None:
+        status = "unknown"
+    elif value > limit:
+        status = "offender" if platform == "pc" else "review"
+    else:
+        status = "pass"
+    return {
+        "id": metric_id,
+        "label": label,
+        "platform": platform,
+        "value": value,
+        "limit": limit,
+        "status": status,
+        "message": _limit_message(label, value, limit or 0, "count", status, "performance_rank_offender"),
+    }
+
+
+def _hidden_body_candidate(name: str, source: str) -> dict[str, Any]:
+    label = _safe_asset_label(name)
+    lower = label.lower()
+    risk = "high"
+    if any(token in lower for token in ("inner", "under", "basebody", "base_body", "covered")):
+        risk = "medium"
+    return {
+        "objectPath": label,
+        "source": source,
+        "risk": risk,
+        "status": "blocked_until_visual_evidence",
+        "reason": "Body/skin geometry removal can cause clipping, expression, or outfit-state regressions.",
+    }
+
+
+def _parameter_regression_risk_flags(parameter_name: str, control_type: str, usage: dict[str, Any]) -> list[str]:
+    text = f"{parameter_name} {control_type}".lower()
+    flags = []
+    if any(token in text for token in ("puppet", "axis", "joystick", "radial")):
+        flags.append("puppet_or_continuous_control")
+    if any(token in text for token in ("osc", "face", "tracking", "vrcft", "eye")):
+        flags.append("osc_or_face_tracking")
+    if usage.get("conditionCount"):
+        flags.append("fx_condition")
+    if usage.get("menuControlCount"):
+        flags.append("menu_control")
+    if not flags:
+        flags.append("manual_review")
+    return flags
+
+
+def _parameter_expected_probe(control_type: str) -> str:
+    lowered = str(control_type or "").lower()
+    if "puppet" in lowered or "axis" in lowered or "radial" in lowered:
+        return "Exercise the full continuous control range and verify matching animator/material response before and after."
+    if "toggle" in lowered or "button" in lowered:
+        return "Toggle the control on/off and verify the same object/material/animator state before and after."
+    if "sub" in lowered:
+        return "Open the submenu and verify child controls still resolve to the same parameters before and after."
+    return "Drive the control value and compare visible behavior plus FX state before and after."
 
 
 def _limit_check(
