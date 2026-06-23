@@ -3611,7 +3611,17 @@ class DashboardServerTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertEqual(error, "")
-            mock_popen.assert_called_once_with([str(editor), "-projectPath", str(project)], cwd=str(editor_dir), env=ANY)
+            mock_popen.assert_called_once_with(
+                [
+                    str(editor),
+                    "-projectPath",
+                    str(project),
+                    "-executeMethod",
+                    "VRCForge.Editor.McpBridgeBootstrap.StartBridgeNow",
+                ],
+                cwd=str(editor_dir),
+                env=ANY,
+            )
             self.assertNotIn(internal_dir, mock_popen.call_args.kwargs["env"]["PATH"])
             self.assertEqual([call.args[0] for call in mock_set_dll_directory.call_args_list], [None, internal_dir])
 

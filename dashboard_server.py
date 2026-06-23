@@ -8333,7 +8333,17 @@ def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> 
 
 def launch_unity_project(editor_path: Path, project_root: Path) -> tuple[bool, str]:
     try:
-        launch_unity_subprocess([str(editor_path), "-projectPath", str(project_root)], editor_path, project_root)
+        launch_unity_subprocess(
+            [
+                str(editor_path),
+                "-projectPath",
+                str(project_root),
+                "-executeMethod",
+                "VRCForge.Editor.McpBridgeBootstrap.StartBridgeNow",
+            ],
+            editor_path,
+            project_root,
+        )
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
     return True, ""
