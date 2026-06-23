@@ -1219,11 +1219,15 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
     preview = AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
     if not preview.get("ok"):
         raise HTTPException(status_code=400, detail=preview.get("error") or "Checkpoint is not restorable.")
+    checkpoint = ensure_dict(preview.get("checkpoint"))
+    arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    if checkpoint.get("projectRoot"):
+        arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
         payload = AGENT_GATEWAY.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
-                "arguments": {"checkpointId": checkpoint_id, "confirmRestore": True},
+                "arguments": arguments,
                 "reason": "Restore Unity project files from a VRCForge checkpoint.",
                 "preview": preview,
                 "agent_name": "desktop-agent",
@@ -10675,6 +10679,54 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
             "installPlan": strategy,
         }
 
+    repository = str(params.get("repository") or params.get("vpmRepository") or "").strip()
+    preflight_commands: list[dict[str, Any]] = []
+    preflight_results: list[dict[str, Any]] = []
+
+    if cli["name"] == "vrc-get" and repository:
+        # `vrc-get repo add` is not guaranteed to be idempotent across
+        # versions. Treat it as a best-effort repository preparation step and
+        # let update/install provide the authoritative failure if the repository
+        # is actually unusable.
+        preflight_commands.append({"command": [cli["path"], "repo", "add", repository], "required": False})
+        preflight_commands.append({"command": [cli["path"], "update"], "required": True})
+
+    for preflight_spec in preflight_commands:
+        raw_preflight_command = preflight_spec.get("command")
+        preflight_command = list(raw_preflight_command) if isinstance(raw_preflight_command, list) else []
+        required = bool(preflight_spec.get("required", True))
+        try:
+            preflight_proc = subprocess.run(
+                preflight_command,
+                cwd=project_value,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": f"Package repository command failed to run: {exc}"[:300], "command": preflight_command}
+        preflight_results.append(
+            {
+                "command": preflight_command,
+                "required": required,
+                "exitCode": preflight_proc.returncode,
+                "stdoutSummary": (preflight_proc.stdout or "")[-1500:],
+                "stderrSummary": (preflight_proc.stderr or "")[-1500:],
+                "ignoredNonZero": bool(preflight_proc.returncode != 0 and not required),
+            }
+        )
+        if preflight_proc.returncode != 0 and required:
+            return {
+                "ok": False,
+                "error": "Package repository preparation failed.",
+                "command": preflight_command,
+                "preflightResults": preflight_results,
+                "projectPath": project_value,
+                "packageId": package_id,
+                "repository": repository,
+                "installPlan": strategy,
+            }
+
     if cli["name"] == "vrc-get":
         command = [cli["path"], "install", "-p", project_value, "-y"]
         if bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")):
@@ -10694,6 +10746,18 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": f"Package install command failed to run: {exc}"[:300], "command": command}
 
+    unity_refresh: dict[str, Any] = {"attempted": False}
+    if proc.returncode == 0:
+        try:
+            refresh = refresh_asset_database_sync({
+                "projectPath": project_value,
+                "resolvePackages": True,
+                "packageResolveTimeoutSeconds": 180,
+            })
+            unity_refresh = {"attempted": True, "ok": bool(refresh.get("ok")), "result": refresh}
+        except Exception as exc:  # noqa: BLE001 - package install succeeded; report refresh separately.
+            unity_refresh = {"attempted": True, "ok": False, "error": str(exc)}
+
     package_state = None
     for spec in ADDON_FRAMEWORKS.values():
         if package_id in [str(item).lower() for item in spec["packageIds"]]:
@@ -10711,6 +10775,9 @@ def install_vpm_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         "stderrSummary": (proc.stderr or "")[-1500:],
         "projectPath": project_value,
         "packageId": package_id,
+        "repository": repository,
+        "preflightResults": preflight_results,
+        "unityRefresh": unity_refresh,
         "package": package_state,
         "installPlan": strategy,
         "hint": "Unity must refresh/resolve packages before new components are usable; reopen or focus the Unity project.",
@@ -13535,11 +13602,14 @@ def import_unitypackage_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
+    package_resolve_timeout = max(5, min(int((params or {}).get("packageResolveTimeoutSeconds") or 120), 300))
     settings = load_dashboard_settings(build_agent_connection_request(params or {}))
-    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 120)
+    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 120, package_resolve_timeout + 30)
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_refresh_asset_database", {
             "projectPath": str((params or {}).get("projectPath") or (params or {}).get("project_path") or ""),
+            "resolvePackages": bool((params or {}).get("resolvePackages") or (params or {}).get("resolve_packages")),
+            "packageResolveTimeoutSeconds": package_resolve_timeout,
         })),
         "refresh asset database",
     )
@@ -14267,12 +14337,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             preflight=False,
             json=False,
             cli=True,
+            no_start=False,
+            start_runtime=False,
             cli_args=raw_args[cli_index + 1 :],
         )
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", default=8757, type=int, help="Dashboard bind port.")
     parser.add_argument("--agent-mcp-stdio", action="store_true", help="Run the external-agent stdio MCP bridge instead of the HTTP backend.")
+    parser.add_argument("--start-runtime", action="store_true", help="With --agent-mcp-stdio, launch VRCForge Desktop when the runtime is offline.")
+    parser.add_argument("--no-start", action="store_true", help="Compatibility flag; stdio runtime auto-launch is disabled by default.")
     parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag for preflight JSON output.")
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
@@ -14288,13 +14362,18 @@ def main() -> int:
     if args.agent_mcp_stdio:
         from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, run_stdio_server
 
+        no_start_env = str(os.environ.get("VRCFORGE_AGENT_NO_START") or "").strip().lower()
+        start_runtime_env = str(os.environ.get("VRCFORGE_AGENT_START_RUNTIME") or "").strip().lower()
+        no_start = bool(args.no_start or no_start_env in {"1", "true", "yes", "on"})
+        start_runtime = bool(args.start_runtime or start_runtime_env in {"1", "true", "yes", "on"}) and not no_start
+
         bridge = VRCForgeBridge(
             base_url=os.environ.get("VRCFORGE_AGENT_BASE_URL", "http://127.0.0.1:8757").rstrip("/"),
             config_path=Path(os.environ["VRCFORGE_AGENT_GATEWAY_CONFIG"]).expanduser().resolve()
             if os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG")
             else None,
             timeout_seconds=float(os.environ.get("VRCFORGE_AGENT_TIMEOUT", "30")),
-            start_runtime=True,
+            start_runtime=start_runtime,
         )
         if args.preflight:
             print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))

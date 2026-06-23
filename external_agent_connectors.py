@@ -13,6 +13,7 @@ DEFAULT_TOKEN_ENV_VAR = "VRCFORGE_AGENT_TOKEN"
 DEFAULT_SKILLS_PROJECTION_DIR = "%LOCALAPPDATA%\\VRCForge\\agentic-app\\skills"
 DEFAULT_STDIO_COMMAND = "python"
 DEFAULT_STDIO_SCRIPT = "tools\\vrcforge_agent_mcp_stdio.py"
+DEFAULT_STDIO_EXTRA_ARGS = ("--no-start",)
 DEFAULT_SMOKE_COMMAND = "python"
 DEFAULT_SMOKE_SCRIPT = "scripts\\smoke_external_agent_bridge.py"
 
@@ -29,6 +30,7 @@ class ExternalAgentConnectorOptions:
     skills_projection_dir: str | PathLike[str] = DEFAULT_SKILLS_PROJECTION_DIR
     stdio_command: str = DEFAULT_STDIO_COMMAND
     stdio_script: str | PathLike[str] = DEFAULT_STDIO_SCRIPT
+    stdio_extra_args: tuple[str, ...] = DEFAULT_STDIO_EXTRA_ARGS
     stdio_cwd: str | PathLike[str] = "."
     smoke_command: str = DEFAULT_SMOKE_COMMAND
     smoke_script: str | PathLike[str] = DEFAULT_SMOKE_SCRIPT
@@ -40,6 +42,7 @@ class ExternalAgentConnectorOptions:
         object.__setattr__(self, "skills_projection_dir", _validate_path_text(self.skills_projection_dir))
         object.__setattr__(self, "stdio_command", _validate_command_text(self.stdio_command, "stdio_command"))
         object.__setattr__(self, "stdio_script", _validate_path_text(self.stdio_script))
+        object.__setattr__(self, "stdio_extra_args", tuple(_validate_arg_text(item, "stdio_extra_args") for item in self.stdio_extra_args))
         object.__setattr__(self, "stdio_cwd", _validate_path_text(self.stdio_cwd))
         object.__setattr__(self, "smoke_command", _validate_command_text(self.smoke_command, "smoke_command"))
         object.__setattr__(self, "smoke_script", _validate_path_text(self.smoke_script))
@@ -132,11 +135,12 @@ def build_codex_style_config(options: ExternalAgentConnectorOptions | None = Non
 
 def build_codex_stdio_config(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
     opts = options or ExternalAgentConnectorOptions()
+    args = [opts.stdio_script, *opts.stdio_extra_args]
     return {
         "mcp_servers": {
             opts.server_name: {
                 "command": opts.stdio_command,
-                "args": [opts.stdio_script],
+                "args": args,
                 "cwd": opts.stdio_cwd,
                 "startup_timeout_sec": 30,
                 "tool_timeout_sec": 300,
@@ -162,11 +166,12 @@ def build_claude_code_style_config(options: ExternalAgentConnectorOptions | None
 
 def build_claude_code_stdio_config(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
     opts = options or ExternalAgentConnectorOptions()
+    args = [opts.stdio_script, *opts.stdio_extra_args]
     return {
         "mcpServers": {
             opts.server_name: {
                 "command": opts.stdio_command,
-                "args": [opts.stdio_script],
+                "args": args,
                 "env": {},
             }
         }
@@ -175,12 +180,14 @@ def build_claude_code_stdio_config(options: ExternalAgentConnectorOptions | None
 
 def build_launcher_metadata(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
     opts = options or ExternalAgentConnectorOptions()
+    args = [opts.stdio_script, *opts.stdio_extra_args]
     return {
         "stdioBridge": {
             "command": opts.stdio_command,
-            "args": [opts.stdio_script],
+            "args": args,
             "cwd": opts.stdio_cwd,
-            "startsOrReconnectsRuntime": True,
+            "startsOrReconnectsRuntime": False,
+            "requiresRuntimeAlreadyOnline": True,
             "readsGatewayTokenFromLocalConfig": True,
             "storesPlaintextToken": False,
         },
@@ -228,7 +235,7 @@ def render_codex_toml(options: ExternalAgentConnectorOptions | None = None) -> s
 def render_codex_stdio_toml(options: ExternalAgentConnectorOptions | None = None) -> str:
     opts = options or ExternalAgentConnectorOptions()
     table = f"mcp_servers.{opts.server_name}"
-    args = "[" + ", ".join(_toml_string(item) for item in [opts.stdio_script]) + "]"
+    args = "[" + ", ".join(_toml_string(item) for item in [opts.stdio_script, *opts.stdio_extra_args]) + "]"
     return "\n".join(
         [
             f"[{table}]",
@@ -290,6 +297,15 @@ def _validate_command_text(command: str, field_name: str) -> str:
     return value
 
 
+def _validate_arg_text(arg: str, field_name: str) -> str:
+    value = str(arg).strip()
+    if not value:
+        raise ValueError(f"{field_name} must not contain empty args.")
+    if any(char in value for char in "\r\n\0"):
+        raise ValueError(f"{field_name} args must be single argument strings.")
+    return value
+
+
 def _normalize_mcp_url(url: str) -> str:
     value = str(url).strip()
     parsed = urlparse(value)
@@ -312,6 +328,7 @@ __all__ = [
     "DEFAULT_SMOKE_COMMAND",
     "DEFAULT_SMOKE_SCRIPT",
     "DEFAULT_STDIO_COMMAND",
+    "DEFAULT_STDIO_EXTRA_ARGS",
     "DEFAULT_STDIO_SCRIPT",
     "DEFAULT_TOKEN_ENV_VAR",
     "ExternalAgentConnectorOptions",

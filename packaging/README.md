@@ -117,5 +117,7 @@ restores the previous gateway and permission settings. If rollback fails, fix
 rollback before publishing.
 
 For packaged builds, Agent Connector stdio config should point at
-`backend/vrcforge_backend.exe --agent-mcp-stdio` instead of requiring a system
-Python installation.
+`backend/vrcforge_backend.exe --agent-mcp-stdio --no-start` instead of requiring
+a system Python installation. Generated client config should not let Codex or
+other MCP clients launch the desktop app implicitly; VRCForge should already be
+running.

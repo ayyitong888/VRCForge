@@ -45,7 +45,7 @@ def test_claude_code_install_preserves_existing_server_and_is_idempotent(tmp_pat
     assert first["changed"] is True
     assert payload["mcpServers"]["existing"]["command"] == "node"
     assert server["command"] == sys.executable
-    assert server["args"] == [str((root / "tools" / "vrcforge_agent_mcp_stdio.py").resolve())]
+    assert server["args"] == [str((root / "tools" / "vrcforge_agent_mcp_stdio.py").resolve()), "--no-start"]
     assert server["env"] == {}
 
     second = install_connector("claudeCode", root_dir=root, project_path=str(project), run_self_test=False)
@@ -123,7 +123,7 @@ def test_codex_app_and_cli_share_safe_toml_install_uninstall(monkeypatch: pytest
     assert app_install["changed"] is True
     assert parsed["mcp_servers"]["other"]["command"] == "node"
     assert server["command"] == sys.executable
-    assert server["args"] == [str((root / "tools" / "vrcforge_agent_mcp_stdio.py").resolve())]
+    assert server["args"] == [str((root / "tools" / "vrcforge_agent_mcp_stdio.py").resolve()), "--no-start"]
     assert server["cwd"] == str(root.resolve())
 
     cli_install = install_connector("codexCli", root_dir=root, run_self_test=False)

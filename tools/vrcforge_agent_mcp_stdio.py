@@ -26,7 +26,7 @@ def main() -> int:
         base_url=args.base_url.rstrip("/"),
         config_path=Path(args.config).expanduser().resolve() if args.config else None,
         timeout_seconds=args.timeout,
-        start_runtime=not args.no_start,
+        start_runtime=args.start_runtime and not args.no_start,
     )
     if args.preflight:
         print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
@@ -36,15 +36,16 @@ def main() -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the VRCForge external-agent stdio MCP bridge.")
     parser.add_argument("--base-url", default=os.environ.get("VRCFORGE_AGENT_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--config", default=os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", ""))
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("VRCFORGE_AGENT_TIMEOUT", "30")))
-    parser.add_argument("--no-start", action="store_true", help="Do not launch VRCForge if the runtime is offline.")
+    parser.add_argument("--start-runtime", action="store_true", help="Launch VRCForge Desktop if the runtime is offline.")
+    parser.add_argument("--no-start", action="store_true", help="Compatibility flag; runtime auto-launch is disabled by default.")
     parser.add_argument("--preflight", action="store_true", help="Print a JSON preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag; preflight already prints JSON.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 class VRCForgeBridge:

@@ -12,7 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, AgentGatewayError
 from skill_packages import SkillPackageService
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
@@ -981,6 +981,18 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse(replay.json()["ok"])
 
     def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
+        temp_project = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_project.cleanup)
+        project = Path(temp_project.name) / "UnityProject"
+        (project / "Assets").mkdir(parents=True)
+        (project / "Packages").mkdir()
+        (project / "ProjectSettings").mkdir()
+        (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+        (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+        original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY, "checkpoint_prepare_handler", original_prepare)
+
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -1011,7 +1023,7 @@ class DashboardServerTests(unittest.TestCase):
                     "agent_name": "codex-test",
                     "params": {
                         "target_tool": "vrcforge_apply_blendshapes",
-                        "arguments": {"adjustments": []},
+                        "arguments": {"projectRoot": str(project), "adjustments": []},
                         "reason": "test supervised loop",
                     },
                 },
@@ -1098,6 +1110,7 @@ class DashboardServerTests(unittest.TestCase):
         stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge_local"]
         self.assertEqual(Path(stdio["cwd"]), dashboard_server.ROOT_DIR)
         self.assertEqual(Path(stdio["args"][0]), dashboard_server.ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
+        self.assertIn("--no-start", stdio["args"])
         self.assertIn("CUSTOM_VRCFORGE_TOKEN", rendered)
         self.assertNotIn("real-token", rendered)
 
@@ -1114,7 +1127,7 @@ class DashboardServerTests(unittest.TestCase):
 
         stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge"]
         self.assertEqual(Path(stdio["command"]), backend_exe)
-        self.assertEqual(stdio["args"], ["--agent-mcp-stdio"])
+        self.assertEqual(stdio["args"], ["--agent-mcp-stdio", "--no-start"])
         self.assertEqual(Path(stdio["cwd"]), root)
 
     def test_external_agent_connector_status_uses_project_query_for_claude_code(self) -> None:
@@ -2094,6 +2107,12 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(Path(applied["checkpoint"]["archivePath"]).is_file())
             self.assertEqual(existing.read_text(encoding="utf-8"), "after")
             self.assertEqual(prepared, [project.resolve()])
+            bee_cache = project / "Library" / "Bee"
+            script_cache = project / "Library" / "ScriptAssemblies"
+            bee_cache.mkdir(parents=True)
+            script_cache.mkdir(parents=True)
+            (bee_cache / "stale-inputdata.json").write_text("Packages/com.deleted.shader", encoding="utf-8")
+            (script_cache / "stale.dll").write_text("stale", encoding="utf-8")
 
             checkpoint_id = applied["checkpoint"]["id"]
             preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint_id})
@@ -2105,6 +2124,11 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(restored["ok"])
             self.assertEqual(existing.read_text(encoding="utf-8"), "before")
             self.assertFalse((project / "Assets" / "generated.txt").exists())
+            self.assertFalse(bee_cache.exists())
+            self.assertFalse(script_cache.exists())
+            self.assertFalse(restored["unityCacheCleanup"]["skipped"])
+            self.assertIn(str(bee_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
+            self.assertIn(str(script_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertEqual(reloaded, [project.resolve()])
 
     def test_failed_write_after_checkpoint_returns_checkpoint_for_rollback(self) -> None:
@@ -2144,6 +2168,63 @@ class DashboardServerTests(unittest.TestCase):
             restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertFalse((project / "Assets" / "generated-before-fail.txt").exists())
+
+    def test_audit_log_approval_is_not_executable_after_memory_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            called: list[dict] = []
+
+            def write_handler(args: dict) -> dict:
+                called.append(args)
+                return {"ok": True}
+
+            gateway.register_write_handler("vrcforge_test_audit_write", "Audit write", "high", write_handler)
+            request = gateway.create_apply_request({
+                "target_tool": "vrcforge_test_audit_write",
+                "arguments": {
+                    "projectRoot": str(root / "UnityProject"),
+                    "repository": "https://example.com/vpm/index.json",
+                    "nested": {"key": "value"},
+                },
+            })
+            approval_id = request["approval"]["id"]
+
+            gateway._approvals.clear()
+
+            with self.assertRaises(AgentGatewayError) as approve_error:
+                gateway.approve(approval_id)
+            self.assertEqual(approve_error.exception.status_code, 404)
+
+            with self.assertRaises(AgentGatewayError) as apply_error:
+                gateway.apply_approved({"approval_id": approval_id})
+            self.assertEqual(apply_error.exception.status_code, 404)
+            self.assertEqual(called, [])
+
+    def test_checkpoint_blocks_write_when_project_root_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            called: list[dict] = []
+
+            def write_handler(args: dict) -> dict:
+                called.append(args)
+                return {"ok": True}
+
+            gateway.register_write_handler("vrcforge_test_missing_root_write", "Missing root write", "high", write_handler)
+            request = gateway.create_apply_request({
+                "target_tool": "vrcforge_test_missing_root_write",
+                "arguments": {"avatar_path": "Scene/Avatar"},
+            })
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertFalse(applied["ok"])
+            self.assertEqual(applied["status"], "failed")
+            self.assertIn("No Unity project root", applied["error"])
+            self.assertTrue(applied["checkpoint"]["blocking"])
+            self.assertEqual(called, [])
 
     def test_checkpoint_archive_restore_succeeds_when_unity_reload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2218,6 +2299,21 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
         self.assertIn("ForceSynchronousImport", source)
         self.assertIn("AssetDatabase.Refresh", source)
+
+    def test_refresh_asset_database_tool_can_resolve_packages(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "OutfitPackageImporter.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("UnityEditor.PackageManager", source)
+        self.assertIn("resolvePackages", source)
+        self.assertIn("Client.Resolve()", source)
+        self.assertIn("packageResolve", source)
+        self.assertIn('status = "started"', source)
 
     def test_setup_outfit_uses_modular_avatar_public_api(self) -> None:
         source = (
@@ -2355,7 +2451,18 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(mock_invoke.call_count, 1)
 
     def test_app_approval_executes_non_shell_write_handler(self) -> None:
+        temp_project = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_project.cleanup)
+        project = Path(temp_project.name) / "UnityProject"
+        (project / "Assets").mkdir(parents=True)
+        (project / "Packages").mkdir()
+        (project / "ProjectSettings").mkdir()
+        (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+        (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
         original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+        original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
         calls: list[dict] = []
 
         def write_handler(args: dict) -> dict:
@@ -2371,7 +2478,7 @@ class DashboardServerTests(unittest.TestCase):
             )
             request = dashboard_server.AGENT_GATEWAY.create_apply_request({
                 "target_tool": "vrcforge_test_app_write",
-                "arguments": {"name": "value"},
+                "arguments": {"projectRoot": str(project), "name": "value"},
             })
             approval_id = request["approval"]["id"]
 
@@ -2381,9 +2488,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["execution"]["status"], "applied")
             self.assertEqual(payload["execution"]["result"]["wrote"], "value")
-            self.assertEqual(calls, [{"name": "value"}])
+            self.assertEqual(calls, [{"projectRoot": str(project), "name": "value"}])
         finally:
             dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+            dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
 
     def test_app_checkpoint_restore_request_uses_approval_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2441,6 +2549,8 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertTrue(preview["ok"])
                 self.assertEqual(restore_request["status"], "pending")
                 self.assertEqual(restore_request["approval"]["targetTool"], "vrcforge_restore_checkpoint")
+                stored_restore = dashboard_server.AGENT_GATEWAY._approvals[restore_approval_id]  # noqa: SLF001 - verify executable approval payload.
+                self.assertEqual(stored_restore["arguments"]["projectRoot"], str(project.resolve()))
                 self.assertTrue(applied["execution"]["ok"])
                 self.assertFalse((project / "Assets" / "generated.txt").exists())
             finally:
@@ -4678,6 +4788,49 @@ namespace VRCForge.Editor
         self.assertIn("new GenericShaderAdapter()", source)
         self.assertIn('base("Generic"', source)
         self.assertIn('"_BaseColor"', source)
+
+    def test_shader_fixture_tool_sets_named_shader_with_undo_and_save(self) -> None:
+        source = Path("Assets/VRCForge/Editor/ShaderFixtureTool.cs").read_text(encoding="utf-8-sig")
+
+        self.assertIn('name: "vrc_set_material_shader"', source)
+        self.assertIn("ResolveShader(shaderName, shaderAssetPath)", source)
+        self.assertIn("shaderAssetPath", source)
+        self.assertIn("LoadExplicitShaderAtAssetPath(shaderAssetPath)", source)
+        self.assertIn("AssetDatabase.ImportAsset(normalizedPath, ImportAssetOptions.ForceSynchronousImport)", source)
+        self.assertIn("AssetDatabase.FindAssets", source)
+        self.assertIn("AssetDatabase.LoadAssetAtPath<Shader>", source)
+        self.assertIn("Undo.RecordObject", source)
+        self.assertIn("target.material.shader = shader", source)
+        self.assertIn("AssetDatabase.SaveAssets", source)
+        self.assertIn("rendererPath or materialAssetPath is required", source)
+
+    def test_shader_adapter_smoke_script_uses_supervised_paths(self) -> None:
+        source = Path("scripts/smoke_shader_adapter_apply_rollback.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("vrcforge.shader_adapter_apply_rollback_smoke.v1", source)
+        self.assertIn("/api/app/package-install/request", source)
+        self.assertIn("vrcforge_unity_mcp_write", source)
+        self.assertIn("vrc_set_material_shader", source)
+        self.assertIn("vrcforge_apply_shader_tuning", source)
+        self.assertIn('"projectPath": self.project_root', source)
+        self.assertIn("/api/app/doctor/unity-mcp/repair", source)
+        self.assertIn("/api/app/checkpoints/{checkpoint_id}/restore", source)
+        self.assertIn("vrcforge.path_to_skill.v1", source)
+
+    def test_agent_mcp_stdio_supports_no_start_flag(self) -> None:
+        args = dashboard_server.parse_args(["--agent-mcp-stdio", "--no-start"])
+
+        self.assertTrue(args.agent_mcp_stdio)
+        self.assertTrue(args.no_start)
+        self.assertFalse(args.start_runtime)
+
+    def test_agent_mcp_stdio_start_runtime_is_explicit_opt_in(self) -> None:
+        default_args = dashboard_server.parse_args(["--agent-mcp-stdio"])
+        start_args = dashboard_server.parse_args(["--agent-mcp-stdio", "--start-runtime"])
+
+        self.assertTrue(default_args.agent_mcp_stdio)
+        self.assertFalse(default_args.start_runtime)
+        self.assertTrue(start_args.start_runtime)
 
     def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(

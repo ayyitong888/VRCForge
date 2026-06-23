@@ -456,9 +456,13 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
         dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
 
 
-def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch) -> None:
+def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
     original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
     original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+    original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+    dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
     dashboard_server.AGENT_GATEWAY._approvals.clear()
     calls: list[dict] = []
 
@@ -481,7 +485,7 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch) -> None
         payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
             {
                 "target_tool": "vrcforge_test_auto_write",
-                "arguments": {"value": "kept"},
+                "arguments": {"projectRoot": str(project), "value": "kept"},
                 "preview": {"ok": True},
             }
         )
@@ -492,10 +496,12 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch) -> None
         assert payload["approval"]["status"] == "applied"
         assert len(calls) == 1
         assert calls[0]["value"] == "kept"
+        assert calls[0]["projectRoot"] == str(project)
     finally:
         dashboard_server.AGENT_GATEWAY._approvals.clear()
         dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
         dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
 
 
 def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
@@ -818,6 +824,12 @@ def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp
         return Proc()
 
     monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "refresh_asset_database_sync",
+        lambda params: refresh_calls.append(params) or {"ok": True},
+    )
 
     result = dashboard_server.install_vpm_package_sync(
         {
@@ -833,6 +845,116 @@ def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp
     assert command[:4] == ["C:/tools/vrc-get.exe", "install", "-p", str(project)]
     assert "--prerelease" in command
     assert command[-1] == "com.anatawa12.avatar-optimizer"
+    assert refresh_calls[-1]["resolvePackages"] is True
+
+
+def test_vrc_get_install_adds_requested_repository_before_install(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "locate_vpm_package_managers",
+        lambda: [
+            {
+                "name": "vrc-get",
+                "path": "C:/tools/vrc-get.exe",
+                "kind": "managed-cli",
+                "supportsCommandInstall": True,
+                "supportsUiHandoff": False,
+            }
+        ],
+    )
+
+    class Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Proc()
+
+    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "refresh_asset_database_sync",
+        lambda params: refresh_calls.append(params) or {"ok": True},
+    )
+
+    result = dashboard_server.install_vpm_package_sync(
+        {
+            "projectPath": str(project),
+            "packageId": "com.poiyomi.toon",
+            "repository": "https://poiyomi.github.io/vpm/index.json",
+        }
+    )
+
+    assert result["ok"] is True
+    assert calls[0] == ["C:/tools/vrc-get.exe", "repo", "add", "https://poiyomi.github.io/vpm/index.json"]
+    assert calls[1] == ["C:/tools/vrc-get.exe", "update"]
+    assert calls[2][-1] == "com.poiyomi.toon"
+    assert refresh_calls[-1]["resolvePackages"] is True
+    assert refresh_calls[-1]["packageResolveTimeoutSeconds"] == 180
+    assert result["repository"] == "https://poiyomi.github.io/vpm/index.json"
+
+
+def test_vrc_get_install_tolerates_existing_repository_before_install(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "locate_vpm_package_managers",
+        lambda: [
+            {
+                "name": "vrc-get",
+                "path": "C:/tools/vrc-get.exe",
+                "kind": "managed-cli",
+                "supportsCommandInstall": True,
+                "supportsUiHandoff": False,
+            }
+        ],
+    )
+
+    class Proc:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["C:/tools/vrc-get.exe", "repo", "add"]:
+            return Proc(1, stderr="repository already exists")
+        return Proc(0, stdout="ok")
+
+    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "refresh_asset_database_sync",
+        lambda params: refresh_calls.append(params) or {"ok": True},
+    )
+
+    result = dashboard_server.install_vpm_package_sync(
+        {
+            "projectPath": str(project),
+            "packageId": "com.poiyomi.toon",
+            "repository": "https://poiyomi.github.io/vpm/index.json",
+        }
+    )
+
+    assert result["ok"] is True
+    assert calls[0] == ["C:/tools/vrc-get.exe", "repo", "add", "https://poiyomi.github.io/vpm/index.json"]
+    assert calls[1] == ["C:/tools/vrc-get.exe", "update"]
+    assert calls[2][-1] == "com.poiyomi.toon"
+    assert result["preflightResults"][0]["ignoredNonZero"] is True
+    assert len(result["preflightResults"]) == 2
+    assert refresh_calls[-1]["resolvePackages"] is True
 
 
 def test_public_optimization_docs_include_roadmap_sequence() -> None:

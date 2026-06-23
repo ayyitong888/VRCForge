@@ -11,6 +11,7 @@ from external_agent_connectors import (
     DEFAULT_SERVER_NAME,
     DEFAULT_SMOKE_SCRIPT,
     DEFAULT_SKILLS_PROJECTION_DIR,
+    DEFAULT_STDIO_EXTRA_ARGS,
     DEFAULT_STDIO_SCRIPT,
     DEFAULT_TOKEN_ENV_VAR,
     ExternalAgentConnectorOptions,
@@ -63,7 +64,7 @@ def test_codex_stdio_toml_is_parseable_and_uses_launcher() -> None:
     server = parsed["mcp_servers"][DEFAULT_SERVER_NAME]
 
     assert server["command"] == "python"
-    assert server["args"] == [DEFAULT_STDIO_SCRIPT]
+    assert server["args"] == [DEFAULT_STDIO_SCRIPT, *DEFAULT_STDIO_EXTRA_ARGS]
     assert server["cwd"] == "."
     assert build_codex_stdio_config()["mcp_servers"][DEFAULT_SERVER_NAME] == server
 
@@ -87,7 +88,7 @@ def test_claude_code_stdio_json_is_parseable_and_uses_launcher() -> None:
     server = parsed["mcpServers"][DEFAULT_SERVER_NAME]
 
     assert server["command"] == "python"
-    assert server["args"] == [DEFAULT_STDIO_SCRIPT]
+    assert server["args"] == [DEFAULT_STDIO_SCRIPT, *DEFAULT_STDIO_EXTRA_ARGS]
     assert server["env"] == {}
     assert build_claude_code_stdio_config()["mcpServers"][DEFAULT_SERVER_NAME] == server
 
@@ -95,7 +96,9 @@ def test_claude_code_stdio_json_is_parseable_and_uses_launcher() -> None:
 def test_connector_bundle_includes_launcher_and_smoke_metadata() -> None:
     bundle = build_connector_bundle()
 
-    assert bundle["launcher"]["stdioBridge"]["args"] == [DEFAULT_STDIO_SCRIPT]
+    assert bundle["launcher"]["stdioBridge"]["args"] == [DEFAULT_STDIO_SCRIPT, *DEFAULT_STDIO_EXTRA_ARGS]
+    assert bundle["launcher"]["stdioBridge"]["startsOrReconnectsRuntime"] is False
+    assert bundle["launcher"]["stdioBridge"]["requiresRuntimeAlreadyOnline"] is True
     assert bundle["launcher"]["stdioBridge"]["storesPlaintextToken"] is False
     assert bundle["launcher"]["smoke"]["args"] == [DEFAULT_SMOKE_SCRIPT]
     assert bundle["launcher"]["smoke"]["preflightArgs"] == ["--enable-gateway"]
@@ -134,7 +137,7 @@ def test_custom_options_normalize_path_json_and_toml_outputs(tmp_path: Path) -> 
     assert toml_server["bearer_token_env_var"] == "CUSTOM_VRCFORGE_TOKEN"
 
     stdio_server = tomllib.loads(render_codex_stdio_toml(options))["mcp_servers"]["vrcforge_local"]
-    assert stdio_server["args"] == [DEFAULT_STDIO_SCRIPT]
+    assert stdio_server["args"] == [DEFAULT_STDIO_SCRIPT, *DEFAULT_STDIO_EXTRA_ARGS]
 
 
 @pytest.mark.parametrize(

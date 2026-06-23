@@ -4,6 +4,7 @@ using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.PackageManager;
 
 namespace VRCForge.Editor
 {
@@ -76,11 +77,30 @@ namespace VRCForge.Editor
             {
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
+                var resolvePackages = @params?["resolvePackages"]?.Value<bool?>() ?? false;
+                var packageResolveTimeoutSeconds = Math.Max(
+                    5,
+                    Math.Min(@params?["packageResolveTimeoutSeconds"]?.Value<int?>() ?? 120, 300));
+                object packageResolve = new { requested = false };
                 AssetDatabase.SaveAssets();
+                if (resolvePackages)
+                {
+                    var startedAt = DateTime.UtcNow;
+                    Client.Resolve();
+                    packageResolve = new
+                    {
+                        requested = true,
+                        completed = false,
+                        status = "started",
+                        error = "",
+                        startedAt = startedAt.ToString("O"),
+                        timeoutSeconds = packageResolveTimeoutSeconds
+                    };
+                }
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 return new SuccessResponse(
                     "Refreshed Unity AssetDatabase.",
-                    new { ok = true, projectPath = CheckpointPrepareTool.ProjectRoot() });
+                    new { ok = true, projectPath = CheckpointPrepareTool.ProjectRoot(), packageResolve });
             }
             catch (Exception ex)
             {

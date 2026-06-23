@@ -63,11 +63,12 @@ that are never treated as wardrobes automatically.
 
 Settings > Agent Connectors can generate loopback MCP config for local external
 agent clients. Use the HTTP config when VRCForge Desktop is already running.
-Use the stdio bridge config when the client should start or reconnect to
-VRCForge automatically. Installed builds use the packaged backend exe for stdio;
-source checkouts use the Python bridge script. Copied configs use environment
-variables or the local VRCForge user-data config; plaintext gateway tokens are
-not written into client config.
+Use the stdio bridge config when the client needs a local token-free bridge;
+generated stdio configs include `--no-start` and require VRCForge to already be
+running instead of launching the desktop app from the MCP client. Installed
+builds use the packaged backend exe for stdio; source checkouts use the Python
+bridge script. Copied configs use environment variables or the local VRCForge
+user-data config; plaintext gateway tokens are not written into client config.
 
 The external-agent success path is:
 

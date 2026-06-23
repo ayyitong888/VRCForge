@@ -70,6 +70,7 @@ class StdioBridgeSpec:
         return ExternalAgentConnectorOptions(
             stdio_command=self.command,
             stdio_script=stdio_arg,
+            stdio_extra_args=tuple(self.args[1:]),
             stdio_cwd=self.cwd,
         )
 
@@ -84,7 +85,7 @@ def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
         if candidate.is_file():
             return StdioBridgeSpec(
                 command=str(candidate.resolve()),
-                args=["--agent-mcp-stdio"],
+                args=["--agent-mcp-stdio", "--no-start"],
                 cwd=str(root),
                 packaged=True,
                 source="packaged-backend",
@@ -101,7 +102,7 @@ def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
     command = str(executable.resolve()) if executable.is_file() else "python"
     return StdioBridgeSpec(
         command=command,
-        args=[str(script.resolve())],
+        args=[str(script.resolve()), "--no-start"],
         cwd=str(root),
         packaged=False,
         source="source-python",

@@ -2067,6 +2067,11 @@ class AgentGateway:
                 "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
                 "error": clean.get("error") or "",
             }
+        if payload.get("ok"):
+            cache_cleanup = self._cleanup_checkpoint_restore_unity_caches(checkpoint)
+            payload["unityCacheCleanup"] = cache_cleanup
+            if cache_cleanup.get("errors"):
+                payload["unityCacheCleanupWarning"] = "; ".join(ensure_string_list(cache_cleanup.get("errors")))
         if payload.get("ok") and self.checkpoint_restore_handler is not None:
             try:
                 reload_result = ensure_dict(self.checkpoint_restore_handler(Path(str(checkpoint["projectRoot"]))))
@@ -2097,7 +2102,13 @@ class AgentGateway:
             "status": "unavailable",
         }
         if project_root is None:
-            record = {**base_record, "ok": False, "error": "No Unity project root was available for checkpointing."}
+            record = {
+                **base_record,
+                "ok": False,
+                "blocking": True,
+                "status": "failed",
+                "error": "No Unity project root was available for checkpointing.",
+            }
             self._append_checkpoint(record)
             return record
         project_root = project_root.resolve()
@@ -2380,6 +2391,43 @@ class AgentGateway:
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
+
+    def _cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        if not self._checkpoint_touches_packages(checkpoint):
+            return {"ok": True, "skipped": True, "reason": "checkpoint does not restore Packages", "deleted": [], "errors": []}
+        project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve()
+        library_root = (project_root / "Library").resolve()
+        deleted: list[str] = []
+        errors: list[str] = []
+        for name in ("Bee", "ScriptAssemblies"):
+            target = (library_root / name).resolve()
+            if not is_path_within(target, library_root):
+                errors.append(f"Unsafe Unity cache path skipped: {target}")
+                continue
+            if not target.exists():
+                continue
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                deleted.append(str(target))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{target}: {exc}")
+        return {
+            "ok": not errors,
+            "skipped": False,
+            "reason": "checkpoint restores Packages",
+            "deleted": deleted,
+            "errors": errors,
+        }
+
+    def _checkpoint_touches_packages(self, checkpoint: dict[str, Any]) -> bool:
+        for pathspec in ensure_string_list(checkpoint.get("pathspecs")):
+            parts = Path(str(pathspec).replace("\\", "/")).parts
+            if "Packages" in parts:
+                return True
+        return False
 
     def _resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
         for key in (
@@ -3919,10 +3967,6 @@ class AgentGateway:
         return approval
 
     def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
-        for entry in reversed(self.recent_audit_logs(limit=500)):
-            approval = entry.get("approval")
-            if isinstance(approval, dict) and approval.get("id") == approval_id:
-                return approval
         return None
 
 
