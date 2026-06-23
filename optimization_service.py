@@ -9,6 +9,75 @@ from typing import Any
 
 OPTIMIZATION_SCHEMA = "vrcforge.optimization.v1"
 OPTIMIZATION_VERSION_STAGE = "0.7.2-beta"
+MEGABYTE = 1024 * 1024
+
+UPLOAD_GATE_LIMITS: dict[str, Any] = {
+    "docsCheckedAt": "2026-06-23",
+    "sources": [
+        "https://creators.vrchat.com/avatars/avatar-size-limits/",
+        "https://creators.vrchat.com/avatars/animator-parameters/",
+        "https://creators.vrchat.com/avatars/avatar-performance-ranking-system/",
+    ],
+    "pc": {
+        "downloadSizeBytes": 200 * MEGABYTE,
+        "downloadSizeMb": 200,
+        "uncompressedSizeBytes": 500 * MEGABYTE,
+        "uncompressedSizeMb": 500,
+    },
+    "android": {
+        "downloadSizeBytes": 10 * MEGABYTE,
+        "downloadSizeMb": 10,
+        "uncompressedSizeBytes": 40 * MEGABYTE,
+        "uncompressedSizeMb": 40,
+        "mobileComponentLimits": {
+            "physBoneComponents": 8,
+            "physBoneAffectedTransforms": 64,
+            "physBoneColliders": 16,
+            "physBoneCollisionCheckCount": 64,
+            "contacts": 16,
+            "constraints": 150,
+            "constraintDepth": 50,
+        },
+    },
+    "parameters": {
+        "syncedBits": 256,
+        "totalCustomParameters": 8192,
+        "typeCosts": {"Bool": 1, "Int": 8, "Float": 8},
+    },
+}
+
+PERFORMANCE_REVIEW_LIMITS: dict[str, Any] = {
+    "pc": {
+        "triangles": 70000,
+        "textureMemoryBytes": 150 * MEGABYTE,
+        "skinnedMeshes": 16,
+        "basicMeshes": 24,
+        "materialSlots": 32,
+        "physBoneComponents": 32,
+        "physBoneAffectedTransforms": 256,
+        "physBoneColliders": 32,
+        "physBoneCollisionCheckCount": 512,
+        "contacts": 32,
+        "constraints": 350,
+        "animators": 32,
+        "particles": 16,
+    },
+    "android": {
+        "triangles": 20000,
+        "textureMemoryBytes": 40 * MEGABYTE,
+        "skinnedMeshes": 2,
+        "basicMeshes": 2,
+        "materialSlots": 4,
+        "physBoneComponents": 8,
+        "physBoneAffectedTransforms": 64,
+        "physBoneColliders": 16,
+        "physBoneCollisionCheckCount": 64,
+        "contacts": 16,
+        "constraints": 150,
+        "animators": 2,
+        "particles": 2,
+    },
+}
 
 
 OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
@@ -77,6 +146,48 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "gatewayName": "vrcforge_optimization_parameter_budget_audit",
         "category": "read/debug",
         "description": "Audit synced expression parameter bit usage without compressing parameters.",
+    },
+    {
+        "externalName": "optimization.upload-gate.audit",
+        "gatewayName": "vrcforge_optimization_upload_gate_audit",
+        "category": "read/debug",
+        "description": "Separate SDK upload blockers from performance-rank offenders without changing project files.",
+    },
+    {
+        "externalName": "optimization.upload-gate.fix-plan",
+        "gatewayName": "vrcforge_optimization_upload_gate_fix_plan",
+        "category": "plan/preview",
+        "description": "Plan read-only upload-gate fixes grouped by blocker, performance offender, and risky fix.",
+    },
+    {
+        "externalName": "optimization.parameter.inventory",
+        "gatewayName": "vrcforge_optimization_parameter_inventory",
+        "category": "read/debug",
+        "description": "Inventory custom Expression Parameters and synced bit usage without changing parameters.",
+    },
+    {
+        "externalName": "optimization.parameter.menu-map",
+        "gatewayName": "vrcforge_optimization_parameter_menu_map",
+        "category": "read/debug",
+        "description": "Map expression menu controls to parameters without editing menus.",
+    },
+    {
+        "externalName": "optimization.parameter.animator-usage",
+        "gatewayName": "vrcforge_optimization_parameter_animator_usage",
+        "category": "read/debug",
+        "description": "Map FX animator conditions and controller declarations to custom parameters without editing controllers.",
+    },
+    {
+        "externalName": "optimization.parameter.compressibility-plan",
+        "gatewayName": "vrcforge_optimization_parameter_compressibility_plan",
+        "category": "plan/preview",
+        "description": "Classify parameter compression candidates and exclusions without applying compression.",
+    },
+    {
+        "externalName": "optimization.parameter.vrcfury-compressor-plan",
+        "gatewayName": "vrcforge_optimization_parameter_vrcfury_compressor_plan",
+        "category": "plan/preview",
+        "description": "Plan VRCFury Parameter Compressor usage as an experimental request-only path with behavior-regression gates.",
     },
     {
         "externalName": "optimization.vrcfury.compatibility-report",
@@ -513,6 +624,11 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
     material_audit = build_material_slot_audit(validation)
     mesh_audit = build_mesh_triangle_audit(validation)
     parameter_audit = build_parameter_budget_audit(validation)
+    upload_gate_audit = build_upload_gate_audit(validation)
+    parameter_inventory = build_parameter_inventory(validation)
+    parameter_menu_map = build_parameter_menu_map(validation)
+    parameter_animator_usage = build_parameter_animator_usage(validation)
+    parameter_compressibility = build_parameter_compressibility_plan(validation)
     aao_plan = build_aao_trace_plan(dependency_doctor, validation)
     lac_plan = build_lac_profile_plan(profile, dependency_doctor, texture_audit)
     ttt_plan = build_ttt_atlas_plan(dependency_doctor, material_audit, texture_audit)
@@ -560,6 +676,11 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "materialSlots": material_audit,
             "meshTriangles": mesh_audit,
             "parameterBudget": parameter_audit,
+            "uploadGate": upload_gate_audit,
+            "parameterInventory": parameter_inventory,
+            "parameterMenuMap": parameter_menu_map,
+            "parameterAnimatorUsage": parameter_animator_usage,
+            "parameterCompressibility": parameter_compressibility,
             "maResponsiveLayers": ma_audit,
         },
         "plans": {
@@ -624,6 +745,20 @@ def build_optimization_tool_result(
         result = build_meshia_simplify_plan(dependency_doctor, build_mesh_triangle_audit(validation))
     elif external_name == "optimization.parameter-budget-audit":
         result = build_parameter_budget_audit(validation)
+    elif external_name == "optimization.upload-gate.audit":
+        result = build_upload_gate_audit(validation)
+    elif external_name == "optimization.upload-gate.fix-plan":
+        result = build_upload_gate_fix_plan(build_upload_gate_audit(validation))
+    elif external_name == "optimization.parameter.inventory":
+        result = build_parameter_inventory(validation)
+    elif external_name == "optimization.parameter.menu-map":
+        result = build_parameter_menu_map(validation)
+    elif external_name == "optimization.parameter.animator-usage":
+        result = build_parameter_animator_usage(validation)
+    elif external_name == "optimization.parameter.compressibility-plan":
+        result = build_parameter_compressibility_plan(validation)
+    elif external_name == "optimization.parameter.vrcfury-compressor-plan":
+        result = build_vrcfury_parameter_compressor_plan(dependency_doctor, validation)
     elif external_name == "optimization.vrcfury.compatibility-report":
         result = build_vrcfury_compatibility_report(dependency_doctor, validation)
     elif external_name == "optimization.ma-responsive-layer-audit":
@@ -827,6 +962,394 @@ def build_parameter_budget_audit(validation: dict[str, Any]) -> dict[str, Any]:
         },
         "parameters": entries[:200],
         "notes": ["This audit does not compress, delete, or rewrite expression parameters."],
+    }
+
+
+def build_upload_gate_audit(validation: dict[str, Any]) -> dict[str, Any]:
+    sources = _validation_sources(validation)
+    pc = _source_payload(sources, "performance_pc")
+    android = _source_payload(sources, "performance_quest")
+    materials = _source_payload(sources, "materials")
+    avatar_items = _source_payload(sources, "avatar_items")
+    parameter_inventory = build_parameter_inventory(validation)
+    material_audit = build_material_slot_audit(validation)
+
+    metrics = {
+        "pc": {
+            "downloadSizeBytes": _first_size_bytes(pc, ("downloadSizeBytes", "downloadSize", "compressedSizeBytes", "compressedSize", "buildSizeBytes", "fileSizeBytes", "pcDownloadSizeBytes", "downloadSizeMb", "downloadSizeMB")),
+            "uncompressedSizeBytes": _first_size_bytes(pc, ("uncompressedSizeBytes", "uncompressedSize", "uncompressedBytes", "bundleUncompressedSizeBytes", "pcUncompressedSizeBytes", "uncompressedSizeMb", "uncompressedSizeMB")),
+            "rank": _performance_headline(pc).get("rank"),
+        },
+        "android": {
+            "downloadSizeBytes": _first_size_bytes(android, ("downloadSizeBytes", "downloadSize", "compressedSizeBytes", "compressedSize", "buildSizeBytes", "fileSizeBytes", "androidDownloadSizeBytes", "questDownloadSizeBytes", "downloadSizeMb", "downloadSizeMB")),
+            "uncompressedSizeBytes": _first_size_bytes(android, ("uncompressedSizeBytes", "uncompressedSize", "uncompressedBytes", "bundleUncompressedSizeBytes", "androidUncompressedSizeBytes", "questUncompressedSizeBytes", "uncompressedSizeMb", "uncompressedSizeMB")),
+            "rank": _performance_headline(android).get("rank"),
+        },
+        "parameters": {
+            "syncedBits": parameter_inventory.get("summary", {}).get("syncedBits"),
+            "totalCustomParameters": parameter_inventory.get("summary", {}).get("totalCustomParameters"),
+        },
+        "performance": {
+            "textureMemoryBytes": _first_size_bytes(materials, ("textureMemoryBytes", "textureBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")) or _first_size_bytes(pc, ("textureMemoryBytes", "textureBytes", "vramBytes", "totalTextureBytes")),
+            "triangles": _first_numeric(pc, ("triangleCount", "triangles", "polygonCount", "polygons")),
+            "materialSlots": material_audit.get("summary", {}).get("knownMaterialSlotCount") or _first_numeric(pc, ("materialSlotCount", "slotCount", "materialCount")),
+            "skinnedMeshes": _first_numeric(pc, ("skinnedMeshCount", "skinnedMeshes", "skinnedMeshRendererCount")) or _sum_direct_numeric(avatar_items, ("skinned_renderer_count", "skinnedRendererCount", "skinnedMeshCount")),
+            "basicMeshes": _first_numeric(pc, ("meshCount", "basicMeshCount", "meshRendererCount", "basicMeshes")) or _estimate_basic_mesh_count(avatar_items),
+            "physBoneComponents": _first_numeric(pc, ("physBoneCount", "physBones", "physBoneComponents")) or _component_type_count(avatar_items, ("physbone",)),
+            "physBoneAffectedTransforms": _first_numeric(pc, ("physBoneAffectedTransforms", "affectedTransforms")),
+            "physBoneColliders": _first_numeric(pc, ("physBoneColliderCount", "physBoneColliders")),
+            "physBoneCollisionCheckCount": _first_numeric(pc, ("physBoneCollisionCheckCount", "collisionCheckCount")),
+            "contacts": _first_numeric(pc, ("contactCount", "contacts")) or _component_type_count(avatar_items, ("contact",)),
+            "constraints": _first_numeric(pc, ("constraintCount", "constraints")) or _component_type_count(avatar_items, ("constraint",)),
+            "animators": _first_numeric(pc, ("animatorCount", "animators")) or _component_type_count(avatar_items, ("animator",)),
+            "particles": _first_numeric(pc, ("particleSystemCount", "particleSystems", "particles")) or _component_type_count(avatar_items, ("particlesystem", "particle system")),
+            "meshReadWriteDisabled": _detect_mesh_read_write_disabled(pc, android),
+        },
+    }
+
+    checks = [
+        _limit_check("pc_download_size", "PC download size", metrics["pc"]["downloadSizeBytes"], UPLOAD_GATE_LIMITS["pc"]["downloadSizeBytes"], "bytes", "hard_upload_blocker", "performance_pc"),
+        _limit_check("pc_uncompressed_size", "PC uncompressed size", metrics["pc"]["uncompressedSizeBytes"], UPLOAD_GATE_LIMITS["pc"]["uncompressedSizeBytes"], "bytes", "hard_upload_blocker", "performance_pc"),
+        _limit_check("android_download_size", "Android download size", metrics["android"]["downloadSizeBytes"], UPLOAD_GATE_LIMITS["android"]["downloadSizeBytes"], "bytes", "hard_upload_blocker", "performance_quest"),
+        _limit_check("android_uncompressed_size", "Android uncompressed size", metrics["android"]["uncompressedSizeBytes"], UPLOAD_GATE_LIMITS["android"]["uncompressedSizeBytes"], "bytes", "hard_upload_blocker", "performance_quest"),
+        _limit_check("synced_parameter_bits", "Synced Expression Parameter memory", metrics["parameters"]["syncedBits"], UPLOAD_GATE_LIMITS["parameters"]["syncedBits"], "bits", "hard_upload_blocker", "parameters"),
+        _limit_check("total_custom_expression_parameters", "Total custom Expression Parameters", metrics["parameters"]["totalCustomParameters"], UPLOAD_GATE_LIMITS["parameters"]["totalCustomParameters"], "count", "hard_upload_blocker", "parameters"),
+    ]
+
+    performance_checks = [
+        _limit_check("texture_memory", "Texture Memory", metrics["performance"]["textureMemoryBytes"], PERFORMANCE_REVIEW_LIMITS["pc"]["textureMemoryBytes"], "bytes", "performance_rank_offender", "materials"),
+        _limit_check("triangles", "Triangles", metrics["performance"]["triangles"], PERFORMANCE_REVIEW_LIMITS["pc"]["triangles"], "count", "performance_rank_offender", "performance_pc"),
+        _limit_check("material_slots", "Material slots", metrics["performance"]["materialSlots"], PERFORMANCE_REVIEW_LIMITS["pc"]["materialSlots"], "count", "performance_rank_offender", "materials"),
+        _limit_check("skinned_meshes", "Skinned meshes", metrics["performance"]["skinnedMeshes"], PERFORMANCE_REVIEW_LIMITS["pc"]["skinnedMeshes"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("basic_meshes", "Basic meshes", metrics["performance"]["basicMeshes"], PERFORMANCE_REVIEW_LIMITS["pc"]["basicMeshes"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("physbone_components", "PhysBone components", metrics["performance"]["physBoneComponents"], PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneComponents"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("physbone_affected_transforms", "PhysBone affected transforms", metrics["performance"]["physBoneAffectedTransforms"], PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneAffectedTransforms"], "count", "performance_rank_offender", "performance_pc"),
+        _limit_check("physbone_colliders", "PhysBone colliders", metrics["performance"]["physBoneColliders"], PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneColliders"], "count", "performance_rank_offender", "performance_pc"),
+        _limit_check("physbone_collision_checks", "PhysBone collision check count", metrics["performance"]["physBoneCollisionCheckCount"], PERFORMANCE_REVIEW_LIMITS["pc"]["physBoneCollisionCheckCount"], "count", "performance_rank_offender", "performance_pc"),
+        _limit_check("contacts", "Contacts", metrics["performance"]["contacts"], PERFORMANCE_REVIEW_LIMITS["pc"]["contacts"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("constraints", "Constraints", metrics["performance"]["constraints"], PERFORMANCE_REVIEW_LIMITS["pc"]["constraints"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("animators", "Animators", metrics["performance"]["animators"], PERFORMANCE_REVIEW_LIMITS["pc"]["animators"], "count", "performance_rank_offender", "avatar_items"),
+        _limit_check("particles", "Particles", metrics["performance"]["particles"], PERFORMANCE_REVIEW_LIMITS["pc"]["particles"], "count", "performance_rank_offender", "avatar_items"),
+    ]
+    checks.extend(performance_checks)
+
+    mesh_read_write = metrics["performance"]["meshReadWriteDisabled"]
+    checks.append(
+        {
+            "id": "mesh_read_write_disabled",
+            "label": "Mesh Read/Write Disabled guard",
+            "value": mesh_read_write,
+            "limit": False,
+            "unit": "bool",
+            "status": "risk" if mesh_read_write is True else ("unknown" if mesh_read_write is None else "pass"),
+            "category": "risky_fix",
+            "source": "performance_pc",
+            "message": "Disabling Mesh Read/Write is not an optimization; when detected by the SDK it can force Very Poor rank or upload warning.",
+        }
+    )
+
+    hard_blockers = [item for item in checks if item.get("category") == "hard_upload_blocker" and item.get("status") == "blocker"]
+    performance_offenders = [item for item in checks if item.get("category") == "performance_rank_offender" and item.get("status") == "offender"]
+    risky_fixes = [item for item in checks if item.get("category") == "risky_fix" and item.get("status") in {"risk", "unknown"}]
+    return {
+        "readOnly": True,
+        "limits": UPLOAD_GATE_LIMITS,
+        "metrics": metrics,
+        "checks": checks,
+        "groups": {
+            "hardUploadBlockers": hard_blockers,
+            "performanceRankOffenders": performance_offenders,
+            "riskyFixes": risky_fixes,
+        },
+        "summary": {
+            "hardBlockerCount": len(hard_blockers),
+            "performanceRankOffenderCount": len(performance_offenders),
+            "riskyFixCount": len(risky_fixes),
+            "unknownMetricCount": sum(1 for item in checks if item.get("status") == "unknown"),
+            "sourceStatus": {name: _validation_source_status(source) for name, source in sources.items()},
+        },
+        "notes": [
+            "Upload hard blockers are separated from performance-rank offenders.",
+            "PC uncompressed size is bundle size, not VRAM.",
+            "Unknown SDK fields stay unknown; VRCForge does not infer upload pass from missing data.",
+        ],
+    }
+
+
+def build_upload_gate_fix_plan(upload_gate: dict[str, Any]) -> dict[str, Any]:
+    groups = upload_gate.get("groups") if isinstance(upload_gate.get("groups"), dict) else {}
+    steps = []
+    for item in groups.get("hardUploadBlockers") or []:
+        steps.append(
+            {
+                "id": f"fix_{item.get('id')}",
+                "category": "hard_upload_blocker",
+                "title": f"Bring {item.get('label')} under the upload limit",
+                "risk": "medium",
+                "writePath": "request-only",
+                "why": item.get("message"),
+            }
+        )
+    for item in groups.get("performanceRankOffenders") or []:
+        steps.append(
+            {
+                "id": f"review_{item.get('id')}",
+                "category": "performance_rank_offender",
+                "title": f"Review {item.get('label')} before optimizing",
+                "risk": "review",
+                "writePath": "none",
+                "why": item.get("message"),
+            }
+        )
+    for item in groups.get("riskyFixes") or []:
+        steps.append(
+            {
+                "id": f"guard_{item.get('id')}",
+                "category": "risky_fix",
+                "title": f"Do not blindly apply {item.get('label')}",
+                "risk": "high",
+                "writePath": "blocked_until_dedicated_proof",
+                "why": item.get("message"),
+            }
+        )
+    return {
+        "planOnly": True,
+        "uploadGateSummary": upload_gate.get("summary") or {},
+        "steps": steps,
+        "nextStage": "0.8.0-beta read-only foundation; future apply requests require approval, checkpoint, validation, and rollback proof.",
+        "notes": ["This plan does not change textures, meshes, parameters, or import settings."],
+    }
+
+
+def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
+    parameters = _source_payload(_validation_sources(validation), "parameters")
+    entries = _parameter_entries(parameters)
+    computed_synced_bits = sum(int(item.get("syncedBits") or 0) for item in entries)
+    reported_synced_bits = _first_numeric(parameters, ("syncedBits", "bitsUsed", "totalEstimatedCost", "totalCost", "parameterCost"))
+    reported_total = _first_numeric(parameters, ("totalParameters", "totalCustomParameters", "parameterCount", "customParameterCount"))
+    synced_bits = int(reported_synced_bits if reported_synced_bits is not None else computed_synced_bits)
+    total_parameters = int(reported_total if reported_total is not None else len(entries))
+    return {
+        "readOnly": True,
+        "limits": UPLOAD_GATE_LIMITS["parameters"],
+        "summary": {
+            "totalCustomParameters": total_parameters,
+            "totalCustomParameterLimit": UPLOAD_GATE_LIMITS["parameters"]["totalCustomParameters"],
+            "syncedBits": synced_bits,
+            "syncedBitLimit": UPLOAD_GATE_LIMITS["parameters"]["syncedBits"],
+            "syncedParameterCount": sum(1 for item in entries if item.get("networkSynced")),
+            "unsyncedParameterCount": sum(1 for item in entries if item.get("networkSynced") is False),
+            "boolCount": sum(1 for item in entries if item.get("type") == "Bool"),
+            "intCount": sum(1 for item in entries if item.get("type") == "Int"),
+            "floatCount": sum(1 for item in entries if item.get("type") == "Float"),
+            "scannerCoverage": "metadata" if entries or reported_synced_bits is not None or reported_total is not None else "unknown",
+        },
+        "parameters": entries[:500],
+        "notes": ["Synced bits and total custom parameter count are different limits."],
+    }
+
+
+def build_parameter_menu_map(validation: dict[str, Any]) -> dict[str, Any]:
+    menu = _source_payload(_validation_sources(validation), "menu")
+    controls = []
+    for item in _dict_list(menu, ("items", "controls", "menuItems")):
+        parameter_name = _direct_text(item, ("parameterName", "parameter", "param"))
+        display_name = _direct_text(item, ("displayName", "name", "controlName")) or parameter_name
+        menu_path = _direct_text(item, ("menuPath", "path", "controlPath")) or ""
+        if not display_name and not parameter_name:
+            continue
+        controls.append(
+            {
+                "displayName": str(display_name or "")[:120],
+                "menuPath": _safe_asset_label(str(menu_path)),
+                "parameterName": str(parameter_name or "")[:120],
+                "controlType": _direct_text(item, ("controlType", "type")) or "unknown",
+                "valueType": _normalize_parameter_type(_direct_text(item, ("valueType", "parameterType", "type"))),
+                "networkSynced": _direct_bool(item, ("networkSynced", "synced")),
+                "source": _direct_text(item, ("source",)) or "menu",
+            }
+        )
+    mapped = {}
+    for control in controls:
+        name = str(control.get("parameterName") or "")
+        if not name:
+            continue
+        bucket = mapped.setdefault(name, {"parameterName": name, "controlCount": 0, "controlTypes": set(), "menuPaths": []})
+        bucket["controlCount"] += 1
+        bucket["controlTypes"].add(control.get("controlType") or "unknown")
+        if control.get("menuPath"):
+            bucket["menuPaths"].append(control["menuPath"])
+    parameter_map = [
+        {
+            "parameterName": value["parameterName"],
+            "controlCount": value["controlCount"],
+            "controlTypes": sorted(value["controlTypes"]),
+            "menuPaths": _dedupe_labels(value["menuPaths"])[:12],
+        }
+        for value in mapped.values()
+    ]
+    return {
+        "readOnly": True,
+        "summary": {
+            "knownControlCount": len(controls),
+            "mappedParameterCount": len(parameter_map),
+            "scannerCoverage": "metadata" if controls else "unknown",
+        },
+        "controls": controls[:500],
+        "parameterMap": sorted(parameter_map, key=lambda item: item["parameterName"].lower())[:300],
+    }
+
+
+def build_parameter_animator_usage(validation: dict[str, Any]) -> dict[str, Any]:
+    sources = _validation_sources(validation)
+    fx = _source_payload(sources, "fx")
+    bindings = _source_payload(sources, "animation_bindings")
+    inventory = build_parameter_inventory(validation)
+    menu_map = build_parameter_menu_map(validation)
+    usage: dict[str, dict[str, Any]] = {}
+
+    for parameter in inventory.get("parameters") or []:
+        name = str(parameter.get("name") or "").strip()
+        if name:
+            usage.setdefault(name, _parameter_usage_bucket(name))["expressionDeclared"] = True
+    for control in menu_map.get("controls") or []:
+        name = str(control.get("parameterName") or "").strip()
+        if name:
+            bucket = usage.setdefault(name, _parameter_usage_bucket(name))
+            bucket["menuControlCount"] += 1
+            bucket["menuControlTypes"].add(str(control.get("controlType") or "unknown"))
+    for parameter in _dict_list(fx, ("parameters", "controllerParameters")):
+        name = _direct_text(parameter, ("name", "parameterName", "param"))
+        if not name:
+            continue
+        bucket = usage.setdefault(name, _parameter_usage_bucket(name))
+        bucket["animatorDeclared"] = True
+        bucket["animatorType"] = _normalize_parameter_type(_direct_text(parameter, ("type", "valueType", "parameterType")))
+        if _direct_bool(parameter, ("used_by_condition", "usedByCondition", "used")):
+            bucket["usedByCondition"] = True
+    for entry in _walk_dicts(fx):
+        for condition in _coerce_list(entry.get("conditions")):
+            if not isinstance(condition, dict):
+                continue
+            name = _direct_text(condition, ("parameter", "parameterName", "param"))
+            if not name:
+                continue
+            bucket = usage.setdefault(name, _parameter_usage_bucket(name))
+            bucket["conditionCount"] += 1
+            bucket["usedByCondition"] = True
+            mode = _direct_text(condition, ("mode", "conditionMode"))
+            if mode:
+                bucket["conditionModes"].add(mode)
+    rows = []
+    for bucket in usage.values():
+        row = dict(bucket)
+        row["menuControlTypes"] = sorted(row["menuControlTypes"])
+        row["conditionModes"] = sorted(row["conditionModes"])
+        row["usageClass"] = _parameter_usage_class(row)
+        rows.append(row)
+    binding_summary = bindings.get("summary") if isinstance(bindings.get("summary"), dict) else {}
+    return {
+        "readOnly": True,
+        "summary": {
+            "knownParameterUsageCount": len(rows),
+            "conditionParameterCount": sum(1 for item in rows if item.get("conditionCount")),
+            "menuControlledParameterCount": sum(1 for item in rows if item.get("menuControlCount")),
+            "clipCount": binding_summary.get("clipCount"),
+            "bindingCount": binding_summary.get("bindingCount"),
+            "scannerCoverage": "metadata" if rows else "unknown",
+        },
+        "parameters": sorted(rows, key=lambda item: item["parameterName"].lower())[:500],
+        "notes": ["Animator usage is read-only evidence; it is not a behavior-regression proof by itself."],
+    }
+
+
+def build_parameter_compressibility_plan(validation: dict[str, Any]) -> dict[str, Any]:
+    inventory = build_parameter_inventory(validation)
+    menu_map = build_parameter_menu_map(validation)
+    animator_usage = build_parameter_animator_usage(validation)
+    menu_counts = {item["parameterName"]: int(item.get("controlCount") or 0) for item in menu_map.get("parameterMap") or []}
+    usage_map = {item["parameterName"]: item for item in animator_usage.get("parameters") or []}
+    duplicate_names = _duplicate_parameter_keys(inventory.get("parameters") or [])
+    categories: dict[str, list[dict[str, Any]]] = {
+        "safe_to_unsync": [],
+        "safe_to_pack": [],
+        "safe_to_int_exclusive": [],
+        "already_optimal_bool": [],
+        "danger_continuous_float": [],
+        "danger_puppet": [],
+        "danger_osc_or_face_tracking": [],
+        "unused_candidate": [],
+        "duplicate_candidate": [],
+        "unknown_do_not_touch": [],
+    }
+    for parameter in inventory.get("parameters") or []:
+        category, reason = _classify_parameter_compressibility(parameter, menu_counts, usage_map, duplicate_names)
+        categories.setdefault(category, []).append(
+            {
+                "name": parameter.get("name"),
+                "type": parameter.get("type"),
+                "syncedBits": parameter.get("syncedBits"),
+                "networkSynced": parameter.get("networkSynced"),
+                "menuControlCount": menu_counts.get(str(parameter.get("name") or ""), 0),
+                "usageClass": usage_map.get(str(parameter.get("name") or ""), {}).get("usageClass"),
+                "reason": reason,
+            }
+        )
+    return {
+        "planOnly": True,
+        "limits": UPLOAD_GATE_LIMITS["parameters"],
+        "summary": {
+            "syncedBits": inventory.get("summary", {}).get("syncedBits"),
+            "syncedBitLimit": UPLOAD_GATE_LIMITS["parameters"]["syncedBits"],
+            "totalCustomParameters": inventory.get("summary", {}).get("totalCustomParameters"),
+            "totalCustomParameterLimit": UPLOAD_GATE_LIMITS["parameters"]["totalCustomParameters"],
+            "safeToPackCount": len(categories["safe_to_pack"]),
+            "safeToIntExclusiveCount": len(categories["safe_to_int_exclusive"]),
+            "dangerPuppetCount": len(categories["danger_puppet"]),
+            "dangerOscOrFaceTrackingCount": len(categories["danger_osc_or_face_tracking"]),
+            "continuousFloatDangerCount": len(categories["danger_continuous_float"]),
+            "unknownDoNotTouchCount": len(categories["unknown_do_not_touch"]),
+        },
+        "categories": {key: value[:120] for key, value in categories.items()},
+        "rules": [
+            "Do not compress OSC, face tracking, puppet, or continuous real-time parameters automatically.",
+            "Any compression apply path needs menu behavior regression and rollback proof.",
+        ],
+    }
+
+
+def build_vrcfury_parameter_compressor_plan(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    dep = _dependency_by_id(dependency_doctor, "vrcfury")
+    compressibility = build_parameter_compressibility_plan(validation)
+    categories = compressibility.get("categories") if isinstance(compressibility.get("categories"), dict) else {}
+    candidates = []
+    for category in ("safe_to_unsync", "safe_to_pack", "safe_to_int_exclusive", "unused_candidate", "duplicate_candidate"):
+        for item in categories.get(category) or []:
+            candidate = dict(item)
+            candidate["category"] = category
+            candidates.append(candidate)
+    return {
+        "planOnly": True,
+        "dependency": dep,
+        "experimentalOnly": True,
+        "applyRequestTool": "optimization.vrcfury.parameter-compressor-apply-request",
+        "applyBlocked": True,
+        "blockedReason": "VRCFury Parameter Compressor writes stay experimental until behavior-regression and rollback proof exist.",
+        "candidateCount": len(candidates),
+        "candidates": candidates[:120],
+        "dangerCounts": {
+            "puppet": compressibility.get("summary", {}).get("dangerPuppetCount"),
+            "oscOrFaceTracking": compressibility.get("summary", {}).get("dangerOscOrFaceTrackingCount"),
+            "continuousFloat": compressibility.get("summary", {}).get("continuousFloatDangerCount"),
+        },
+        "requiredProof": [
+            "menu toggle behavior regression",
+            "outfit/int-exclusive state regression",
+            "puppet exclusion proof",
+            "OSC/face-tracking exclusion proof",
+            "PC/Android parameter-order compatibility check",
+            "approval -> checkpoint -> apply -> validation -> rollback proof",
+        ],
     }
 
 
@@ -1455,8 +1978,25 @@ def _scanner_statuses(validation: dict[str, Any]) -> list[dict[str, Any]]:
     statuses = []
     for name, source in _validation_sources(validation).items():
         if isinstance(source, dict):
-            statuses.append({"id": name, "ok": bool(source.get("ok")), "error": source.get("error")})
+            statuses.append({"id": name, "ok": bool(source.get("ok")), "status": _validation_source_status(source), "error": source.get("error")})
     return statuses
+
+
+def _validation_source_status(source: Any) -> str:
+    if not isinstance(source, dict):
+        return "unavailable"
+    if source.get("ok"):
+        return "ok"
+    error = str(source.get("error") or "").lower()
+    if "timeout" in error or "timed out" in error:
+        return "timeout"
+    if "avatarperformancestats" in error or "performance stats" in error or "sdk type" in error:
+        return "missing_sdk_type"
+    if "compile" in error or "compilation" in error:
+        return "package_compile_blocked"
+    if "unsupported" in error or "version" in error:
+        return "unsupported_sdk_version"
+    return "unavailable"
 
 
 def _performance_headline(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1498,6 +2038,48 @@ def _first_numeric(value: Any, names: tuple[str, ...]) -> int | float | None:
     return None
 
 
+def _first_size_bytes(value: Any, names: tuple[str, ...]) -> int | None:
+    wanted = {_normalize_key(name) for name in names}
+    for entry in _walk_dicts(value):
+        for key, raw in entry.items():
+            if _normalize_key(str(key)) not in wanted:
+                continue
+            parsed = _coerce_size_bytes(raw, str(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _coerce_size_bytes(raw: Any, key: str = "") -> int | None:
+    if isinstance(raw, bool) or raw is None:
+        return None
+    key_lower = key.lower()
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        if "gb" in key_lower:
+            value *= 1024 * MEGABYTE
+        elif "mb" in key_lower or "mib" in key_lower:
+            value *= MEGABYTE
+        elif "kb" in key_lower or "kib" in key_lower:
+            value *= 1024
+        return int(value)
+    if isinstance(raw, str):
+        text = raw.strip().lower().replace(",", "")
+        match = re.search(r"(-?\d+(?:\.\d+)?)\s*(gib|gb|mib|mb|kib|kb|bytes|byte|b)?", text)
+        if not match:
+            return None
+        value = float(match.group(1))
+        unit = match.group(2) or ("mb" if "mb" in key_lower else "b")
+        if unit in {"gib", "gb"}:
+            value *= 1024 * MEGABYTE
+        elif unit in {"mib", "mb"}:
+            value *= MEGABYTE
+        elif unit in {"kib", "kb"}:
+            value *= 1024
+        return int(value)
+    return None
+
+
 def _first_text(value: Any, names: tuple[str, ...]) -> str | None:
     wanted = {_normalize_key(name) for name in names}
     for entry in _walk_dicts(value):
@@ -1508,6 +2090,286 @@ def _first_text(value: Any, names: tuple[str, ...]) -> str | None:
                     if text:
                         return text
     return None
+
+
+def _direct_text(entry: dict[str, Any], names: tuple[str, ...]) -> str | None:
+    wanted = {_normalize_key(name) for name in names}
+    for key, raw in entry.items():
+        if _normalize_key(str(key)) in wanted and raw is not None:
+            text = str(raw).strip()
+            if text:
+                return text
+    return None
+
+
+def _direct_numeric(entry: dict[str, Any], names: tuple[str, ...]) -> int | float | None:
+    wanted = {_normalize_key(name) for name in names}
+    for key, raw in entry.items():
+        if _normalize_key(str(key)) not in wanted or isinstance(raw, bool):
+            continue
+        if isinstance(raw, (int, float)):
+            return raw
+        if isinstance(raw, str):
+            match = re.search(r"-?\d+(?:\.\d+)?", raw.replace(",", ""))
+            if match:
+                number = float(match.group(0))
+                return int(number) if number.is_integer() else number
+    return None
+
+
+def _direct_bool(entry: dict[str, Any], names: tuple[str, ...]) -> bool | None:
+    wanted = {_normalize_key(name) for name in names}
+    for key, raw in entry.items():
+        if _normalize_key(str(key)) not in wanted:
+            continue
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        if isinstance(raw, str):
+            text = raw.strip().lower()
+            if text in {"true", "yes", "1", "on"}:
+                return True
+            if text in {"false", "no", "0", "off"}:
+                return False
+    return None
+
+
+def _dict_list(payload: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    wanted = {_normalize_key(key) for key in keys}
+    for entry in _walk_dicts(payload):
+        for key, raw in entry.items():
+            if _normalize_key(str(key)) not in wanted:
+                continue
+            for item in _coerce_list(raw):
+                if isinstance(item, dict):
+                    result.append(item)
+    return result
+
+
+def _sum_direct_numeric(payload: dict[str, Any], names: tuple[str, ...]) -> int | float | None:
+    total: int | float = 0
+    found = False
+    for entry in _walk_dicts(payload):
+        value = _direct_numeric(entry, names)
+        if value is None:
+            continue
+        total += value
+        found = True
+    return total if found else None
+
+
+def _component_type_count(payload: dict[str, Any], tokens: tuple[str, ...]) -> int | None:
+    count = 0
+    found = False
+    normalized_tokens = tuple(token.replace(" ", "").lower() for token in tokens)
+    for entry in _walk_dicts(payload):
+        raw = entry.get("component_types")
+        if raw is None:
+            raw = entry.get("componentTypes")
+        components = _coerce_list(raw)
+        if not components:
+            continue
+        found = True
+        joined = " ".join(str(item).replace(" ", "").lower() for item in components)
+        if any(token in joined for token in normalized_tokens):
+            count += 1
+    return count if found else None
+
+
+def _estimate_basic_mesh_count(payload: dict[str, Any]) -> int | None:
+    renderer_total = _sum_direct_numeric(payload, ("renderer_count", "rendererCount"))
+    skinned = _sum_direct_numeric(payload, ("skinned_renderer_count", "skinnedRendererCount"))
+    if renderer_total is None:
+        return _component_type_count(payload, ("meshrenderer", "mesh renderer"))
+    return max(0, int(renderer_total) - int(skinned or 0))
+
+
+def _detect_mesh_read_write_disabled(*payloads: dict[str, Any]) -> bool | None:
+    saw_payload = False
+    for payload in payloads:
+        if not payload:
+            continue
+        saw_payload = True
+        text = json.dumps(payload, ensure_ascii=False, default=str).lower()
+        if "mesh read/write disabled" in text or "mesh readwrite disabled" in text or "read/write disabled" in text:
+            return True
+    return None if saw_payload else None
+
+
+def _limit_check(
+    check_id: str,
+    label: str,
+    value: int | float | None,
+    limit: int | float,
+    unit: str,
+    category: str,
+    source: str,
+) -> dict[str, Any]:
+    if value is None:
+        status = "unknown"
+    elif category == "hard_upload_blocker":
+        status = "blocker" if value > limit else "pass"
+    else:
+        status = "offender" if value > limit else "pass"
+    return {
+        "id": check_id,
+        "label": label,
+        "value": value,
+        "limit": limit,
+        "unit": unit,
+        "status": status,
+        "category": category,
+        "source": source,
+        "message": _limit_message(label, value, limit, unit, status, category),
+    }
+
+
+def _limit_message(label: str, value: int | float | None, limit: int | float, unit: str, status: str, category: str) -> str:
+    if status == "unknown":
+        return f"{label} was not reported by the available scanner source."
+    if status == "pass":
+        return f"{label} is within the current VRCForge reference limit."
+    if category == "hard_upload_blocker":
+        return f"{label} exceeds the upload hard gate limit."
+    return f"{label} exceeds the current performance-rank review threshold."
+
+
+def _parameter_entries(parameters: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = _dict_list(parameters, ("parameterNames", "parameters", "items"))
+    if not raw_items:
+        raw_items = [
+            entry
+            for entry in _walk_dicts(parameters)
+            if isinstance(entry, dict) and _direct_text(entry, ("parameterName", "name", "param"))
+        ]
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        name = _direct_text(item, ("parameterName", "name", "param"))
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        value_type = _normalize_parameter_type(_direct_text(item, ("valueType", "type", "parameterType")))
+        explicit_bits = _direct_numeric(item, ("bits", "cost", "syncedBits", "bitCost"))
+        network_synced = _direct_bool(item, ("networkSynced", "synced"))
+        if network_synced is None:
+            network_synced = explicit_bits is not None
+        bits = _parameter_bit_cost(value_type, network_synced, explicit_bits)
+        entries.append(
+            {
+                "name": name[:120],
+                "type": value_type,
+                "networkSynced": network_synced,
+                "saved": _direct_bool(item, ("saved",)),
+                "defaultValue": _direct_numeric(item, ("defaultValue", "default", "value")),
+                "syncedBits": bits,
+                "flags": _parameter_flags(name, value_type),
+            }
+        )
+    return entries
+
+
+def _normalize_parameter_type(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if "bool" in text:
+        return "Bool"
+    if "float" in text:
+        return "Float"
+    if "int" in text or "integer" in text:
+        return "Int"
+    return "unknown"
+
+
+def _parameter_bit_cost(value_type: str, network_synced: bool | None, explicit_bits: int | float | None) -> int:
+    if network_synced is False:
+        return 0
+    if explicit_bits is not None:
+        return int(explicit_bits)
+    if value_type == "Bool":
+        return 1
+    if value_type in {"Int", "Float"}:
+        return 8
+    return 0
+
+
+def _parameter_flags(name: str, value_type: str) -> list[str]:
+    lower = name.lower()
+    flags = []
+    if any(token in lower for token in ("osc", "face", "tracking", "vrcft", "eye")):
+        flags.append("OSC/face tracking risk")
+    if any(token in lower for token in ("puppet", "axis", "joystick", "radial")):
+        flags.append("puppet risk")
+    if value_type == "Float":
+        flags.append("continuous float review")
+    return flags
+
+
+def _parameter_usage_bucket(name: str) -> dict[str, Any]:
+    return {
+        "parameterName": name,
+        "expressionDeclared": False,
+        "animatorDeclared": False,
+        "animatorType": "unknown",
+        "usedByCondition": False,
+        "conditionCount": 0,
+        "conditionModes": set(),
+        "menuControlCount": 0,
+        "menuControlTypes": set(),
+    }
+
+
+def _parameter_usage_class(row: dict[str, Any]) -> str:
+    if row.get("usedByCondition") and row.get("menuControlCount"):
+        return "menu_and_animator"
+    if row.get("usedByCondition"):
+        return "animator_only"
+    if row.get("menuControlCount"):
+        return "menu_only"
+    if row.get("expressionDeclared"):
+        return "declared_only"
+    return "unknown"
+
+
+def _duplicate_parameter_keys(parameters: list[dict[str, Any]]) -> set[str]:
+    seen: dict[str, int] = {}
+    for parameter in parameters:
+        key = re.sub(r"[^a-z0-9]+", "", str(parameter.get("name") or "").lower())
+        if not key:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+    return {key for key, count in seen.items() if count > 1}
+
+
+def _classify_parameter_compressibility(
+    parameter: dict[str, Any],
+    menu_counts: dict[str, int],
+    usage_map: dict[str, dict[str, Any]],
+    duplicate_names: set[str],
+) -> tuple[str, str]:
+    name = str(parameter.get("name") or "")
+    lower = name.lower()
+    value_type = str(parameter.get("type") or "unknown")
+    usage = usage_map.get(name) or {}
+    key = re.sub(r"[^a-z0-9]+", "", lower)
+    if any(token in lower for token in ("osc", "face", "tracking", "vrcft", "eye")):
+        return "danger_osc_or_face_tracking", "OSC, face tracking, and eye tracking parameters are excluded from automatic compression."
+    if any(token in lower for token in ("puppet", "axis", "joystick", "radial")) or "puppet" in " ".join(usage.get("menuControlTypes") or []).lower():
+        return "danger_puppet", "Puppet and axis-style controls can be continuous behavior and are excluded."
+    if value_type == "Float":
+        return "danger_continuous_float", "Float parameters may drive continuous real-time behavior."
+    if key in duplicate_names:
+        return "duplicate_candidate", "Name-normalized duplicate candidate; needs manual behavior review."
+    if not usage.get("usedByCondition") and not usage.get("menuControlCount"):
+        return "unused_candidate", "No menu control or FX condition evidence was found."
+    if value_type == "Bool" and any(token in lower for token in ("toggle", "show", "hide", "enable", "cloth", "outfit", "wardrobe")):
+        return "safe_to_pack", "Bool toggle group candidate; only safe after behavior regression."
+    if value_type == "Bool":
+        return "already_optimal_bool", "Bool already uses one synced bit."
+    if value_type == "Int" and menu_counts.get(name, 0) > 1:
+        return "safe_to_int_exclusive", "Int parameter with multiple menu controls may already represent an exclusive group."
+    return "unknown_do_not_touch", "Insufficient evidence for safe compression."
 
 
 def _normalize_key(value: str) -> str:

@@ -40,8 +40,29 @@ def fake_validation() -> dict:
         "summary": {"severityCounts": {"Error": 0, "Warning": 0, "Suggestion": 1, "Info": 1, "Ignored": 0}},
         "gate": {"status": "pass"},
         "sources": {
-            "performance_pc": {"ok": True, "payload": {"rank": "Good", "triangleCount": 42000}},
-            "performance_quest": {"ok": True, "payload": {"rank": "Medium", "triangleCount": 42000}},
+            "performance_pc": {
+                "ok": True,
+                "payload": {
+                    "rank": "Good",
+                    "triangleCount": 42000,
+                    "downloadSizeBytes": 260 * 1024 * 1024,
+                    "uncompressedSizeBytes": 420 * 1024 * 1024,
+                    "textureMemoryBytes": 96 * 1024 * 1024,
+                    "materialSlotCount": 12,
+                    "skinnedMeshCount": 3,
+                    "meshReadWriteWarning": "Mesh Read/Write Disabled",
+                },
+            },
+            "performance_quest": {
+                "ok": True,
+                "payload": {
+                    "rank": "Medium",
+                    "triangleCount": 42000,
+                    "downloadSizeBytes": 8 * 1024 * 1024,
+                    "uncompressedSizeBytes": 55 * 1024 * 1024,
+                    "textureMemoryBytes": 38 * 1024 * 1024,
+                },
+            },
             "materials": {
                 "ok": True,
                 "payload": {
@@ -56,20 +77,70 @@ def fake_validation() -> dict:
             },
             "parameters": {
                 "ok": True,
-                "payload": {"syncedBits": 72, "parameters": [{"name": "FaceTrackingFloat", "type": "Float", "bits": 8}]},
+                "payload": {
+                    "totalParameters": 6,
+                    "totalEstimatedCost": 280,
+                    "parameterNames": [
+                        {"name": "FaceTrackingFloat", "valueType": "Float", "networkSynced": True, "defaultValue": 0.0},
+                        {"name": "OutfitToggleHat", "valueType": "Bool", "networkSynced": True, "defaultValue": 0.0},
+                        {"name": "Wardrobe", "valueType": "Int", "networkSynced": True, "defaultValue": 0.0},
+                        {"name": "LocalOnlyPreview", "valueType": "Bool", "networkSynced": False, "defaultValue": 0.0},
+                        {"name": "UnusedInt", "valueType": "Int", "networkSynced": True, "defaultValue": 0.0},
+                        {"name": "PuppetAxis", "valueType": "Float", "networkSynced": True, "defaultValue": 0.0},
+                    ],
+                },
+            },
+            "menu": {
+                "ok": True,
+                "payload": {
+                    "items": [
+                        {"displayName": "Hat", "menuPath": "Wardrobe/Hat", "parameterName": "OutfitToggleHat", "controlType": "Toggle", "valueType": "Bool", "networkSynced": True},
+                        {"displayName": "Casual", "menuPath": "Wardrobe/Casual", "parameterName": "Wardrobe", "controlType": "Toggle", "valueType": "Int", "networkSynced": True},
+                        {"displayName": "Dress", "menuPath": "Wardrobe/Dress", "parameterName": "Wardrobe", "controlType": "Toggle", "valueType": "Int", "networkSynced": True},
+                        {"displayName": "Puppet", "menuPath": "Face/Puppet", "parameterName": "PuppetAxis", "controlType": "TwoAxisPuppet", "valueType": "Float", "networkSynced": True},
+                    ]
+                },
             },
             "avatar_items": {
                 "ok": True,
                 "payload": {
                     "items": [
-                        {"gameObjectPath": "Avatar/HatAccessory", "triangleCount": 3200, "componentTypes": ["SkinnedMeshRenderer"]},
+                        {
+                            "gameObjectPath": "Avatar/HatAccessory",
+                            "triangleCount": 3200,
+                            "componentTypes": ["SkinnedMeshRenderer", "VRCPhysBone", "VRCContactReceiver"],
+                            "renderer_count": 1,
+                            "skinned_renderer_count": 1,
+                            "material_summary": {"material_slot_count": 1},
+                        },
                         {"gameObjectPath": "Avatar/Face", "triangleCount": 18000, "blendShapeCount": 80},
+                        {"gameObjectPath": "Avatar/Sparkle", "componentTypes": ["ParticleSystem"], "renderer_count": 1, "skinned_renderer_count": 0},
                     ]
                 },
             },
             "fx": {
                 "ok": True,
-                "payload": {"layers": [{"layerName": "MA Responsive: Object Toggle Hat"}]},
+                "payload": {
+                    "layers": [
+                        {
+                            "layerName": "MA Responsive: Object Toggle Hat",
+                            "transitions": [{"conditions": [{"parameter": "OutfitToggleHat", "mode": "If"}]}],
+                        },
+                        {
+                            "layerName": "Wardrobe",
+                            "transitions": [{"conditions": [{"parameter": "Wardrobe", "mode": "Equals", "threshold": 1}]}],
+                        },
+                    ],
+                    "parameters": [
+                        {"name": "OutfitToggleHat", "type": "Bool", "used_by_condition": True},
+                        {"name": "Wardrobe", "type": "Int", "used_by_condition": True},
+                        {"name": "UnusedInt", "type": "Int", "used_by_condition": False},
+                    ],
+                },
+            },
+            "animation_bindings": {
+                "ok": True,
+                "payload": {"summary": {"clipCount": 4, "bindingCount": 21}},
             },
             "generated_residue": {"ok": True, "payload": {"residueCount": 0}},
         },
@@ -125,6 +196,55 @@ def test_plan_tools_do_not_write(tmp_path: Path) -> None:
         assert payload["noProjectWrites"] is True
         assert payload["directApplyExposed"] is False
         assert "apply" not in payload["gatewayTool"].replace("profile_plan", "").replace("atlas_plan", "").replace("trace_plan", "").replace("simplify_plan", "")
+
+
+def test_upload_gate_audit_separates_hard_blockers_from_rank_offenders(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+
+    payload = build_optimization_tool_result(
+        "optimization.upload-gate.audit",
+        {"projectPath": str(project), "targetProfile": "pc_conservative"},
+        fake_validation(),
+    )
+
+    result = payload["result"]
+    assert payload["readOnly"] is True
+    assert payload["planOnly"] is False
+    assert result["summary"]["hardBlockerCount"] == 3
+    assert {item["id"] for item in result["groups"]["hardUploadBlockers"]} == {
+        "pc_download_size",
+        "android_uncompressed_size",
+        "synced_parameter_bits",
+    }
+    assert "mesh_read_write_disabled" in {item["id"] for item in result["groups"]["riskyFixes"]}
+    assert result["metrics"]["pc"]["uncompressedSizeBytes"] == 420 * 1024 * 1024
+    assert result["metrics"]["parameters"]["totalCustomParameters"] == 6
+
+
+def test_parameter_hard_gate_surfaces_are_read_only_and_conservative(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    validation = fake_validation()
+
+    inventory = build_optimization_tool_result("optimization.parameter.inventory", {"projectPath": str(project)}, validation)["result"]
+    menu_map = build_optimization_tool_result("optimization.parameter.menu-map", {"projectPath": str(project)}, validation)["result"]
+    usage = build_optimization_tool_result("optimization.parameter.animator-usage", {"projectPath": str(project)}, validation)["result"]
+    compressibility = build_optimization_tool_result("optimization.parameter.compressibility-plan", {"projectPath": str(project)}, validation)
+    vrcfury_plan = build_optimization_tool_result("optimization.parameter.vrcfury-compressor-plan", {"projectPath": str(project)}, validation)
+
+    assert inventory["summary"]["syncedBits"] == 280
+    assert inventory["summary"]["totalCustomParameters"] == 6
+    assert menu_map["summary"]["mappedParameterCount"] == 3
+    assert usage["summary"]["conditionParameterCount"] == 2
+    assert compressibility["planOnly"] is True
+    categories = compressibility["result"]["categories"]
+    assert "FaceTrackingFloat" in {item["name"] for item in categories["danger_osc_or_face_tracking"]}
+    assert "PuppetAxis" in {item["name"] for item in categories["danger_puppet"]}
+    assert "OutfitToggleHat" in {item["name"] for item in categories["safe_to_pack"]}
+    assert "Wardrobe" in {item["name"] for item in categories["safe_to_int_exclusive"]}
+    assert vrcfury_plan["result"]["experimentalOnly"] is True
+    assert vrcfury_plan["result"]["applyBlocked"] is True
 
 
 def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
@@ -298,6 +418,84 @@ def test_wrapper_only_optimizer_targets_reject_generic_apply_request(monkeypatch
                 "preview": {},
             }
         )
+
+
+def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "dev.limitex.avatar-compressor", "0.8.0")
+    original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+    )
+    try:
+        payload = dashboard_server.request_optimization_apply_sync(
+            {
+                "tool": "optimization.lac.apply-request",
+                "projectPath": str(project),
+                "avatarPath": "Avatar",
+                "targetProfile": "pc_conservative",
+            },
+            agent_name="test-agent",
+        )
+
+        assert payload["ok"] is True
+        assert payload["status"] == "pending"
+        assert payload.get("autoApproved") is not True
+        approval = payload["approval"]
+        assert approval["status"] == "pending"
+        assert approval["targetTool"] == "vrcforge_configure_optimizer_component"
+        assert approval["requiresExplicitApproval"] is True
+        assert approval["autoApprovalBlocked"] is True
+        assert "Optimizer apply requests" in approval["explicitApprovalReason"]
+    finally:
+        dashboard_server.AGENT_GATEWAY._approvals.clear()
+        dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
+
+
+def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch) -> None:
+    original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
+    original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    calls: list[dict] = []
+
+    def write_handler(args: dict) -> dict:
+        calls.append(args)
+        return {"ok": True, "value": args.get("value")}
+
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+    )
+    try:
+        dashboard_server.AGENT_GATEWAY.register_write_handler(
+            "vrcforge_test_auto_write",
+            "Test auto write.",
+            "high",
+            write_handler,
+        )
+        payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_test_auto_write",
+                "arguments": {"value": "kept"},
+                "preview": {"ok": True},
+            }
+        )
+
+        assert payload["ok"] is True
+        assert payload["status"] == "executed"
+        assert payload["autoApproved"] is True
+        assert payload["approval"]["status"] == "applied"
+        assert len(calls) == 1
+        assert calls[0]["value"] == "kept"
+    finally:
+        dashboard_server.AGENT_GATEWAY._approvals.clear()
+        dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
+        dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
 
 
 def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
@@ -511,6 +709,8 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
     assert approval["arguments"]["packageId"] == "com.anatawa12.avatar-optimizer"
     assert approval["preview"]["requiresCheckpoint"] is True
     assert captured["internalWrapper"] is True
+    assert captured["params"]["requires_explicit_approval"] is True
+    assert "Optimizer package install requests" in captured["params"]["explicit_approval_reason"]
 
 
 def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp_path: Path) -> None:

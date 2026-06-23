@@ -528,7 +528,7 @@ for _optimization_definition in OPTIMIZATION_TOOL_DEFINITIONS:
         "inputs": ["Optional Unity project path, avatar path, target profile, and scanner limits."],
         "outputs": [f"{_optimization_definition['externalName']} {_level} result under vrcforge.optimization.v1."],
         "sideEffects": "none",
-        "backupRestore": "not required; this 0.7.2 tool never writes project assets",
+        "backupRestore": "not required; this read-only/plan-only tool never writes project assets",
         "tags": ["optimization", _level, "no-direct-apply"],
     }
 for _optimization_apply_tool in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES:
@@ -1821,6 +1821,17 @@ class AgentGateway:
         user_constraints = self.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
         preview = params.get("preview")
+        requires_explicit_approval = bool(
+            params.get("requires_explicit_approval")
+            or params.get("requiresExplicitApproval")
+            or params.get("disable_auto_approval")
+            or params.get("disableAutoApproval")
+        )
+        explicit_approval_reason = str(
+            params.get("explicit_approval_reason")
+            or params.get("explicitApprovalReason")
+            or "This write request requires explicit user approval."
+        ).strip()
         if user_constraints.content and isinstance(preview, dict):
             preview = {
                 **preview,
@@ -1835,16 +1846,32 @@ class AgentGateway:
             preview=preview,
             risk_level=write_handler.risk_level,
             user_constraints=user_constraints,
+            requires_explicit_approval=requires_explicit_approval,
+            explicit_approval_reason=explicit_approval_reason,
         )
-        if self.auto_approval_enabled(config):
+        if self.auto_approval_enabled(config) and not requires_explicit_approval:
             auto_payload = self._auto_execute_approval(approval)
             if auto_payload is not None:
                 return auto_payload
+        if self.auto_approval_enabled(config) and requires_explicit_approval:
+            self.append_audit(
+                {
+                    "event": "approval_auto_approval_suppressed",
+                    "approvalId": approval.get("id"),
+                    "mode": normalize_execution_mode(config.execution_mode),
+                    "reason": explicit_approval_reason,
+                    "targetTool": target_tool,
+                }
+            )
         return {
             "ok": True,
             "status": "pending",
             "approval": approval,
-            "message": "Apply request is waiting for user approval.",
+            "message": (
+                "Apply request requires explicit user approval."
+                if requires_explicit_approval
+                else "Apply request is waiting for user approval."
+            ),
         }
 
     def _auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
@@ -3834,6 +3861,8 @@ class AgentGateway:
         preview: Any,
         risk_level: str,
         user_constraints: UserConstraintsSnapshot | None = None,
+        requires_explicit_approval: bool = False,
+        explicit_approval_reason: str = "",
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         config = self.ensure_config()
@@ -3850,6 +3879,10 @@ class AgentGateway:
             "paramsSummary": summarize_params(arguments),
             "preview": preview if preview is not None else summarize_params(arguments),
         }
+        if requires_explicit_approval:
+            approval["requiresExplicitApproval"] = True
+            approval["autoApprovalBlocked"] = True
+            approval["explicitApprovalReason"] = explicit_approval_reason or "This write request requires explicit user approval."
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)

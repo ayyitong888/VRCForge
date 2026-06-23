@@ -10629,6 +10629,13 @@ def request_package_install_sync(params: dict[str, Any], agent_name: str = "exte
             "error": "No supported non-interactive VPM CLI is available for package install. Use the UI handoff or prepare an agent-managed package-manager install first.",
             "installPlan": plan,
         }
+    optimizer_package = bool(ensure_dict(plan.get("package")).get("dependencyId"))
+    explicit_policy: dict[str, Any] = {}
+    if optimizer_package:
+        explicit_policy = {
+            "requires_explicit_approval": True,
+            "explicit_approval_reason": "Optimizer package install requests require explicit user approval even when global auto mode is enabled.",
+        }
     return AGENT_GATEWAY.create_apply_request(
         {
             "target_tool": "vrcforge_install_vpm_package",
@@ -10642,6 +10649,7 @@ def request_package_install_sync(params: dict[str, Any], agent_name: str = "exte
             "reason": f"Install VPM package {plan.get('packageId')} through VRCForge supervised package manager flow.",
             "preview": plan,
             "agent_name": agent_name,
+            **explicit_policy,
         },
         internal_wrapper=True,
     )
@@ -12751,6 +12759,8 @@ def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "e
                 "reason": f"Install dependency for {preview['externalName']} before optimizer configuration.",
                 "preview": install_plan,
                 "agent_name": agent_name,
+                "requires_explicit_approval": True,
+                "explicit_approval_reason": "Optimizer dependency install requests require explicit user approval even when global auto mode is enabled.",
             },
             internal_wrapper=True,
         )
@@ -12763,6 +12773,8 @@ def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "e
             "reason": f"Request supervised optimizer configuration for {preview['externalName']}.",
             "preview": preview,
             "agent_name": agent_name,
+            "requires_explicit_approval": True,
+            "explicit_approval_reason": "Optimizer apply requests require explicit user approval even when global auto mode is enabled.",
         },
         internal_wrapper=True,
     )
