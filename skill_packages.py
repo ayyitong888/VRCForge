@@ -265,6 +265,42 @@ class InstallResult:
 
 
 @dataclass(frozen=True)
+class PackageStateResult:
+    skill_id: str
+    registry_entry: dict[str, Any]
+    manifest: dict[str, Any]
+    changed: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "registry_entry": dict(self.registry_entry),
+            "manifest": dict(self.manifest),
+            "changed": self.changed,
+        }
+
+
+@dataclass(frozen=True)
+class UninstallResult:
+    skill_id: str
+    registry_entry: dict[str, Any]
+    manifest: dict[str, Any]
+    removed_path: Path
+    removed_versions: tuple[str, ...]
+    changed: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "registry_entry": dict(self.registry_entry),
+            "manifest": dict(self.manifest),
+            "removed_path": str(self.removed_path),
+            "removed_versions": list(self.removed_versions),
+            "changed": self.changed,
+        }
+
+
+@dataclass(frozen=True)
 class SigningKeyPair:
     private_key_pem: bytes
     public_key: bytes
@@ -634,6 +670,50 @@ class SkillPackageService:
 
         return self.install(*args, **kwargs)
 
+    def set_enabled(self, skill_id: str, enabled: bool) -> PackageStateResult:
+        normalized_id = self._normalize_installed_skill_id(skill_id)
+        registry = self.load_registry()
+        entry = self._find_installed_entry(normalized_id, registry)
+        if entry is None:
+            raise SkillPackageError(f"Skill package is not installed: {normalized_id}.")
+        registry_entry = dict(entry)
+        registry_entry.pop("versions", None)
+        changed = bool(registry_entry.get("enabled", True)) != bool(enabled)
+        registry_entry["enabled"] = bool(enabled)
+        self._write_installed_registry_entry(normalized_id, registry_entry, registry)
+        manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
+        return PackageStateResult(normalized_id, registry_entry, manifest, changed)
+
+    def uninstall(self, skill_id: str) -> UninstallResult:
+        normalized_id = self._normalize_installed_skill_id(skill_id)
+        registry = self.load_registry()
+        entry = self._find_installed_entry(normalized_id, registry)
+        if entry is None:
+            raise SkillPackageError(f"Skill package is not installed: {normalized_id}.")
+        registry_entry = dict(entry)
+        registry_entry.pop("versions", None)
+        skill_root = self.skill_store / normalized_id
+        if skill_root.is_symlink():
+            raise PackageSecurityError(f"Refusing to uninstall through a symlinked skill directory: {skill_root}.")
+        if skill_root.exists() and not skill_root.is_dir():
+            raise PackageSecurityError(f"Installed skill path is not a directory: {skill_root}.")
+        manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
+        removed_versions = tuple(self._installed_versions(normalized_id))
+        next_registry = {"schema": REGISTRY_SCHEMA, "skills": dict(registry["skills"])}
+        next_registry["skills"].pop(normalized_id, None)
+        self.skill_store.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_json(self.registry_path, next_registry)
+        try:
+            if skill_root.exists():
+                shutil.rmtree(skill_root)
+                changed = True
+            else:
+                changed = normalized_id in registry["skills"]
+        except Exception:
+            self._atomic_write_json(self.registry_path, registry)
+            raise
+        return UninstallResult(normalized_id, registry_entry, manifest, skill_root, removed_versions, changed)
+
     def load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
             return {"schema": REGISTRY_SCHEMA, "skills": {}}
@@ -657,6 +737,13 @@ class SkillPackageService:
     def list_installed(self) -> list[dict[str, Any]]:
         registry = self.load_registry()
         return [dict(registry["skills"][key]) for key in sorted(registry["skills"])]
+
+    @staticmethod
+    def _normalize_installed_skill_id(skill_id: str) -> str:
+        normalized = str(skill_id or "").strip().lower()
+        if not normalized or len(normalized) > 128 or not SKILL_ID_RE.fullmatch(normalized):
+            raise SkillPackageError("Skill package id must be a lowercase reverse-domain id.")
+        return normalized
 
     @staticmethod
     def _validate_registry_entry(
@@ -1171,6 +1258,51 @@ class SkillPackageService:
                     raise PackageIntegrityError(f"Registry and installed metadata disagree for {skill_id}: {field}.")
         entry = registry_entry or installed_entry
         return dict(entry) if entry is not None else None
+
+    def _installed_versions(self, skill_id: str) -> list[str]:
+        versions_root = self.skill_store / skill_id / "versions"
+        if versions_root.is_symlink():
+            raise PackageSecurityError(f"Refusing to read symlinked versions directory: {skill_id}.")
+        if not versions_root.exists():
+            return []
+        if not versions_root.is_dir():
+            raise PackageSecurityError(f"Versions path is not a directory: {skill_id}.")
+        versions = [path.name for path in versions_root.iterdir() if path.is_dir()]
+        return sorted(versions, key=cmp_to_key(_compare_semver))
+
+    def _read_current_manifest(self, skill_id: str, version: str) -> dict[str, Any]:
+        if not version:
+            return {}
+        manifest_path = self.skill_store / skill_id / "versions" / version / MANIFEST_NAME
+        if not manifest_path.exists():
+            return {}
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise PackageSecurityError(f"Installed manifest is not a regular file: {skill_id}.")
+        value = _load_json_bytes(manifest_path.read_bytes(), f"{skill_id}/{version}/{MANIFEST_NAME}")
+        if not isinstance(value, dict):
+            raise PackageIntegrityError(f"Installed manifest is invalid: {skill_id}.")
+        return dict(value)
+
+    def _write_installed_registry_entry(
+        self,
+        skill_id: str,
+        registry_entry: dict[str, Any],
+        registry: dict[str, Any],
+    ) -> None:
+        self.skill_store.mkdir(parents=True, exist_ok=True)
+        skill_root = self.skill_store / skill_id
+        if skill_root.is_symlink():
+            raise PackageSecurityError(f"Refusing to write through symlinked skill directory: {skill_id}.")
+        if skill_root.exists() and not skill_root.is_dir():
+            raise PackageSecurityError(f"Installed skill path is not a directory: {skill_id}.")
+        installed_path = skill_root / "installed.json"
+        if skill_root.exists():
+            installed_entry = dict(registry_entry)
+            installed_entry["versions"] = self._installed_versions(skill_id)
+            self._atomic_write_json(installed_path, installed_entry)
+        next_registry = {"schema": REGISTRY_SCHEMA, "skills": dict(registry["skills"])}
+        next_registry["skills"][skill_id] = dict(registry_entry)
+        self._atomic_write_json(self.registry_path, next_registry)
 
     def _check_update_policy(
         self,

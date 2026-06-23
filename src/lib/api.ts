@@ -638,6 +638,8 @@ export type SkillPackagePreflight = SkillPackageEntry & {
 
 export type SkillPackageImportResult = {
   ok?: boolean;
+  imported?: { registry_entry?: SkillPackageEntry; registryEntry?: SkillPackageEntry; [key: string]: unknown };
+  projectedSkill?: { name?: string; path?: string; [key: string]: unknown } | null;
   installed?: SkillPackageEntry;
   changed?: boolean;
 };
@@ -645,6 +647,18 @@ export type SkillPackageImportResult = {
 export type SkillPackageExportResult = {
   ok?: boolean;
   exported?: SkillPackageEntry;
+};
+
+export type SkillPackageStateResult = {
+  ok?: boolean;
+  state?: { registry_entry?: SkillPackageEntry; registryEntry?: SkillPackageEntry; [key: string]: unknown };
+  projectedSkill?: { name?: string; missing?: boolean; skipped?: boolean; [key: string]: unknown } | null;
+};
+
+export type SkillPackageUninstallResult = {
+  ok?: boolean;
+  uninstalled?: { skill_id?: string; skillId?: string; removed_versions?: string[]; removedVersions?: string[]; [key: string]: unknown };
+  projectedSkill?: { name?: string; deleted?: string; missing?: boolean; skipped?: boolean; [key: string]: unknown } | null;
 };
 
 export async function fetchProviderModels(
@@ -728,6 +742,30 @@ export async function importSkillPackage(
 ): Promise<SkillPackageImportResult> {
   return requestJson<SkillPackageImportResult>(`${endpoint}/api/app/skill-packages/import`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function setSkillPackageEnabled(
+  endpoint: string,
+  skillPackageId: string,
+  request: { enabled: boolean; syncProjectedSkill?: boolean },
+): Promise<SkillPackageStateResult> {
+  return requestJson<SkillPackageStateResult>(`${endpoint}/api/app/skill-packages/${encodeURIComponent(skillPackageId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function uninstallSkillPackage(
+  endpoint: string,
+  skillPackageId: string,
+  request: { removeProjectedSkill?: boolean } = {},
+): Promise<SkillPackageUninstallResult> {
+  return requestJson<SkillPackageUninstallResult>(`${endpoint}/api/app/skill-packages/${encodeURIComponent(skillPackageId)}`, {
+    method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });

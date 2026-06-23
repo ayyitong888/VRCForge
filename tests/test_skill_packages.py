@@ -134,6 +134,35 @@ def test_signed_release_roundtrip_filters_assets_and_installs_atomically(tmp_pat
     assert not list(store.glob(".registry.json.*.tmp"))
 
 
+def test_set_enabled_and_uninstall_package_keep_registry_and_metadata_in_sync(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    package = service.export_dev(make_skill_source(tmp_path), tmp_path / "helper.vsk").package_path
+    service.install(package)
+
+    disabled = service.set_enabled("com.example.avatar-helper", False)
+
+    assert disabled.changed is True
+    assert disabled.registry_entry["enabled"] is False
+    registry = service.load_registry()
+    assert registry["skills"]["com.example.avatar-helper"]["enabled"] is False
+    installed_metadata = json.loads((tmp_path / "store" / "com.example.avatar-helper" / "installed.json").read_text(encoding="utf-8"))
+    assert installed_metadata["enabled"] is False
+    assert installed_metadata["versions"] == ["1.0.0"]
+
+    disabled_again = service.set_enabled("com.example.avatar-helper", False)
+    assert disabled_again.changed is False
+
+    removed = service.uninstall("com.example.avatar-helper")
+
+    assert removed.changed is True
+    assert removed.removed_versions == ("1.0.0",)
+    assert removed.manifest["id"] == "com.example.avatar-helper"
+    assert service.list_installed() == []
+    assert not (tmp_path / "store" / "com.example.avatar-helper").exists()
+    with pytest.raises(SkillPackageError, match="not installed"):
+        service.set_enabled("com.example.avatar-helper", True)
+
+
 def test_unsigned_dev_roundtrip_has_lock_but_no_signature(tmp_path: Path) -> None:
     service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
     source = make_skill_source(tmp_path)

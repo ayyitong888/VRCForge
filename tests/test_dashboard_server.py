@@ -1086,8 +1086,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_apply_blendshapes", write_targets)
         self.assertIn("vrcforge_import_skill_package", write_targets)
         self.assertIn("vrcforge_export_skill_package", write_targets)
+        self.assertIn("vrcforge_set_skill_package_enabled", write_targets)
+        self.assertIn("vrcforge_uninstall_skill_package", write_targets)
         self.assertNotIn("vrcforge_import_skill_package", tool_names)
         self.assertNotIn("vrcforge_export_skill_package", tool_names)
+        self.assertNotIn("vrcforge_set_skill_package_enabled", tool_names)
+        self.assertNotIn("vrcforge_uninstall_skill_package", tool_names)
         self.assertNotIn("api_key", json.dumps(payload).lower())
         self.assertNotIn("approval_token", json.dumps(payload).lower())
 
@@ -1231,6 +1235,18 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/skill-packages/export",
                     json={"skillName": "avatar-review", "outputPath": str(exported_path)},
                 )
+                disabled = client.put(
+                    "/api/app/skill-packages/community.avatar-review",
+                    json={"enabled": False},
+                )
+                skills_after_disable = client.get("/api/app/skills").json()["skills"]
+                uninstalled = client.request(
+                    "DELETE",
+                    "/api/app/skill-packages/community.avatar-review",
+                    json={"removeProjectedSkill": True},
+                )
+                packages_after_uninstall = client.get("/api/app/skill-packages").json()["installed"]
+                skills_after_uninstall = client.get("/api/app/skills").json()["skills"]
 
             self.assertEqual(preflight.status_code, 200)
             self.assertEqual(preflight.json()["preview"]["manifest"]["id"], "community.avatar-review")
@@ -1240,6 +1256,13 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(exported.status_code, 200)
             self.assertTrue(exported_path.is_file())
             self.assertEqual(exported.json()["exported"]["signature_status"], "dev")
+            self.assertEqual(disabled.status_code, 200)
+            self.assertFalse(disabled.json()["state"]["registry_entry"]["enabled"])
+            self.assertTrue(any(skill["name"] == "avatar-review" and not skill["enabled"] for skill in skills_after_disable))
+            self.assertEqual(uninstalled.status_code, 200)
+            self.assertEqual(uninstalled.json()["uninstalled"]["skill_id"], "community.avatar-review")
+            self.assertEqual(packages_after_uninstall, [])
+            self.assertFalse(any(skill["name"] == "avatar-review" for skill in skills_after_uninstall))
 
     def test_roslyn_advanced_skill_requires_full_auto_mode_and_confirmation(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()

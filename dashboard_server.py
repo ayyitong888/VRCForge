@@ -581,6 +581,19 @@ class SkillPackageExportRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SkillPackageStateRequest(BaseModel):
+    enabled: bool
+    sync_projected_skill: bool = Field(default=True, alias="syncProjectedSkill")
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackageUninstallRequest(BaseModel):
+    remove_projected_skill: bool = Field(default=True, alias="removeProjectedSkill")
+
+    model_config = {"populate_by_name": True}
+
+
 class ValidationReportRequest(BaseModel):
     avatar_path: str = Field(default="", alias="avatarPath")
     project_path: str = Field(default="", alias="projectPath")
@@ -1523,8 +1536,7 @@ def _project_installed_skill(installed_path: Path, manifest: dict[str, Any]) -> 
     skill_file = installed_path / "SKILL.md"
     if not skill_file.is_file():
         return None
-    target_name = str(manifest.get("skill_name") or manifest.get("skillName") or manifest.get("id") or "").strip()
-    target_name = re.sub(r"[^a-z0-9_.-]+", "-", target_name.lower()).strip("-._")
+    target_name = _projected_skill_name(manifest)
     if not target_name:
         return None
     target_dir = AGENT_GATEWAY.user_skills_dir / target_name
@@ -1533,6 +1545,38 @@ def _project_installed_skill(installed_path: Path, manifest: dict[str, Any]) -> 
     target_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(skill_file, target_dir / "SKILL.md")
     return {"name": target_name, "path": str(target_dir / "SKILL.md")}
+
+
+def _projected_skill_name(manifest: dict[str, Any]) -> str:
+    target_name = str(manifest.get("skill_name") or manifest.get("skillName") or manifest.get("id") or "").strip()
+    target_name = re.sub(r"[^a-z0-9_.-]+", "-", target_name.lower()).strip("-._")
+    return target_name
+
+
+def _set_projected_skill_enabled(manifest: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    target_name = _projected_skill_name(manifest)
+    if not target_name:
+        return {"ok": True, "skipped": True, "reason": "manifest has no projected skill name"}
+    try:
+        payload = AGENT_GATEWAY.update_user_skill(target_name, {"enabled": bool(enabled)})
+        return {"ok": True, "name": target_name, "skill": payload.get("skill")}
+    except AgentGatewayError as exc:
+        if exc.status_code == 404:
+            return {"ok": True, "name": target_name, "missing": True}
+        raise
+
+
+def _delete_projected_skill(manifest: dict[str, Any]) -> dict[str, Any]:
+    target_name = _projected_skill_name(manifest)
+    if not target_name:
+        return {"ok": True, "skipped": True, "reason": "manifest has no projected skill name"}
+    try:
+        payload = AGENT_GATEWAY.delete_user_skill(target_name)
+        return {"ok": True, "name": target_name, "deleted": payload.get("deleted")}
+    except AgentGatewayError as exc:
+        if exc.status_code == 404:
+            return {"ok": True, "name": target_name, "missing": True}
+        raise
 
 
 def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -1547,6 +1591,29 @@ def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
         projection = _project_installed_skill(result.installed_path, result.preview.manifest)
     return {"ok": True, "imported": result.as_dict(), "projectedSkill": projection}
+
+
+def set_skill_package_enabled_sync(params: dict[str, Any]) -> dict[str, Any]:
+    skill_id = str(params.get("skillPackageId") or params.get("skill_package_id") or params.get("id") or "").strip()
+    if not skill_id:
+        raise AgentGatewayError("skillPackageId is required.", status_code=400)
+    enabled = bool(params.get("enabled"))
+    result = skill_package_service().set_enabled(skill_id, enabled)
+    projected = None
+    if params.get("syncProjectedSkill", params.get("sync_projected_skill", True)) is not False:
+        projected = _set_projected_skill_enabled(result.manifest, enabled)
+    return {"ok": True, "state": result.as_dict(), "projectedSkill": projected}
+
+
+def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    skill_id = str(params.get("skillPackageId") or params.get("skill_package_id") or params.get("id") or "").strip()
+    if not skill_id:
+        raise AgentGatewayError("skillPackageId is required.", status_code=400)
+    result = skill_package_service().uninstall(skill_id)
+    projected = None
+    if params.get("removeProjectedSkill", params.get("remove_projected_skill", True)) is not False:
+        projected = _delete_projected_skill(result.manifest)
+    return {"ok": True, "uninstalled": result.as_dict(), "projectedSkill": projected}
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
@@ -1968,6 +2035,27 @@ def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]
 def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, Any]:
     try:
         return export_skill_package_sync(request.model_dump(by_alias=True))
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.put("/api/app/skill-packages/{skill_package_id}")
+def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageStateRequest) -> dict[str, Any]:
+    try:
+        return set_skill_package_enabled_sync({"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)})
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.delete("/api/app/skill-packages/{skill_package_id}")
+def app_uninstall_skill_package(skill_package_id: str, request: SkillPackageUninstallRequest | None = None) -> dict[str, Any]:
+    try:
+        payload = request.model_dump(by_alias=True) if request is not None else {}
+        return uninstall_skill_package_sync({"skillPackageId": skill_package_id, **payload})
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -14074,6 +14162,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
     AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
+    AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", set_skill_package_enabled_sync)
+    AGENT_GATEWAY.register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", uninstall_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
