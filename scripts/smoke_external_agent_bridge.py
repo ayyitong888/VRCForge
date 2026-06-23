@@ -212,6 +212,8 @@ class ExternalAgentBridgeSmoke:
         ]
         env = os.environ.copy()
         env["VRCFORGE_AGENT_BASE_URL"] = self.base_url
+        if self.gateway_config_path:
+            env["VRCFORGE_AGENT_GATEWAY_CONFIG"] = str(self.gateway_config_path)
         env.setdefault("PYTHONIOENCODING", "utf-8")
         try:
             completed = subprocess.run(
@@ -259,6 +261,8 @@ class ExternalAgentBridgeSmoke:
         cwd = str(launcher.get("cwd") or Path(__file__).resolve().parents[1])
         env = os.environ.copy()
         env["VRCFORGE_AGENT_BASE_URL"] = self.base_url
+        if self.gateway_config_path:
+            env["VRCFORGE_AGENT_GATEWAY_CONFIG"] = str(self.gateway_config_path)
         env.setdefault("PYTHONIOENCODING", "utf-8")
         previous_env = os.environ.copy()
         try:

@@ -276,3 +276,71 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
     assert report["ok"] is True
     assert "smoke_shader_adapter_apply_rollback.py" in called_scripts
     assert "smoke_optimizer_apply_rollback.py" in called_scripts
+
+
+def test_cli_matrix_passes_app_token_and_previews_checkpoint(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    run_calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_calls.append(command)
+        if command[-2:] == ["checkpoint", "list"] or "list" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "checkpoints": [{"id": "ckpt_test"}]}', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    report = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, include_cli=True),
+        request_func=fake_read_only_request,
+        run_command_func=fake_run,
+    ).run()
+
+    assert report["ok"] is True
+    assert run_calls
+    assert all("--token" in command and "test-token" in command for command in run_calls)
+    assert any(command[-3:] == ["checkpoint", "preview", "ckpt_test"] for command in run_calls)
+
+
+def test_matrix_selects_explicit_project_before_health_checks(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    project = tmp_path / "UnityProject"
+    calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def fake_request(
+        base_url: str,
+        method: str,
+        path: str,
+        token: str,
+        payload: dict[str, Any] | None,
+        allow_http_error: bool,
+        timeout: float,
+    ) -> dict[str, Any]:
+        calls.append((method, path, payload))
+        assert base_url == "http://127.0.0.1:8757"
+        assert token == "test-token"
+        assert allow_http_error is False
+        assert timeout == 30.0
+        assert (method, path) == ("POST", "/api/state")
+        assert payload == {"projectPath": str(project.resolve())}
+        return {"selectedProjectPath": str(project.resolve())}
+
+    matrix = smoke.GoldenPathMatrixSmoke(make_args(tmp_path, project_root=str(project)), request_func=fake_request)
+    step = matrix.select_project()
+
+    assert step is not None
+    assert step["ok"] is True
+    assert calls == [("POST", "/api/state", {"projectPath": str(project.resolve())})]
+    assert matrix.project_root == str(project.resolve())
+
+
+def test_matrix_resolves_package_paths_for_packaged_runtime(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    vsk_package = tmp_path / "helper.vsk"
+    outfit_package = tmp_path / "outfit.zip"
+
+    matrix = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, vsk_package=str(vsk_package), outfit_package=str(outfit_package)),
+        request_func=fake_read_only_request,
+    )
+
+    assert matrix.vsk_package == str(vsk_package.resolve())
+    assert matrix.outfit_package == str(outfit_package.resolve())

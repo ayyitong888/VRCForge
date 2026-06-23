@@ -87,6 +87,8 @@ class GoldenPathMatrixSmoke:
         self.bootstrap_payload: dict[str, Any] = {}
         self.project_root = str(Path(args.project_root).expanduser().resolve()) if args.project_root else ""
         self.avatar_path = str(args.avatar_path or "")
+        self.outfit_package = resolve_optional_path(args.outfit_package)
+        self.vsk_package = resolve_optional_path(args.vsk_package)
 
     def run(self) -> dict[str, Any]:
         report: dict[str, Any] = {
@@ -135,6 +137,9 @@ class GoldenPathMatrixSmoke:
     def install_doctor_provider_connect(self) -> None:
         steps: list[dict[str, Any]] = []
         try:
+            select_step = self.select_project()
+            if select_step:
+                steps.append(select_step)
             bootstrap = self.request_app_json("GET", "/api/app/bootstrap")
             self.bootstrap_payload = bootstrap
             self.set_project_from_bootstrap(bootstrap)
@@ -179,6 +184,25 @@ class GoldenPathMatrixSmoke:
                 required=True,
                 steps=[*steps, {"name": "install_doctor_provider_connect.error", "ok": False, "error": str(exc)}],
             )
+
+    def select_project(self) -> dict[str, Any] | None:
+        if not self.project_root:
+            return None
+        payload = self.request_func(
+            self.base_url,
+            "POST",
+            "/api/state",
+            self.app_token,
+            {"projectPath": self.project_root},
+            False,
+            self.args.timeout,
+        )
+        selected = str(payload.get("selectedProjectPath") or payload.get("projectPath") or "")
+        return {
+            "name": "runtime.select_project",
+            "ok": bool(payload) and normalize_path(selected) == normalize_path(self.project_root),
+            "selectedProjectPath": selected,
+        }
 
     def scan_avatar_validation(self) -> None:
         if not self.project_root:
@@ -271,7 +295,7 @@ class GoldenPathMatrixSmoke:
         )
 
     def booth_outfit_import_validation_rollback(self) -> None:
-        package_path = str(self.args.outfit_package or "")
+        package_path = self.outfit_package
         if not package_path:
             self.add_skipped(
                 "booth_outfit_import_validation_rollback",
@@ -501,7 +525,7 @@ class GoldenPathMatrixSmoke:
         )
 
     def vsk_import_dry_run_cleanup(self) -> None:
-        package_path = str(self.args.vsk_package or "")
+        package_path = self.vsk_package
         if not package_path:
             self.add_skipped(
                 "vsk_import_dry_run_cleanup",
@@ -613,18 +637,15 @@ class GoldenPathMatrixSmoke:
                 required=False,
             )
             return
+        base = self.cli_base_command()
         commands: list[list[str]] = [
-            [self.args.python_exe, str(REPO_ROOT / "tools" / "vrcforge_cli.py"), "--endpoint", self.base_url, "--json", "doctor"],
-            [self.args.python_exe, str(REPO_ROOT / "tools" / "vrcforge_cli.py"), "--endpoint", self.base_url, "--json", "unity", "status"],
+            [*base, "doctor"],
+            [*base, "unity", "status"],
         ]
         if self.project_root:
             commands.append(
                 [
-                    self.args.python_exe,
-                    str(REPO_ROOT / "tools" / "vrcforge_cli.py"),
-                    "--endpoint",
-                    self.base_url,
-                    "--json",
+                    *base,
                     "validation",
                     "run",
                     "--project",
@@ -635,11 +656,18 @@ class GoldenPathMatrixSmoke:
             )
             commands.append(
                 [
-                    self.args.python_exe,
-                    str(REPO_ROOT / "tools" / "vrcforge_cli.py"),
-                    "--endpoint",
-                    self.base_url,
-                    "--json",
+                    *base,
+                    "build-test",
+                    "readiness",
+                    "--project",
+                    self.project_root,
+                    "--avatar",
+                    self.avatar_path,
+                ]
+            )
+            commands.append(
+                [
+                    *base,
                     "optimization",
                     "plan",
                     "--project",
@@ -650,9 +678,17 @@ class GoldenPathMatrixSmoke:
                     self.args.target_profile,
                 ]
             )
+            commands.append([*base, "checkpoint", "list", "--project", self.project_root, "--limit", "5"])
         steps: list[dict[str, Any]] = []
         for command in commands:
-            steps.append(self.run_command_step(command, timeout=self.args.timeout))
+            step = self.run_command_step(command, timeout=self.args.timeout)
+            steps.append(step)
+            if "checkpoint" in command and "list" in command:
+                checkpoint_id = first_checkpoint_id(ensure_dict(step.get("stdoutJson")))
+                if checkpoint_id:
+                    steps.append(self.run_command_step([*base, "checkpoint", "preview", checkpoint_id], timeout=self.args.timeout))
+                else:
+                    steps.append({"name": "vrcforge_cli.py", "ok": True, "status": "skipped", "reason": "No checkpoint id returned by CLI checkpoint list."})
         self.add_path(
             "cli_doctor_readiness_checkpoint",
             "CLI doctor/readiness/validation/checkpoint preview",
@@ -661,6 +697,20 @@ class GoldenPathMatrixSmoke:
             required=False,
             steps=steps,
         )
+
+    def cli_base_command(self) -> list[str]:
+        command = [
+            self.args.python_exe,
+            str(REPO_ROOT / "tools" / "vrcforge_cli.py"),
+            "--endpoint",
+            self.base_url,
+            "--timeout",
+            str(float(self.args.timeout)),
+        ]
+        if self.app_token:
+            command += ["--token", self.app_token]
+        command.append("--json")
+        return command
 
     def add_subprocess_path(
         self,
@@ -851,8 +901,43 @@ def command_name(command: Sequence[str]) -> str:
     return script or Path(command[0]).name if command else "command"
 
 
+def resolve_optional_path(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return str(Path(value).expanduser().resolve())
+
+
+def normalize_path(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").rstrip("/").casefold()
+
+
+def first_checkpoint_id(payload: dict[str, Any]) -> str:
+    candidates = ensure_list(payload.get("checkpoints"))
+    if not candidates:
+        candidates = ensure_list(ensure_dict(payload.get("result")).get("checkpoints"))
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        checkpoint_id = str(item.get("id") or item.get("checkpointId") or "").strip()
+        if checkpoint_id:
+            return checkpoint_id
+    return ""
+
+
 def safe_command(command: Sequence[str]) -> list[str]:
-    return [str(part) for part in command]
+    parts = [str(part) for part in command]
+    redacted: list[str] = []
+    redact_next = False
+    for part in parts:
+        if redact_next:
+            redacted.append("[REDACTED]")
+            redact_next = False
+            continue
+        redacted.append(part)
+        if part in {"--token", "--app-token", "--gateway-token"}:
+            redact_next = True
+    return redacted
 
 
 def utc_now() -> str:

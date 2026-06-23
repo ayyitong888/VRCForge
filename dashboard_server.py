@@ -302,7 +302,9 @@ class DashboardStateRequest(BaseModel):
 
 
 class ProjectActionRequest(BaseModel):
-    project_path: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
+
+    model_config = {"populate_by_name": True}
 
 
 class ProjectInstallRequest(BaseModel):
@@ -3486,7 +3488,7 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
             detail="Unity editor path is empty or does not exist. Update dashboard settings before opening a project.",
         )
 
-    subprocess.Popen([editor_path, "-projectPath", project_path], cwd=str(ROOT_DIR))
+    subprocess.Popen([editor_path, "-projectPath", project_path], cwd=unity_launch_working_directory(Path(editor_path), Path(project_path)))
     DASHBOARD_STATE.selected_project_path = project_path
     DASHBOARD_STATE.unity_instance = Path(project_path).name
     payload = serialize_dashboard_state()
@@ -8330,10 +8332,18 @@ def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> 
 
 def launch_unity_project(editor_path: Path, project_root: Path) -> tuple[bool, str]:
     try:
-        subprocess.Popen([str(editor_path), "-projectPath", str(project_root)], cwd=str(ROOT_DIR))
+        subprocess.Popen([str(editor_path), "-projectPath", str(project_root)], cwd=unity_launch_working_directory(editor_path, project_root))
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
     return True, ""
+
+
+def unity_launch_working_directory(editor_path: Path, project_root: Path) -> str:
+    if editor_path.parent.is_dir():
+        return str(editor_path.parent)
+    if project_root.is_dir():
+        return str(project_root)
+    return str(Path.home())
 
 
 def resolve_unity_mcp_repair_project(project_path: str) -> Path:

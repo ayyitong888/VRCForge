@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+from argparse import Namespace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -70,3 +72,84 @@ def test_probe_codex_cli_prefers_codex_config_path(monkeypatch: Any, tmp_path: P
         f"config:{codex_home / 'config.toml'}",
         "PATH",
     ]
+
+
+def make_bridge_smoke(smoke: ModuleType, tmp_path: Path) -> Any:
+    gateway_config = tmp_path / "agent_gateway.json"
+    app_token = tmp_path / "app-session-token"
+    gateway_config.write_text('{"token":"gateway-token"}', encoding="utf-8")
+    app_token.write_text("app-token", encoding="utf-8")
+    args = Namespace(
+        base_url="http://127.0.0.1:8782",
+        gateway_config=str(gateway_config),
+        app_token_file=str(app_token),
+        project_root="",
+        live_write_rollback=False,
+        optimizer_write_request=False,
+        optimizer_tool="vrcforge_optimization_lac_apply_request",
+        avatar_path="",
+        target_profile="pc_conservative",
+        execution_mode="approval",
+        optimizer_option=[],
+        material=[],
+        renderer_path="",
+        relative_vertex_count=None,
+        install_missing_dependencies=False,
+        include_prerelease=False,
+        enable_gateway=False,
+        timeout=30.0,
+        agent_name="test-agent",
+    )
+    bridge = smoke.ExternalAgentBridgeSmoke(args)
+    bridge.connector_payload = {
+        "launcher": {
+            "stdioBridge": {
+                "command": "python",
+                "args": ["tools/vrcforge_agent_mcp_stdio.py", "--no-start"],
+                "cwd": str(tmp_path),
+                "packaged": False,
+            }
+        }
+    }
+    return bridge
+
+
+def test_stdio_preflight_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    seen_env: dict[str, str] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen_env.update(kwargs["env"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ok":true,"runtimeOnline":true,"gatewayEnabled":true,"allowWriteRequests":true,"manifestToolCount":1,"advertisesRequestApply":true}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    result = bridge.check_stdio_bridge_preflight()
+
+    assert result["ok"] is True
+    assert seen_env["VRCFORGE_AGENT_BASE_URL"] == "http://127.0.0.1:8782"
+    assert seen_env["VRCFORGE_AGENT_GATEWAY_CONFIG"] == str(bridge.gateway_config_path)
+
+
+def test_stdio_mcp_tools_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    seen_gateway_config = ""
+
+    def fake_handshake(spec: Any, timeout_seconds: float) -> dict[str, Any]:
+        nonlocal seen_gateway_config
+        seen_gateway_config = smoke.os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", "")
+        return {"ok": True, "hasRequestApply": True, "toolCount": 1}
+
+    monkeypatch.setattr(smoke, "run_stdio_mcp_handshake", fake_handshake)
+
+    result = bridge.check_stdio_mcp_tools()
+
+    assert result["ok"] is True
+    assert seen_gateway_config == str(bridge.gateway_config_path)

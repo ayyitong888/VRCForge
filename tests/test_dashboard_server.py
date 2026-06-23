@@ -3590,6 +3590,53 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(result["after"]["vrcForgeToolsRegistered"])
         mock_close.assert_not_called()
 
+    def test_launch_unity_project_uses_editor_directory_as_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            editor_dir = root / "Editor"
+            project = root / "AvatarProject"
+            editor_dir.mkdir()
+            project.mkdir()
+            editor = editor_dir / "Unity.exe"
+            editor.write_text("", encoding="utf-8")
+
+            with patch("dashboard_server.subprocess.Popen") as mock_popen:
+                ok, error = dashboard_server.launch_unity_project(editor, project)
+
+            self.assertTrue(ok)
+            self.assertEqual(error, "")
+            mock_popen.assert_called_once_with([str(editor), "-projectPath", str(project)], cwd=str(editor_dir))
+
+    def test_open_project_route_accepts_project_path_alias_and_uses_editor_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            editor_dir = root / "Editor"
+            editor = editor_dir / "Unity.exe"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            editor_dir.mkdir()
+            editor.write_text("", encoding="utf-8")
+            previous_editor = dashboard_server.DASHBOARD_STATE.unity_editor_path
+            previous_selected = dashboard_server.DASHBOARD_STATE.selected_project_path
+            dashboard_server.DASHBOARD_STATE.unity_editor_path = str(editor)
+            try:
+                for payload in ({"projectPath": str(project)}, {"project_path": str(project)}):
+                    with patch("dashboard_server.subprocess.Popen") as mock_popen:
+                        with TestClient(dashboard_server.app) as client:
+                            response = client.post("/api/projects/open", json=payload)
+                    self.assertEqual(response.status_code, 200)
+                    command = mock_popen.call_args.args[0]
+                    self.assertEqual(command[0], str(editor))
+                    self.assertEqual(command[1], "-projectPath")
+                    self.assertEqual(Path(command[2]).resolve(), project.resolve())
+                    self.assertEqual(mock_popen.call_args.kwargs["cwd"], str(editor_dir))
+            finally:
+                dashboard_server.DASHBOARD_STATE.unity_editor_path = previous_editor
+                dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
+
     def test_discover_vrcforge_unity_tool_definitions_reads_mcp_attributes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
