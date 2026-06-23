@@ -3488,7 +3488,11 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
             detail="Unity editor path is empty or does not exist. Update dashboard settings before opening a project.",
         )
 
-    subprocess.Popen([editor_path, "-projectPath", project_path], cwd=unity_launch_working_directory(Path(editor_path), Path(project_path)))
+    subprocess.Popen(
+        [editor_path, "-projectPath", project_path],
+        cwd=unity_launch_working_directory(Path(editor_path), Path(project_path)),
+        env=unity_launch_environment(),
+    )
     DASHBOARD_STATE.selected_project_path = project_path
     DASHBOARD_STATE.unity_instance = Path(project_path).name
     payload = serialize_dashboard_state()
@@ -8332,7 +8336,11 @@ def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> 
 
 def launch_unity_project(editor_path: Path, project_root: Path) -> tuple[bool, str]:
     try:
-        subprocess.Popen([str(editor_path), "-projectPath", str(project_root)], cwd=unity_launch_working_directory(editor_path, project_root))
+        subprocess.Popen(
+            [str(editor_path), "-projectPath", str(project_root)],
+            cwd=unity_launch_working_directory(editor_path, project_root),
+            env=unity_launch_environment(),
+        )
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
     return True, ""
@@ -8344,6 +8352,34 @@ def unity_launch_working_directory(editor_path: Path, project_root: Path) -> str
     if project_root.is_dir():
         return str(project_root)
     return str(Path.home())
+
+
+def unity_launch_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    blocked_dirs = [
+        ROOT_DIR / "backend" / "_internal",
+        Path(sys.executable).resolve().parent / "_internal",
+    ]
+    filtered_entries: list[str] = []
+    for entry in path_entries:
+        entry_path = Path(entry).resolve(strict=False)
+        if any(path_is_under(entry_path, blocked) for blocked in blocked_dirs):
+            continue
+        filtered_entries.append(entry)
+    env["PATH"] = os.pathsep.join(filtered_entries)
+    for key in list(env):
+        if key.startswith("_PYI_"):
+            env.pop(key, None)
+    return env
+
+
+def path_is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
 
 
 def resolve_unity_mcp_repair_project(project_path: str) -> Path:

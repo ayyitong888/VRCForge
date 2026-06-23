@@ -7,7 +7,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from fastapi.testclient import TestClient
 
@@ -3600,12 +3600,17 @@ class DashboardServerTests(unittest.TestCase):
             editor = editor_dir / "Unity.exe"
             editor.write_text("", encoding="utf-8")
 
-            with patch("dashboard_server.subprocess.Popen") as mock_popen:
+            internal_dir = str(dashboard_server.ROOT_DIR / "backend" / "_internal")
+            with (
+                patch.dict(dashboard_server.os.environ, {"PATH": internal_dir + os.pathsep + r"C:\Windows"}),
+                patch("dashboard_server.subprocess.Popen") as mock_popen,
+            ):
                 ok, error = dashboard_server.launch_unity_project(editor, project)
 
             self.assertTrue(ok)
             self.assertEqual(error, "")
-            mock_popen.assert_called_once_with([str(editor), "-projectPath", str(project)], cwd=str(editor_dir))
+            mock_popen.assert_called_once_with([str(editor), "-projectPath", str(project)], cwd=str(editor_dir), env=ANY)
+            self.assertNotIn(internal_dir, mock_popen.call_args.kwargs["env"]["PATH"])
 
     def test_open_project_route_accepts_project_path_alias_and_uses_editor_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3633,6 +3638,7 @@ class DashboardServerTests(unittest.TestCase):
                     self.assertEqual(command[1], "-projectPath")
                     self.assertEqual(Path(command[2]).resolve(), project.resolve())
                     self.assertEqual(mock_popen.call_args.kwargs["cwd"], str(editor_dir))
+                    self.assertNotIn(str(dashboard_server.ROOT_DIR / "backend" / "_internal"), mock_popen.call_args.kwargs["env"]["PATH"])
             finally:
                 dashboard_server.DASHBOARD_STATE.unity_editor_path = previous_editor
                 dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
