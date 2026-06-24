@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+import agent_gateway
 import dashboard_server
 
 
@@ -101,6 +102,7 @@ def test_avatar_encryption_plan_is_preview_only_and_records_key_limitations() ->
     assert plan["keyChannel"]["id"] == "avatar_parameter_32bit"
     assert "cannot carry a full AES-256 secret" in plan["keyChannel"]["warning"]
     assert plan["futureRequestTools"]["status"] == "not_registered_in_1.0.1"
+    assert all(capability["registered"] is False for capability in plan["futureCapabilities"])
     assert any("rollback" in item.lower() for item in plan["proofRequirements"])
 
 
@@ -121,6 +123,84 @@ def test_avatar_encryption_preview_does_not_write_and_includes_rollback_policy()
     assert payload["rollbackPolicyPreview"]["removeMustRestoreOriginalMeshesAndMaterials"] is True
     assert payload["writeTargetsPreview"]
     assert all(item["wouldModifyOriginalAsset"] is False for item in payload["writeTargetsPreview"])
+    assert all(item["adapterId"] in {"liltoon", "poiyomi"} for item in payload["writeTargetsPreview"])
+
+
+def test_avatar_encryption_rest_scan_uses_camelcase_avatar_path(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def fake_scan(_settings, avatar_path: str | None) -> dict:
+        seen.append(str(avatar_path or ""))
+        return make_encryption_inventory()
+
+    monkeypatch.setattr(dashboard_server, "scan_shader_materials_direct", fake_scan)
+    with TestClient(dashboard_server.app) as client:
+        response = client.post("/api/avatar-encryption/scan", json={"avatarPath": "Scene/RequestedAvatar"})
+
+    assert response.status_code == 200
+    assert seen == ["Scene/RequestedAvatar"]
+    assert response.json()["avatarPath"] == "Scene/RequestedAvatar"
+
+
+def test_avatar_encryption_preview_filters_caller_supplied_blocked_plan() -> None:
+    payload = dashboard_server.preview_avatar_encryption_sync(
+        dashboard_server.AvatarEncryptionPreviewRequest(
+            plan={
+                "selectedCandidates": [
+                    {
+                        "materialId": "mat_generic",
+                        "rendererPath": "Avatar/Hat",
+                        "materialName": "Hat",
+                        "shaderFamilyId": "generic",
+                        "shaderFamily": "Generic",
+                        "status": "blocked",
+                    },
+                    {
+                        "materialId": "mat_liltoon_body",
+                        "rendererPath": "Avatar/Body",
+                        "materialName": "Body",
+                        "shaderFamilyId": "liltoon",
+                        "shaderFamily": "lilToon",
+                        "status": "candidate",
+                    },
+                ]
+            }
+        )
+    )
+
+    assert [item["materialId"] for item in payload["writeTargetsPreview"]] == ["mat_liltoon_body"]
+    assert [item["materialId"] for item in payload["blockedTargetsPreview"]] == ["mat_generic"]
+
+
+def test_avatar_encryption_plan_blocks_requested_unsupported_family_without_fallback() -> None:
+    payload = dashboard_server.plan_avatar_encryption_sync(
+        dashboard_server.AvatarEncryptionPlanRequest(
+            avatar_path="Scene/HeroAvatar",
+            inventory=make_encryption_inventory(),
+            targetShaderFamilies=["Arktoon"],
+            confirmCreatorOwnedAssets=True,
+        )
+    )
+    plan = payload["plan"]
+
+    assert plan["status"] == "blocked"
+    assert plan["selectedCandidateCount"] == 0
+    assert plan["targetShaderFamilies"] == ["unsupported"]
+    assert "shader_family.requested_restore_adapter_missing" in plan["hardGate"]["blockingIds"]
+
+
+def test_avatar_encryption_plan_blocks_when_layer_gate_blocks() -> None:
+    payload = dashboard_server.plan_avatar_encryption_sync(
+        dashboard_server.AvatarEncryptionPlanRequest(
+            avatar_path="Scene/HeroAvatar",
+            inventory=make_encryption_inventory(),
+            layers=["position_permutation", "normal_tangent_scramble"],
+            confirmCreatorOwnedAssets=True,
+        )
+    )
+
+    assert payload["plan"]["status"] == "blocked"
+    assert "layer.experimental_or_research_only" in payload["plan"]["hardGate"]["blockingIds"]
 
 
 def test_avatar_encryption_rest_endpoints_accept_inventory_without_unity_writes() -> None:
@@ -168,3 +248,4 @@ def test_avatar_encryption_tools_are_projected_without_write_targets() -> None:
     assert {entry["category"] for entry in entries} == {"avatar-encryption"}
     assert {entry["risk"] for entry in entries} <= {"read_only", "plan"}
     assert all(entry["requiresApproval"] is False for entry in entries)
+    assert set(agent_gateway.AVATAR_ENCRYPTION_TOOL_NAMES) == expected

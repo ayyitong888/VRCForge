@@ -70,13 +70,18 @@ distribution notes.
 
 ## Commands
 
+`1.0.1` is currently a source preview line for the Avatar Encryption /
+Anti-Rip addon, not the latest published stable package. Stable publish
+commands should stay on `1.0.0` until the preview line is explicitly promoted
+with fresh release evidence.
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.0.1 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.0.1/VRCForge_Windows_x64_1.0.1.zip
+  -Version 1.0.0 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.0.0/VRCForge_Windows_x64_1.0.0.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.0.1
+  -Version 1.0.0
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -159,9 +164,12 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.0.1
+python scripts\smoke_stable_readiness_gate.py --version 1.0.0
 ```
 
 This gate checks current-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout.
+pointers when they exist in the checkout. While the source tree is on the
+`1.0.1` Avatar Encryption preview line, the gate also checks that public docs
+still say `1.0.0` is the latest published stable release and that
+avatar-encryption apply/remove writers are not exposed.

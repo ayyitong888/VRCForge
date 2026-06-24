@@ -60,6 +60,12 @@ from outfit_import_planner import build_outfit_import_plan
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import PathToSkillError, build_path_to_skill_source
 from project_memory_index import scan_project_memory
+from shader_adapter_registry import (
+    PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
+    normalize_shader_family_id,
+    shader_adapter_definition,
+    shader_family_label,
+)
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_tasks import CancelledError, SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import (
@@ -260,7 +266,7 @@ MATERIAL_NUMERIC_RANGES = {
 
 AVATAR_ENCRYPTION_SCHEMA = "vrcforge.avatar_encryption.v1"
 AVATAR_ENCRYPTION_ADDON_VERSION = "1.0.1"
-AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES = ("liltoon", "poiyomi")
+AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES = PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS
 AVATAR_ENCRYPTION_DEFAULT_LAYERS = ("position_permutation", "uv_obfuscation")
 AVATAR_ENCRYPTION_EXPERIMENTAL_LAYERS = {"normal_tangent_scramble", "blendshape_delta_obfuscation"}
 
@@ -404,7 +410,9 @@ class TuningLocksAiSelectRequest(DashboardRequest):
 
 
 class AvatarScopedConnectionRequest(ConnectionRequest):
-    avatar_path: str | None = None
+    avatar_path: str | None = Field(default=None, alias="avatarPath")
+
+    model_config = {"populate_by_name": True}
 
 
 class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
@@ -412,11 +420,13 @@ class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
 
 
 class ShaderMaterialPlanRequest(DashboardRequest):
-    avatar_path: str | None = None
+    avatar_path: str | None = Field(default=None, alias="avatarPath")
     inventory: dict[str, Any] | None = None
     category_overrides: dict[str, str] = Field(default_factory=dict)
     locked_materials: list[str] = Field(default_factory=list)
     locked_properties: list[str] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
 
 
 class ShaderMaterialApplyRequest(ShaderMaterialPlanRequest):
@@ -486,6 +496,45 @@ class AvatarEncryptionPlanRequest(AvatarEncryptionScanRequest):
 
 class AvatarEncryptionPreviewRequest(AvatarEncryptionPlanRequest):
     plan: dict[str, Any] | None = None
+
+
+class AdjustmentCheckpointCreateRequest(BaseModel):
+    kind: Literal["face", "shader"]
+    id: str | None = None
+    label: str = ""
+    description: str = ""
+    checkpoint_id: str | None = Field(default=None, alias="checkpointId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+    avatar_path: str | None = Field(default=None, alias="avatarPath")
+    tags: list[str] = Field(default_factory=list)
+    compare_group: str = Field(default="", alias="compareGroup")
+    overwrite: bool = False
+
+    model_config = {"populate_by_name": True}
+
+
+class AdjustmentCheckpointUpdateRequest(BaseModel):
+    kind: Literal["face", "shader"] | None = None
+    label: str | None = None
+    description: str | None = None
+    checkpoint_id: str | None = Field(default=None, alias="checkpointId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+    avatar_path: str | None = Field(default=None, alias="avatarPath")
+    tags: list[str] | None = None
+    compare_group: str | None = Field(default=None, alias="compareGroup")
+
+    model_config = {"populate_by_name": True}
+
+
+class AdjustmentCheckpointOverwriteRequest(AdjustmentCheckpointCreateRequest):
+    kind: Literal["face", "shader"] | None = None
+
+
+class AdjustmentCheckpointSelectRequest(BaseModel):
+    slot: Literal["A", "B", "current"] = "current"
+    compare_group: str = Field(default="", alias="compareGroup")
+
+    model_config = {"populate_by_name": True}
 
 
 class ClothingToggleRequest(ConnectionRequest):
@@ -1324,6 +1373,159 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": arguments,
                 "reason": "Restore Unity project files from a VRCForge checkpoint.",
+                "preview": preview,
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.get("/api/app/adjustment-checkpoints")
+def app_list_adjustment_checkpoints(
+    kind: str = "",
+    projectRoot: str = "",
+    avatarPath: str = "",
+    limit: int = 50,
+    includeDeleted: bool = False,
+) -> dict[str, Any]:
+    return AGENT_GATEWAY.list_adjustment_checkpoints(
+        {
+            "kind": kind,
+            "projectRoot": projectRoot,
+            "avatarPath": avatarPath,
+            "limit": limit,
+            "includeDeleted": includeDeleted,
+        }
+    )
+
+
+@app.post("/api/app/adjustment-checkpoints")
+def app_create_adjustment_checkpoint(request: AdjustmentCheckpointCreateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.create_adjustment_checkpoint(request.model_dump(by_alias=True, exclude_none=True))
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint could not be created.")
+    return payload
+
+
+@app.get("/api/app/adjustment-checkpoints/selection")
+def app_get_selected_adjustment_checkpoints(kind: str = "", compareGroup: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.get_selected_adjustment_checkpoints({"kind": kind, "compareGroup": compareGroup})
+
+
+@app.get("/api/app/adjustment-checkpoints/{entry_id}")
+def app_get_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.get_adjustment_checkpoint(entry_id)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
+    return payload
+
+
+@app.put("/api/app/adjustment-checkpoints/{entry_id}")
+def app_update_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointUpdateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.update_adjustment_checkpoint(
+            entry_id,
+            request.model_dump(by_alias=True, exclude_none=True),
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
+    return payload
+
+
+@app.delete("/api/app/adjustment-checkpoints/{entry_id}")
+def app_delete_adjustment_checkpoint(entry_id: str, hardDelete: bool = False) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.delete_adjustment_checkpoint(entry_id, {"hardDelete": hardDelete})
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
+    return payload
+
+
+@app.post("/api/app/adjustment-checkpoints/{entry_id}/select")
+def app_select_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointSelectRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.select_adjustment_checkpoint(
+            entry_id,
+            request.model_dump(by_alias=True, exclude_none=True),
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
+    return payload
+
+
+@app.post("/api/app/adjustment-checkpoints/{entry_id}/overwrite")
+def app_overwrite_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointOverwriteRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.overwrite_adjustment_checkpoint(
+            entry_id,
+            request.model_dump(by_alias=True, exclude_none=True),
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint could not be overwritten.")
+    return payload
+
+
+@app.post("/api/app/adjustment-checkpoints/{entry_id}/apply")
+async def app_apply_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
+    preview = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    if not preview.get("ok"):
+        raise HTTPException(status_code=400, detail=preview.get("error") or "Adjustment checkpoint is not restorable.")
+    checkpoint = ensure_dict(preview.get("checkpoint"))
+    checkpoint_id = str(checkpoint.get("id") or "")
+    arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    if checkpoint.get("projectRoot"):
+        arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_restore_checkpoint",
+                "arguments": arguments,
+                "reason": "Apply a selected high-frequency face/shader adjustment checkpoint for A/B comparison.",
+                "preview": preview,
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/adjustment-checkpoints/{entry_id}/preview")
+def app_preview_adjustment_checkpoint_restore(entry_id: str) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint is not restorable.")
+    return payload
+
+
+@app.post("/api/app/adjustment-checkpoints/{entry_id}/restore")
+async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
+    preview = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    if not preview.get("ok"):
+        raise HTTPException(status_code=400, detail=preview.get("error") or "Adjustment checkpoint is not restorable.")
+    checkpoint = ensure_dict(preview.get("checkpoint"))
+    checkpoint_id = str(checkpoint.get("id") or "")
+    arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    if checkpoint.get("projectRoot"):
+        arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_restore_checkpoint",
+                "arguments": arguments,
+                "reason": "Restore a high-frequency face/shader adjustment checkpoint.",
                 "preview": preview,
                 "agent_name": "desktop-agent",
             }
@@ -5380,6 +5582,7 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         )
     )
     target_families = normalize_avatar_encryption_target_families(request.target_shader_families)
+    unsupported_target_families = [family for family in target_families if family not in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES]
     selected_candidates = [
         item for item in scan["targets"]
         if item.get("status") == "candidate" and item.get("shaderFamilyId") in target_families
@@ -5394,12 +5597,14 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         warnings.append("Creator-owned asset confirmation is required before any future apply/remove request.")
     if not selected_candidates:
         blocking_ids.append("shader_family.no_liltoon_or_poiyomi_candidate")
+    if unsupported_target_families:
+        blocking_ids.append("shader_family.requested_restore_adapter_missing")
     if platform["status"] != "supported":
         blocking_ids.append("platform.pc_only")
     if any(layer.get("status") in {"blocked", "research_only"} for layer in layer_plan):
         blocking_ids.append("layer.experimental_or_research_only")
 
-    plan_status = "preview_ready" if selected_candidates and platform["status"] == "supported" else "blocked"
+    plan_status = "blocked" if blocking_ids else "preview_ready"
     plan = {
         "schema": AVATAR_ENCRYPTION_SCHEMA,
         "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
@@ -5410,6 +5615,7 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         "writeBlockReason": "1.0.1 ships scan/plan/preview only; apply/remove wait for disposable prototype, shader fork review, validation, and rollback proof.",
         "avatarPath": scan.get("avatarPath") or request.avatar_path or "",
         "targetShaderFamilies": list(target_families),
+        "unsupportedTargetFamilies": unsupported_target_families,
         "priorityOrder": ["liltoon", "poiyomi", "compatibility-only"],
         "selectedCandidateCount": len(selected_candidates),
         "selectedCandidates": selected_candidates,
@@ -5422,6 +5628,11 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
             "blockingIds": blocking_ids,
             "warnings": warnings,
         },
+        "ownershipGate": {
+            "status": "confirmed" if request.confirm_creator_owned_assets else "required_before_write",
+            "confirmed": bool(request.confirm_creator_owned_assets),
+            "requiredBeforeWrite": True,
+        },
         "proofRequirements": avatar_encryption_proof_requirements(),
         "futureRequestTools": {
             "liltoonApplyRequest": "vrcforge_avatar_encryption_liltoon_apply_request",
@@ -5429,6 +5640,11 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
             "removeRequest": "vrcforge_avatar_encryption_remove_request",
             "status": "not_registered_in_1.0.1",
         },
+        "futureCapabilities": [
+            {"id": "liltoon.apply_request", "tool": "vrcforge_avatar_encryption_liltoon_apply_request", "registered": False},
+            {"id": "poiyomi.apply_request", "tool": "vrcforge_avatar_encryption_poiyomi_apply_request", "registered": False},
+            {"id": "remove.restore_originals", "tool": "vrcforge_avatar_encryption_remove_request", "registered": False},
+        ],
         "nextSteps": [
             "Run this preview on a disposable avatar before any shader fork or mesh copy.",
             "Prototype lilToon restore include first with position + UV obfuscation only.",
@@ -5443,11 +5659,18 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
     plan_payload = request.plan if request.plan else plan_avatar_encryption_sync(request).get("plan")
     plan = ensure_dict(plan_payload)
     candidates = ensure_list_payload(plan.get("selectedCandidates") or [], "avatar encryption selected candidates")
+    eligible_candidates, blocked_candidates = filter_avatar_encryption_preview_candidates(candidates)
     write_targets = [
         {
+            "materialId": item.get("materialId") or "",
+            "rendererId": item.get("rendererId") or "",
             "rendererPath": item.get("rendererPath") or "",
+            "slotIndex": item.get("slotIndex", 0),
             "materialName": item.get("materialName") or "",
             "shaderFamily": item.get("shaderFamily") or "",
+            "shaderFamilyId": normalize_avatar_encryption_shader_family(item.get("shaderFamilyId") or item.get("shaderFamily")),
+            "adapterId": normalize_avatar_encryption_shader_family(item.get("shaderFamilyId") or item.get("shaderFamily")),
+            "targetResolutionStatus": "resolved" if item.get("rendererPath") and item.get("materialId") else "needs_resolution",
             "wouldCreate": [
                 "encrypted mesh copy under Assets/VRCForgeGenerated/AvatarEncryption",
                 "material copy remapped to a reviewed restore shader fork",
@@ -5455,7 +5678,7 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
             ],
             "wouldModifyOriginalAsset": False,
         }
-        for item in candidates
+        for item in eligible_candidates
         if isinstance(item, dict)
     ]
     return {
@@ -5471,6 +5694,7 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
         },
         "plan": plan,
         "writeTargetsPreview": write_targets,
+        "blockedTargetsPreview": blocked_candidates,
         "rollbackPolicyPreview": {
             "futureScope": ["Assets", "Packages", "ProjectSettings"],
             "requiresCheckpoint": True,
@@ -5546,6 +5770,7 @@ def build_avatar_encryption_target(material: dict[str, Any]) -> dict[str, Any]:
         "supportLevel": "first_class" if first_class else "compatibility_only",
         "status": "candidate" if first_class else "blocked",
         "recommendedAdapter": f"{family_id}_restore_adapter" if first_class else "",
+        "adapterDecision": shader_adapter_definition(family_id),
         "defaultLayers": list(AVATAR_ENCRYPTION_DEFAULT_LAYERS) if first_class else [],
         "blockers": blockers,
         "warnings": warnings,
@@ -5553,36 +5778,49 @@ def build_avatar_encryption_target(material: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_avatar_encryption_shader_family(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    compact = re.sub(r"[^a-z0-9]+", "", text)
-    if "liltoon" in compact or "lil" in compact and "toon" in compact:
-        return "liltoon"
-    if "poiyomi" in compact or "poiyomitoon" in compact:
-        return "poiyomi"
-    if "generic" in compact:
-        return "generic"
-    if "standard" in compact or "vrchatmobile" in compact:
-        return "standard"
-    return "unsupported"
+    family = normalize_shader_family_id(value)
+    return "generic" if family == "generic-semantic" else family
 
 
 def avatar_encryption_shader_family_label(family_id: str) -> str:
-    return {
-        "liltoon": "lilToon",
-        "poiyomi": "Poiyomi",
-        "generic": "Generic",
-        "standard": "Standard/Mobile",
-        "unsupported": "Unsupported",
-    }.get(family_id, family_id)
+    return "Generic" if family_id == "generic" else shader_family_label(family_id)
 
 
 def normalize_avatar_encryption_target_families(values: list[str] | None) -> tuple[str, ...]:
     families = []
-    for value in values or AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES:
+    requested_values = values if values else list(AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES)
+    for value in requested_values:
         family = normalize_avatar_encryption_shader_family(value)
-        if family in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES and family not in families:
+        if family not in families:
             families.append(family)
     return tuple(families or AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES)
+
+
+def filter_avatar_encryption_preview_candidates(candidates: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    eligible: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        family_id = normalize_avatar_encryption_shader_family(candidate.get("shaderFamilyId") or candidate.get("shaderFamily"))
+        is_candidate = candidate.get("status") == "candidate"
+        if is_candidate and family_id in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES:
+            eligible.append(candidate)
+            continue
+        blocked.append(
+            {
+                "materialId": candidate.get("materialId") or "",
+                "rendererId": candidate.get("rendererId") or "",
+                "rendererPath": candidate.get("rendererPath") or "",
+                "slotIndex": candidate.get("slotIndex", 0),
+                "materialName": candidate.get("materialName") or "",
+                "shaderFamily": candidate.get("shaderFamily") or avatar_encryption_shader_family_label(family_id),
+                "shaderFamilyId": family_id,
+                "status": "blocked",
+                "reason": "Only lilToon and Poiyomi first-class candidates may appear in writeTargetsPreview.",
+            }
+        )
+    return eligible, blocked
 
 
 def normalize_avatar_encryption_platform(value: Any) -> dict[str, Any]:

@@ -27,6 +27,7 @@ release work can be accepted or refreshed.
 | Poiyomi | First-class shader adapter | Poiyomi package/shader/tuning rollback proof | Package install/tuning/rollback remains checkpointed |
 | Generic semantic shader | Conservative fallback | Generic semantic fallback exists | Only safe common properties; unsupported shader report otherwise |
 | Avatar Encryption addon | Read-only 1.0.1 preview for lilToon and Poiyomi first | Research/scan/plan/preview tools only; no apply/remove writer registered | Generic/Standard/unknown shader families stay compatibility-only until restore adapters and rollback proof exist |
+| Face/shader adjustment timeline | 1.0.1 source-line A/B checkpoints for high-frequency tuning | API and desktop Checkpoints UI support CRUD, overwrite, A/B selection, preview, and restore-approval apply | Applies must stay on the normal checkpoint/approval/rollback chain |
 
 ## Known Conflicts
 

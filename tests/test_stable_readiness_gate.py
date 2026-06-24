@@ -55,7 +55,10 @@ def write_minimum_tree(tmp_path: Path) -> None:
     public_terms = (
         "1.0.1 Install and first run Connect Unity Provider / BYOK / local-only / no-provider "
         "Doctor First validation report First rollback Booth outfit model optimization external agents .vsk support bundle "
-        "Privacy Boundary API key Gateway token paid asset private files .vsk export"
+        "Privacy Boundary API key Gateway token paid asset private files .vsk export "
+        "Current source version: `1.0.1` Latest published stable release: `1.0.0` "
+        "Avatar Encryption / Anti-Rip addon preview read-only "
+        "No avatar-encryption apply/remove write tool is exposed yet"
     )
     for path in ("README.md", "USER_MANUAL.md", "packaging/README.md"):
         target = tmp_path / path
@@ -67,7 +70,8 @@ def write_minimum_tree(tmp_path: Path) -> None:
 
     compatibility = (
         "Unity VRChat SDK Modular Avatar NDMF VRCFury AAO LAC TTT Meshia "
-        "MA2BT-Pro Thry lilToon Poiyomi Known conflicts Known safe profiles"
+        "MA2BT-Pro Thry lilToon Poiyomi Known conflicts Known safe profiles "
+        "Avatar Encryption / Anti-Rip addon preview read-only no apply/remove writer"
     )
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -214,6 +218,23 @@ def test_stable_readiness_gate_blocks_missing_compatibility_term(tmp_path, monke
 
     assert report["ok"] is False
     assert "compatibility_matrix.exists" in report["summary"]["blockingSteps"]
+
+
+def test_stable_readiness_gate_blocks_missing_avatar_encryption_boundary(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    (tmp_path / "README.md").write_text("1.0.1 Install and first run Privacy Boundary", encoding="utf-8")
+    (tmp_path / "USER_MANUAL.md").write_text("1.0.1 API key support bundle", encoding="utf-8")
+    (tmp_path / "docs" / "COMPATIBILITY_MATRIX.md").write_text(
+        "Unity VRChat SDK Modular Avatar NDMF VRCFury AAO LAC TTT Meshia MA2BT-Pro Thry lilToon Poiyomi Known conflicts Known safe profiles",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+
+    assert report["ok"] is False
+    assert "public_docs.avatar_encryption_preview_boundary" in report["summary"]["blockingSteps"]
 
 
 def test_stable_readiness_gate_writes_report(tmp_path):

@@ -55,6 +55,13 @@ COMPATIBILITY_TERMS = (
     "Known conflicts",
     "Known safe profiles",
 )
+AVATAR_ENCRYPTION_BOUNDARY_TERMS = (
+    "Current source version: `1.0.1`",
+    "Latest published stable release: `1.0.0`",
+    "read-only",
+    "Avatar Encryption / Anti-Rip addon preview",
+    "No avatar-encryption apply/remove write tool is exposed yet",
+)
 OPTIMIZER_STATE_TERMS = (
     "missing_dependency",
     "detected",
@@ -122,6 +129,7 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     steps.extend(check_versioned_public_docs(version, stale_versions))
     steps.append(check_public_doc_terms("public_docs.golden_paths", PUBLIC_GOLDEN_PATH_TERMS, VERSIONED_PUBLIC_DOCS))
     steps.append(check_public_doc_terms("public_docs.privacy_boundary", PRIVACY_TERMS, ("README.md", "USER_MANUAL.md", ".github/ISSUE_TEMPLATE/bug_report.yml")))
+    steps.append(check_public_doc_terms("public_docs.avatar_encryption_preview_boundary", AVATAR_ENCRYPTION_BOUNDARY_TERMS, ("README.md", "USER_MANUAL.md", "docs/COMPATIBILITY_MATRIX.md")))
     steps.append(check_doc_contains(Path(args.compatibility_matrix), "compatibility_matrix.exists", COMPATIBILITY_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/OPTIMIZATION_STRATEGY.md"), "optimizer_state_machine.public", OPTIMIZER_STATE_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/RELEASE_CHECKLIST.md"), "release_checklist.stable_gate", ("smoke_stable_readiness_gate.py", "COMPATIBILITY_MATRIX", "support bundle"), required=True))

@@ -49,6 +49,7 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
   AgentApproval,
+  AdjustmentCheckpoint,
   AgentCheckpoint,
   AgentCheckpointPreview,
   AgentRuntimeResponse,
@@ -84,7 +85,11 @@ import {
   deleteSkill,
   exportSupportBundle,
   exportSkillPackage,
+  fetchAdjustmentCheckpoints,
   fetchCheckpoints,
+  applyAdjustmentCheckpoint,
+  createAdjustmentCheckpoint,
+  deleteAdjustmentCheckpoint,
   fetchBootstrap,
   fetchDiagnostics,
   fetchDoctor,
@@ -111,11 +116,13 @@ import {
   preflightSkillPackage,
   ProjectPrefs,
   previewRestoreCheckpoint,
+  previewAdjustmentCheckpoint,
   rejectAgentApproval,
   requestOptimizationApply,
   requestOutfitImport,
   requestPackageInstall,
   requestRestoreCheckpoint,
+  selectAdjustmentCheckpoint,
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
   retrySubAgent,
@@ -129,11 +136,13 @@ import {
   setAppSessionToken,
   testProviderCapability,
   trustSkillPackageSigner,
+  updateAdjustmentCheckpoint,
   updateApiConfig,
   updateDiagnostics,
   updateExternalAgentGateway,
   updatePermission,
   updateSkill,
+  overwriteAdjustmentCheckpoint,
   uninstallExternalAgentConnector,
   uninstallSkillPackage,
 } from "./lib/api";
@@ -171,6 +180,7 @@ type OptimizationActionOptions = {
 };
 
 type OptimizationActionCardItem = NonNullable<OptimizationPlannerReport["actionCards"]>[number];
+type AdjustmentCheckpointPreview = AgentCheckpointPreview & { adjustmentCheckpoint?: AdjustmentCheckpoint };
 
 function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
   if (client === "codex") {
@@ -465,10 +475,14 @@ export default function App() {
   const [exportingSupportBundle, setExportingSupportBundle] = useState(false);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
   const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
+  const [adjustmentCheckpoints, setAdjustmentCheckpoints] = useState<AdjustmentCheckpoint[]>([]);
   const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
+  const [adjustmentPreview, setAdjustmentPreview] = useState<AdjustmentCheckpointPreview | null>(null);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
   const [restoringCheckpointId, setRestoringCheckpointId] = useState("");
+  const [adjustmentBusyId, setAdjustmentBusyId] = useState("");
   const [checkpointMessage, setCheckpointMessage] = useState("");
+  const [adjustmentMessage, setAdjustmentMessage] = useState("");
   const [agentNotes, setAgentNotes] = useState("");
   const [agentNotesPath, setAgentNotesPath] = useState("");
   const [agentNotesLoaded, setAgentNotesLoaded] = useState(false);
@@ -2284,10 +2298,20 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      const payload = await fetchCheckpoints(targetEndpoint, activeProjectPath || undefined);
-      setCheckpoints(payload.checkpoints || []);
-      if (checkpointPreview?.checkpoint?.id && !payload.checkpoints?.some((item) => item.id === checkpointPreview.checkpoint?.id)) {
+      const [payload, adjustmentPayload] = await Promise.all([
+        fetchCheckpoints(targetEndpoint, activeProjectPath || undefined),
+        fetchAdjustmentCheckpoints(targetEndpoint, { projectRoot: activeProjectPath || undefined }),
+      ]);
+      const nextCheckpoints = payload.checkpoints || [];
+      const nextAdjustmentCheckpoints = adjustmentPayload.checkpoints || [];
+      setCheckpoints(nextCheckpoints);
+      setAdjustmentCheckpoints(nextAdjustmentCheckpoints);
+      if (checkpointPreview?.checkpoint?.id && !nextCheckpoints.some((item) => item.id === checkpointPreview.checkpoint?.id)) {
         setCheckpointPreview(null);
+      }
+      const adjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id;
+      if (adjustmentId && !nextAdjustmentCheckpoints.some((item) => item.id === adjustmentId)) {
+        setAdjustmentPreview(null);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2331,6 +2355,158 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setRestoringCheckpointId("");
+    }
+  }
+
+  async function createAdjustment(kind: "face" | "shader") {
+    setAdjustmentBusyId(`create:${kind}`);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await createAdjustmentCheckpoint(targetEndpoint, {
+        kind,
+        projectRoot: activeProjectPath || undefined,
+        label: kind === "face" ? "Face adjustment" : "Shader adjustment",
+      });
+      setAdjustmentMessage(`${kind === "face" ? "Face" : "Shader"} checkpoint created.`);
+      setAdjustmentPreview(payload.baseCheckpoint ? { ok: true, checkpoint: payload.baseCheckpoint, adjustmentCheckpoint: payload.checkpoint } : null);
+      await loadCheckpoints(targetEndpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function renameAdjustment(checkpoint: AdjustmentCheckpoint) {
+    const currentLabel = checkpoint.label || checkpoint.id;
+    const nextLabel = window.prompt("Checkpoint label", currentLabel);
+    if (nextLabel === null || nextLabel.trim() === currentLabel) {
+      return;
+    }
+    setAdjustmentBusyId(checkpoint.id);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      const payload = await updateAdjustmentCheckpoint(endpoint, checkpoint.id, { label: nextLabel.trim() });
+      setAdjustmentMessage("Adjustment checkpoint updated.");
+      setAdjustmentPreview((previous) =>
+        previous?.adjustmentCheckpoint?.id === checkpoint.id
+          ? { ...previous, adjustmentCheckpoint: payload.checkpoint }
+          : previous,
+      );
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function previewAdjustment(checkpointId: string) {
+    setAdjustmentBusyId(checkpointId);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      const payload = await previewAdjustmentCheckpoint(endpoint, checkpointId);
+      setAdjustmentPreview(payload);
+      if (!payload.ok) {
+        setError(payload.error || "Adjustment preview failed.");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function selectAdjustment(checkpointId: string, slot: "A" | "B") {
+    setAdjustmentBusyId(`${checkpointId}:${slot}`);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      const payload = await selectAdjustmentCheckpoint(endpoint, checkpointId, { slot });
+      setAdjustmentMessage(`Selected ${slot}.`);
+      setAdjustmentPreview((previous) =>
+        previous?.adjustmentCheckpoint?.id === checkpointId
+          ? { ...previous, adjustmentCheckpoint: payload.checkpoint }
+          : previous,
+      );
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function applyAdjustment(checkpointId: string) {
+    setAdjustmentBusyId(`apply:${checkpointId}`);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      const payload = await applyAdjustmentCheckpoint(endpoint, checkpointId);
+      if (payload.status === "pending") {
+        setAdjustmentMessage("Apply approval is pending.");
+      } else if (payload.ok) {
+        setAdjustmentMessage("Adjustment checkpoint applied.");
+      } else {
+        setAdjustmentMessage(String(payload.error || "Apply request failed."));
+      }
+      await refresh();
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function overwriteAdjustment(checkpointId: string) {
+    if (!window.confirm("Overwrite this adjustment checkpoint with the current project state?")) {
+      return;
+    }
+    setAdjustmentBusyId(`overwrite:${checkpointId}`);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      const payload = await overwriteAdjustmentCheckpoint(endpoint, checkpointId);
+      setAdjustmentMessage("Adjustment checkpoint overwritten.");
+      setAdjustmentPreview(payload.baseCheckpoint ? { ok: true, checkpoint: payload.baseCheckpoint, adjustmentCheckpoint: payload.checkpoint } : null);
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
+    }
+  }
+
+  async function removeAdjustment(checkpointId: string) {
+    if (!window.confirm("Delete this adjustment checkpoint?")) {
+      return;
+    }
+    setAdjustmentBusyId(`delete:${checkpointId}`);
+    setAdjustmentMessage("");
+    setError("");
+    try {
+      await deleteAdjustmentCheckpoint(endpoint, checkpointId);
+      setAdjustmentMessage("Adjustment checkpoint deleted.");
+      if (adjustmentPreview?.adjustmentCheckpoint?.id === checkpointId) {
+        setAdjustmentPreview(null);
+      }
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAdjustmentBusyId("");
     }
   }
 
@@ -2827,14 +3003,25 @@ export default function App() {
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
               checkpoints={checkpoints}
+              adjustmentCheckpoints={adjustmentCheckpoints}
               selectedProjectPath={activeProjectPath}
               preview={checkpointPreview}
+              adjustmentPreview={adjustmentPreview}
               loading={loadingCheckpoints}
               restoringId={restoringCheckpointId}
+              adjustmentBusyId={adjustmentBusyId}
               message={checkpointMessage}
+              adjustmentMessage={adjustmentMessage}
               onRefresh={() => void loadCheckpoints()}
               onPreview={previewCheckpoint}
               onRestore={restoreCheckpoint}
+              onCreateAdjustment={createAdjustment}
+              onPreviewAdjustment={previewAdjustment}
+              onSelectAdjustment={selectAdjustment}
+              onApplyAdjustment={applyAdjustment}
+              onOverwriteAdjustment={overwriteAdjustment}
+              onRenameAdjustment={renameAdjustment}
+              onDeleteAdjustment={removeAdjustment}
             />
           ) : activeView === "optimization" ? (
             <OptimizationWorkspace
@@ -5390,115 +5577,331 @@ function ProofMetricCard({ title, before, after, rollback }: { title: string; be
 
 function CheckpointWorkspace({
   checkpoints,
+  adjustmentCheckpoints,
   selectedProjectPath,
   preview,
+  adjustmentPreview,
   loading,
   restoringId,
+  adjustmentBusyId,
   message,
+  adjustmentMessage,
   onRefresh,
   onPreview,
   onRestore,
+  onCreateAdjustment,
+  onPreviewAdjustment,
+  onSelectAdjustment,
+  onApplyAdjustment,
+  onOverwriteAdjustment,
+  onRenameAdjustment,
+  onDeleteAdjustment,
 }: {
   checkpoints: AgentCheckpoint[];
+  adjustmentCheckpoints: AdjustmentCheckpoint[];
   selectedProjectPath: string;
   preview: AgentCheckpointPreview | null;
+  adjustmentPreview: AdjustmentCheckpointPreview | null;
   loading: boolean;
   restoringId: string;
+  adjustmentBusyId: string;
   message: string;
+  adjustmentMessage: string;
   onRefresh: () => void;
   onPreview: (checkpointId: string) => void;
   onRestore: (checkpointId: string) => void;
+  onCreateAdjustment: (kind: "face" | "shader") => void;
+  onPreviewAdjustment: (checkpointId: string) => void;
+  onSelectAdjustment: (checkpointId: string, slot: "A" | "B") => void;
+  onApplyAdjustment: (checkpointId: string) => void;
+  onOverwriteAdjustment: (checkpointId: string) => void;
+  onRenameAdjustment: (checkpoint: AdjustmentCheckpoint) => void;
+  onDeleteAdjustment: (checkpointId: string) => void;
 }) {
   const selectedId = preview?.checkpoint?.id || "";
+  const selectedAdjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id || "";
   const changedFiles = preview?.changedFiles || [];
   const workingTreeStatus = preview?.workingTreeStatus || [];
+  const adjustmentChangedFiles = adjustmentPreview?.changedFiles || [];
+  const adjustmentWorkingTreeStatus = adjustmentPreview?.workingTreeStatus || [];
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
       <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
-        <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
-          <div className="mb-4 flex items-center gap-2">
-            <History className="h-4 w-4 shrink-0 text-primary" />
-            <div className="truncate text-sm font-semibold">Checkpoints</div>
-            <Badge tone="muted" className="ml-auto shrink-0">
-              {checkpoints.length}
-            </Badge>
-            <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
-              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            </Button>
-          </div>
-          {selectedProjectPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{selectedProjectPath}</div> : null}
-          <div className="max-h-[calc(100vh-220px)] space-y-2 overflow-auto pr-1">
-            {checkpoints.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-                No pre-write checkpoints yet.
-              </div>
-            ) : null}
-            {checkpoints.map((checkpoint) => (
-              <button
-                key={checkpoint.id}
-                type="button"
-                onClick={() => onPreview(checkpoint.id)}
-                className={cn(
-                  "grid w-full min-w-0 gap-1 rounded-md border px-3 py-2 text-left text-sm transition-colors",
-                  selectedId === checkpoint.id
-                    ? "border-primary bg-primary/5"
-                    : "border-border hover:border-primary/40 hover:bg-muted/60",
-                )}
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{checkpoint.id}</span>
-                  <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
-                    {checkpoint.status || (checkpoint.ok ? "ready" : "unavailable")}
-                  </Badge>
-                </div>
-                <div className="truncate text-xs text-muted-foreground">{checkpoint.targetTool || "-"}</div>
-                <div className="truncate text-xs text-muted-foreground">{formatCheckpointTime(checkpoint.createdAt)}</div>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
-          <div className="mb-5 flex items-center gap-2">
-            <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
-            <div className="truncate text-sm font-semibold">Restore Preview</div>
-            {preview ? (
-              <Badge tone={preview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-                {preview.ok ? "ready" : "blocked"}
+        <div className="grid min-w-0 gap-6">
+          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-4 flex items-center gap-2">
+              <History className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Checkpoints</div>
+              <Badge tone="muted" className="ml-auto shrink-0">
+                {checkpoints.length}
               </Badge>
-            ) : null}
-          </div>
-
-          {!preview ? (
-            <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-              Select a checkpoint to inspect the rollback.
+              <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              </Button>
             </div>
-          ) : (
-            <div className="grid gap-4">
-              <div className="grid gap-3">
-                <DataLine label="Checkpoint" value={preview.checkpoint?.id || "-"} mono />
-                <DataLine label="Target" value={preview.checkpoint?.targetTool || "-"} />
-                <DataLine label="Project" value={preview.checkpoint?.projectRoot || "-"} />
-                <DataLine label="Git ref" value={shortRef(preview.checkpoint?.checkpointRef)} mono />
-                {preview.error ? <DataLine label="Error" value={preview.error} /> : null}
-              </div>
-              <OutputBlock label="Changed files" value={changedFiles.join("\n")} />
-              <OutputBlock label="Working tree" value={workingTreeStatus.join("\n")} />
-              {message ? <div className="text-sm text-muted-foreground">{message}</div> : null}
-              <div className="flex justify-end">
-                <Button
+            {selectedProjectPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{selectedProjectPath}</div> : null}
+            <div className="max-h-[34vh] space-y-2 overflow-auto pr-1">
+              {checkpoints.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+                  No pre-write checkpoints yet.
+                </div>
+              ) : null}
+              {checkpoints.map((checkpoint) => (
+                <button
+                  key={checkpoint.id}
                   type="button"
-                  variant="danger"
-                  disabled={!preview.ok || !preview.checkpoint?.id || Boolean(restoringId)}
-                  onClick={() => preview.checkpoint?.id && onRestore(preview.checkpoint.id)}
+                  onClick={() => onPreview(checkpoint.id)}
+                  className={cn(
+                    "grid w-full min-w-0 gap-1 rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    selectedId === checkpoint.id
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/40 hover:bg-muted/60",
+                  )}
                 >
-                  {restoringId ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-                  Restore
-                </Button>
-              </div>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{checkpoint.id}</span>
+                    <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
+                      {checkpoint.status || (checkpoint.ok ? "ready" : "unavailable")}
+                    </Badge>
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">{checkpoint.targetTool || "-"}</div>
+                  <div className="truncate text-xs text-muted-foreground">{formatCheckpointTime(checkpoint.createdAt)}</div>
+                </button>
+              ))}
             </div>
-          )}
-        </section>
+          </section>
+
+          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-4 flex items-center gap-2">
+              <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Adjustment Timeline</div>
+              <Badge tone="muted" className="ml-auto shrink-0">
+                {adjustmentCheckpoints.length}
+              </Badge>
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                onClick={() => onCreateAdjustment("face")}
+                disabled={Boolean(adjustmentBusyId) || loading}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Face
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                onClick={() => onCreateAdjustment("shader")}
+                disabled={Boolean(adjustmentBusyId) || loading}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Shader
+              </Button>
+            </div>
+            <div className="max-h-[40vh] space-y-2 overflow-auto pr-1">
+              {adjustmentCheckpoints.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+                  No adjustment checkpoints yet.
+                </div>
+              ) : null}
+              {adjustmentCheckpoints.map((checkpoint) => {
+                const slots = checkpoint.selectedSlots || (checkpoint.selectionSlot ? [checkpoint.selectionSlot] : []);
+                const slotA = slots.includes("A");
+                const slotB = slots.includes("B");
+                const busy =
+                  adjustmentBusyId === checkpoint.id ||
+                  adjustmentBusyId.startsWith(`${checkpoint.id}:`) ||
+                  adjustmentBusyId.endsWith(`:${checkpoint.id}`);
+                return (
+                  <div
+                    key={checkpoint.id}
+                    className={cn(
+                      "grid min-w-0 gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                      selectedAdjustmentId === checkpoint.id ? "border-primary bg-primary/5" : "border-border",
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Badge tone={checkpoint.kind === "face" ? "default" : "muted"} className="h-6 shrink-0">
+                        {checkpoint.kind}
+                      </Badge>
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left font-medium"
+                        onClick={() => onPreviewAdjustment(checkpoint.id)}
+                      >
+                        {checkpoint.label || checkpoint.id}
+                      </button>
+                      {busy ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" /> : null}
+                    </div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{checkpoint.checkpointId || checkpoint.id}</div>
+                    <div className="flex min-w-0 flex-wrap gap-1.5">
+                      <Button
+                        type="button"
+                        variant={slotA ? "primary" : "outline"}
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onSelectAdjustment(checkpoint.id, "A")}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        A
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={slotB ? "primary" : "outline"}
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onSelectAdjustment(checkpoint.id, "B")}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        B
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onPreviewAdjustment(checkpoint.id)}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onApplyAdjustment(checkpoint.id)}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Apply
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onOverwriteAdjustment(checkpoint.id)}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        <Archive className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onRenameAdjustment(checkpoint)}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs text-destructive"
+                        onClick={() => onDeleteAdjustment(checkpoint.id)}
+                        disabled={Boolean(adjustmentBusyId)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+
+        <div className="grid min-w-0 gap-6">
+          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+            <div className="mb-5 flex items-center gap-2">
+              <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Restore Preview</div>
+              {preview ? (
+                <Badge tone={preview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
+                  {preview.ok ? "ready" : "blocked"}
+                </Badge>
+              ) : null}
+            </div>
+
+            {!preview ? (
+              <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                Select a checkpoint to inspect the rollback.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                <div className="grid gap-3">
+                  <DataLine label="Checkpoint" value={preview.checkpoint?.id || "-"} mono />
+                  <DataLine label="Target" value={preview.checkpoint?.targetTool || "-"} />
+                  <DataLine label="Project" value={preview.checkpoint?.projectRoot || "-"} />
+                  <DataLine label="Git ref" value={shortRef(preview.checkpoint?.checkpointRef)} mono />
+                  {preview.error ? <DataLine label="Error" value={preview.error} /> : null}
+                </div>
+                <OutputBlock label="Changed files" value={changedFiles.join("\n")} />
+                <OutputBlock label="Working tree" value={workingTreeStatus.join("\n")} />
+                {message ? <div className="text-sm text-muted-foreground">{message}</div> : null}
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={!preview.ok || !preview.checkpoint?.id || Boolean(restoringId)}
+                    onClick={() => preview.checkpoint?.id && onRestore(preview.checkpoint.id)}
+                  >
+                    {restoringId ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                    Restore
+                  </Button>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+            <div className="mb-5 flex items-center gap-2">
+              <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Adjustment Preview</div>
+              {adjustmentPreview ? (
+                <Badge tone={adjustmentPreview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
+                  {adjustmentPreview.ok ? "ready" : "blocked"}
+                </Badge>
+              ) : null}
+            </div>
+
+            {!adjustmentPreview ? (
+              <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                Select a face or shader checkpoint.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                <div className="grid gap-3">
+                  <DataLine label="Adjustment" value={adjustmentPreview.adjustmentCheckpoint?.label || "-"} />
+                  <DataLine label="Kind" value={adjustmentPreview.adjustmentCheckpoint?.kind || "-"} />
+                  <DataLine label="Checkpoint" value={adjustmentPreview.checkpoint?.id || "-"} mono />
+                  <DataLine label="Project" value={adjustmentPreview.checkpoint?.projectRoot || "-"} />
+                  <DataLine label="Git ref" value={shortRef(adjustmentPreview.checkpoint?.checkpointRef)} mono />
+                  {adjustmentPreview.error ? <DataLine label="Error" value={adjustmentPreview.error} /> : null}
+                </div>
+                <OutputBlock label="Changed files" value={adjustmentChangedFiles.join("\n")} />
+                <OutputBlock label="Working tree" value={adjustmentWorkingTreeStatus.join("\n")} />
+                {adjustmentMessage ? <div className="text-sm text-muted-foreground">{adjustmentMessage}</div> : null}
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={!adjustmentPreview.ok || !adjustmentPreview.adjustmentCheckpoint?.id || Boolean(adjustmentBusyId)}
+                    onClick={() =>
+                      adjustmentPreview.adjustmentCheckpoint?.id && onApplyAdjustment(adjustmentPreview.adjustmentCheckpoint.id)
+                    }
+                  >
+                    {adjustmentBusyId.startsWith("apply:") ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-4 w-4" />
+                    )}
+                    Apply
+                  </Button>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );

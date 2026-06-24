@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from shader_adapter_registry import SHADER_ADAPTER_IDS, classify_shader_adapter, shader_adapter_definition
+
 
 OPTIMIZATION_SCHEMA = "vrcforge.optimization.v1"
 OPTIMIZATION_VERSION_STAGE = "0.7.2-beta"
@@ -1925,7 +1927,7 @@ def build_shader_adapter_registry(dependency_doctor: dict[str, Any], validation:
         adapter = _classify_shader_adapter(row.get("materialName") or "", row.get("shaderName") or "")
         detected_adapters.add(adapter["adapter"])
         material_coverage.append({**row, **adapter})
-    adapters = [_shader_adapter_definition(adapter_id, detected_adapters) for adapter_id in ("liltoon", "poiyomi", "generic-semantic")]
+    adapters = [shader_adapter_definition(adapter_id, detected_adapters) for adapter_id in SHADER_ADAPTER_IDS]
     unsupported_count = sum(1 for item in material_coverage if item.get("adapter") == "unsupported")
     return {
         "readOnly": True,
@@ -2093,62 +2095,14 @@ def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _classify_shader_adapter(material_name: str, shader_name: str) -> dict[str, Any]:
-    text = f"{material_name} {shader_name}".lower()
-    if "liltoon" in text or "lil toon" in text or "lil/liltoon" in text:
-        adapter = "liltoon"
-        confidence = "high"
-    elif "poiyomi" in text or "poi toon" in text:
-        adapter = "poiyomi"
-        confidence = "high"
-    elif material_name or shader_name:
-        adapter = "generic-semantic"
-        confidence = "medium" if shader_name else "low"
-    else:
-        adapter = "unsupported"
-        confidence = "low"
-    definition = _shader_adapter_definition(adapter, {adapter})
-    return {
-        "adapter": adapter,
-        "confidence": confidence,
-        "safeSemanticProperties": definition.get("safeSemanticProperties") or [],
-        "blockedProperties": definition.get("blockedProperties") or [],
-    }
+    classification = classify_shader_adapter(material_name, shader_name, generic_fallback=True)
+    if classification.get("adapter") == "standard":
+        classification = {**classification, "adapter": "generic-semantic"}
+    return classification
 
 
 def _shader_adapter_definition(adapter_id: str, detected_adapters: set[str]) -> dict[str, Any]:
-    definitions = {
-        "liltoon": {
-            "label": "lilToon",
-            "knownPackageIds": ["jp.lilxyzw.liltoon"],
-            "safeSemanticProperties": ["main_color", "shade_color", "smoothness", "emission_strength", "rendering_mode"],
-            "blockedProperties": ["raw_property_name", "unknown_texture_slot", "render_queue_without_adapter"],
-        },
-        "poiyomi": {
-            "label": "Poiyomi",
-            "knownPackageIds": ["com.poiyomi.toon"],
-            "safeSemanticProperties": ["main_color", "emission_strength", "smoothness", "metallic", "render_queue"],
-            "blockedProperties": ["raw_property_name", "shader_feature_toggle_without_adapter", "unknown_keyword"],
-        },
-        "generic-semantic": {
-            "label": "Generic semantic",
-            "knownPackageIds": [],
-            "safeSemanticProperties": ["main_color", "smoothness", "metallic", "emission_color"],
-            "blockedProperties": ["raw_property_name", "shader_specific_keyword", "unsupported_blend_mode"],
-        },
-        "unsupported": {
-            "label": "Unsupported",
-            "knownPackageIds": [],
-            "safeSemanticProperties": [],
-            "blockedProperties": ["all_writes"],
-        },
-    }
-    base = definitions.get(adapter_id, definitions["unsupported"])
-    return {
-        "id": adapter_id,
-        **base,
-        "detectedInCurrentScan": adapter_id in detected_adapters,
-        "applyPolicy": "semantic-allowlist-only" if adapter_id != "unsupported" else "blocked",
-    }
+    return shader_adapter_definition(adapter_id, detected_adapters)
 
 
 def _profile_report_from_params(

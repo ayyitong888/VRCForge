@@ -123,6 +123,46 @@ WRAPPER_ONLY_WRITE_TARGETS = {
     "vrcforge_configure_optimizer_component",
     "vrcforge_install_vpm_package",
 }
+AVATAR_ENCRYPTION_TOOL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "vrcforge_avatar_encryption_research_report",
+        "title": "Avatar Encryption Research Report",
+        "permissionMode": "read_only",
+        "risk": "read_only",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_scan",
+        "title": "Avatar Encryption Compatibility Scan",
+        "permissionMode": "read_only",
+        "risk": "read_only",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_plan",
+        "title": "Avatar Encryption Plan",
+        "permissionMode": "preview",
+        "risk": "plan",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_preview",
+        "title": "Avatar Encryption Write Preview",
+        "permissionMode": "preview",
+        "risk": "plan",
+    },
+)
+AVATAR_ENCRYPTION_TOOL_NAMES = tuple(str(item["name"]) for item in AVATAR_ENCRYPTION_TOOL_SPECS)
+AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS = (
+    "vrcforge_avatar_encryption_liltoon_apply_request",
+    "vrcforge_avatar_encryption_poiyomi_apply_request",
+    "vrcforge_avatar_encryption_remove_request",
+)
+ADJUSTMENT_CHECKPOINT_KINDS = {"face", "shader"}
+ADJUSTMENT_CHECKPOINT_TARGETS = {
+    "vrcforge_apply_blendshapes": "face",
+    "vrcforge_run_face_tuning": "face",
+    "vrcforge_undo_blendshapes": "face",
+    "vrcforge_apply_shader_tuning": "shader",
+    "vrcforge_restore_shader_tuning": "shader",
+}
 
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
@@ -826,18 +866,8 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "outputs": ["Read-only research packet, lilToon/Poiyomi candidate scan, compatibility-only blocked families, preview plan, and rollback proof requirements."],
         "sideEffects": "none; 1.0.1 does not provide apply/remove writes",
         "backupRestore": "not required for preview; future apply/remove must use approval, checkpoint, validation, visual proof, and rollback",
-        "allowedTools": [
-            "vrcforge_avatar_encryption_research_report",
-            "vrcforge_avatar_encryption_scan",
-            "vrcforge_avatar_encryption_plan",
-            "vrcforge_avatar_encryption_preview",
-            "vrcforge_scan_materials",
-        ],
-        "disallowedTools": [
-            "vrcforge_avatar_encryption_liltoon_apply_request",
-            "vrcforge_avatar_encryption_poiyomi_apply_request",
-            "vrcforge_avatar_encryption_remove_request",
-        ],
+        "allowedTools": [*AVATAR_ENCRYPTION_TOOL_NAMES, "vrcforge_scan_materials"],
+        "disallowedTools": list(AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS),
         "entrypointTool": "vrcforge_avatar_encryption_plan",
         "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "preview-only", "liltoon", "poiyomi"],
     },
@@ -2106,6 +2136,203 @@ class AgentGateway:
         entries = entries[:limit]
         return {"ok": True, "checkpoints": entries, "count": len(entries)}
 
+    def list_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        limit = max(1, min(int(params.get("limit") or 50), 500))
+        include_deleted = bool(params.get("includeDeleted") or params.get("include_deleted"))
+        kind_filter = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=False)
+        raw_project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
+        project_filter = normalize_filesystem_path(raw_project_filter) if raw_project_filter else ""
+        avatar_filter = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+        entries = self._read_adjustment_checkpoint_entries()
+        if not include_deleted:
+            entries = [entry for entry in entries if not entry.get("deletedAt")]
+        if kind_filter:
+            entries = [entry for entry in entries if entry.get("kind") == kind_filter]
+        if project_filter:
+            entries = [
+                entry for entry in entries
+                if normalize_filesystem_path(str(entry.get("projectRoot") or "")) == project_filter
+            ]
+        if avatar_filter:
+            entries = [entry for entry in entries if str(entry.get("avatarPath") or "") == avatar_filter]
+        entries = entries[:limit]
+        return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoints": entries, "count": len(entries)}
+
+    def get_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
+        entry = self._load_adjustment_checkpoint(entry_id)
+        if not entry:
+            return {"ok": False, "error": "adjustment checkpoint was not found."}
+        return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": entry}
+
+    def create_adjustment_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        kind = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=True)
+        checkpoint = self._resolve_or_create_adjustment_base_checkpoint(params)
+        if not checkpoint.get("ok"):
+            return checkpoint
+        entry = self._build_adjustment_checkpoint_entry(params, checkpoint, kind=kind, existing={})
+        entries = self._read_adjustment_checkpoint_entries()
+        requested_id = str(params.get("id") or "").strip()
+        if requested_id and any(item.get("id") == requested_id for item in entries) and not bool(params.get("overwrite")):
+            return {"ok": False, "error": "adjustment checkpoint id already exists; pass overwrite=true or use overwrite endpoint."}
+        if requested_id:
+            entry["id"] = requested_id
+            entries = [item for item in entries if item.get("id") != requested_id]
+        entries.insert(0, entry)
+        self._write_adjustment_checkpoint_entries(entries)
+        self.append_audit({"event": "adjustment_checkpoint_created", "checkpoint": entry})
+        return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": entry, "baseCheckpoint": checkpoint}
+
+    def update_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        entries = self._read_adjustment_checkpoint_entries()
+        for index, entry in enumerate(entries):
+            if entry.get("id") != entry_id:
+                continue
+            updated = dict(entry)
+            self._apply_adjustment_checkpoint_metadata(updated, params)
+            if "kind" in params:
+                updated["kind"] = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=True)
+            if "checkpointId" in params or "checkpoint_id" in params:
+                checkpoint = self._load_checkpoint(str(params.get("checkpointId") or params.get("checkpoint_id") or "").strip())
+                if not checkpoint:
+                    return {"ok": False, "error": "checkpointId was not found."}
+                updated["checkpointId"] = str(checkpoint.get("id") or "")
+                updated["targetTool"] = str(checkpoint.get("targetTool") or updated.get("targetTool") or "")
+            updated["updatedAt"] = utc_now_iso()
+            entries[index] = updated
+            self._write_adjustment_checkpoint_entries(entries)
+            self.append_audit({"event": "adjustment_checkpoint_updated", "checkpoint": updated})
+            return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": updated}
+        return {"ok": False, "error": "adjustment checkpoint was not found."}
+
+    def delete_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        hard_delete = bool(params.get("hardDelete") or params.get("hard_delete"))
+        entries = self._read_adjustment_checkpoint_entries()
+        for index, entry in enumerate(entries):
+            if entry.get("id") != entry_id:
+                continue
+            deleted = dict(entry)
+            if hard_delete:
+                entries.pop(index)
+            else:
+                deleted["deletedAt"] = utc_now_iso()
+                deleted["updatedAt"] = deleted["deletedAt"]
+                entries[index] = deleted
+            self._write_adjustment_checkpoint_entries(entries)
+            self.append_audit({"event": "adjustment_checkpoint_deleted", "checkpoint": deleted, "hardDelete": hard_delete})
+            return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": deleted, "hardDelete": hard_delete}
+        return {"ok": False, "error": "adjustment checkpoint was not found."}
+
+    def select_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        entries = self._read_adjustment_checkpoint_entries()
+        selected_entry: dict[str, Any] | None = None
+        slot = self._normalize_adjustment_selection_slot(params.get("slot") or params.get("compareSlot") or params.get("compare_slot"))
+        for entry in entries:
+            if entry.get("id") == entry_id and not entry.get("deletedAt"):
+                selected_entry = dict(entry)
+                break
+        if not selected_entry:
+            return {"ok": False, "error": "adjustment checkpoint was not found."}
+        kind = str(selected_entry.get("kind") or "")
+        compare_group = str(params.get("compareGroup") or params.get("compare_group") or selected_entry.get("compareGroup") or kind)
+        now = utc_now_iso()
+        updated_entries: list[dict[str, Any]] = []
+        for entry in entries:
+            current = dict(entry)
+            if current.get("kind") == kind and str(current.get("compareGroup") or kind) == compare_group:
+                selected_slots = [
+                    item for item in ensure_string_list(current.get("selectedSlots"))
+                    if item.upper() != slot
+                ]
+                if current.get("id") == entry_id:
+                    selected_slots.append(slot)
+                    current["selectedSlots"] = selected_slots
+                    current["selectedAt"] = now
+                    current["selected"] = True
+                    current["selectionSlot"] = slot
+                else:
+                    current["selectedSlots"] = selected_slots
+                    if not selected_slots:
+                        current.pop("selectedAt", None)
+                        current["selected"] = False
+                        current.pop("selectionSlot", None)
+            updated_entries.append(current)
+        self._write_adjustment_checkpoint_entries(updated_entries)
+        selected = self._load_adjustment_checkpoint(entry_id) or selected_entry
+        self.append_audit({"event": "adjustment_checkpoint_selected", "checkpoint": selected, "slot": slot})
+        return {
+            "ok": True,
+            "schema": "vrcforge.adjustment_checkpoint_timeline.v1",
+            "checkpoint": selected,
+            "selection": {"kind": kind, "compareGroup": compare_group, "slot": slot, "checkpointId": selected.get("checkpointId")},
+        }
+
+    def overwrite_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        entries = self._read_adjustment_checkpoint_entries()
+        for index, entry in enumerate(entries):
+            if entry.get("id") != entry_id:
+                continue
+            checkpoint = self._resolve_or_create_adjustment_base_checkpoint({**entry, **params})
+            if not checkpoint.get("ok"):
+                return checkpoint
+            updated = self._build_adjustment_checkpoint_entry(
+                params,
+                checkpoint,
+                kind=self._normalize_adjustment_checkpoint_kind(params.get("kind") or entry.get("kind"), required=True),
+                existing=entry,
+            )
+            updated["id"] = entry_id
+            revisions = ensure_list(entry.get("revisions"))
+            revisions.append(
+                {
+                    "checkpointId": entry.get("checkpointId"),
+                    "overwrittenAt": utc_now_iso(),
+                    "label": entry.get("label"),
+                }
+            )
+            updated["revisions"] = revisions
+            updated["overwriteCount"] = len(revisions)
+            entries[index] = updated
+            self._write_adjustment_checkpoint_entries(entries)
+            self.append_audit({"event": "adjustment_checkpoint_overwritten", "checkpoint": updated})
+            return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": updated, "baseCheckpoint": checkpoint}
+        return {"ok": False, "error": "adjustment checkpoint was not found."}
+
+    def preview_restore_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
+        entry = self._load_adjustment_checkpoint(entry_id)
+        if not entry or entry.get("deletedAt"):
+            return {"ok": False, "error": "adjustment checkpoint was not found."}
+        preview = self.preview_restore_checkpoint({"checkpointId": str(entry.get("checkpointId") or "")})
+        preview["adjustmentCheckpoint"] = entry
+        return preview
+
+    def get_selected_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        kind_filter = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=False)
+        compare_group = str(params.get("compareGroup") or params.get("compare_group") or "").strip()
+        entries = [
+            entry for entry in self._read_adjustment_checkpoint_entries()
+            if not entry.get("deletedAt") and ensure_string_list(entry.get("selectedSlots"))
+        ]
+        if kind_filter:
+            entries = [entry for entry in entries if entry.get("kind") == kind_filter]
+        if compare_group:
+            entries = [entry for entry in entries if str(entry.get("compareGroup") or entry.get("kind") or "") == compare_group]
+        selections: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            key_base = f"{entry.get('kind')}:{entry.get('compareGroup') or entry.get('kind')}"
+            for slot in ensure_string_list(entry.get("selectedSlots")):
+                selections[f"{key_base}:{slot.upper()}"] = entry
+        return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "selections": selections, "count": len(selections)}
+
+    def _normalize_adjustment_selection_slot(self, value: Any) -> str:
+        slot = str(value or "current").strip().upper()
+        if slot in {"A", "B", "CURRENT"}:
+            return slot
+        raise AgentGatewayError("selection slot must be A, B, or current.", status_code=400)
+
     def preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
@@ -3113,6 +3340,7 @@ class AgentGateway:
         self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._maybe_record_adjustment_checkpoint(record)
 
     def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
         if not self.checkpoint_log_path.exists():
@@ -3134,6 +3362,159 @@ class AgentGateway:
             if entry.get("id") == checkpoint_id:
                 return entry
         return None
+
+    def _read_adjustment_checkpoint_entries(self) -> list[dict[str, Any]]:
+        if not self.adjustment_checkpoint_log_path.exists():
+            return []
+        try:
+            payload = json.loads(self.adjustment_checkpoint_log_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        raw_entries = payload.get("checkpoints") if isinstance(payload, dict) else []
+        if not isinstance(raw_entries, list):
+            return []
+        entries = [item for item in raw_entries if isinstance(item, dict)]
+        return sorted(entries, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+
+    def _write_adjustment_checkpoint_entries(self, entries: list[dict[str, Any]]) -> None:
+        self.adjustment_checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "vrcforge.adjustment_checkpoint_timeline.v1",
+            "updatedAt": utc_now_iso(),
+            "checkpoints": entries,
+        }
+        self.adjustment_checkpoint_log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any] | None:
+        if not entry_id:
+            return None
+        for entry in self._read_adjustment_checkpoint_entries():
+            if entry.get("id") == entry_id:
+                return entry
+        return None
+
+    def _normalize_adjustment_checkpoint_kind(self, value: Any, *, required: bool) -> str:
+        kind = str(value or "").strip().lower().replace("_", "-")
+        if kind in {"blendshape", "face-tuning", "facial", "face"}:
+            return "face"
+        if kind in {"material", "shader-material", "shader-tuning", "shader"}:
+            return "shader"
+        if required:
+            raise AgentGatewayError("kind must be one of: face, shader.", status_code=400)
+        return ""
+
+    def _resolve_or_create_adjustment_base_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(params.get("checkpointId") or params.get("checkpoint_id") or "").strip()
+        if checkpoint_id:
+            checkpoint = self._load_checkpoint(checkpoint_id)
+            if not checkpoint:
+                return {"ok": False, "error": "checkpointId was not found."}
+            return checkpoint
+        target_tool = str(params.get("targetTool") or params.get("target_tool") or "vrcforge_manual_adjustment_checkpoint")
+        if target_tool == "vrcforge_restore_checkpoint":
+            return {"ok": False, "error": "restore checkpoints cannot be used as adjustment snapshots."}
+        fake_approval = {"id": str(params.get("approvalId") or ""), "targetTool": target_tool}
+        arguments = {
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or "").strip(),
+            "avatarPath": str(params.get("avatarPath") or params.get("avatar_path") or "").strip(),
+        }
+        return self._create_pre_write_checkpoint(fake_approval, arguments) or {"ok": False, "error": "checkpoint creation was skipped."}
+
+    def _build_adjustment_checkpoint_entry(
+        self,
+        params: dict[str, Any],
+        checkpoint: dict[str, Any],
+        *,
+        kind: str,
+        existing: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        entry = {
+            "id": existing.get("id") or f"adj_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
+            "schema": "vrcforge.adjustment_checkpoint.v1",
+            "kind": kind,
+            "createdAt": existing.get("createdAt") or now,
+            "updatedAt": now,
+            "checkpointId": str(checkpoint.get("id") or ""),
+            "targetTool": str(checkpoint.get("targetTool") or params.get("targetTool") or params.get("target_tool") or ""),
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or checkpoint.get("projectRoot") or existing.get("projectRoot") or ""),
+            "avatarPath": str(params.get("avatarPath") or params.get("avatar_path") or existing.get("avatarPath") or ""),
+            "label": str(params.get("label") or existing.get("label") or self._default_adjustment_checkpoint_label(kind, checkpoint)),
+            "description": str(params.get("description") if "description" in params else existing.get("description") or ""),
+            "tags": self._normalize_tags(params.get("tags") if "tags" in params else existing.get("tags")),
+            "compareGroup": str(params.get("compareGroup") or params.get("compare_group") or existing.get("compareGroup") or kind),
+            "source": str(params.get("source") or existing.get("source") or "manual"),
+            "checkpoint": {
+                "id": checkpoint.get("id"),
+                "status": checkpoint.get("status"),
+                "ok": checkpoint.get("ok"),
+                "strategy": checkpoint.get("strategy"),
+                "createdAt": checkpoint.get("createdAt"),
+                "targetTool": checkpoint.get("targetTool"),
+            },
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "manualCrud": {"create": True, "read": True, "update": True, "delete": True, "overwrite": True},
+        }
+        if existing.get("revisions"):
+            entry["revisions"] = ensure_list(existing.get("revisions"))
+            entry["overwriteCount"] = int(existing.get("overwriteCount") or len(entry["revisions"]))
+        return entry
+
+    def _apply_adjustment_checkpoint_metadata(self, entry: dict[str, Any], params: dict[str, Any]) -> None:
+        for source_key, target_key in (
+            ("label", "label"),
+            ("description", "description"),
+            ("avatarPath", "avatarPath"),
+            ("avatar_path", "avatarPath"),
+            ("projectRoot", "projectRoot"),
+            ("project_root", "projectRoot"),
+            ("compareGroup", "compareGroup"),
+            ("compare_group", "compareGroup"),
+        ):
+            if source_key in params:
+                entry[target_key] = str(params.get(source_key) or "")
+        if "tags" in params:
+            entry["tags"] = self._normalize_tags(params.get("tags"))
+
+    def _normalize_tags(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            raw = value
+        elif isinstance(value, str):
+            raw = re.split(r"[,;\s]+", value)
+        else:
+            raw = []
+        tags: list[str] = []
+        for item in raw:
+            tag = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(item or "").strip()).strip("-")
+            if tag and tag not in tags:
+                tags.append(tag[:48])
+        return tags[:24]
+
+    def _default_adjustment_checkpoint_label(self, kind: str, checkpoint: dict[str, Any]) -> str:
+        target_tool = str(checkpoint.get("targetTool") or "")
+        prefix = "Face" if kind == "face" else "Shader"
+        if target_tool:
+            return f"{prefix} checkpoint before {target_tool}"
+        return f"{prefix} checkpoint"
+
+    def _maybe_record_adjustment_checkpoint(self, record: dict[str, Any]) -> None:
+        target_tool = str(record.get("targetTool") or "")
+        kind = ADJUSTMENT_CHECKPOINT_TARGETS.get(target_tool)
+        if not kind or not record.get("ok") or not record.get("id"):
+            return
+        entries = self._read_adjustment_checkpoint_entries()
+        checkpoint_id = str(record.get("id") or "")
+        if any(entry.get("checkpointId") == checkpoint_id for entry in entries):
+            return
+        entry = self._build_adjustment_checkpoint_entry(
+            {"source": "automatic", "projectRoot": record.get("projectRoot") or ""},
+            record,
+            kind=kind,
+            existing={},
+        )
+        entry["source"] = "automatic"
+        entries.insert(0, entry)
+        self._write_adjustment_checkpoint_entries(entries)
 
     def _checkpoint_pathspecs(self, git_root: Path, project_root: Path) -> list[str]:
         try:
@@ -3351,6 +3732,10 @@ class AgentGateway:
     @property
     def checkpoint_log_path(self) -> Path:
         return self.audit_dir / "checkpoints.jsonl"
+
+    @property
+    def adjustment_checkpoint_log_path(self) -> Path:
+        return self.audit_dir / "adjustment-checkpoints.json"
 
     @property
     def checkpoint_store_dir(self) -> Path:
@@ -4710,10 +5095,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_optimization_validation_delta",
         *OPTIMIZATION_GATEWAY_TOOL_NAMES,
         *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
-        "vrcforge_avatar_encryption_research_report",
-        "vrcforge_avatar_encryption_scan",
-        "vrcforge_avatar_encryption_plan",
-        "vrcforge_avatar_encryption_preview",
+        *AVATAR_ENCRYPTION_TOOL_NAMES,
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",

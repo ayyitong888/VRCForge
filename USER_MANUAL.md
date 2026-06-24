@@ -53,6 +53,7 @@ apply/remove writes yet.
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
+| Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | 1.0.1 source line, approval/checkpoint required |
 | External agent connector templates and smoke | HTTP + stdio MCP snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
 | `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
@@ -164,6 +165,14 @@ blocked reason before it can be treated as stable.
 4. Request restore, approve it, then rerun validation.
 5. Treat missing checkpoint ids, failed restore, or residue after restore as a
    release blocker for that workflow.
+
+### Face/Shader A/B Adjustments
+
+1. Open Checkpoints and use the Adjustment Timeline for frequent face or shader tuning snapshots.
+2. Face and shader writes are indexed automatically; use Face or Shader to create a manual current-state snapshot before experimenting.
+3. Rename or delete entries as needed, or overwrite an entry with the current project state.
+4. Select two entries as A and B, preview either entry, then Apply the one you want to test through the same restore approval path.
+5. After applying an adjustment checkpoint, rerun validation or visual review before continuing.
 
 ### Booth Outfit Import
 

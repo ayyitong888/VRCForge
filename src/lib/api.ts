@@ -187,6 +187,29 @@ export type AgentCheckpointPreview = {
   error?: string;
 };
 
+export type AdjustmentCheckpoint = {
+  id: string;
+  schema?: string;
+  kind: "face" | "shader";
+  label?: string;
+  description?: string;
+  checkpointId?: string;
+  targetTool?: string;
+  projectRoot?: string;
+  avatarPath?: string;
+  tags?: string[];
+  compareGroup?: string;
+  selected?: boolean;
+  selectedAt?: string;
+  selectedSlots?: string[];
+  selectionSlot?: string;
+  deletedAt?: string;
+  overwriteCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  checkpoint?: Partial<AgentCheckpoint>;
+};
+
 export type AgentApprovalExecution = {
   status?: string;
   result?: AgentShellResult | Record<string, unknown>;
@@ -1577,6 +1600,95 @@ export async function requestRestoreCheckpoint(
   checkpointId: string,
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
   return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/restore`, {
+    method: "POST",
+  });
+}
+
+export async function fetchAdjustmentCheckpoints(
+  endpoint: string,
+  options: { kind?: "face" | "shader"; projectRoot?: string; avatarPath?: string; includeDeleted?: boolean } = {},
+): Promise<{ ok: boolean; checkpoints: AdjustmentCheckpoint[]; count: number }> {
+  const params = new URLSearchParams();
+  if (options.kind) params.set("kind", options.kind);
+  if (options.projectRoot) params.set("projectRoot", options.projectRoot);
+  if (options.avatarPath) params.set("avatarPath", options.avatarPath);
+  if (options.includeDeleted) params.set("includeDeleted", "true");
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints${suffix}`);
+}
+
+export async function createAdjustmentCheckpoint(
+  endpoint: string,
+  body: Partial<AdjustmentCheckpoint> & { kind: "face" | "shader"; overwrite?: boolean },
+): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; baseCheckpoint?: AgentCheckpoint }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+  body: Partial<AdjustmentCheckpoint>,
+): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+  hardDelete = false,
+): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; hardDelete: boolean }> {
+  const suffix = hardDelete ? "?hardDelete=true" : "";
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}${suffix}`, {
+    method: "DELETE",
+  });
+}
+
+export async function overwriteAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+  body: Partial<AdjustmentCheckpoint> = {},
+): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; baseCheckpoint?: AgentCheckpoint }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/overwrite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function selectAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+  body: { slot?: "A" | "B" | "current"; compareGroup?: string } = {},
+): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; selection: Record<string, unknown> }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function applyAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; error?: string }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/apply`, {
+    method: "POST",
+  });
+}
+
+export async function previewAdjustmentCheckpoint(
+  endpoint: string,
+  checkpointId: string,
+): Promise<AgentCheckpointPreview & { adjustmentCheckpoint?: AdjustmentCheckpoint }> {
+  return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/preview`, {
     method: "POST",
   });
 }

@@ -3051,6 +3051,116 @@ class DashboardServerTests(unittest.TestCase):
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
                 dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
 
+    def test_adjustment_checkpoint_timeline_supports_crud_select_apply_and_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "face.txt").write_text("current", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
+            try:
+                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root: {"ok": True}
+                with TestClient(dashboard_server.app) as client:
+                    created = client.post(
+                        "/api/app/adjustment-checkpoints",
+                        json={
+                            "kind": "face",
+                            "projectRoot": str(project),
+                            "avatarPath": "Scene/HeroAvatar",
+                            "label": "Face A",
+                            "tags": ["nose", "smile"],
+                        },
+                    ).json()
+                    entry_id = created["checkpoint"]["id"]
+
+                    listed = client.get("/api/app/adjustment-checkpoints", params={"kind": "face"}).json()
+                    fetched = client.get(f"/api/app/adjustment-checkpoints/{entry_id}").json()
+                    updated = client.put(
+                        f"/api/app/adjustment-checkpoints/{entry_id}",
+                        json={"label": "Face A tuned", "compareGroup": "smile-test"},
+                    ).json()
+                    selected = client.post(
+                        f"/api/app/adjustment-checkpoints/{entry_id}/select",
+                        json={"slot": "A", "compareGroup": "smile-test"},
+                    ).json()
+                    selections = client.get(
+                        "/api/app/adjustment-checkpoints/selection",
+                        params={"kind": "face", "compareGroup": "smile-test"},
+                    ).json()
+
+                    (project / "Assets" / "face.txt").write_text("variant b", encoding="utf-8")
+                    overwritten = client.post(
+                        f"/api/app/adjustment-checkpoints/{entry_id}/overwrite",
+                        json={"label": "Face B", "projectRoot": str(project), "compareGroup": "smile-test"},
+                    ).json()
+                    preview = client.post(f"/api/app/adjustment-checkpoints/{entry_id}/preview").json()
+                    apply_request = client.post(f"/api/app/adjustment-checkpoints/{entry_id}/apply").json()
+                    deleted = client.delete(f"/api/app/adjustment-checkpoints/{entry_id}").json()
+                    listed_after_delete = client.get("/api/app/adjustment-checkpoints", params={"kind": "face"}).json()
+                    listed_with_deleted = client.get(
+                        "/api/app/adjustment-checkpoints",
+                        params={"kind": "face", "includeDeleted": "true"},
+                    ).json()
+
+                self.assertTrue(created["ok"])
+                self.assertEqual(created["checkpoint"]["label"], "Face A")
+                self.assertTrue(created["checkpoint"]["checkpointId"])
+                self.assertEqual(listed["count"], 1)
+                self.assertEqual(fetched["checkpoint"]["id"], entry_id)
+                self.assertEqual(updated["checkpoint"]["label"], "Face A tuned")
+                self.assertEqual(selected["selection"]["slot"], "A")
+                self.assertIn("face:smile-test:A", selections["selections"])
+                self.assertEqual(overwritten["checkpoint"]["label"], "Face B")
+                self.assertEqual(overwritten["checkpoint"]["overwriteCount"], 1)
+                self.assertTrue(preview["ok"])
+                self.assertEqual(apply_request["approval"]["targetTool"], "vrcforge_restore_checkpoint")
+                self.assertTrue(deleted["checkpoint"]["deletedAt"])
+                self.assertEqual(listed_after_delete["count"], 0)
+                self.assertEqual(listed_with_deleted["count"], 1)
+            finally:
+                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
+
+    def test_face_shader_checkpoint_records_auto_adjustment_timeline_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = AgentGateway(Path(tmp) / "config" / "agent_gateway.json", Path(tmp) / "audit")
+
+            gateway._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
+                {
+                    "id": "ckpt_face_auto",
+                    "createdAt": "2026-06-24T00:00:00+00:00",
+                    "ok": True,
+                    "status": "ready",
+                    "targetTool": "vrcforge_run_face_tuning",
+                    "projectRoot": "D:/AvatarProject",
+                }
+            )
+            gateway._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
+                {
+                    "id": "ckpt_shader_auto",
+                    "createdAt": "2026-06-24T00:00:01+00:00",
+                    "ok": True,
+                    "status": "ready",
+                    "targetTool": "vrcforge_apply_shader_tuning",
+                    "projectRoot": "D:/AvatarProject",
+                }
+            )
+
+            face = gateway.list_adjustment_checkpoints({"kind": "face"})
+            shader = gateway.list_adjustment_checkpoints({"kind": "shader"})
+
+            self.assertEqual(face["count"], 1)
+            self.assertEqual(face["checkpoints"][0]["checkpointId"], "ckpt_face_auto")
+            self.assertEqual(face["checkpoints"][0]["source"], "automatic")
+            self.assertEqual(shader["count"], 1)
+            self.assertEqual(shader["checkpoints"][0]["checkpointId"], "ckpt_shader_auto")
+
     def test_add_outfit_workflow_registered_in_gateway(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
