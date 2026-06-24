@@ -152,11 +152,11 @@ a system Python installation. Generated client config should not let Codex or
 other MCP clients launch the desktop app implicitly; VRCForge should already be
 running.
 
-0.9 public-support smoke should also verify that Doctor can export a support
-bundle and that the GitHub issue template asks users to upload or paste that
-artifact manually. The bundle must not be auto-attached to issues.
+Stable public-support smoke should also verify that Doctor can export a
+support bundle and that the GitHub issue template asks users to upload or
+paste that artifact manually. The bundle must not be auto-attached to issues.
 
-Before treating a release candidate as 1.0-ready, run the stable-readiness gate:
+Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
 python scripts\smoke_stable_readiness_gate.py --version 1.0.0

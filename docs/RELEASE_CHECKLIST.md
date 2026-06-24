@@ -11,7 +11,7 @@ Before publishing a release package:
 * [ ] Ensure third-party dependencies and their licenses are documented.
 * [ ] Run `python scripts\smoke_stable_readiness_gate.py --version <VERSION>`
       and resolve any public-doc or COMPATIBILITY_MATRIX blocker before
-      treating a release candidate as 1.0-ready. This includes the Doctor
+      publishing a stable release or stable refresh. This includes the Doctor
       support bundle flow.
 * [ ] Run `packaging/check_third_party_licenses.ps1` and stop the release if any
       bundled component fails its license gate.

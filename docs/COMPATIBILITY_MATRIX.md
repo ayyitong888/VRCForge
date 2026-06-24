@@ -1,9 +1,10 @@
 # VRCForge Compatibility Matrix
 
-This matrix is the public compatibility checklist for 1.0 stable readiness. It
+This matrix is the public compatibility checklist for the 1.0.0 public stable
+release and future stable refreshes. It
 does not claim that every avatar, outfit, or shader stack is supported. It
 records the components VRCForge must detect, report, and gate before stable
-release work can be accepted.
+release work can be accepted or refreshed.
 
 ## Stable Compatibility Targets
 
@@ -61,7 +62,8 @@ release work can be accepted.
 
 ## 1.0 Evidence Rule
 
-Before VRCForge is treated as public stable, every stable row above needs either
-fresh evidence in the Golden Path Matrix / proof matrix or an explicit
-not-run/blocked reason in release evidence. Experimental rows must stay labeled
-as Experimental or Advanced and must not become default one-click behavior.
+Before a future stable release or stable refresh is published, every stable row
+above needs either fresh evidence in the Golden Path Matrix / proof matrix or
+an explicit not-run/blocked reason in release evidence. Experimental rows must
+stay labeled as Experimental or Advanced and must not become default one-click
+behavior.

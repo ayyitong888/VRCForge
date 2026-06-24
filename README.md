@@ -15,7 +15,7 @@ VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri 
 
 VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 桌面 Agent 工作区、本地 FastAPI 运行时和 Unity Editor 工具，让用户可以在明确审查后应用或恢复 Avatar 改动。
 
-> WIP / 开发中
+> Public stable release / 公开稳定版
 >
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
@@ -175,7 +175,7 @@ Model optimization integration strategy and release sequencing are documented in
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
-| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.9.5 RC line; 1.0 readiness tracks compatibility and proof evidence |
+| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 1.0 stable line; conservative writes remain approval/checkpoint/rollback gated |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
