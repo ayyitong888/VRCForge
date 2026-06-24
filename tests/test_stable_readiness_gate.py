@@ -21,7 +21,7 @@ def load_gate():
 
 def make_args(tmp_path: Path, **overrides: object) -> Namespace:
     values = {
-        "version": "0.9.5-rc",
+        "version": "1.0.0",
         "compatibility_matrix": str(tmp_path / "docs" / "COMPATIBILITY_MATRIX.md"),
         "release_manifest": str(tmp_path / "dist" / "release" / "release-manifest.json"),
         "packaged_backend_smoke": "",
@@ -42,18 +42,18 @@ def make_args(tmp_path: Path, **overrides: object) -> Namespace:
 
 def write_minimum_tree(tmp_path: Path) -> None:
     for path, text in {
-        "VERSION": "0.9.5-rc\n",
-        "package.json": '{"version":"0.9.5-rc"}',
-        "package-lock.json": '{"version":"0.9.5-rc"}',
-        "src-tauri/tauri.conf.json": '{"version":"0.9.5-rc"}',
-        "src-tauri/Cargo.toml": 'version = "0.9.5-rc"',
+        "VERSION": "1.0.0\n",
+        "package.json": '{"version":"1.0.0"}',
+        "package-lock.json": '{"version":"1.0.0"}',
+        "src-tauri/tauri.conf.json": '{"version":"1.0.0"}',
+        "src-tauri/Cargo.toml": 'version = "1.0.0"',
     }.items():
         target = tmp_path / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
 
     public_terms = (
-        "0.9.5-rc Install and first run Connect Unity Provider / BYOK / local-only / no-provider "
+        "1.0.0 Install and first run Connect Unity Provider / BYOK / local-only / no-provider "
         "Doctor First validation report First rollback Booth outfit model optimization external agents .vsk support bundle "
         "Privacy Boundary API key Gateway token paid asset private files .vsk export"
     )
@@ -63,7 +63,7 @@ def write_minimum_tree(tmp_path: Path) -> None:
         target.write_text(public_terms, encoding="utf-8")
     issue = tmp_path / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
     issue.parent.mkdir(parents=True, exist_ok=True)
-    issue.write_text("0.9.5-rc support bundle API key Gateway token paid asset private files", encoding="utf-8")
+    issue.write_text("1.0.0 support bundle API key Gateway token paid asset private files", encoding="utf-8")
 
     compatibility = (
         "Unity VRChat SDK Modular Avatar NDMF VRCFury AAO LAC TTT Meshia "
@@ -105,11 +105,11 @@ def write_evidence_tree(tmp_path: Path) -> None:
         "VRCForge.unitypackage": b"unitypackage",
         "VRCForge_Offline_Installer_x64.exe": b"offline",
         "VRCForge_Web_Installer_x64.exe": b"web",
-        "VRCForge_Windows_x64_0.9.5-rc.zip": b"zip",
+        "VRCForge_Windows_x64_1.0.0.zip": b"zip",
     }.items():
         sha256 = write_bytes(release_dir / name, content)
         artifacts.append({"name": name, "path": name, "sha256": sha256})
-    write_json(release_dir / "release-manifest.json", {"version": "0.9.5-rc", "commit": "abc", "artifacts": artifacts})
+    write_json(release_dir / "release-manifest.json", {"version": "1.0.0", "commit": "abc", "artifacts": artifacts})
 
     support_bundle = tmp_path / "artifacts" / "packaged-backend-smoke-095" / "support.zip"
     write_bytes(support_bundle, b"support")
@@ -118,7 +118,7 @@ def write_evidence_tree(tmp_path: Path) -> None:
         {
             "schema": "vrcforge.packaged_backend_smoke.v1",
             "ok": True,
-            "version": "0.9.5-rc",
+            "version": "1.0.0",
             "portableMode": True,
             "bootstrapOk": True,
             "proofIndexOk": True,
@@ -131,9 +131,9 @@ def write_evidence_tree(tmp_path: Path) -> None:
         {
             "schema": "vrcforge.payload_zip_unpack.v1",
             "ok": True,
-            "version": "0.9.5-rc",
+            "version": "1.0.0",
             "missing": [],
-            "zip": str(release_dir / "VRCForge_Windows_x64_0.9.5-rc.zip"),
+            "zip": str(release_dir / "VRCForge_Windows_x64_1.0.0.zip"),
         },
     )
     write_json(

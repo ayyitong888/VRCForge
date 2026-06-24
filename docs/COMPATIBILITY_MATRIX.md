@@ -7,7 +7,7 @@ release work can be accepted.
 
 ## Stable Compatibility Targets
 
-| Area | Current target | 0.9.5-rc evidence | 1.0 stable expectation |
+| Area | Current target | Release evidence | 1.0 stable expectation |
 | --- | --- | --- | --- |
 | Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Install, update, uninstall, and portable launch remain boring |
 | Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |

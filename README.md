@@ -1,15 +1,15 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.9.5--rc-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.5-rc)
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v1.0.0)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current release candidate target: `0.9.5-rc`.
+Current stable release: `1.0.0`.
 
-0.9.5-rc release artifacts are published as a prerelease for release-candidate
-testing. Use the installer for normal Windows x64 installs, or the portable zip
-when you need a no-install/debug payload.
+1.0.0 release artifacts are published as the public stable release. Use the
+installer for normal Windows x64 installs, or the portable zip when you need a
+no-install/debug payload.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -26,7 +26,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.5-rc
+https://github.com/ayyitong888/VRCForge/releases/tag/v1.0.0
 
 Recommended:
 
@@ -50,7 +50,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.9.5-rc.zip`
+- `VRCForge_Windows_x64_1.0.0.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 - The installer writes program files to `%ProgramFiles%\VRCForge`; user data is under `%LOCALAPPDATA%\VRCForge\agentic-app` and is preserved during update/uninstall unless removed manually.
@@ -87,16 +87,15 @@ The project picker merges manual folders, VCC user projects, Unity Hub recent pr
 
 Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet. Settings also includes a Debug logging switch that records local API/MCP/runtime interactions to redacted logs, and Doctor can export a redacted Support Bundle for troubleshooting. When filing a public GitHub issue, upload or paste the relevant support bundle artifact manually after reviewing it for private data.
 
-## 0.9.5 Release Candidate and 1.0 Stable Readiness
+## 1.0 Stable Workflow
 
-0.9.5-rc is the release-candidate line for Golden Path Matrix coverage, rollback
-audit surfacing, Path-to-Skill export, `.vsk` governance, and support hardening.
-Release evidence is recorded from reusable smoke commands and published
-artifact hashes, with local sample-project proofs kept separate from general
-installer/support gates.
+1.0.0 is the public stable line for Golden Path Matrix coverage, rollback audit
+surfacing, Path-to-Skill export, `.vsk` governance, compatibility evidence, and
+support hardening. Release evidence is recorded from reusable smoke commands
+and published artifact hashes, with local sample-project proofs kept separate
+from general installer/support gates.
 
-1.0 stable readiness requires these public golden paths to stay documented and
-testable:
+1.0 stable keeps these public golden paths documented and testable:
 
 - Install and first run.
 - Connect Unity.
@@ -110,7 +109,7 @@ testable:
 - `.vsk` import/export, dry-run, disable, and uninstall.
 - Support bundle export and manual issue upload.
 
-Release-candidate focus:
+Stable release focus:
 
 - Golden Path Matrix: install, Doctor, Unity connection, avatar validation,
   supervised write request, checkpoint, rollback, external-agent request, and
@@ -126,7 +125,7 @@ The desktop app also includes uninstall actions:
 
 ## CLI / 命令行
 
-VRCForge 0.9.5-rc includes a local CLI for diagnostics, read-only scans, and
+VRCForge 1.0.0 includes a local CLI for diagnostics, read-only scans, and
 request-based write flows. It talks to the same local desktop runtime at
 `http://127.0.0.1:8757`; open VRCForge Desktop first so the backend and app
 session token are available.

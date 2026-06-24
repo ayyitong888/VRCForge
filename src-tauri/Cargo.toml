@@ -1,6 +1,6 @@
 [package]
 name = "vrcforge-agentic-app"
-version = "0.9.5-rc"
+version = "1.0.0"
 description = "VRCForge agentic desktop application"
 authors = ["VRCForge"]
 edition = "2021"

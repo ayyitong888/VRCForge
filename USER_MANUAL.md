@@ -88,13 +88,12 @@ direct apply tools are hidden, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 
-## 0.9.5 RC and 1.0 Stable Readiness Workflow
+## 1.0 Stable Workflow
 
-0.9.5-rc is organized around release-candidate proof instead of feature
-promises. Use it when you want to verify a whole workflow and keep the evidence
-needed for support.
+1.0.0 is organized around stable proof instead of feature promises. Use it when
+you want to verify a whole workflow and keep the evidence needed for support.
 
-The 1.0 stable readiness checklist is:
+The 1.0 stable checklist is:
 
 1. Install and first run.
 2. Connect Unity.
@@ -121,9 +120,9 @@ Recommended flow:
    VRCForge does not attach the bundle automatically; review it first and
    remove secrets, tokens, paid asset contents, and private files.
 
-The 0.9 release evidence and proof matrix are prepared for final acceptance.
-Any placeholder rows marked pending will be filled by the release agent with
-real artifact paths, sizes, and hashes after validation.
+The release evidence and proof matrix are the final acceptance record. Any row
+marked pending needs a real artifact path, size, hash, or explicit not-run /
+blocked reason before it can be treated as stable.
 
 ### Provider Modes
 
