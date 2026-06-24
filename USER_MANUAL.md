@@ -4,6 +4,11 @@ VRCForge is a local desktop agent workspace for VRChat avatar editing.
 VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
+
+Current source version: `1.0.1`. Latest published stable release:
+`1.0.0`. The 1.0.1 source line starts a read-only Avatar Encryption /
+Anti-Rip addon preview for lilToon and Poiyomi. It does not expose
+apply/remove writes yet.
 本手册只说明公开使用流程和功能状态，不包含项目私有路径或本地配置细节。
 
 ## Feature Status / 功能状态
@@ -18,6 +23,7 @@ This manual explains the public workflow and feature status without project-spec
 | Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
 | Shader / Material tuning | Semantic material tuning for lilToon, Poiyomi, and conservative Generic fallback | 已可用 / Available |
+| Avatar Encryption / Anti-Rip addon preview | lilToon and Poiyomi shader-encryption research/scan/plan/preview; other shader families compatibility-only | 1.0.1 read-only preview, no apply/remove writes |
 | Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
 | First-run resilient normal-agent fallback | Optional Unity/skill/project failures do not block ordinary agent chat | 已可用 / Available |
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |

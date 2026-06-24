@@ -258,6 +258,12 @@ MATERIAL_NUMERIC_RANGES = {
     "emission_strength": (0.0, 2.0),
 }
 
+AVATAR_ENCRYPTION_SCHEMA = "vrcforge.avatar_encryption.v1"
+AVATAR_ENCRYPTION_ADDON_VERSION = "1.0.1"
+AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES = ("liltoon", "poiyomi")
+AVATAR_ENCRYPTION_DEFAULT_LAYERS = ("position_permutation", "uv_obfuscation")
+AVATAR_ENCRYPTION_EXPERIMENTAL_LAYERS = {"normal_tangent_scramble", "blendshape_delta_obfuscation"}
+
 
 def runtime_settings_path() -> str:
     return str(RUNTIME_SETTINGS_PATH)
@@ -450,6 +456,36 @@ class ShaderVisionReviewRequest(DashboardRequest):
     goal: str | None = None
     before_image_paths: list[str] = Field(default_factory=list)
     after_image_paths: list[str] = Field(default_factory=list)
+
+
+class AvatarEncryptionResearchRequest(BaseModel):
+    include_external_references: bool = Field(default=True, alias="includeExternalReferences")
+
+    model_config = {"populate_by_name": True}
+
+
+class AvatarEncryptionScanRequest(AvatarScopedConnectionRequest):
+    inventory: dict[str, Any] | None = None
+    include_compatibility: bool = Field(default=True, alias="includeCompatibility")
+
+    model_config = {"populate_by_name": True}
+
+
+class AvatarEncryptionPlanRequest(AvatarEncryptionScanRequest):
+    target_shader_families: list[str] = Field(
+        default_factory=lambda: list(AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES),
+        alias="targetShaderFamilies",
+    )
+    key_channel: str = Field(default="avatar_parameter_32bit", alias="keyChannel")
+    platform: str = "pc"
+    layers: list[str] = Field(default_factory=lambda: list(AVATAR_ENCRYPTION_DEFAULT_LAYERS))
+    confirm_creator_owned_assets: bool = Field(default=False, alias="confirmCreatorOwnedAssets")
+
+    model_config = {"populate_by_name": True}
+
+
+class AvatarEncryptionPreviewRequest(AvatarEncryptionPlanRequest):
+    plan: dict[str, Any] | None = None
 
 
 class ClothingToggleRequest(ConnectionRequest):
@@ -4115,6 +4151,26 @@ async def review_shader_material_vision(request: ShaderVisionReviewRequest) -> d
     return await asyncio.to_thread(review_shader_material_vision_sync, request)
 
 
+@app.post("/api/avatar-encryption/research-report")
+async def avatar_encryption_research_report(request: AvatarEncryptionResearchRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(build_avatar_encryption_research_report_sync, request)
+
+
+@app.post("/api/avatar-encryption/scan")
+async def avatar_encryption_scan(request: AvatarEncryptionScanRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(scan_avatar_encryption_sync, request)
+
+
+@app.post("/api/avatar-encryption/plan")
+async def avatar_encryption_plan(request: AvatarEncryptionPlanRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(plan_avatar_encryption_sync, request)
+
+
+@app.post("/api/avatar-encryption/preview")
+async def avatar_encryption_preview(request: AvatarEncryptionPreviewRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(preview_avatar_encryption_sync, request)
+
+
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
     return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
@@ -5196,6 +5252,417 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "shader", "Failed to scan shader materials.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def build_avatar_encryption_research_report_sync(request: AvatarEncryptionResearchRequest | None = None) -> dict[str, Any]:
+    include_refs = True if request is None else bool(request.include_external_references)
+    references = []
+    if include_refs:
+        references = [
+            {
+                "id": "liltoon",
+                "label": "lilToon",
+                "role": "primary open shader base for the first fork/prototype",
+                "reusePolicy": "inspect and pin before any fork; keep restore patch minimal",
+            },
+            {
+                "id": "avacrypt-v2-liltoon",
+                "label": "AvaCrypt V2 lilToon fork",
+                "role": "research reference for UV/keyed restore ideas",
+                "reusePolicy": "research only until license, trust, and code review are complete",
+            },
+            {
+                "id": "poiyomi-toon",
+                "label": "Poiyomi Toon Shader",
+                "role": "second first-class shader family after lilToon proves the abstraction",
+                "reusePolicy": "public Toon line first; private/Pro modules out of scope until cleared",
+            },
+        ]
+
+    return {
+        "ok": True,
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "phase": "M0/M2",
+        "track": "avatar-encryption-addon",
+        "readOnly": True,
+        "writeStatus": "blocked_until_disposable_prototype_and_rollback_proof",
+        "firstClassShaderFamilies": ["lilToon", "Poiyomi"],
+        "compatibilityPolicy": {
+            "genericSemantic": "scan-only; blocked preview until a restore shader adapter exists",
+            "standardOrUnknown": "compatibility report only; never auto-convert",
+            "otherShaderFamilies": "collect family/material evidence and keep apply blocked by default",
+        },
+        "securityPrinciples": [
+            "Opt-in only; never run as part of normal optimization/import flows.",
+            "Creator-owned local assets only.",
+            "Generated encrypted copies must preserve originals and use checkpointed apply/remove later.",
+            "Do not market as unbreakable DRM; shader bytecode and material state may be reverse engineered.",
+            "Do not write secrets, paid asset payloads, or generated encrypted meshes into .vsk packages.",
+        ],
+        "keyModel": [
+            {
+                "id": "avatar_parameter_32bit",
+                "status": "compatibility_demo",
+                "security": "low",
+                "notes": "A 32-bit Avatar 3.0 parameter cannot carry an AES-256 secret; use only as shard/selector/demo value.",
+            },
+            {
+                "id": "baked_per_avatar_secret",
+                "status": "required_hybrid_component",
+                "security": "medium",
+                "notes": "Useful only when combined with per-mesh salts and no secret leakage in support bundles or packages.",
+            },
+            {
+                "id": "osc_companion",
+                "status": "research_required",
+                "security": "stronger_possible",
+                "notes": "Potential stronger/rotating key path, but usability and VRChat compatibility need proof.",
+            },
+        ],
+        "layers": [
+            {"id": "position_permutation", "status": "target_for_liltoon_m1", "default": True},
+            {"id": "uv_obfuscation", "status": "target_for_liltoon_m1", "default": True},
+            {"id": "normal_tangent_scramble", "status": "experimental", "default": False},
+            {"id": "blendshape_delta_obfuscation", "status": "research_only_high_risk", "default": False},
+        ],
+        "milestones": [
+            "M0 research packet",
+            "M1 local disposable lilToon prototype",
+            "M2 VRCForge scan/plan/preview skill",
+            "M3 lilToon apply/remove request after proof",
+            "M4 Poiyomi apply/remove request after shared restore abstraction",
+            "M5 governed .vsk addon packaging",
+        ],
+        "externalReferences": references,
+    }
+
+
+def scan_avatar_encryption_sync(request: AvatarEncryptionScanRequest) -> dict[str, Any]:
+    try:
+        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
+        if request.inventory is not None:
+            inventory = copy.deepcopy(request.inventory)
+        else:
+            settings = load_dashboard_settings(request)
+            inventory = scan_shader_materials_direct(settings, avatar_path)
+        scan = build_avatar_encryption_scan_payload(
+            inventory=inventory,
+            avatar_path=avatar_path,
+            include_compatibility=bool(request.include_compatibility),
+        )
+        emit_log(
+            "info",
+            "avatar-encryption",
+            "Avatar encryption compatibility scanned.",
+            {
+                "avatarPath": avatar_path,
+                "candidateCount": scan["summary"]["candidateCount"],
+                "compatibilityOnlyCount": scan["summary"]["compatibilityOnlyCount"],
+            },
+        )
+        return scan
+    except (RuntimeError, UnityMcpError) as exc:
+        emit_log("error", "avatar-encryption", "Failed to scan avatar encryption compatibility.", {"error": str(exc)})
+        raise to_http_exception(exc) from exc
+
+
+def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[str, Any]:
+    scan = scan_avatar_encryption_sync(
+        AvatarEncryptionScanRequest(
+            settings_path=request.settings_path,
+            unity_host=request.unity_host,
+            unity_port=request.unity_port,
+            unity_instance=request.unity_instance,
+            avatar_path=request.avatar_path,
+            inventory=request.inventory,
+            include_compatibility=request.include_compatibility,
+        )
+    )
+    target_families = normalize_avatar_encryption_target_families(request.target_shader_families)
+    selected_candidates = [
+        item for item in scan["targets"]
+        if item.get("status") == "candidate" and item.get("shaderFamilyId") in target_families
+    ]
+    layer_plan = build_avatar_encryption_layer_plan(request.layers)
+    key_channel = build_avatar_encryption_key_channel(str(request.key_channel or "avatar_parameter_32bit"))
+    platform = normalize_avatar_encryption_platform(request.platform)
+    warnings: list[str] = []
+    blocking_ids: list[str] = []
+
+    if not request.confirm_creator_owned_assets:
+        warnings.append("Creator-owned asset confirmation is required before any future apply/remove request.")
+    if not selected_candidates:
+        blocking_ids.append("shader_family.no_liltoon_or_poiyomi_candidate")
+    if platform["status"] != "supported":
+        blocking_ids.append("platform.pc_only")
+    if any(layer.get("status") in {"blocked", "research_only"} for layer in layer_plan):
+        blocking_ids.append("layer.experimental_or_research_only")
+
+    plan_status = "preview_ready" if selected_candidates and platform["status"] == "supported" else "blocked"
+    plan = {
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "phase": "M2-preview",
+        "status": plan_status,
+        "readOnly": True,
+        "writeStatus": "blocked",
+        "writeBlockReason": "1.0.1 ships scan/plan/preview only; apply/remove wait for disposable prototype, shader fork review, validation, and rollback proof.",
+        "avatarPath": scan.get("avatarPath") or request.avatar_path or "",
+        "targetShaderFamilies": list(target_families),
+        "priorityOrder": ["liltoon", "poiyomi", "compatibility-only"],
+        "selectedCandidateCount": len(selected_candidates),
+        "selectedCandidates": selected_candidates,
+        "compatibilityTargets": scan["compatibilityTargets"],
+        "keyChannel": key_channel,
+        "platform": platform,
+        "layers": layer_plan,
+        "hardGate": {
+            "status": "blocked" if blocking_ids else "preview_only",
+            "blockingIds": blocking_ids,
+            "warnings": warnings,
+        },
+        "proofRequirements": avatar_encryption_proof_requirements(),
+        "futureRequestTools": {
+            "liltoonApplyRequest": "vrcforge_avatar_encryption_liltoon_apply_request",
+            "poiyomiApplyRequest": "vrcforge_avatar_encryption_poiyomi_apply_request",
+            "removeRequest": "vrcforge_avatar_encryption_remove_request",
+            "status": "not_registered_in_1.0.1",
+        },
+        "nextSteps": [
+            "Run this preview on a disposable avatar before any shader fork or mesh copy.",
+            "Prototype lilToon restore include first with position + UV obfuscation only.",
+            "Use the same scan/plan schema for Poiyomi once the lilToon restore boundary is proven.",
+            "Keep Generic/Standard/unknown shader families as compatibility-only until a restore adapter exists.",
+        ],
+    }
+    return {"ok": True, "schema": AVATAR_ENCRYPTION_SCHEMA, "scan": scan, "plan": plan}
+
+
+def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> dict[str, Any]:
+    plan_payload = request.plan if request.plan else plan_avatar_encryption_sync(request).get("plan")
+    plan = ensure_dict(plan_payload)
+    candidates = ensure_list_payload(plan.get("selectedCandidates") or [], "avatar encryption selected candidates")
+    write_targets = [
+        {
+            "rendererPath": item.get("rendererPath") or "",
+            "materialName": item.get("materialName") or "",
+            "shaderFamily": item.get("shaderFamily") or "",
+            "wouldCreate": [
+                "encrypted mesh copy under Assets/VRCForgeGenerated/AvatarEncryption",
+                "material copy remapped to a reviewed restore shader fork",
+                "encryption manifest with redacted salt/key metadata only",
+            ],
+            "wouldModifyOriginalAsset": False,
+        }
+        for item in candidates
+        if isinstance(item, dict)
+    ]
+    return {
+        "ok": True,
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "previewOnly": True,
+        "writeAllowed": False,
+        "wouldWrite": False,
+        "blockedApply": {
+            "status": "blocked",
+            "reason": "1.0.1 is read/plan/preview only. No mesh, material, shader, package, or secret writes are available.",
+        },
+        "plan": plan,
+        "writeTargetsPreview": write_targets,
+        "rollbackPolicyPreview": {
+            "futureScope": ["Assets", "Packages", "ProjectSettings"],
+            "requiresCheckpoint": True,
+            "removeMustRestoreOriginalMeshesAndMaterials": True,
+            "supportBundlesMustRedactSecrets": True,
+        },
+    }
+
+
+def build_avatar_encryption_scan_payload(
+    inventory: dict[str, Any],
+    avatar_path: str | None,
+    include_compatibility: bool,
+) -> dict[str, Any]:
+    materials = ensure_list_payload(inventory.get("materials") or [], "shader material inventory")
+    targets = [build_avatar_encryption_target(material) for material in materials if isinstance(material, dict)]
+    if not include_compatibility:
+        targets = [target for target in targets if target["supportLevel"] == "first_class"]
+    targets.sort(key=lambda item: (int(item.get("priority") or 99), str(item.get("materialName") or "")))
+    compatibility_targets = [target for target in targets if target["supportLevel"] != "first_class"]
+    first_class_targets = [target for target in targets if target["supportLevel"] == "first_class"]
+    summary = {
+        "materialCount": len(materials),
+        "targetCount": len(targets),
+        "candidateCount": sum(1 for target in targets if target["status"] == "candidate"),
+        "lilToonCandidateCount": sum(1 for target in targets if target["shaderFamilyId"] == "liltoon" and target["status"] == "candidate"),
+        "poiyomiCandidateCount": sum(1 for target in targets if target["shaderFamilyId"] == "poiyomi" and target["status"] == "candidate"),
+        "compatibilityOnlyCount": len(compatibility_targets),
+        "blockedCount": sum(1 for target in targets if target["status"] == "blocked"),
+    }
+    return {
+        "ok": True,
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "phase": "M2-preview",
+        "readOnly": True,
+        "avatarPath": avatar_path or infer_avatar_path_from_inventory(inventory),
+        "inventorySummary": inventory.get("summary") or {},
+        "summary": summary,
+        "firstClassTargets": first_class_targets,
+        "compatibilityTargets": compatibility_targets,
+        "targets": targets,
+        "policy": {
+            "primaryFamilies": ["lilToon", "Poiyomi"],
+            "otherFamilies": "compatibility-only blocked preview",
+            "applyAvailable": False,
+        },
+    }
+
+
+def build_avatar_encryption_target(material: dict[str, Any]) -> dict[str, Any]:
+    family_id = normalize_avatar_encryption_shader_family(material.get("shader_family") or material.get("shader_name"))
+    first_class = family_id in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not first_class:
+        blockers.append("shader_family.restore_adapter_missing")
+    if family_id == "generic":
+        warnings.append("Generic semantic shader support can report compatibility but has no restore fork.")
+    if not str(material.get("renderer_path") or ""):
+        warnings.append("Renderer path is missing; future apply would require a concrete renderer/material slot.")
+    return {
+        "materialId": str(material.get("material_id") or ""),
+        "materialName": str(material.get("material_name") or ""),
+        "rendererPath": str(material.get("renderer_path") or material.get("item_path") or ""),
+        "rendererId": str(material.get("renderer_id") or ""),
+        "slotIndex": material.get("slot_index", 0),
+        "meshName": str(material.get("mesh_name") or ""),
+        "shaderName": str(material.get("shader_name") or ""),
+        "shaderFamily": avatar_encryption_shader_family_label(family_id),
+        "shaderFamilyId": family_id,
+        "priority": 1 if family_id == "liltoon" else 2 if family_id == "poiyomi" else 50,
+        "supportLevel": "first_class" if first_class else "compatibility_only",
+        "status": "candidate" if first_class else "blocked",
+        "recommendedAdapter": f"{family_id}_restore_adapter" if first_class else "",
+        "defaultLayers": list(AVATAR_ENCRYPTION_DEFAULT_LAYERS) if first_class else [],
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def normalize_avatar_encryption_shader_family(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    if "liltoon" in compact or "lil" in compact and "toon" in compact:
+        return "liltoon"
+    if "poiyomi" in compact or "poiyomitoon" in compact:
+        return "poiyomi"
+    if "generic" in compact:
+        return "generic"
+    if "standard" in compact or "vrchatmobile" in compact:
+        return "standard"
+    return "unsupported"
+
+
+def avatar_encryption_shader_family_label(family_id: str) -> str:
+    return {
+        "liltoon": "lilToon",
+        "poiyomi": "Poiyomi",
+        "generic": "Generic",
+        "standard": "Standard/Mobile",
+        "unsupported": "Unsupported",
+    }.get(family_id, family_id)
+
+
+def normalize_avatar_encryption_target_families(values: list[str] | None) -> tuple[str, ...]:
+    families = []
+    for value in values or AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES:
+        family = normalize_avatar_encryption_shader_family(value)
+        if family in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES and family not in families:
+            families.append(family)
+    return tuple(families or AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES)
+
+
+def normalize_avatar_encryption_platform(value: Any) -> dict[str, Any]:
+    platform = str(value or "pc").strip().lower()
+    if platform in {"pc", "windows"}:
+        return {"id": "pc", "label": "PC", "status": "supported"}
+    if platform in {"quest", "android"}:
+        return {
+            "id": "quest_android",
+            "label": "Quest/Android",
+            "status": "blocked",
+            "reason": "Quest/Android shader and lookup constraints need separate proof.",
+        }
+    return {"id": platform or "unknown", "label": platform or "unknown", "status": "blocked", "reason": "Unknown platform."}
+
+
+def build_avatar_encryption_layer_plan(values: list[str] | None) -> list[dict[str, Any]]:
+    requested = [str(value or "").strip().lower() for value in (values or AVATAR_ENCRYPTION_DEFAULT_LAYERS)]
+    if not requested:
+        requested = list(AVATAR_ENCRYPTION_DEFAULT_LAYERS)
+    layer_plan: list[dict[str, Any]] = []
+    for layer in requested:
+        if layer in {"position", "vertex", "position_permutation"}:
+            layer_plan.append({"id": "position_permutation", "status": "preview_supported", "default": True})
+        elif layer in {"uv", "uv_obfuscation", "uv_encrypt"}:
+            layer_plan.append({"id": "uv_obfuscation", "status": "preview_supported", "default": True})
+        elif layer in {"normal", "tangent", "normal_tangent", "normal_tangent_scramble"}:
+            layer_plan.append({"id": "normal_tangent_scramble", "status": "blocked", "reason": "Needs lighting/outline/matcap proof."})
+        elif layer in {"blendshape", "blend_shape", "blendshape_delta", "blendshape_delta_obfuscation"}:
+            layer_plan.append({"id": "blendshape_delta_obfuscation", "status": "research_only", "reason": "High risk for visemes, face tracking, and animation clips."})
+        else:
+            layer_plan.append({"id": layer or "unknown", "status": "blocked", "reason": "Unknown encryption layer."})
+    return dedupe_avatar_encryption_layers(layer_plan)
+
+
+def dedupe_avatar_encryption_layers(layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for layer in layers:
+        layer_id = str(layer.get("id") or "")
+        if layer_id in seen:
+            continue
+        seen.add(layer_id)
+        result.append(layer)
+    return result
+
+
+def build_avatar_encryption_key_channel(value: str) -> dict[str, Any]:
+    key = str(value or "avatar_parameter_32bit").strip().lower()
+    if key in {"avatar_parameter_32bit", "parameter", "avatar3_parameter"}:
+        return {
+            "id": "avatar_parameter_32bit",
+            "status": "compatibility_demo",
+            "security": "low",
+            "warning": "32-bit Avatar 3.0 parameter cannot carry a full AES-256 secret.",
+        }
+    if key in {"osc", "osc_companion"}:
+        return {"id": "osc_companion", "status": "research_required", "security": "stronger_possible"}
+    if key in {"baked", "baked_per_avatar_secret"}:
+        return {"id": "baked_per_avatar_secret", "status": "hybrid_component", "security": "medium"}
+    return {"id": key, "status": "blocked", "security": "unknown", "warning": "Unsupported key channel."}
+
+
+def avatar_encryption_proof_requirements() -> list[str]:
+    return [
+        "Disposable avatar only until shader fork and rollback are reviewed.",
+        "Source assets preserved; future apply generates encrypted mesh/material copies.",
+        "Unity compile errors remain zero.",
+        "Build/Test readiness or explainable blocker is recorded.",
+        "Visual proof includes before, correct-key restored, wrong-key/scrambled, and rollback screenshots.",
+        "Remove operation restores original meshes and materials.",
+        "Support bundles redact keys, salts, secrets, and encryption manifests.",
+    ]
+
+
+def infer_avatar_path_from_inventory(inventory: dict[str, Any]) -> str:
+    for material in ensure_list_payload(inventory.get("materials") or [], "shader material inventory"):
+        if isinstance(material, dict) and material.get("avatar_path"):
+            return str(material.get("avatar_path") or "")
+    return ""
 
 
 def generate_shader_material_plan_sync(request: ShaderMaterialPlanRequest) -> dict[str, Any]:
@@ -14916,6 +15383,30 @@ def register_agent_gateway_tools() -> None:
             ),
             write=True,
         )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_research_report",
+        "Build the read-only Avatar Encryption / Anti-Rip addon research packet.",
+        "read/debug",
+        lambda params: build_avatar_encryption_research_report_sync(AvatarEncryptionResearchRequest(**(params or {}))),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_scan",
+        "Scan shader material inventory for lilToon/Poiyomi avatar-encryption candidates and compatibility-only blockers.",
+        "read/debug",
+        lambda params: scan_avatar_encryption_sync(AvatarEncryptionScanRequest(**(params or {}))),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_plan",
+        "Build a read-only Avatar Encryption / Anti-Rip addon plan without writing Unity assets.",
+        "plan/preview",
+        lambda params: plan_avatar_encryption_sync(AvatarEncryptionPlanRequest(**(params or {}))),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_preview",
+        "Preview future avatar-encryption mesh/material write targets without writing Unity assets.",
+        "plan/preview",
+        lambda params: preview_avatar_encryption_sync(AvatarEncryptionPreviewRequest(**(params or {}))),
+    )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))

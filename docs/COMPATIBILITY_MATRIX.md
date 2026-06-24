@@ -1,7 +1,8 @@
 # VRCForge Compatibility Matrix
 
 This matrix is the public compatibility checklist for the 1.0.0 public stable
-release and future stable refreshes. It
+release, the 1.0.1 Avatar Encryption / Anti-Rip addon preview, and future
+stable refreshes. It
 does not claim that every avatar, outfit, or shader stack is supported. It
 records the components VRCForge must detect, report, and gate before stable
 release work can be accepted or refreshed.
@@ -25,6 +26,7 @@ release work can be accepted or refreshed.
 | lilToon | First-class shader adapter | Carry-forward semantic material proof and package-preflight rules | Safe semantic properties only; raw property mutation stays blocked |
 | Poiyomi | First-class shader adapter | Poiyomi package/shader/tuning rollback proof | Package install/tuning/rollback remains checkpointed |
 | Generic semantic shader | Conservative fallback | Generic semantic fallback exists | Only safe common properties; unsupported shader report otherwise |
+| Avatar Encryption addon | Read-only 1.0.1 preview for lilToon and Poiyomi first | Research/scan/plan/preview tools only; no apply/remove writer registered | Generic/Standard/unknown shader families stay compatibility-only until restore adapters and rollback proof exist |
 
 ## Known Conflicts
 

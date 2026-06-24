@@ -1,15 +1,22 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v1.0.0)
+[![Version](https://img.shields.io/badge/source-v1.0.1-blue)](https://github.com/ayyitong888/VRCForge)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current stable release: `1.0.0`.
+Current source version: `1.0.1`.
+Latest published stable release: `1.0.0`.
 
 1.0.0 release artifacts are published as the public stable release. Use the
 installer for normal Windows x64 installs, or the portable zip when you need a
 no-install/debug payload.
+
+1.0.1 starts the Avatar Encryption / Anti-Rip addon preview line. This first
+slice is read-only: research report, shader-family scan, plan, and write
+preview for lilToon and Poiyomi first. Generic, Standard/Mobile, and unknown
+shader families are reported as compatibility-only or blocked until a restore
+adapter exists. No avatar-encryption apply/remove write tool is exposed yet.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -174,6 +181,7 @@ Model optimization integration strategy and release sequencing are documented in
 | AI face tuning history and presets | AI 捏脸历史与预设 | Available / 可用 |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
+| Avatar Encryption / Anti-Rip addon preview | lilToon and Poiyomi shader-encryption scan/plan/preview; other shader families compatibility-only | 1.0.1 read-only preview; apply/remove and rollback proof pending |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
 | Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 1.0 stable line; conservative writes remain approval/checkpoint/rollback gated |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |

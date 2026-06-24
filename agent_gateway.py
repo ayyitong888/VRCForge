@@ -268,6 +268,40 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["package", "diagnostics", "compile-errors"],
     },
+    "vrcforge_avatar_encryption_research_report": {
+        "title": "Avatar Encryption Research Report",
+        "inputs": ["Optional includeExternalReferences flag."],
+        "outputs": ["Read-only Avatar Encryption / Anti-Rip addon research packet and security boundaries."],
+        "sideEffects": "none",
+        "backupRestore": "not required; research report never writes Unity assets",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "research", "liltoon", "poiyomi"],
+    },
+    "vrcforge_avatar_encryption_scan": {
+        "title": "Avatar Encryption Compatibility Scan",
+        "inputs": ["Optional avatar path and shader material inventory."],
+        "outputs": ["Read-only lilToon/Poiyomi candidate list plus compatibility-only blocked shader families."],
+        "sideEffects": "none",
+        "backupRestore": "not required; scan never writes Unity assets",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "scan", "liltoon", "poiyomi"],
+    },
+    "vrcforge_avatar_encryption_plan": {
+        "title": "Avatar Encryption Plan",
+        "permissionMode": "preview",
+        "inputs": ["Avatar path or inventory, target shader families, key channel, platform, and layer list."],
+        "outputs": ["Read-only preview plan with lilToon/Poiyomi priorities, key/channel warnings, proof requirements, and blocked future write tools."],
+        "sideEffects": "none",
+        "backupRestore": "not required in 1.0.1; future apply/remove must use checkpoint, validation, and rollback proof",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "plan", "preview-only", "liltoon", "poiyomi"],
+    },
+    "vrcforge_avatar_encryption_preview": {
+        "title": "Avatar Encryption Write Preview",
+        "permissionMode": "preview",
+        "inputs": ["Avatar encryption plan or the same arguments accepted by avatar-encryption.plan."],
+        "outputs": ["No-write preview of future generated mesh/material copy targets and rollback policy."],
+        "sideEffects": "none",
+        "backupRestore": "not required in 1.0.1; future apply/remove must use checkpoint, validation, and rollback proof",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "preview", "no-direct-apply"],
+    },
     "vrcforge_build_test_readiness": {
         "title": "Build & Test Readiness",
         "inputs": ["Optional avatar path, Unity project path, Quest toggle, and compile-error limit."],
@@ -779,6 +813,33 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         ],
         "entrypointTool": "vrcforge_plan_shader_tuning",
         "tags": ["builtin", "group", "shader", "material", "write"],
+    },
+    {
+        "name": "avatar-encryption-addon-preview",
+        "title": "Avatar Encryption Addon Preview",
+        "description": "Read, scan, plan, and preview the optional anti-rip shader encryption addon without writing Unity assets.",
+        "category": "avatar-encryption",
+        "permissionMode": "preview",
+        "riskLevel": "low",
+        "whenToUse": "avatar encryption, anti-rip, shader encryption, lilToon encryption, Poiyomi encryption, mesh obfuscation preview",
+        "inputs": ["Avatar path or material inventory, target shader families, key channel, platform, and obfuscation layers."],
+        "outputs": ["Read-only research packet, lilToon/Poiyomi candidate scan, compatibility-only blocked families, preview plan, and rollback proof requirements."],
+        "sideEffects": "none; 1.0.1 does not provide apply/remove writes",
+        "backupRestore": "not required for preview; future apply/remove must use approval, checkpoint, validation, visual proof, and rollback",
+        "allowedTools": [
+            "vrcforge_avatar_encryption_research_report",
+            "vrcforge_avatar_encryption_scan",
+            "vrcforge_avatar_encryption_plan",
+            "vrcforge_avatar_encryption_preview",
+            "vrcforge_scan_materials",
+        ],
+        "disallowedTools": [
+            "vrcforge_avatar_encryption_liltoon_apply_request",
+            "vrcforge_avatar_encryption_poiyomi_apply_request",
+            "vrcforge_avatar_encryption_remove_request",
+        ],
+        "entrypointTool": "vrcforge_avatar_encryption_plan",
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "preview-only", "liltoon", "poiyomi"],
     },
     {
         "name": "approval-restore-control",
@@ -4100,6 +4161,14 @@ class AgentGateway:
             return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
         if has_any(lowered, text, ["unity", "mcp", "连接", "连上", "实例"]):
             return self._runtime_skill_route("vrcforge_unity_status", skill_params, "unity status")
+        if has_any(lowered, text, ["avatar encryption", "shader encryption", "anti-rip", "antirip", "encrypt", "encryption"]):
+            if has_any(lowered, text, ["research", "report", "notes"]):
+                return self._runtime_skill_route("vrcforge_avatar_encryption_research_report", skill_params, "avatar encryption research report")
+            if has_any(lowered, text, ["scan", "inventory", "materials"]):
+                return self._runtime_skill_route("vrcforge_avatar_encryption_scan", skill_params, "avatar encryption scan")
+            if has_any(lowered, text, ["preview", "would write", "rollback"]):
+                return self._runtime_skill_route("vrcforge_avatar_encryption_preview", skill_params, "avatar encryption preview")
+            return self._runtime_skill_route("vrcforge_avatar_encryption_plan", skill_params, "avatar encryption plan")
         if has_any(lowered, text, ["avatar", "avatars", "角色", "模型", "工程刷新", "刷新列表"]):
             return self._runtime_skill_route("vrcforge_list_avatars", skill_params, "avatar list")
         if has_any(lowered, text, ["blendshape", "blend shape", "形态键", "表情键", "脸部", "面部"]):
@@ -4455,6 +4524,8 @@ class AgentGateway:
 
     def _registry_category(self, category: str, name: str) -> str:
         text = f"{category} {name}".lower()
+        if "avatar_encryption" in text or "avatar-encryption" in text or "anti-rip" in text or "antirip" in text:
+            return "avatar-encryption"
         if "optimization" in text or "optimizer" in text or "vram" in text:
             return "optimization"
         if "health" in text or "status" in text:
@@ -4639,6 +4710,10 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_optimization_validation_delta",
         *OPTIMIZATION_GATEWAY_TOOL_NAMES,
         *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
+        "vrcforge_avatar_encryption_research_report",
+        "vrcforge_avatar_encryption_scan",
+        "vrcforge_avatar_encryption_plan",
+        "vrcforge_avatar_encryption_preview",
         "vrcforge_create_safe_backup",
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",
