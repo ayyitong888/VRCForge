@@ -395,6 +395,8 @@ def delta_summary(payload: dict[str, Any], *, require_rollback: bool) -> dict[st
             "removedCount": ensure_dict(payload.get("findingDelta")).get("removedCount"),
         },
         "rollbackProof": rollback,
+        "profileDiff": payload.get("profileDiff"),
+        "parameterBudgetDelta": payload.get("parameterBudgetDelta"),
     }
 
 

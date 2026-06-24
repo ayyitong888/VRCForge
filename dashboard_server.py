@@ -2112,6 +2112,34 @@ def app_optimization_validation_delta(request: OptimizationValidationDeltaReques
     return build_optimization_validation_delta_sync(request.model_dump(by_alias=True))
 
 
+@app.get("/api/app/optimization/proofs")
+def app_optimization_proof_index(limit: int = 10) -> dict[str, Any]:
+    return list_optimizer_proofs_sync(limit=limit)
+
+
+@app.get("/api/app/optimization/proofs/{run_id}")
+def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
+    try:
+        return read_optimizer_proof_sync(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Optimizer proof was not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/app/optimization/proofs/{run_id}/screenshots/{stage}")
+def app_optimization_proof_screenshot(run_id: str, stage: str) -> FileResponse:
+    try:
+        path = optimizer_proof_screenshot_path(run_id, stage)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Optimizer proof screenshot was not found.") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Optimizer proof screenshot is outside the artifacts directory.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path, media_type=mimetypes.guess_type(str(path))[0] or "application/octet-stream")
+
+
 @app.post("/api/app/project-index/scan")
 def app_project_index_scan(request: ProjectIndexScanRequest) -> dict[str, Any]:
     return scan_project_index_sync(request.model_dump(by_alias=True))
@@ -12670,6 +12698,143 @@ def _validation_delta_status(before: dict[str, Any], after: dict[str, Any], roll
     return "unchanged"
 
 
+def _validation_delta_source_payload(report: dict[str, Any], source_name: str) -> dict[str, Any]:
+    source = ensure_dict(ensure_dict(report.get("sources")).get(source_name))
+    payload = ensure_dict(source.get("payload"))
+    return payload or ensure_dict(source.get("summary"))
+
+
+def _validation_delta_walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _validation_delta_walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _validation_delta_walk_dicts(child)
+
+
+def _validation_delta_normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _validation_delta_first_numeric(value: Any, names: tuple[str, ...]) -> int | float | None:
+    wanted = {_validation_delta_normalize_key(name) for name in names}
+    for entry in _validation_delta_walk_dicts(value):
+        for key, raw in entry.items():
+            if _validation_delta_normalize_key(str(key)) not in wanted or isinstance(raw, bool):
+                continue
+            if isinstance(raw, (int, float)):
+                return raw
+            if isinstance(raw, list):
+                return len(raw)
+            if isinstance(raw, str):
+                match = re.search(r"-?\d+(?:\.\d+)?", raw.replace(",", ""))
+                if match:
+                    number = float(match.group(0))
+                    return int(number) if number.is_integer() else number
+    return None
+
+
+def _validation_delta_first_text(value: Any, names: tuple[str, ...]) -> str | None:
+    wanted = {_validation_delta_normalize_key(name) for name in names}
+    for entry in _validation_delta_walk_dicts(value):
+        for key, raw in entry.items():
+            if _validation_delta_normalize_key(str(key)) in wanted and raw is not None:
+                text = str(raw).strip()
+                if text:
+                    return text
+    return None
+
+
+def _validation_delta_platform_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": _validation_delta_first_text(payload, ("rank", "performanceRank", "overallRank", "rating")) or "unknown",
+        "triangles": _validation_delta_first_numeric(payload, ("triangleCount", "triangles", "polygonCount", "polygons")),
+        "materialSlots": _validation_delta_first_numeric(payload, ("materialSlotCount", "slotCount", "materialCount")),
+        "skinnedMeshes": _validation_delta_first_numeric(payload, ("skinnedMeshCount", "skinnedMeshes", "skinnedMeshRendererCount")),
+        "textureMemoryBytes": _validation_delta_first_numeric(payload, ("textureMemoryBytes", "textureBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")),
+        "downloadSizeBytes": _validation_delta_first_numeric(payload, ("downloadSizeBytes", "downloadSize", "compressedSizeBytes", "buildSizeBytes", "fileSizeBytes")),
+        "uncompressedSizeBytes": _validation_delta_first_numeric(payload, ("uncompressedSizeBytes", "uncompressedSize", "uncompressedBytes", "bundleUncompressedSizeBytes")),
+        "physBoneComponents": _validation_delta_first_numeric(payload, ("physBoneCount", "physBones", "physBoneComponents")),
+        "physBoneAffectedTransforms": _validation_delta_first_numeric(payload, ("physBoneAffectedTransforms", "affectedTransforms")),
+    }
+
+
+def _validation_delta_parameter_profile(report: dict[str, Any]) -> dict[str, Any]:
+    payload = _validation_delta_source_payload(report, "parameters")
+    parameter_items = _validation_delta_first_numeric(payload, ("totalParameters", "totalCustomParameters", "parameterCount", "customParameterCount"))
+    return {
+        "syncedBits": _validation_delta_first_numeric(payload, ("syncedBits", "bitsUsed", "totalEstimatedCost", "totalCost", "parameterCost")),
+        "totalCustomParameters": parameter_items,
+    }
+
+
+def _validation_delta_profile_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pc": _validation_delta_platform_profile(_validation_delta_source_payload(report, "performance_pc")),
+        "quest": _validation_delta_platform_profile(_validation_delta_source_payload(report, "performance_quest")),
+        "parameters": _validation_delta_parameter_profile(report),
+    }
+
+
+def _validation_delta_numeric_delta(before: Any, after: Any) -> int | float | None:
+    if before is None or after is None:
+        return None
+    if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+        delta = after - before
+        return int(delta) if isinstance(delta, float) and delta.is_integer() else delta
+    return None
+
+
+def _validation_delta_platform_delta(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any]) -> dict[str, Any]:
+    numeric_keys = [
+        "triangles",
+        "materialSlots",
+        "skinnedMeshes",
+        "textureMemoryBytes",
+        "downloadSizeBytes",
+        "uncompressedSizeBytes",
+        "physBoneComponents",
+        "physBoneAffectedTransforms",
+    ]
+    return {
+        "rankBefore": before.get("rank") or "unknown",
+        "rankAfter": after.get("rank") or "unknown",
+        "rankRollback": rollback.get("rank") if rollback else None,
+        "rankChanged": (before.get("rank") or "unknown") != (after.get("rank") or "unknown"),
+        "rollbackRankMatchesBefore": bool(rollback) and (rollback.get("rank") or "unknown") == (before.get("rank") or "unknown"),
+        "metricsDelta": {key: _validation_delta_numeric_delta(before.get(key), after.get(key)) for key in numeric_keys},
+        "rollbackMetricsMatchBefore": bool(rollback)
+        and all(rollback.get(key) == before.get(key) for key in numeric_keys if before.get(key) is not None or rollback.get(key) is not None),
+    }
+
+
+def _validation_delta_profile_diff(before_report: dict[str, Any], after_report: dict[str, Any], rollback_report: dict[str, Any]) -> dict[str, Any]:
+    before = _validation_delta_profile_snapshot(before_report)
+    after = _validation_delta_profile_snapshot(after_report)
+    rollback = _validation_delta_profile_snapshot(rollback_report) if rollback_report else {}
+    before_params = ensure_dict(before.get("parameters"))
+    after_params = ensure_dict(after.get("parameters"))
+    rollback_params = ensure_dict(rollback.get("parameters"))
+    parameter_delta = {
+        "syncedBitsDelta": _validation_delta_numeric_delta(before_params.get("syncedBits"), after_params.get("syncedBits")),
+        "totalCustomParametersDelta": _validation_delta_numeric_delta(before_params.get("totalCustomParameters"), after_params.get("totalCustomParameters")),
+        "rollbackMatchesBefore": bool(rollback_report)
+        and rollback_params.get("syncedBits") == before_params.get("syncedBits")
+        and rollback_params.get("totalCustomParameters") == before_params.get("totalCustomParameters"),
+    }
+    return {
+        "readOnly": True,
+        "before": before,
+        "after": after,
+        "rollback": rollback,
+        "pc": _validation_delta_platform_delta(ensure_dict(before.get("pc")), ensure_dict(after.get("pc")), ensure_dict(rollback.get("pc"))),
+        "quest": _validation_delta_platform_delta(ensure_dict(before.get("quest")), ensure_dict(after.get("quest")), ensure_dict(rollback.get("quest"))),
+        "parameters": parameter_delta,
+    }
+
+
 def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     before_report = ensure_dict(params.get("beforeValidation") or params.get("before_validation") or params.get("before") or {})
@@ -12704,6 +12869,7 @@ def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str
     persistent_keys = sorted(set(before_findings) & set(after_findings))
     rollback_matches_before = bool(rollback_report) and rollback.get("severityCounts") == before.get("severityCounts") and rollback.get("gateStatus") == before.get("gateStatus")
     status = _validation_delta_status(before, after, rollback)
+    profile_diff = _validation_delta_profile_diff(before_report, after_report, rollback_report)
     return {
         "ok": status not in {"regressed", "rollback-drift"},
         "schema": "vrcforge.optimization.validation_delta.v1",
@@ -12728,6 +12894,8 @@ def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str
             "added": [after_findings[key] for key in added_keys[:50]],
             "removed": [before_findings[key] for key in removed_keys[:50]],
         },
+        "profileDiff": profile_diff,
+        "parameterBudgetDelta": profile_diff.get("parameters"),
         "sectionDeltas": section_deltas,
         "rollbackProof": {
             "provided": bool(rollback_report),
@@ -12741,6 +12909,187 @@ def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str
             "externalAgentsMustNotApplyDirectly": True,
         },
     }
+
+
+def optimizer_proof_root() -> Path:
+    return ARTIFACTS_DIR / "optimizer-apply-smoke"
+
+
+def _optimizer_proof_run_id(value: str) -> str:
+    run_id = str(value or "").strip()
+    if run_id.endswith(".json"):
+        run_id = run_id[:-5]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,160}", run_id):
+        raise ValueError("Invalid optimizer proof run id.")
+    return run_id
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _optimizer_proof_path(run_id: str) -> Path:
+    root = optimizer_proof_root().resolve()
+    path = (root / f"{_optimizer_proof_run_id(run_id)}.json").resolve()
+    if not _path_is_under(path, root):
+        raise ValueError("Invalid optimizer proof path.")
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(path)
+    return path
+
+
+def _read_optimizer_proof_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Optimizer proof is not valid JSON: {path.name}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Optimizer proof JSON must be an object: {path.name}")
+    return payload
+
+
+def _optimizer_proof_steps(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    steps = report.get("steps")
+    if not isinstance(steps, list):
+        return {}
+    mapped: dict[str, dict[str, Any]] = {}
+    for step in steps:
+        if isinstance(step, dict):
+            name = str(step.get("name") or "")
+            if name:
+                mapped[name] = step
+    return mapped
+
+
+def _optimizer_proof_latest_delta(report: dict[str, Any]) -> dict[str, Any]:
+    steps = _optimizer_proof_steps(report)
+    return steps.get("validation.delta_after_rollback") or steps.get("validation.delta_after_apply") or {}
+
+
+def _optimizer_proof_visual_summary(report: dict[str, Any], run_id: str) -> dict[str, Any]:
+    visual = ensure_dict(report.get("visualRegression"))
+    screenshots = ensure_dict(visual.get("screenshots"))
+    screenshot_summary: dict[str, dict[str, Any]] = {}
+    for stage, raw in screenshots.items():
+        stage_name = str(stage or "")
+        entry = ensure_dict(raw)
+        summarized = {
+            "stage": stage_name,
+            "captured": bool(entry.get("captured")),
+            "artifactOk": bool(entry.get("artifactOk")),
+            "exists": bool(entry.get("exists")),
+            "size": entry.get("size"),
+            "sha256": entry.get("sha256"),
+            "warning": entry.get("warning") or entry.get("error"),
+        }
+        image_path = Path(str(entry.get("artifactImagePath") or "")) if entry.get("artifactImagePath") else None
+        if image_path and image_path.exists() and _path_is_under(image_path, ARTIFACTS_DIR):
+            summarized["imageUrl"] = f"/api/app/optimization/proofs/{run_id}/screenshots/{stage_name}"
+        screenshot_summary[stage_name] = summarized
+    return {
+        "schema": visual.get("schema"),
+        "status": visual.get("status") or "unavailable",
+        "proofPassed": bool(visual.get("proofPassed")),
+        "requiresHumanReview": bool(visual.get("requiresHumanReview")),
+        "scoring": ensure_dict(visual.get("scoring")) or {"mode": "not-run"},
+        "screenshots": screenshot_summary,
+    }
+
+
+def summarize_optimizer_proof(path: Path, report: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = report or _read_optimizer_proof_file(path)
+    run_id = path.stem
+    summary = ensure_dict(payload.get("summary"))
+    steps = _optimizer_proof_steps(payload)
+    delta = _optimizer_proof_latest_delta(payload)
+    profile_diff = ensure_dict(delta.get("profileDiff"))
+    parameter_delta = ensure_dict(delta.get("parameterBudgetDelta"))
+    checkpoint_step = ensure_dict(steps.get("optimizer.verify_checkpoint_delta"))
+    rollback_proof = ensure_dict(delta.get("rollbackProof"))
+    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    profile_unavailable = not bool(profile_diff)
+    return {
+        "runId": run_id,
+        "schema": payload.get("schema"),
+        "ok": bool(payload.get("ok")),
+        "status": summary.get("status") or ("passed" if payload.get("ok") else "failed"),
+        "tool": summary.get("tool"),
+        "checkpointId": summary.get("checkpointId"),
+        "rollbackDone": bool(summary.get("rollbackDone") or payload.get("rollbackDone")),
+        "changedFileCount": checkpoint_step.get("changedFileCount"),
+        "failedSteps": summary.get("failedSteps") if isinstance(summary.get("failedSteps"), list) else [],
+        "startedAt": payload.get("startedAt"),
+        "finishedAt": payload.get("finishedAt"),
+        "modifiedAt": modified,
+        "visualRegression": _optimizer_proof_visual_summary(payload, run_id),
+        "rollbackProof": rollback_proof,
+        "profileDiff": profile_diff,
+        "profileDiffUnavailable": profile_unavailable,
+        "parameterBudgetDelta": parameter_delta,
+        "reportPath": str(path),
+    }
+
+
+def list_optimizer_proofs_sync(limit: int = 10) -> dict[str, Any]:
+    safe_limit = max(1, min(int(limit or 10), 50))
+    root = optimizer_proof_root()
+    proofs: list[dict[str, Any]] = []
+    if root.exists():
+        files = sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for path in files[:safe_limit]:
+            try:
+                proofs.append(summarize_optimizer_proof(path))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                proofs.append(
+                    {
+                        "runId": path.stem,
+                        "ok": False,
+                        "status": "unreadable",
+                        "modifiedAt": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                        "error": str(exc),
+                    }
+                )
+    return {
+        "ok": True,
+        "schema": "vrcforge.optimization.proof_index.v1",
+        "readOnly": True,
+        "artifactRoot": str(root),
+        "count": len(proofs),
+        "proofs": proofs,
+    }
+
+
+def read_optimizer_proof_sync(run_id: str) -> dict[str, Any]:
+    path = _optimizer_proof_path(run_id)
+    report = _read_optimizer_proof_file(path)
+    return {
+        "ok": True,
+        "schema": "vrcforge.optimization.proof_detail.v1",
+        "readOnly": True,
+        "proof": summarize_optimizer_proof(path, report),
+        "report": report,
+    }
+
+
+def optimizer_proof_screenshot_path(run_id: str, stage: str) -> Path:
+    stage_name = str(stage or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", stage_name):
+        raise ValueError("Invalid optimizer proof screenshot stage.")
+    report = _read_optimizer_proof_file(_optimizer_proof_path(run_id))
+    screenshot = ensure_dict(ensure_dict(ensure_dict(report.get("visualRegression")).get("screenshots")).get(stage_name))
+    path_value = str(screenshot.get("artifactImagePath") or "").strip()
+    if not path_value:
+        raise FileNotFoundError(stage_name)
+    path = Path(path_value).resolve()
+    if not _path_is_under(path, ARTIFACTS_DIR):
+        raise PermissionError(path)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 def build_optimization_plan_sync(params: dict[str, Any]) -> dict[str, Any]:

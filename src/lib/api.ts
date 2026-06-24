@@ -1187,6 +1187,53 @@ export async function fetchOptimizationPlan(
   });
 }
 
+export type OptimizationProofSummary = {
+  runId: string;
+  schema?: string;
+  ok?: boolean;
+  status?: string;
+  tool?: string;
+  checkpointId?: string;
+  rollbackDone?: boolean;
+  changedFileCount?: number;
+  failedSteps?: string[];
+  startedAt?: string;
+  finishedAt?: string;
+  modifiedAt?: string;
+  visualRegression?: Record<string, unknown>;
+  rollbackProof?: Record<string, unknown>;
+  profileDiff?: Record<string, unknown>;
+  profileDiffUnavailable?: boolean;
+  parameterBudgetDelta?: Record<string, unknown>;
+  reportPath?: string;
+  error?: string;
+};
+
+export type OptimizationProofList = {
+  ok: boolean;
+  schema: string;
+  readOnly: boolean;
+  artifactRoot?: string;
+  count: number;
+  proofs: OptimizationProofSummary[];
+};
+
+export type OptimizationProofDetail = {
+  ok: boolean;
+  schema: string;
+  readOnly: boolean;
+  proof: OptimizationProofSummary;
+  report: Record<string, unknown>;
+};
+
+export async function fetchOptimizationProofs(endpoint: string, limit = 8): Promise<OptimizationProofList> {
+  return requestJson<OptimizationProofList>(`${endpoint}/api/app/optimization/proofs?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function fetchOptimizationProof(endpoint: string, runId: string): Promise<OptimizationProofDetail> {
+  return requestJson<OptimizationProofDetail>(`${endpoint}/api/app/optimization/proofs/${encodeURIComponent(runId)}`);
+}
+
 export async function fetchAvatars(
   endpoint: string,
   request: { projectPath?: string } = {},

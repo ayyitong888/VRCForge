@@ -57,3 +57,24 @@ def test_visual_regression_artifact_marks_partial_and_skipped() -> None:
     assert partial["screenshots"]["before"]["warning"] == "missing file"
     assert skipped["status"] == "skipped"
     assert skipped["requiresHumanReview"] is False
+
+
+def test_delta_summary_keeps_profile_diff_and_parameter_delta() -> None:
+    module = load_optimizer_smoke_module()
+
+    summary = module.delta_summary(
+        {
+            "ok": True,
+            "schema": "vrcforge.optimization.validation_delta.v1",
+            "status": "improved",
+            "findingDelta": {"addedCount": 0, "removedCount": 2},
+            "rollbackProof": {"matchesBeforeSeverityAndGate": True},
+            "profileDiff": {"pc": {"rankBefore": "Poor", "rankAfter": "Medium"}},
+            "parameterBudgetDelta": {"syncedBitsDelta": -8},
+        },
+        require_rollback=True,
+    )
+
+    assert summary["ok"] is True
+    assert summary["profileDiff"]["pc"]["rankAfter"] == "Medium"
+    assert summary["parameterBudgetDelta"]["syncedBitsDelta"] == -8

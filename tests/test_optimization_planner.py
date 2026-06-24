@@ -138,6 +138,10 @@ def fake_validation() -> dict:
                             "layerName": "Wardrobe",
                             "transitions": [{"conditions": [{"parameter": "Wardrobe", "mode": "Equals", "threshold": 1}]}],
                         },
+                        {
+                            "layerName": "ma_to_blendtree: Already Converted",
+                            "transitions": [],
+                        },
                     ],
                     "parameters": [
                         {"name": "OutfitToggleHat", "type": "Bool", "used_by_condition": True},
@@ -271,6 +275,8 @@ def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> Non
     assert report["audits"]["physBones"]["summary"]["reportedComponentCount"] == 36
     assert report["plans"]["physBoneReduce"]["planOnly"] is True
     assert report["plans"]["hiddenBodyCut"]["applyBlocked"] is True
+    assert report["plans"]["ma2btConvertibility"]["summary"]["skippedLayerCount"] == 1
+    assert report["plans"]["ma2btConvertibility"]["diagnostics"][0]["recommendedAction"]
     assert report["plans"]["parameterBehaviorRegression"]["proofReady"] is False
     assert report["plans"]["parameterPathToSkill"]["applyBlocked"] is True
     assert physbone["readOnly"] is True
@@ -372,6 +378,11 @@ def test_optimization_validation_delta_reports_improvement_and_rollback_match() 
         "sections": [
             {"id": "materials", "name": "Materials", "status": "warning", "counts": {"Error": 0, "Warning": 1, "Suggestion": 1, "Info": 0, "Ignored": 0}},
         ],
+        "sources": {
+            "performance_pc": {"ok": True, "payload": {"rank": "Poor", "triangleCount": 72000, "textureMemoryBytes": 180000000}},
+            "performance_quest": {"ok": True, "payload": {"rank": "VeryPoor", "triangleCount": 42000}},
+            "parameters": {"ok": True, "payload": {"totalEstimatedCost": 240, "totalParameters": 22}},
+        },
         "findings": [
             {"section": "Materials", "severity": "Warning", "title": "Large texture", "source": "materials"},
             {"section": "Materials", "severity": "Suggestion", "title": "Atlas candidate", "source": "materials"},
@@ -385,6 +396,11 @@ def test_optimization_validation_delta_reports_improvement_and_rollback_match() 
         "sections": [
             {"id": "materials", "name": "Materials", "status": "review", "counts": {"Error": 0, "Warning": 0, "Suggestion": 1, "Info": 0, "Ignored": 0}},
         ],
+        "sources": {
+            "performance_pc": {"ok": True, "payload": {"rank": "Medium", "triangleCount": 68000, "textureMemoryBytes": 128000000}},
+            "performance_quest": {"ok": True, "payload": {"rank": "Poor", "triangleCount": 39000}},
+            "parameters": {"ok": True, "payload": {"totalEstimatedCost": 212, "totalParameters": 20}},
+        },
         "findings": [
             {"section": "Materials", "severity": "Suggestion", "title": "Atlas candidate", "source": "materials"},
         ],
@@ -407,6 +423,13 @@ def test_optimization_validation_delta_reports_improvement_and_rollback_match() 
     assert delta["status"] == "improved"
     assert delta["severityDelta"]["Warning"] == -1
     assert delta["findingDelta"]["removedCount"] == 1
+    assert delta["profileDiff"]["pc"]["rankBefore"] == "Poor"
+    assert delta["profileDiff"]["pc"]["rankAfter"] == "Medium"
+    assert delta["profileDiff"]["pc"]["metricsDelta"]["triangles"] == -4000
+    assert delta["profileDiff"]["quest"]["rankChanged"] is True
+    assert delta["parameterBudgetDelta"]["syncedBitsDelta"] == -28
+    assert delta["parameterBudgetDelta"]["totalCustomParametersDelta"] == -2
+    assert delta["parameterBudgetDelta"]["rollbackMatchesBefore"] is True
     assert delta["rollbackProof"]["matchesBeforeSeverityAndGate"] is True
 
 

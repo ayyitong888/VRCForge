@@ -4116,6 +4116,8 @@ namespace VRCForge.Editor
         self.assertIn("VRCForge_Windows_x64_$Version.zip", publish_script)
         self.assertIn("VRCForge.unitypackage", publish_script)
         self.assertIn('(?i)(alpha|beta|rc)', publish_script)
+        self.assertIn("targetCommitish", publish_script)
+        self.assertIn("Existing GitHub Release $tag targets", publish_script)
         self.assertIn('release upload $tag @artifacts --clobber', publish_script)
         self.assertIn("win-x64", launcher_project)
         self.assertIn("<Platforms>x64</Platforms>", launcher_project)
@@ -4124,7 +4126,8 @@ namespace VRCForge.Editor
         self.assertIn("VRCForge_Offline_Installer_x64.exe", offline_nsis)
         self.assertIn("VRCForge_Web_Installer_x64.exe", web_nsis)
         self.assertIn("$PROGRAMFILES64\\VRCForge", offline_nsis)
-        self.assertIn("$LOCALAPPDATA\\VRCForge\\config", web_nsis)
+        self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", offline_nsis)
+        self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", web_nsis)
 
     def test_coplaydev_mcp_distribution_notes_are_present(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -5531,6 +5534,117 @@ namespace VRCForge.Editor
         path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
         url = dashboard_server.to_artifact_url(path)
         self.assertEqual(url, "/artifacts/latest/vision_capture.png")
+
+    def test_optimizer_proof_index_detail_and_screenshot_are_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
+            temp_artifacts = Path(temp_dir) / "artifacts"
+            dashboard_server.ARTIFACTS_DIR = temp_artifacts
+            proof_root = temp_artifacts / "optimizer-apply-smoke"
+            run_id = "optimizer-apply-smoke-20260624-010101"
+            screenshot = proof_root / run_id / "screenshots" / "before.png"
+            screenshot.parent.mkdir(parents=True)
+            screenshot.write_bytes(b"proof image")
+            (proof_root / f"{run_id}.json").write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "schema": "vrcforge.optimizer_apply_rollback_smoke.v1",
+                        "startedAt": "2026-06-24T01:01:01+00:00",
+                        "finishedAt": "2026-06-24T01:02:01+00:00",
+                        "summary": {
+                            "status": "passed",
+                            "tool": "optimization.meshia.simplify-apply-request",
+                            "checkpointId": "ckpt_123",
+                            "rollbackDone": True,
+                            "failedSteps": [],
+                        },
+                        "steps": [
+                            {"name": "optimizer.verify_checkpoint_delta", "ok": True, "changedFileCount": 1},
+                            {
+                                "name": "validation.delta_after_rollback",
+                                "ok": True,
+                                "rollbackProof": {"matchesBeforeSeverityAndGate": True},
+                                "profileDiff": {"pc": {"rankBefore": "Poor", "rankAfter": "Medium"}},
+                                "parameterBudgetDelta": {"syncedBitsDelta": -12},
+                            },
+                        ],
+                        "visualRegression": {
+                            "schema": "vrcforge.visual_regression.v1",
+                            "status": "captured",
+                            "proofPassed": True,
+                            "requiresHumanReview": True,
+                            "scoring": {"mode": "not-run"},
+                            "screenshots": {
+                                "before": {
+                                    "stage": "before",
+                                    "captured": True,
+                                    "artifactOk": True,
+                                    "exists": True,
+                                    "artifactImagePath": str(screenshot),
+                                }
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    index_response = client.get("/api/app/optimization/proofs")
+                    detail_response = client.get(f"/api/app/optimization/proofs/{run_id}")
+                    screenshot_response = client.get(f"/api/app/optimization/proofs/{run_id}/screenshots/before")
+
+                self.assertEqual(index_response.status_code, 200)
+                index_payload = index_response.json()
+                self.assertTrue(index_payload["readOnly"])
+                self.assertEqual(index_payload["proofs"][0]["runId"], run_id)
+                self.assertEqual(index_payload["proofs"][0]["profileDiff"]["pc"]["rankAfter"], "Medium")
+                self.assertEqual(index_payload["proofs"][0]["parameterBudgetDelta"]["syncedBitsDelta"], -12)
+                self.assertIn("/screenshots/before", index_payload["proofs"][0]["visualRegression"]["screenshots"]["before"]["imageUrl"])
+
+                self.assertEqual(detail_response.status_code, 200)
+                detail_payload = detail_response.json()
+                self.assertTrue(detail_payload["readOnly"])
+                self.assertEqual(detail_payload["proof"]["checkpointId"], "ckpt_123")
+                self.assertEqual(detail_payload["report"]["summary"]["tool"], "optimization.meshia.simplify-apply-request")
+                self.assertEqual(screenshot_response.status_code, 200)
+                self.assertEqual(screenshot_response.content, b"proof image")
+            finally:
+                dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
+
+    def test_optimizer_proof_screenshot_rejects_paths_outside_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
+            temp_path = Path(temp_dir)
+            temp_artifacts = temp_path / "artifacts"
+            dashboard_server.ARTIFACTS_DIR = temp_artifacts
+            proof_root = temp_artifacts / "optimizer-apply-smoke"
+            proof_root.mkdir(parents=True)
+            outside = temp_path / "outside.png"
+            outside.write_bytes(b"outside")
+            run_id = "optimizer-apply-smoke-20260624-020202"
+            (proof_root / f"{run_id}.json").write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "summary": {"status": "passed"},
+                        "visualRegression": {
+                            "screenshots": {
+                                "before": {"artifactImagePath": str(outside), "artifactOk": True},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.get(f"/api/app/optimization/proofs/{run_id}/screenshots/before")
+
+                self.assertEqual(response.status_code, 403)
+            finally:
+                dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
 
     # ------------------------------------------------------------------
     # /api/clothes/apply-fx (dry_run=True — no Unity needed)

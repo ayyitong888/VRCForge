@@ -1,11 +1,15 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.8.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.8.0-beta)
+[![Version](https://img.shields.io/badge/version-v0.9.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.0-beta)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current source and latest packaged release line: `0.8.0-beta`.
+Current public beta target: `0.9.0-beta`.
+
+0.9.0-beta release artifacts and hashes are still pending final main-agent
+acceptance. Until the GitHub Release is published, use the latest published
+`0.8.0-beta` release for stable beta testing.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -22,7 +26,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.8.0-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.0-beta
 
 Recommended:
 
@@ -46,7 +50,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.8.0-beta.zip`
+- `VRCForge_Windows_x64_0.9.0-beta.zip` after release acceptance
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 
@@ -80,7 +84,24 @@ The project picker merges manual folders, VCC user projects, Unity Hub recent pr
 
 `VRCForge.exe` opens the Tauri desktop app directly and starts or reconnects to the local FastAPI runtime. The legacy WebView2 launcher and `start_dashboard.cmd` path remain debug/compatibility surfaces only.
 
-Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet. Settings also includes a Debug logging switch that records local API/MCP/runtime interactions to redacted logs, and Doctor can export a redacted Support Bundle for troubleshooting.
+Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet. Settings also includes a Debug logging switch that records local API/MCP/runtime interactions to redacted logs, and Doctor can export a redacted Support Bundle for troubleshooting. When filing a public GitHub issue, upload or paste the relevant support bundle artifact manually after reviewing it for private data.
+
+## 0.9 Public Beta Workflow
+
+0.9.0-beta is the public beta line for Golden Path Matrix coverage and support
+hardening. The public release evidence and proof matrix sections are prepared
+as placeholders; the main release agent will replace them with real artifact
+paths, sizes, and SHA-256 hashes after final acceptance.
+
+Public beta focus:
+
+- Golden Path Matrix: install, Doctor, Unity connection, avatar validation,
+  supervised write request, checkpoint, rollback, external-agent request, and
+  `.vsk` import/disable/uninstall coverage.
+- Proof viewer: human-reviewable proof artifacts for screenshots,
+  checkpoints, validation deltas, and rollback evidence.
+- Support flow: Doctor support bundle export, then manual upload or paste into
+  the GitHub issue template.
 
 The desktop app also includes uninstall actions:
 - Unity-side uninstall moves `Assets/VRCForge` and `Packages/com.coplaydev.unity-mcp` to project-root `.vrcforge/backups/`, then removes the manifest dependency with rollback on failure.
@@ -88,7 +109,7 @@ The desktop app also includes uninstall actions:
 
 ## CLI / 命令行
 
-VRCForge 0.8.0-beta includes a local CLI for diagnostics, read-only scans, and
+VRCForge 0.9.0-beta includes a local CLI for diagnostics, read-only scans, and
 request-based write flows. It talks to the same local desktop runtime at
 `http://127.0.0.1:8757`; open VRCForge Desktop first so the backend and app
 session token are available.
@@ -138,7 +159,7 @@ Model optimization integration strategy and release sequencing are documented in
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
-| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.8.0 proof line |
+| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.8.0 proof line; 0.9 broadens Golden Path Matrix coverage |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |

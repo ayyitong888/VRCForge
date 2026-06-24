@@ -70,6 +70,8 @@ import {
   ExternalAgentConnectorStatus,
   OutfitImportPlanResult,
   OptimizationPlannerReport,
+  OptimizationProofDetail,
+  OptimizationProofSummary,
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
@@ -88,6 +90,8 @@ import {
   fetchDoctor,
   fetchExternalAgentConnectors,
   fetchOptimizationPlan,
+  fetchOptimizationProof,
+  fetchOptimizationProofs,
   fetchSkillPackages,
   fetchSkills,
   AgentSkillCheck,
@@ -118,6 +122,7 @@ import {
   saveAgentNotes,
   scanProjectIndex,
   sendAgentMessage,
+  setSkillPackageEnabled,
   setAppSessionToken,
   testProviderCapability,
   updateApiConfig,
@@ -126,6 +131,7 @@ import {
   updatePermission,
   updateSkill,
   uninstallExternalAgentConnector,
+  uninstallSkillPackage,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
@@ -397,6 +403,10 @@ export default function App() {
   const [requestingOptimizationAction, setRequestingOptimizationAction] = useState("");
   const [requestingOptimizationDependency, setRequestingOptimizationDependency] = useState("");
   const [optimizationActionOptions, setOptimizationActionOptions] = useState<Record<string, OptimizationActionOptions>>({});
+  const [optimizationProofs, setOptimizationProofs] = useState<OptimizationProofSummary[]>([]);
+  const [selectedOptimizationProof, setSelectedOptimizationProof] = useState<OptimizationProofDetail | null>(null);
+  const [loadingOptimizationProofs, setLoadingOptimizationProofs] = useState(false);
+  const [optimizationProofMessage, setOptimizationProofMessage] = useState("");
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
@@ -1629,6 +1639,7 @@ export default function App() {
     setError("");
     await loadOptimizationPlan();
     await loadOptimizationAvatars();
+    await loadOptimizationProofs();
   }
 
   async function loadOptimizationPlan(target = endpoint, profile = optimizationTargetProfile) {
@@ -1651,11 +1662,47 @@ export default function App() {
       });
       setOptimizationReport(payload);
       setOptimizationMessage(payload.ok ? "Plan refreshed" : "Planner returned warnings");
+      void loadOptimizationProofs(targetEndpoint);
     } catch (cause) {
       setOptimizationMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingOptimization(false);
     }
+  }
+
+  async function loadOptimizationProofs(target = endpoint, runId?: string) {
+    setLoadingOptimizationProofs(true);
+    setOptimizationProofMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchOptimizationProofs(targetEndpoint, 8);
+      const proofs = payload.proofs || [];
+      setOptimizationProofs(proofs);
+      const selectedRunId = runId || selectedOptimizationProof?.proof?.runId || proofs[0]?.runId || "";
+      if (selectedRunId) {
+        const detail = await fetchOptimizationProof(targetEndpoint, selectedRunId);
+        setSelectedOptimizationProof(detail);
+      } else {
+        setSelectedOptimizationProof(null);
+      }
+      setOptimizationProofMessage(proofs.length ? `${proofs.length} proof run${proofs.length === 1 ? "" : "s"}` : "No optimizer proof runs");
+    } catch (cause) {
+      setOptimizationProofMessage(cause instanceof Error ? cause.message : String(cause));
+      setSelectedOptimizationProof(null);
+    } finally {
+      setLoadingOptimizationProofs(false);
+    }
+  }
+
+  async function selectOptimizationProof(runId: string) {
+    await loadOptimizationProofs(endpoint, runId);
   }
 
   async function loadOptimizationAvatars(target = endpoint) {
@@ -1881,13 +1928,55 @@ export default function App() {
     }
   }
 
-  async function exportVskPackage(skillName: string, outputPath: string, release: boolean) {
+  async function exportVskPackage(skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) {
     setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
     try {
-      const payload = await exportSkillPackage(endpoint, { skillName, outputPath, release });
+      const payload = await exportSkillPackage(endpoint, { skillName, outputPath, release, privateKeyPath: privateKeyPath || undefined });
       setSkillPackageMessage(release ? "Release package exported" : "Dev package exported");
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function setVskPackageEnabled(skillPackageId: string, enabled: boolean) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await setSkillPackageEnabled(endpoint, skillPackageId, { enabled, syncProjectedSkill: true });
+      setSkillPackageMessage(enabled ? "Package enabled" : "Package disabled");
+      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+      setSkillRegistry(skillsPayload);
+      setSkillCheck(await checkSkills(endpoint));
+      await refresh(endpoint);
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function uninstallVskPackage(skillPackageId: string) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await uninstallSkillPackage(endpoint, skillPackageId, { removeProjectedSkill: true });
+      setSkillPackageMessage("Package uninstalled");
+      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+      setSkillRegistry(skillsPayload);
+      setSkillCheck(await checkSkills(endpoint));
+      await refresh(endpoint);
       return payload;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -2639,6 +2728,8 @@ export default function App() {
               onPreflightPackage={preflightVskPackage}
               onImportPackage={importVskPackage}
               onExportPackage={exportVskPackage}
+              onSetPackageEnabled={setVskPackageEnabled}
+              onUninstallPackage={uninstallVskPackage}
             />
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
@@ -2655,14 +2746,19 @@ export default function App() {
           ) : activeView === "optimization" ? (
             <OptimizationWorkspace
               report={optimizationReport}
+              proofs={optimizationProofs}
+              selectedProof={selectedOptimizationProof}
+              endpoint={endpoint}
               permission={permission}
               selectedProjectPath={activeProjectPath}
               avatarPath={optimizationAvatarPath}
               avatars={optimizationAvatars}
               targetProfile={optimizationTargetProfile}
               loading={loadingOptimization}
+              loadingProofs={loadingOptimizationProofs}
               loadingAvatars={loadingOptimizationAvatars}
               message={optimizationMessage}
+              proofMessage={optimizationProofMessage}
               avatarMessage={optimizationAvatarMessage}
               actionOptions={optimizationActionOptions}
               requestingActionId={requestingOptimizationAction}
@@ -2670,6 +2766,8 @@ export default function App() {
               onAvatarPathChange={setOptimizationAvatarPath}
               onTargetProfileChange={setOptimizationTargetProfile}
               onRefresh={() => void loadOptimizationPlan()}
+              onRefreshProofs={() => void loadOptimizationProofs()}
+              onSelectProof={(runId) => void selectOptimizationProof(runId)}
               onRefreshAvatars={() => void loadOptimizationAvatars()}
               onActionOptionChange={updateOptimizationActionOption}
               onRequestAction={(card) => void requestOptimizationAction(card)}
@@ -4611,14 +4709,19 @@ function ConnectorToggle({
 
 function OptimizationWorkspace({
   report,
+  proofs,
+  selectedProof,
+  endpoint,
   permission,
   selectedProjectPath,
   avatarPath,
   avatars,
   targetProfile,
   loading,
+  loadingProofs,
   loadingAvatars,
   message,
+  proofMessage,
   avatarMessage,
   actionOptions,
   requestingActionId,
@@ -4626,20 +4729,27 @@ function OptimizationWorkspace({
   onAvatarPathChange,
   onTargetProfileChange,
   onRefresh,
+  onRefreshProofs,
+  onSelectProof,
   onRefreshAvatars,
   onActionOptionChange,
   onRequestAction,
   onRequestDependency,
 }: {
   report: OptimizationPlannerReport | null;
+  proofs: OptimizationProofSummary[];
+  selectedProof: OptimizationProofDetail | null;
+  endpoint: string;
   permission?: PermissionState;
   selectedProjectPath: string;
   avatarPath: string;
   avatars: AvatarListItem[];
   targetProfile: string;
   loading: boolean;
+  loadingProofs: boolean;
   loadingAvatars: boolean;
   message: string;
+  proofMessage: string;
   avatarMessage: string;
   actionOptions: Record<string, OptimizationActionOptions>;
   requestingActionId: string;
@@ -4647,6 +4757,8 @@ function OptimizationWorkspace({
   onAvatarPathChange: (value: string) => void;
   onTargetProfileChange: (profile: string) => void;
   onRefresh: () => void;
+  onRefreshProofs: () => void;
+  onSelectProof: (runId: string) => void;
   onRefreshAvatars: () => void;
   onActionOptionChange: (actionId: string, key: keyof OptimizationActionOptions, value: string) => void;
   onRequestAction: (card: NonNullable<OptimizationPlannerReport["actionCards"]>[number]) => void;
@@ -4785,6 +4897,17 @@ function OptimizationWorkspace({
           <OptimizationMetric label="PhysBones" value={formatOptimizationMetric(metrics.physBones)} />
           <OptimizationMetric label="Generated residue" value={formatOptimizationMetric(metrics.generatedResidueCount)} />
         </section>
+
+        <OptimizationProofReadiness report={report} />
+        <OptimizationProofViewer
+          proofs={proofs}
+          selectedProof={selectedProof}
+          endpoint={endpoint}
+          loading={loadingProofs}
+          message={proofMessage}
+          onRefresh={onRefreshProofs}
+          onSelectProof={onSelectProof}
+        />
 
         <section>
           <div className="mb-3 flex min-w-0 items-center gap-2">
@@ -4948,6 +5071,230 @@ function OptimizationMetric({ label, value }: { label: string; value: string }) 
   );
 }
 
+function OptimizationProofReadiness({ report }: { report: OptimizationPlannerReport | null }) {
+  const plans = optimizationRecord(report?.plans);
+  const visual = optimizationRecord(plans.visualRegression);
+  const rollback = optimizationRecord(plans.rollbackVerify);
+  const parameterRegression = optimizationRecord(plans.parameterBehaviorRegression);
+  const parameterPath = optimizationRecord(plans.parameterPathToSkill);
+  const ma2bt = optimizationRecord(plans.ma2btConvertibility);
+  const visualShots = optimizationArray(visual.shots);
+  const visualPlayModeShots = visualShots.filter((item) => Boolean(optimizationRecord(item).requiresPlayMode));
+  const rollbackReady = Boolean(rollback.canGenerateFutureProof);
+  const parameterSummary = optimizationRecord(parameterRegression.summary);
+  const parameterGates = optimizationRecord(parameterPath.hardGates);
+  const ma2btSummary = optimizationRecord(ma2bt.summary);
+  const ma2btDiagnostics = optimizationArray(ma2bt.diagnostics);
+  const cards = [
+    {
+      id: "visual",
+      icon: Eye,
+      title: "Visual proof",
+      tone: visualShots.length ? ("ok" as const) : ("warn" as const),
+      lines: [
+        ["Shots", `${visualShots.length}`],
+        ["Play Mode", `${visualPlayModeShots.length}`],
+        ["Scoring", optimizationRecord(visual.scoring).mode ? String(optimizationRecord(visual.scoring).mode) : "not-run"],
+      ],
+    },
+    {
+      id: "rollback",
+      icon: RotateCcw,
+      title: "Rollback proof",
+      tone: rollbackReady ? ("ok" as const) : ("warn" as const),
+      lines: [
+        ["Project", rollback.projectReadable ? "readable" : "not ready"],
+        ["Residue", formatOptimizationMetric(rollback.generatedResidueCount)],
+        ["Checkpoint", rollback.checkpointInfrastructureRequired ? "required" : "unknown"],
+      ],
+    },
+    {
+      id: "parameters",
+      icon: Shield,
+      title: "Parameter gates",
+      tone: Number(parameterSummary.dangerParameterCount || parameterGates.blockedParameterCount || 0) ? ("warn" as const) : ("ok" as const),
+      lines: [
+        ["Cases", formatOptimizationMetric(parameterSummary.testCaseCount)],
+        ["Blocked", formatOptimizationMetric(parameterGates.blockedParameterCount ?? parameterSummary.dangerParameterCount)],
+        ["Apply", parameterPath.applyBlocked ? "blocked" : "review"],
+      ],
+    },
+    {
+      id: "ma2bt",
+      icon: Sparkles,
+      title: "MA2BT diagnostics",
+      tone: Number(ma2btSummary.skippedLayerCount || 0) ? ("warn" as const) : ("ok" as const),
+      lines: [
+        ["Convertible", formatOptimizationMetric(ma2btSummary.convertibleLayerCount)],
+        ["Skipped", formatOptimizationMetric(ma2btSummary.skippedLayerCount)],
+        ["Reasons", `${ma2btDiagnostics.length}`],
+      ],
+    },
+  ];
+  return (
+    <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+      <div className="mb-3 flex min-w-0 items-center gap-2">
+        <Shield className="h-4 w-4 shrink-0 text-primary" />
+        <h2 className="truncate text-sm font-semibold">Proof readiness</h2>
+        <Badge tone="muted" className="ml-auto shrink-0">
+          0.9 gates
+        </Badge>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {cards.map((card) => {
+          const Icon = card.icon;
+          return (
+            <div key={card.id} className="min-w-0 rounded-lg border border-border bg-background p-3">
+              <div className="mb-2 flex min-w-0 items-center gap-2">
+                <Icon className="h-4 w-4 shrink-0 text-primary" />
+                <div className="min-w-0 flex-1 truncate text-sm font-medium">{card.title}</div>
+                <Badge tone={card.tone} className="shrink-0">
+                  {card.tone === "ok" ? "ready" : "review"}
+                </Badge>
+              </div>
+              <div className="grid gap-1 text-xs text-muted-foreground">
+                {card.lines.map(([label, value]) => (
+                  <DataLine key={label} label={label} value={value || "-"} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function OptimizationProofViewer({
+  proofs,
+  selectedProof,
+  endpoint,
+  loading,
+  message,
+  onRefresh,
+  onSelectProof,
+}: {
+  proofs: OptimizationProofSummary[];
+  selectedProof: OptimizationProofDetail | null;
+  endpoint: string;
+  loading: boolean;
+  message: string;
+  onRefresh: () => void;
+  onSelectProof: (runId: string) => void;
+}) {
+  const proof = selectedProof?.proof || proofs[0] || null;
+  const visual = optimizationRecord(proof?.visualRegression);
+  const screenshots = optimizationRecord(visual.screenshots);
+  const profile = optimizationRecord(proof?.profileDiff);
+  const pc = optimizationRecord(profile.pc);
+  const quest = optimizationRecord(profile.quest);
+  const parameters = optimizationRecord(proof?.parameterBudgetDelta);
+  const rollback = optimizationRecord(proof?.rollbackProof);
+  const stageIds = ["before", "after_apply", "after_rollback"];
+  return (
+    <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+      <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
+        <History className="h-4 w-4 shrink-0 text-primary" />
+        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">Optimizer proof</h2>
+        {message ? (
+          <Badge tone="muted" className="shrink-0">
+            {message}
+          </Badge>
+        ) : null}
+        <Button type="button" variant="ghost" className="h-8 px-2 text-xs" disabled={loading} onClick={onRefresh}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+
+      {!proof ? (
+        <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">No optimizer proof runs.</div>
+      ) : (
+        <div className="grid gap-4">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+            <div className="grid gap-2 rounded-lg border border-border bg-background p-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <Badge tone={proof.ok ? "ok" : "danger"} className="shrink-0">
+                  {proof.status || (proof.ok ? "passed" : "failed")}
+                </Badge>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{proof.runId}</span>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                <DataLine label="Tool" value={proof.tool || "-"} />
+                <DataLine label="Checkpoint" value={proof.checkpointId || "-"} mono />
+                <DataLine label="Changed files" value={formatOptimizationMetric(proof.changedFileCount)} />
+                <DataLine label="Rollback" value={proof.rollbackDone ? "done" : "not done"} />
+              </div>
+            </div>
+            <select
+              value={proof.runId}
+              disabled={loading || proofs.length === 0}
+              onChange={(event) => onSelectProof(event.target.value)}
+              className="h-10 min-w-0 self-start rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+            >
+              {proofs.map((item) => (
+                <option key={item.runId} value={item.runId}>
+                  {item.status || "proof"} / {item.tool || item.runId}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <ProofMetricCard title="PC rank" before={pc.rankBefore} after={pc.rankAfter} rollback={pc.rankRollback} />
+            <ProofMetricCard title="Quest rank" before={quest.rankBefore} after={quest.rankAfter} rollback={quest.rankRollback} />
+            <ProofMetricCard title="Parameter bits" before="delta" after={parameters.syncedBitsDelta} rollback={parameters.rollbackMatchesBefore ? "matched" : "review"} />
+            <ProofMetricCard title="Rollback gate" before="severity/gate" after={rollback.matchesBeforeSeverityAndGate ? "matched" : "review"} rollback={rollback.remainingFindingCount ?? "-"} />
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-3">
+            {stageIds.map((stage) => {
+              const entry = optimizationRecord(screenshots[stage]);
+              const imageUrl = proofImageUrl(endpoint, entry.imageUrl);
+              const ok = Boolean(entry.artifactOk || entry.exists);
+              return (
+                <div key={stage} className="grid min-w-0 gap-2 rounded-lg border border-border bg-background p-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Eye className="h-4 w-4 shrink-0 text-primary" />
+                    <div className="min-w-0 flex-1 truncate text-sm font-medium">{proofStageLabel(stage)}</div>
+                    <Badge tone={ok ? "ok" : "warn"} className="shrink-0">
+                      {ok ? "captured" : "missing"}
+                    </Badge>
+                  </div>
+                  {imageUrl ? (
+                    <div className="aspect-square overflow-hidden rounded-md border border-border bg-muted">
+                      <img src={imageUrl} alt={proofStageLabel(stage)} className="h-full w-full object-contain" />
+                    </div>
+                  ) : (
+                    <div className="grid aspect-square place-items-center rounded-md border border-dashed border-border text-xs text-muted-foreground">No screenshot</div>
+                  )}
+                  <div className="grid gap-1 text-xs text-muted-foreground">
+                    <DataLine label="SHA" value={String(entry.sha256 || "-")} mono />
+                    <DataLine label="Size" value={formatOptimizationMetric(entry.size)} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {proof.failedSteps?.length ? <OutputBlock label="Failed steps" value={proof.failedSteps.join("\n")} /> : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProofMetricCard({ title, before, after, rollback }: { title: string; before: unknown; after: unknown; rollback: unknown }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border bg-background p-3">
+      <div className="mb-2 truncate text-sm font-medium">{title}</div>
+      <div className="grid gap-1 text-xs text-muted-foreground">
+        <DataLine label="Before" value={formatProofValue(before)} />
+        <DataLine label="After" value={formatProofValue(after)} />
+        <DataLine label="Rollback" value={formatProofValue(rollback)} />
+      </div>
+    </div>
+  );
+}
+
 function CheckpointWorkspace({
   checkpoints,
   selectedProjectPath,
@@ -5086,6 +5433,8 @@ function SkillsWorkspace({
   onPreflightPackage,
   onImportPackage,
   onExportPackage,
+  onSetPackageEnabled,
+  onUninstallPackage,
 }: {
   skills: AgentSkill[];
   skillCount: number;
@@ -5107,7 +5456,9 @@ function SkillsWorkspace({
   onRefreshPackages: () => void;
   onPreflightPackage: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImportPackage: (packagePath: string) => Promise<unknown>;
-  onExportPackage: (skillName: string, outputPath: string, release: boolean) => Promise<unknown>;
+  onExportPackage: (skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) => Promise<unknown>;
+  onSetPackageEnabled: (skillPackageId: string, enabled: boolean) => Promise<unknown>;
+  onUninstallPackage: (skillPackageId: string) => Promise<unknown>;
 }) {
   const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
@@ -5494,6 +5845,8 @@ function SkillsWorkspace({
           onPreflight={onPreflightPackage}
           onImport={onImportPackage}
           onExport={onExportPackage}
+          onSetEnabled={onSetPackageEnabled}
+          onUninstall={onUninstallPackage}
         />
         </div>
       </div>
@@ -5511,6 +5864,8 @@ function SkillPackageManagerPanel({
   onPreflight,
   onImport,
   onExport,
+  onSetEnabled,
+  onUninstall,
 }: {
   packages: SkillPackageEntry[];
   packageStore: string;
@@ -5520,15 +5875,19 @@ function SkillPackageManagerPanel({
   onRefresh: () => void;
   onPreflight: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImport: (packagePath: string) => Promise<unknown>;
-  onExport: (skillName: string, outputPath: string, release: boolean) => Promise<unknown>;
+  onExport: (skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) => Promise<unknown>;
+  onSetEnabled: (skillPackageId: string, enabled: boolean) => Promise<unknown>;
+  onUninstall: (skillPackageId: string) => Promise<unknown>;
 }) {
   const [packagePath, setPackagePath] = useState("");
   const [exportSkillName, setExportSkillName] = useState("");
   const [exportPath, setExportPath] = useState("");
+  const [exportPrivateKeyPath, setExportPrivateKeyPath] = useState("");
   const [releaseExport, setReleaseExport] = useState(false);
   const [preflight, setPreflight] = useState<SkillPackagePreflight | null>(null);
   const [localMessage, setLocalMessage] = useState("");
   const [localError, setLocalError] = useState("");
+  const [packageActionId, setPackageActionId] = useState("");
   const preview = normalizeSkillPackagePreview(preflight);
   async function runPreflight() {
     if (!packagePath.trim()) {
@@ -5559,16 +5918,49 @@ function SkillPackageManagerPanel({
     }
   }
   async function runExport() {
-    if (!exportSkillName.trim() || !exportPath.trim()) {
+    const privateKeyPath = exportPrivateKeyPath.trim();
+    if (!exportSkillName.trim() || !exportPath.trim() || (releaseExport && !privateKeyPath)) {
       return;
     }
     setLocalMessage("");
     setLocalError("");
     try {
-      await onExport(exportSkillName.trim(), exportPath.trim(), releaseExport);
+      await onExport(exportSkillName.trim(), exportPath.trim(), releaseExport, privateKeyPath || undefined);
       setLocalMessage(releaseExport ? "Release package exported" : "Dev package exported");
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  async function runSetEnabled(skillPackageIdValue: string, enabled: boolean) {
+    if (!skillPackageIdValue || skillPackageIdValue === "-") {
+      return;
+    }
+    setPackageActionId(skillPackageIdValue);
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onSetEnabled(skillPackageIdValue, enabled);
+      setLocalMessage(enabled ? "Package enabled" : "Package disabled");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
+    }
+  }
+  async function runUninstall(skillPackageIdValue: string) {
+    if (!skillPackageIdValue || skillPackageIdValue === "-") {
+      return;
+    }
+    setPackageActionId(skillPackageIdValue);
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onUninstall(skillPackageIdValue);
+      setLocalMessage("Package uninstalled");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
     }
   }
   const displayMessage = localMessage || message;
@@ -5648,12 +6040,26 @@ function SkillPackageManagerPanel({
               />
             </FieldLabel>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <label className="mr-auto flex h-9 min-w-0 items-center gap-2 rounded-md border border-border px-3 text-sm text-muted-foreground">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <FieldLabel label="Private Key Path">
+              <input
+                value={exportPrivateKeyPath}
+                onChange={(event) => setExportPrivateKeyPath(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
+              />
+            </FieldLabel>
+            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-border px-3 text-sm text-muted-foreground">
               <input type="checkbox" checked={releaseExport} onChange={(event) => setReleaseExport(event.target.checked)} />
               <span className="truncate">Signed release</span>
             </label>
-            <Button type="button" variant="outline" disabled={loading || !exportSkillName.trim() || !exportPath.trim()} onClick={() => void runExport()}>
+          </div>
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={loading || !exportSkillName.trim() || !exportPath.trim() || (releaseExport && !exportPrivateKeyPath.trim())}
+              onClick={() => void runExport()}
+            >
               <Copy className="h-4 w-4" />
               Export
             </Button>
@@ -5661,30 +6067,58 @@ function SkillPackageManagerPanel({
         </div>
 
         <div className="overflow-hidden rounded-lg border border-border">
-          <div className="grid grid-cols-[minmax(0,1fr)_100px_160px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+          <div className="grid grid-cols-[minmax(0,1fr)_88px_150px_180px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
             <span className="truncate">Package</span>
             <span className="truncate">Risk</span>
             <span className="truncate">Status</span>
+            <span className="truncate">Actions</span>
           </div>
           {packages.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">No installed .vsk packages.</div>
           ) : null}
-          {packages.map((pkg, index) => (
-            <div key={`${skillPackageId(pkg)}-${index}`} className="grid grid-cols-[minmax(0,1fr)_100px_160px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
-              <div className="min-w-0">
-                <div className="truncate font-medium">{skillPackageTitle(pkg)}</div>
-                <div className="truncate text-muted-foreground">{skillPackageId(pkg)}</div>
+          {packages.map((pkg, index) => {
+            const id = skillPackageId(pkg);
+            const enabled = skillPackageEnabled(pkg);
+            const busy = loading || packageActionId === id;
+            return (
+              <div key={`${id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_88px_150px_180px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{skillPackageTitle(pkg)}</div>
+                  <div className="truncate text-muted-foreground">{id}</div>
+                </div>
+                <span className="truncate">{skillPackageRisk(pkg)}</span>
+                <div className="flex min-w-0 flex-wrap gap-1">
+                  {skillPackageLabels(pkg).map((label) => (
+                    <Badge key={label} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">
+                      {label}
+                    </Badge>
+                  ))}
+                </div>
+                <div className="flex min-w-0 flex-wrap justify-end gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || id === "-"}
+                    onClick={() => void runSetEnabled(id, !enabled)}
+                  >
+                    {packageActionId === id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : enabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    {enabled ? "Disable" : "Enable"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || id === "-"}
+                    onClick={() => void runUninstall(id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Uninstall
+                  </Button>
+                </div>
               </div>
-              <span className="truncate">{skillPackageRisk(pkg)}</span>
-              <div className="flex min-w-0 flex-wrap gap-1">
-                {skillPackageLabels(pkg).map((label) => (
-                  <Badge key={label} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">
-                    {label}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </section>
@@ -5712,6 +6146,10 @@ function skillPackageRisk(pkg: SkillPackageEntry): string {
 
 function skillPackageSigner(pkg: SkillPackageEntry): string {
   return String(pkg.signer_fingerprint || pkg.signerFingerprint || "-");
+}
+
+function skillPackageEnabled(pkg: SkillPackageEntry): boolean {
+  return pkg.enabled !== false && pkg.available !== false;
 }
 
 function skillPackagePermissions(pkg: SkillPackageEntry): string[] {
@@ -6673,6 +7111,51 @@ function formatOptimizationMetric(value: unknown): string {
     return value;
   }
   return "unknown";
+}
+
+function optimizationRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function optimizationArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function proofStageLabel(stage: string): string {
+  if (stage === "after_apply") {
+    return "After apply";
+  }
+  if (stage === "after_rollback") {
+    return "After rollback";
+  }
+  return "Before";
+}
+
+function proofImageUrl(endpoint: string, value: unknown): string {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+  if (raw.startsWith("/")) {
+    return `${endpoint.replace(/\/$/, "")}${raw}`;
+  }
+  return raw;
+}
+
+function formatProofValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  }
+  return String(value);
 }
 
 function avatarOptionLabel(avatar: AvatarListItem): string {

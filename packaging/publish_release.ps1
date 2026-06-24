@@ -59,9 +59,14 @@ try {
     $tag = "v$Version"
     $target = (git rev-parse origin/main).Trim()
     $releaseExists = $false
+    $existingTarget = ""
     try {
-        $existingRelease = & gh release view $tag --json tagName 2>$null
+        $existingRelease = & gh release view $tag --json tagName,targetCommitish,isDraft,isPrerelease 2>$null
         $releaseExists = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingRelease)
+        if ($releaseExists) {
+            $existingPayload = $existingRelease | ConvertFrom-Json
+            $existingTarget = [string]$existingPayload.targetCommitish
+        }
     } catch {
         $releaseExists = $false
     }
@@ -79,6 +84,9 @@ try {
         }
         & gh @createArgs
     } else {
+        if ($existingTarget -and $existingTarget -ne $target) {
+            throw "Existing GitHub Release $tag targets $existingTarget, but origin/main is $target. Move or delete the tag/release before re-uploading assets."
+        }
         & gh release upload $tag @artifacts --clobber
     }
 

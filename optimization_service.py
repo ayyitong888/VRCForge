@@ -1851,13 +1851,32 @@ def build_ma2bt_convertibility_plan(dependency_doctor: dict[str, Any], ma_audit:
             skipped.append({**item, "skipReason": "Layer requires manual review before conversion."})
         else:
             candidates.append({**item, "status": "convertible-plan"})
+    skipped_layers = (ma_audit.get("skipped") or []) + skipped[:120]
+    skip_reason_counts: dict[str, int] = {}
+    for item in skipped_layers:
+        reason = str(item.get("skipReason") or "unknown").strip() or "unknown"
+        skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
     return {
         "planOnly": True,
         "dependency": dep,
         "blocked": dep.get("status") != "installed",
         "blockedReason": None if dep.get("status") == "installed" else "MA2BT-Pro is not detected.",
+        "summary": {
+            "convertibleLayerCount": len(candidates),
+            "skippedLayerCount": len(skipped_layers),
+            "skipReasonCounts": skip_reason_counts,
+            "scannerCoverage": ma_audit.get("summary", {}).get("scannerCoverage"),
+        },
         "convertibleLayers": candidates[:120],
-        "skippedLayers": (ma_audit.get("skipped") or []) + skipped[:120],
+        "skippedLayers": skipped_layers[:160],
+        "diagnostics": [
+            {
+                "reason": reason,
+                "count": count,
+                "recommendedAction": _ma2bt_skip_recommendation(reason),
+            }
+            for reason, count in sorted(skip_reason_counts.items())
+        ],
         "notes": ["scanAllLayers is higher risk; VRCForge defaults to MA Responsive layers only."],
     }
 
@@ -2902,6 +2921,17 @@ def _classify_ma_layer(name: str) -> str:
     if "shape" in lower or "blend" in lower:
         return "Shape Changer"
     return "MA Responsive layer"
+
+
+def _ma2bt_skip_recommendation(reason: str) -> str:
+    lower = reason.lower()
+    if "already" in lower:
+        return "Keep the layer as-is; it already appears converted or generated."
+    if "manual review" in lower or "unsafe" in lower:
+        return "Inspect the FX layer and only request MA2BT after behavior regression evidence exists."
+    if "unknown" in lower:
+        return "Refresh the FX animator scan and verify Modular Avatar metadata before planning conversion."
+    return "Review this skipped layer before enabling any MA2BT request."
 
 
 def _action_card(

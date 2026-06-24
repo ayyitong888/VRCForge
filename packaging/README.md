@@ -72,11 +72,11 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 0.8.0-beta `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.8.0-beta/VRCForge_Windows_x64_0.8.0-beta.zip
+  -Version 0.9.0-beta `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.9.0-beta/VRCForge_Windows_x64_0.9.0-beta.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 0.8.0-beta
+  -Version 0.9.0-beta
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -89,6 +89,11 @@ VRCForge_Windows_x64_<VERSION>.zip
 VRCForge_Offline_Installer_x64.exe
 VRCForge_Web_Installer_x64.exe
 ```
+
+For 0.9.0-beta, do not publish until the main release agent has filled the
+release evidence and proof matrix with real artifact paths, sizes, SHA-256
+hashes, and acceptance notes. Placeholder rows are allowed in docs before that
+handoff, but release notes must not imply unverified artifact/hash evidence.
 
 Do not upload artifacts built from a newer commit into an older existing tag.
 If release contents change after `v<VERSION>` was already created, bump
@@ -129,3 +134,7 @@ For packaged builds, Agent Connector stdio config should point at
 a system Python installation. Generated client config should not let Codex or
 other MCP clients launch the desktop app implicitly; VRCForge should already be
 running.
+
+0.9 public-support smoke should also verify that Doctor can export a support
+bundle and that the GitHub issue template asks users to upload or paste that
+artifact manually. The bundle must not be auto-attached to issues.

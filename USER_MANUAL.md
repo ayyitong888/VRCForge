@@ -88,6 +88,29 @@ direct apply tools are hidden, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 
+## 0.9 Public Beta Workflow
+
+0.9.0-beta is organized around public-beta proof instead of feature promises.
+Use it when you want to verify a whole workflow and keep the evidence needed
+for support.
+
+Recommended flow:
+
+1. Run Doctor and fix any startup, Unity, provider, or gateway blockers.
+2. Run the Golden Path Matrix or follow its same order manually: connect Unity,
+   scan the avatar, run validation, request one supervised edit, review the
+   checkpoint, apply, validate, and roll back.
+3. Open the proof viewer for the run and review screenshots, validation deltas,
+   checkpoint ids, rollback status, and any skipped rows.
+4. Export a Doctor support bundle if the run fails or behaves unexpectedly.
+5. Open a GitHub issue and upload or paste the relevant support bundle artifact.
+   VRCForge does not attach the bundle automatically; review it first and
+   remove secrets, tokens, paid asset contents, and private files.
+
+The 0.9 release evidence and proof matrix are prepared for final acceptance.
+Any placeholder rows marked pending will be filled by the release agent with
+real artifact paths, sizes, and hashes after validation.
+
 ## Requirements / 运行环境
 
 - Windows

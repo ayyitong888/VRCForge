@@ -90,10 +90,10 @@ Section "Install"
     Abort
   ${EndIf}
 
-  CreateDirectory "$LOCALAPPDATA\VRCForge\config"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\logs"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\artifacts"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\backups"
+  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\config"
+  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\logs"
+  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\artifacts"
+  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\backups"
 
   CreateDirectory "$SMPROGRAMS\VRCForge"
   CreateShortCut "$DESKTOP\VRCForge.lnk" "$INSTDIR\VRCForge.exe"
@@ -120,5 +120,5 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\VRCForge"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge"
-  MessageBox MB_OK "VRCForge program files were removed. User data remains in $LOCALAPPDATA\VRCForge."
+  MessageBox MB_OK "VRCForge program files were removed. User data remains in $LOCALAPPDATA\VRCForge\agentic-app."
 SectionEnd
