@@ -1,13 +1,13 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/version-v0.9.0--beta-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.0-beta)
+[![Version](https://img.shields.io/badge/version-v0.9.5--rc-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.5-rc)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
 
-Current public beta target: `0.9.0-beta`.
+Current release candidate target: `0.9.5-rc`.
 
-0.9.0-beta release artifacts are published as a prerelease for public beta
+0.9.5-rc release artifacts are published as a prerelease for release-candidate
 testing. Use the installer for normal Windows x64 installs, or the portable zip
 when you need a no-install/debug payload.
 
@@ -26,7 +26,7 @@ For normal Windows x64 users, download the latest release:
 
 普通 Windows x64 用户请下载最新 Release：
 
-https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.0-beta
+https://github.com/ayyitong888/VRCForge/releases/tag/v0.9.5-rc
 
 Recommended:
 
@@ -50,7 +50,7 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.9.0-beta.zip`
+- `VRCForge_Windows_x64_0.9.5-rc.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
 - The installer writes program files to `%ProgramFiles%\VRCForge`; user data is under `%LOCALAPPDATA%\VRCForge\agentic-app` and is preserved during update/uninstall unless removed manually.
@@ -87,14 +87,30 @@ The project picker merges manual folders, VCC user projects, Unity Hub recent pr
 
 Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill registry loading, or external-agent MCP startup are surfaced as warnings or setup actions while the desktop remains usable as an ordinary agent chat when the backend is online. If startup/bootstrap fails or environment health degrades, the desktop points the user to Startup Doctor; healthy launches stay quiet. Settings also includes a Debug logging switch that records local API/MCP/runtime interactions to redacted logs, and Doctor can export a redacted Support Bundle for troubleshooting. When filing a public GitHub issue, upload or paste the relevant support bundle artifact manually after reviewing it for private data.
 
-## 0.9 Public Beta Workflow
+## 0.9.5 Release Candidate and 1.0 Stable Readiness
 
-0.9.0-beta is the public beta line for Golden Path Matrix coverage and support
-hardening. Release evidence is recorded from reusable smoke commands and
-published artifact hashes, with local sample-project proofs kept separate from
-general installer/support gates.
+0.9.5-rc is the release-candidate line for Golden Path Matrix coverage, rollback
+audit surfacing, Path-to-Skill export, `.vsk` governance, and support hardening.
+Release evidence is recorded from reusable smoke commands and published
+artifact hashes, with local sample-project proofs kept separate from general
+installer/support gates.
 
-Public beta focus:
+1.0 stable readiness requires these public golden paths to stay documented and
+testable:
+
+- Install and first run.
+- Connect Unity.
+- Provider / BYOK / local-only / no-provider setup.
+- Doctor startup checks.
+- First validation report.
+- First rollback.
+- Booth outfit import planning and supervised apply.
+- Safe model optimization with one conservative step.
+- External agents using read/plan/write-request only.
+- `.vsk` import/export, dry-run, disable, and uninstall.
+- Support bundle export and manual issue upload.
+
+Release-candidate focus:
 
 - Golden Path Matrix: install, Doctor, Unity connection, avatar validation,
   supervised write request, checkpoint, rollback, external-agent request, and
@@ -110,7 +126,7 @@ The desktop app also includes uninstall actions:
 
 ## CLI / 命令行
 
-VRCForge 0.9.0-beta includes a local CLI for diagnostics, read-only scans, and
+VRCForge 0.9.5-rc includes a local CLI for diagnostics, read-only scans, and
 request-based write flows. It talks to the same local desktop runtime at
 `http://127.0.0.1:8757`; open VRCForge Desktop first so the backend and app
 session token are available.
@@ -160,7 +176,7 @@ Model optimization integration strategy and release sequencing are documented in
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
-| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.8.0 proof line; 0.9 broadens Golden Path Matrix coverage |
+| Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 0.9.5 RC line; 1.0 readiness tracks compatibility and proof evidence |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |
 | Agent workspace (multi-chat UI) | Agent 工作台（多会话界面） | Available / 可用 |
 | First-run resilient normal-agent fallback | 首启韧性普通 Agent 兜底 | Available / 可用 |
@@ -274,6 +290,14 @@ VRCForge supports `.vsk` skill packages for community distribution. Package impo
 
 The desktop Skill Manager can list installed packages, inspect preflight results, import packages by path, export dev/release packages, and show risk, permissions, signature status, signer fingerprint, and manifest details. Signature labels only mean package integrity and signer continuity; VRCForge does not label community packages as verified.
 
+## Privacy Boundary
+
+VRCForge is local-first. API key values, gateway token values, paid asset
+payloads, Booth package contents, FBX files, textures, material binaries, and
+private files must not be copied into model context, external-agent config, or
+`.vsk export` output. Support bundle exports are redacted, but users should
+review them before uploading or pasting them into an issue.
+
 ## Safety / 安全原则
 
 VRCForge follows a supervised workflow for write operations:
@@ -319,6 +343,7 @@ This path is for development and troubleshooting. The installer is the preferred
 - [DEPENDENCIES.md](DEPENDENCIES.md)
 - [NOTICE](NOTICE)
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
+- [docs/COMPATIBILITY_MATRIX.md](docs/COMPATIBILITY_MATRIX.md)
 - [docs/FACE_TUNING_ACCEPTANCE_TEST.md](docs/FACE_TUNING_ACCEPTANCE_TEST.md)
 - [SHADER_TUNING_PLAN.md](SHADER_TUNING_PLAN.md)
 - [docs/SHADER_TUNING_CHECKPOINTS.md](docs/SHADER_TUNING_CHECKPOINTS.md)

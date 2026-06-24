@@ -72,11 +72,11 @@ distribution notes.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 0.9.0-beta `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.9.0-beta/VRCForge_Windows_x64_0.9.0-beta.zip
+  -Version 0.9.5-rc `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v0.9.5-rc/VRCForge_Windows_x64_0.9.5-rc.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 0.9.0-beta
+  -Version 0.9.5-rc
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -155,3 +155,13 @@ running.
 0.9 public-support smoke should also verify that Doctor can export a support
 bundle and that the GitHub issue template asks users to upload or paste that
 artifact manually. The bundle must not be auto-attached to issues.
+
+Before treating a release candidate as 1.0-ready, run the stable-readiness gate:
+
+```powershell
+python scripts\smoke_stable_readiness_gate.py --version 0.9.5-rc
+```
+
+This gate checks current-version public docs, the public golden-path wording,
+the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
+pointers when they exist in the checkout.

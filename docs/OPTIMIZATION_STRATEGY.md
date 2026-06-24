@@ -55,6 +55,32 @@ Stable workflow proof calls:
 - `optimization.validation-delta` / `vrcforge_optimization_validation_delta`: compares before, after, and optional rollback `vrcforge.validation.v1` reports for one optimizer step. It reports severity deltas, finding deltas, section deltas, gate changes, and rollback drift without scanning or writing by itself.
 - `scripts/smoke_optimizer_apply_rollback.py`: reusable live proof harness for one optimizer request. It forces approval mode, captures before/after/rollback validation reports, optionally captures screenshots, computes validation delta, requests rollback, and writes evidence under `artifacts/optimizer-apply-smoke/`.
 
+## Optimizer State Machine
+
+Use these state names consistently in UI, MCP, CLI, proof artifacts, and
+release evidence when describing optimizer workflows:
+
+- `missing_dependency`
+- `detected`
+- `plan_available`
+- `request_blocked_missing_options`
+- `request_ready`
+- `approval_pending`
+- `checkpoint_created`
+- `applied`
+- `validation_done`
+- `rollback_requested`
+- `rollback_done`
+- `proof_passed`
+- `proof_failed`
+- `stable_candidate`
+- `experimental_only`
+
+Stable paths should move through request, approval, checkpoint, validation, and
+rollback states one step at a time. Experimental paths must remain
+`experimental_only` or `request_blocked_missing_options` until they have visual,
+behavior, validation, and rollback proof for the target avatar class.
+
 Still blocked or experimental until further sample-matrix validation:
 
 - TTT automatic group selection, atlas execution without user-confirmed materials, and material-slot reduction that requires mesh/material coordination.

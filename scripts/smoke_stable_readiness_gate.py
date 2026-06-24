@@ -1,0 +1,548 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA = "vrcforge.stable_readiness_gate.v1"
+
+VERSIONED_PUBLIC_DOCS = (
+    "README.md",
+    "USER_MANUAL.md",
+    "packaging/README.md",
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+)
+PUBLIC_GOLDEN_PATH_TERMS = (
+    "Install and first run",
+    "Connect Unity",
+    "Provider / BYOK / local-only / no-provider",
+    "Doctor",
+    "First validation report",
+    "First rollback",
+    "Booth outfit",
+    "model optimization",
+    "external agents",
+    ".vsk",
+    "support bundle",
+)
+PRIVACY_TERMS = (
+    "Privacy Boundary",
+    "API key",
+    "Gateway token",
+    "paid asset",
+    "private files",
+    "support bundle",
+    ".vsk export",
+)
+COMPATIBILITY_TERMS = (
+    "Unity",
+    "VRChat SDK",
+    "Modular Avatar",
+    "NDMF",
+    "VRCFury",
+    "AAO",
+    "LAC",
+    "TTT",
+    "Meshia",
+    "MA2BT-Pro",
+    "Thry",
+    "lilToon",
+    "Poiyomi",
+    "Known conflicts",
+    "Known safe profiles",
+)
+OPTIMIZER_STATE_TERMS = (
+    "missing_dependency",
+    "detected",
+    "plan_available",
+    "request_blocked_missing_options",
+    "request_ready",
+    "approval_pending",
+    "checkpoint_created",
+    "applied",
+    "validation_done",
+    "rollback_requested",
+    "rollback_done",
+    "proof_passed",
+    "proof_failed",
+    "stable_candidate",
+    "experimental_only",
+)
+METADATA_FILES = (
+    "VERSION",
+    "package.json",
+    "package-lock.json",
+    "src-tauri/tauri.conf.json",
+    "src-tauri/Cargo.toml",
+)
+RELEASE_ARTIFACTS = (
+    "VRCForge.unitypackage",
+    "VRCForge_Offline_Installer_x64.exe",
+    "VRCForge_Web_Installer_x64.exe",
+)
+
+
+def main() -> int:
+    args = parse_args()
+    report = build_stable_readiness_gate(args)
+    output = write_report(report, args.artifacts_dir)
+    print(json.dumps({"ok": report["ok"], "status": report["summary"]["status"], "reportPath": str(output)}, indent=2))
+    return 0 if report["ok"] or args.allow_blocked else 1
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Check VRCForge 1.0 public-stable readiness documentation gates.")
+    parser.add_argument("--version", default=read_text_file(Path("VERSION")).strip() if Path("VERSION").is_file() else "")
+    parser.add_argument("--compatibility-matrix", default="docs/COMPATIBILITY_MATRIX.md")
+    parser.add_argument("--release-manifest", default="dist/release/release-manifest.json")
+    parser.add_argument("--packaged-backend-smoke", default="")
+    parser.add_argument("--payload-zip-smoke", default="")
+    parser.add_argument("--golden-path-matrix", default="")
+    parser.add_argument("--optimizer-request-guard-smoke", default="")
+    parser.add_argument("--external-agent-smoke", default="")
+    parser.add_argument("--installer-smoke", default="")
+    parser.add_argument("--release-evidence", default="docs/RELEASE_EVIDENCE.md")
+    parser.add_argument("--proof-matrix", default="docs/PROOF_MATRIX.md")
+    parser.add_argument("--artifacts-dir", default="artifacts/stable-readiness-gate")
+    parser.add_argument("--stale-version", action="append", default=["0.9.0-beta"], help="Stale version string that must not appear in current public docs.")
+    parser.add_argument("--allow-blocked", action="store_true", help="Exit 0 even when required readiness gates are blocked.")
+    return parser.parse_args()
+
+
+def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
+    version = str(args.version or "").strip()
+    stale_versions = tuple(str(item) for item in (args.stale_version or []) if str(item).strip())
+    steps: list[dict[str, Any]] = []
+
+    steps.append(check_metadata_versions(version))
+    steps.extend(check_versioned_public_docs(version, stale_versions))
+    steps.append(check_public_doc_terms("public_docs.golden_paths", PUBLIC_GOLDEN_PATH_TERMS, VERSIONED_PUBLIC_DOCS))
+    steps.append(check_public_doc_terms("public_docs.privacy_boundary", PRIVACY_TERMS, ("README.md", "USER_MANUAL.md", ".github/ISSUE_TEMPLATE/bug_report.yml")))
+    steps.append(check_doc_contains(Path(args.compatibility_matrix), "compatibility_matrix.exists", COMPATIBILITY_TERMS, required=True))
+    steps.append(check_doc_contains(Path("docs/OPTIMIZATION_STRATEGY.md"), "optimizer_state_machine.public", OPTIMIZER_STATE_TERMS, required=True))
+    steps.append(check_doc_contains(Path("docs/RELEASE_CHECKLIST.md"), "release_checklist.stable_gate", ("smoke_stable_readiness_gate.py", "COMPATIBILITY_MATRIX", "support bundle"), required=True))
+    steps.append(check_release_manifest(Path(args.release_manifest), version))
+    steps.append(check_packaged_backend(resolve_evidence_path(args.packaged_backend_smoke, "artifacts/packaged-backend-smoke-*/packaged-bootstrap-summary.json"), version))
+    steps.append(check_payload_zip(resolve_evidence_path(args.payload_zip_smoke, "artifacts/payload-smoke/*/summary.json"), version))
+    steps.append(check_golden_path_matrix(resolve_evidence_path(args.golden_path_matrix, "artifacts/golden-path-matrix/*.json")))
+    steps.append(check_optimizer_request_guard(resolve_evidence_path(args.optimizer_request_guard_smoke, "artifacts/optimizer-request-guard-smoke/*.json")))
+    steps.append(check_external_agent_smoke(resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")))
+    steps.append(check_installer_smoke(resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")))
+    steps.append(check_doc_contains(Path(args.release_evidence), "local_release_evidence.current", (version, "Golden Path Matrix", "Installer install/uninstall"), required=False))
+    steps.append(check_doc_contains(Path(args.proof_matrix), "local_proof_matrix.current", (version, "Golden Path Matrix", "External-agent request"), required=False))
+
+    blocking = [step for step in steps if step.get("required", True) and not step.get("ok")]
+    warnings = [step for step in steps if not step.get("required", True) and not step.get("ok")]
+    status = "passed" if not blocking else "blocked"
+    return {
+        "ok": not blocking,
+        "schema": SCHEMA,
+        "generatedAt": utc_now(),
+        "version": version,
+        "summary": {
+            "status": status,
+            "stepCount": len(steps),
+            "blockingCount": len(blocking),
+            "warningCount": len(warnings),
+            "blockingSteps": [str(step.get("name")) for step in blocking],
+            "warningSteps": [str(step.get("name")) for step in warnings],
+        },
+        "steps": steps,
+        "policy": {
+            "publicDocsMustMatchCurrentVersion": True,
+            "releaseArtifactsAndPackagedSmokesRequired": True,
+            "compatibilityMatrixRequiredBeforeStable": True,
+            "privacyBoundaryRequiredBeforeStable": True,
+            "installerAdminBlockedKeepsGateBlockedUnlessAllowBlocked": True,
+            "localEvidenceDocsAreAdvisoryForFreshClones": True,
+        },
+    }
+
+
+def check_metadata_versions(version: str) -> dict[str, Any]:
+    missing_files: list[str] = []
+    missing_version: list[str] = []
+    for item in METADATA_FILES:
+        path = Path(item)
+        if not path.is_file():
+            missing_files.append(item)
+            continue
+        if version not in read_text_file(path):
+            missing_version.append(item)
+    return {
+        "name": "metadata.version_alignment",
+        "ok": bool(version and not missing_files and not missing_version),
+        "required": True,
+        "version": version,
+        "files": list(METADATA_FILES),
+        "missingFiles": missing_files,
+        "missingVersion": missing_version,
+        "error": "" if version and not missing_files and not missing_version else "version metadata is missing or not aligned",
+    }
+
+
+def check_versioned_public_docs(version: str, stale_versions: tuple[str, ...]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for item in VERSIONED_PUBLIC_DOCS:
+        path = Path(item)
+        if not path.is_file():
+            steps.append({"name": f"public_doc.{item}.exists", "ok": False, "required": True, "path": item, "error": "document is missing"})
+            continue
+        text = read_text_file(path)
+        stale_found = [stale for stale in stale_versions if stale and stale in text]
+        steps.append(
+            {
+                "name": f"public_doc.{item}.current_version",
+                "ok": bool(version in text and not stale_found),
+                "required": True,
+                "path": item,
+                "version": version,
+                "staleVersions": stale_found,
+                "error": "" if version in text and not stale_found else "public document does not match the current release version",
+            }
+        )
+    return steps
+
+
+def check_public_doc_terms(name: str, required_terms: tuple[str, ...], paths: tuple[str, ...]) -> dict[str, Any]:
+    existing_paths = [Path(item) for item in paths if Path(item).is_file()]
+    combined = "\n".join(read_text_file(path) for path in existing_paths)
+    missing = [term for term in required_terms if term.lower() not in combined.lower()]
+    return {
+        "name": name,
+        "ok": not missing,
+        "required": True,
+        "paths": [str(path) for path in existing_paths],
+        "missingTerms": missing,
+        "error": "" if not missing else "required stable-readiness terms are missing from public docs",
+    }
+
+
+def check_doc_contains(path: Path, name: str, required_terms: tuple[str, ...], required: bool) -> dict[str, Any]:
+    if not path.is_file():
+        return {"name": name, "ok": False, "required": required, "path": str(path), "error": "document is missing"}
+    text = read_text_file(path)
+    missing = [term for term in required_terms if term.lower() not in text.lower()]
+    return {
+        "name": name,
+        "ok": not missing,
+        "required": required,
+        "path": str(path),
+        "missingTerms": missing,
+        "error": "" if not missing else "required terms are missing",
+    }
+
+
+def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("release_artifacts.manifest", False, True, path, reason=parse_error, category="release")
+    artifact_items = normalize_manifest_artifacts(payload)
+    artifacts_by_name = {Path(str(item.get("path") or item.get("name") or "")).name: item for item in artifact_items}
+    required_names = [*RELEASE_ARTIFACTS, f"VRCForge_Windows_x64_{version}.zip"]
+    missing: list[str] = []
+    checksum_mismatches: list[str] = []
+    base_dir = path.parent
+    for name in required_names:
+        item = artifacts_by_name.get(name)
+        if not item:
+            missing.append(f"manifest:{name}")
+            continue
+        artifact_path = Path(str(item.get("path") or item.get("name") or name))
+        if not artifact_path.is_absolute():
+            artifact_path = base_dir / artifact_path
+        if not artifact_path.is_file():
+            missing.append(str(artifact_path))
+            continue
+        expected_sha = str(item.get("sha256") or item.get("sha256sum") or "").lower()
+        if expected_sha and sha256_file(artifact_path) != expected_sha:
+            checksum_mismatches.append(name)
+    manifest_version = str(payload.get("version") or "").strip()
+    ok = manifest_version == version and not missing and not checksum_mismatches
+    return evidence_step(
+        "release_artifacts.manifest",
+        ok,
+        True,
+        path,
+        category="release",
+        schema="release-manifest",
+        fields_checked=["version", "commit", "artifacts[].name", "artifacts[].sha256"],
+        missing=missing,
+        reason="" if ok else "release manifest is missing required artifacts or checksum evidence",
+        details={"version": manifest_version, "expectedVersion": version, "checksumMismatches": checksum_mismatches},
+    )
+
+
+def check_packaged_backend(path: Path, version: str) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("packaged_backend.support_bundle", False, True, path, reason=parse_error, category="packaged-runtime")
+    support_path = Path(str(payload.get("supportBundlePath") or ""))
+    ok = bool(
+        payload.get("schema") == "vrcforge.packaged_backend_smoke.v1"
+        and payload.get("ok") is True
+        and payload.get("version") == version
+        and payload.get("portableMode") is True
+        and payload.get("bootstrapOk") is True
+        and payload.get("proofIndexOk") is True
+        and payload.get("supportBundleOk") is True
+        and str(payload.get("supportBundlePath") or "")
+        and support_path.is_file()
+    )
+    return evidence_step(
+        "packaged_backend.support_bundle",
+        ok,
+        True,
+        path,
+        category="packaged-runtime",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=["ok", "version", "portableMode", "bootstrapOk", "proofIndexOk", "supportBundleOk", "supportBundlePath"],
+        reason="" if ok else "packaged backend/support bundle smoke did not pass",
+    )
+
+
+def check_payload_zip(path: Path, version: str) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("payload_zip.unpack", False, True, path, reason=parse_error, category="packaged-runtime")
+    zip_path = Path(str(payload.get("zip") or ""))
+    missing = payload.get("missing")
+    ok = bool(
+        payload.get("schema") == "vrcforge.payload_zip_unpack.v1"
+        and payload.get("ok") is True
+        and payload.get("version") == version
+        and isinstance(missing, list)
+        and not missing
+        and zip_path.is_file()
+    )
+    return evidence_step(
+        "payload_zip.unpack",
+        ok,
+        True,
+        path,
+        category="packaged-runtime",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=["ok", "version", "missing", "zip"],
+        missing=[str(item) for item in missing] if isinstance(missing, list) else ["missing[]"],
+        reason="" if ok else "portable zip unpack smoke did not pass",
+    )
+
+
+def check_golden_path_matrix(path: Path) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("golden_path_matrix.safe_default", False, True, path, reason=parse_error, category="golden-path")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    ok = bool(
+        payload.get("schema") == "vrcforge.golden_path_matrix.v1"
+        and payload.get("ok") is True
+        and summary.get("status") == "passed"
+        and int(summary.get("failedCount") or 0) == 0
+        and summary.get("safeDefault") is True
+    )
+    return evidence_step(
+        "golden_path_matrix.safe_default",
+        ok,
+        True,
+        path,
+        category="golden-path",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=["ok", "summary.status", "summary.failedCount", "summary.safeDefault"],
+        reason="" if ok else "packaged safe-default Golden Path Matrix did not pass",
+        details={"summary": summary},
+    )
+
+
+def check_optimizer_request_guard(path: Path) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("optimizer_request_guard.explicit_approval", False, True, path, reason=parse_error, category="safety")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    by_name = {str(step.get("name")): step for step in steps if isinstance(step, dict)}
+    required_step_names = ("optimizer.request_approval", "optimizer.request_auto")
+    request_steps_ok = all(
+        by_name.get(name, {}).get("requiresExplicitApproval") is True
+        and by_name.get(name, {}).get("autoApprovalBlocked") is True
+        and by_name.get(name, {}).get("requestStatus") == "pending"
+        for name in required_step_names
+    )
+    tested_modes = summary.get("testedModes") if isinstance(summary.get("testedModes"), list) else []
+    ok = bool(
+        payload.get("schema") == "vrcforge.optimizer_request_guard_smoke.v1"
+        and payload.get("ok") is True
+        and summary.get("failedSteps") == []
+        and {"approval", "auto"}.issubset(set(tested_modes))
+        and request_steps_ok
+    )
+    return evidence_step(
+        "optimizer_request_guard.explicit_approval",
+        ok,
+        True,
+        path,
+        category="safety",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=["summary.failedSteps", "summary.testedModes", "requiresExplicitApproval", "autoApprovalBlocked", "requestStatus"],
+        reason="" if ok else "optimizer request guard did not prove explicit approval in approval and auto modes",
+        details={"testedModes": tested_modes},
+    )
+
+
+def check_external_agent_smoke(path: Path) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("external_agent.request_only", False, True, path, reason=parse_error, category="safety")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    by_name = {str(step.get("name")): step for step in steps if isinstance(step, dict)}
+    stdio = by_name.get("stdio.bridge_preflight", {})
+    manifest = by_name.get("gateway.manifest", {})
+    mcp_tools = by_name.get("mcp.tools_list", {})
+    ok = bool(
+        payload.get("schema") == "vrcforge.external_agent_bridge_smoke.v1"
+        and payload.get("ok") is True
+        and summary.get("failedSteps") == []
+        and stdio.get("advertisesRequestApply") is True
+        and stdio.get("advertisesDirectApply") is False
+        and manifest.get("directApplyAdvertised") == []
+        and mcp_tools.get("directApplyListed") == []
+        and mcp_tools.get("requestApplyListed") is True
+    )
+    return evidence_step(
+        "external_agent.request_only",
+        ok,
+        True,
+        path,
+        category="safety",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=["failedSteps", "advertisesRequestApply", "advertisesDirectApply", "directApplyAdvertised", "directApplyListed"],
+        reason="" if ok else "external-agent smoke did not prove request-only write exposure",
+    )
+
+
+def check_installer_smoke(path: Path) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("installer.install_uninstall", False, True, path, reason=parse_error, category="installer")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    phases = summary.get("phases") if isinstance(summary.get("phases"), dict) else {}
+    failed_steps = summary.get("failedSteps") if isinstance(summary.get("failedSteps"), list) else []
+    admin_blocked = bool(
+        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1"
+        and summary.get("status") == "blocked"
+        and failed_steps == ["admin.check"]
+        and phases.get("install") == "blocked"
+        and phases.get("uninstall") == "blocked"
+        and "admin" in str(summary.get("blockedReason") or "").lower()
+    )
+    ok = bool(payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1" and payload.get("ok") is True and summary.get("status") == "passed")
+    return evidence_step(
+        "installer.install_uninstall",
+        ok,
+        True,
+        path,
+        category="installer",
+        schema=str(payload.get("schema") or ""),
+        status="passed" if ok else ("blocked" if admin_blocked else "failed"),
+        fields_checked=["ok", "summary.status", "failedSteps", "phases.install", "phases.uninstall", "blockedReason"],
+        reason="" if ok else ("installer requires Administrator elevation" if admin_blocked else "installer install/uninstall smoke did not pass"),
+        details={"adminBlocked": admin_blocked, "summary": summary},
+    )
+
+
+def evidence_step(
+    name: str,
+    ok: bool,
+    required: bool,
+    path: Path,
+    *,
+    category: str = "",
+    schema: str = "",
+    status: str | None = None,
+    fields_checked: list[str] | None = None,
+    missing: list[str] | None = None,
+    reason: str = "",
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "category": category,
+        "required": required,
+        "status": status or ("passed" if ok else "failed"),
+        "ok": ok,
+        "path": str(path),
+        "schema": schema,
+        "fieldsChecked": fields_checked or [],
+        "missing": missing or [],
+        "reason": reason,
+        "details": details or {},
+    }
+
+
+def read_json_document(path: Path) -> tuple[dict[str, Any], str]:
+    if not path or not path.is_file():
+        return {}, f"evidence file is missing: {path}"
+    try:
+        payload = json.loads(read_text_file(path))
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"evidence JSON parse failed: {exc}"
+    if not isinstance(payload, dict):
+        return {}, "evidence JSON root must be an object"
+    return payload, ""
+
+
+def resolve_evidence_path(explicit: str, pattern: str) -> Path:
+    if explicit:
+        return Path(explicit)
+    candidates = [path for path in Path().glob(pattern) if path.is_file()]
+    if not candidates:
+        return Path(pattern)
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def normalize_manifest_artifacts(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = manifest.get("artifacts")
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        result: list[dict[str, Any]] = []
+        for name, value in raw.items():
+            if isinstance(value, dict):
+                result.append({"name": str(name), **value})
+            else:
+                result.append({"name": str(name), "path": str(value)})
+        return result
+    return []
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_report(report: dict[str, Any], artifacts_dir: str) -> Path:
+    root = Path(artifacts_dir or "artifacts/stable-readiness-gate").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = root / f"stable-readiness-gate-{stamp}.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def read_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

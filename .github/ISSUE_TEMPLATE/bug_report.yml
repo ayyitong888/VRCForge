@@ -13,8 +13,32 @@ body:
     id: version
     attributes:
       label: VRCForge version
-      description: Example: 0.9.0-beta, 0.8.0-beta, or the commit shown in About/Doctor.
-      placeholder: 0.9.0-beta
+      description: Example: 0.9.5-rc, 1.0.0, or the commit shown in About/Doctor.
+      placeholder: 0.9.5-rc
+    validations:
+      required: true
+  - type: dropdown
+    id: provider_mode
+    attributes:
+      label: Provider mode
+      options:
+        - BYOK cloud provider
+        - Local provider / Ollama
+        - Custom OpenAI-compatible endpoint
+        - No-provider / manual read-only
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: unity_connection
+    attributes:
+      label: Unity connection state
+      options:
+        - Connected and tools visible
+        - Unity open but tools missing
+        - Unity not open
+        - Startup Doctor reports a blocker
+        - Not sure
     validations:
       required: true
   - type: dropdown

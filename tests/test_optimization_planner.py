@@ -1196,6 +1196,24 @@ def test_public_optimization_docs_include_roadmap_sequence() -> None:
         assert marker in text
     assert "Calling third-party tools vs first-class VRCForge capabilities" in text
     assert "No direct apply" in text
+    for state in [
+        "missing_dependency",
+        "detected",
+        "plan_available",
+        "request_blocked_missing_options",
+        "request_ready",
+        "approval_pending",
+        "checkpoint_created",
+        "applied",
+        "validation_done",
+        "rollback_requested",
+        "rollback_done",
+        "proof_passed",
+        "proof_failed",
+        "stable_candidate",
+        "experimental_only",
+    ]:
+        assert state in text
 
 
 def test_optimizer_apply_rollback_smoke_script_uses_validation_delta_endpoint() -> None:

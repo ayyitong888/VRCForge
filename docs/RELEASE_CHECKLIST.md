@@ -9,6 +9,10 @@ Before publishing a release package:
 * [ ] Mark the version number clearly.
 * [ ] Mark whether this is an official release or a modified build.
 * [ ] Ensure third-party dependencies and their licenses are documented.
+* [ ] Run `python scripts\smoke_stable_readiness_gate.py --version <VERSION>`
+      and resolve any public-doc or COMPATIBILITY_MATRIX blocker before
+      treating a release candidate as 1.0-ready. This includes the Doctor
+      support bundle flow.
 * [ ] Run `packaging/check_third_party_licenses.ps1` and stop the release if any
       bundled component fails its license gate.
 * [ ] Add every bundled third-party component to
@@ -19,6 +23,9 @@ Before publishing a release package:
       state the upstream project, pinned commit, license, and local changes.
 * [ ] Add a warning that users should back up Unity / VRChat avatar projects before writing assets.
 * [ ] Add changelog notes for major behavior changes.
+* [ ] Confirm the public compatibility matrix covers Unity, VRChat SDK,
+      Modular Avatar, NDMF, VRCFury, AAO, LAC, TTT, Meshia, MA2BT-Pro, Thry
+      tools, lilToon, Poiyomi, known conflicts, and known safe profiles.
 * [ ] Confirm desktop WebView CORS preflight for authenticated app APIs returns
       200, not 401:
       `OPTIONS /api/app/bootstrap` with `Origin: tauri://localhost` and

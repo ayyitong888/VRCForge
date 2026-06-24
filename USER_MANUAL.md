@@ -88,11 +88,25 @@ direct apply tools are hidden, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 
-## 0.9 Public Beta Workflow
+## 0.9.5 RC and 1.0 Stable Readiness Workflow
 
-0.9.0-beta is organized around public-beta proof instead of feature promises.
-Use it when you want to verify a whole workflow and keep the evidence needed
-for support.
+0.9.5-rc is organized around release-candidate proof instead of feature
+promises. Use it when you want to verify a whole workflow and keep the evidence
+needed for support.
+
+The 1.0 stable readiness checklist is:
+
+1. Install and first run.
+2. Connect Unity.
+3. Configure Provider / BYOK / local-only / no-provider mode.
+4. Run Doctor.
+5. Create the first validation report.
+6. Perform the first rollback.
+7. Plan and supervise one Booth outfit workflow.
+8. Run one safe model optimization step.
+9. Use external agents only through read/plan/write-request.
+10. Import, dry-run, disable, uninstall, and optionally export a `.vsk`.
+11. Export a support bundle and attach it manually to an issue after review.
 
 Recommended flow:
 
@@ -110,6 +124,94 @@ Recommended flow:
 The 0.9 release evidence and proof matrix are prepared for final acceptance.
 Any placeholder rows marked pending will be filled by the release agent with
 real artifact paths, sizes, and hashes after validation.
+
+### Provider Modes
+
+- BYOK cloud provider: enter your own provider key in Settings, then run the
+  built-in provider text/JSON/vision-safe tests before relying on AI-assisted
+  writes.
+- Local provider / Ollama: configure the local endpoint and model, then use the
+  same provider test surface. Local models may be text-only depending on the
+  selected model.
+- Custom OpenAI-compatible endpoint: configure the base URL, model, and key or
+  local token required by that endpoint.
+- No-provider / manual read-only: VRCForge can still open, connect Unity, run
+  Doctor, scan projects, run validation, show checkpoints, import `.vsk`
+  packages, and create supervised non-LLM plans where deterministic tools are
+  available. AI-generated chat plans and vision reasoning require a provider.
+
+### First Validation Report
+
+1. Open the Unity project and wait for compilation to finish.
+2. In VRCForge, select the project and avatar.
+3. Run Doctor if the Unity or SDK status is unclear.
+4. Run the Validation Report from the desktop validation/readiness surface or
+   use the CLI `validation run` command from the same runtime.
+5. Review compile, SDK, parameter, menu, FX, material, wardrobe, performance,
+   and generated-residue sections before requesting a write.
+
+### First Rollback
+
+1. Apply only one small supervised change.
+2. Confirm the approval card created a checkpoint id.
+3. Open Checkpoints, choose the newest checkpoint, and preview the changed,
+   added, and deleted files.
+4. Request restore, approve it, then rerun validation.
+5. Treat missing checkpoint ids, failed restore, or residue after restore as a
+   release blocker for that workflow.
+
+### Booth Outfit Import
+
+1. Inspect the `.unitypackage`, Booth ZIP/folder, or loose prefab folder first.
+2. Review dependency preflight, especially shader support packages such as
+   lilToon or Poiyomi that may already be installed.
+3. Keep paid asset binaries local. Do not paste FBX, textures, materials, or
+   Booth package contents into model prompts, support issues, or `.vsk` output.
+4. Request the supervised import only after reviewing the plan.
+5. Validate, inspect screenshots when relevant, then roll back if the result is
+   not what you expected.
+
+### Safe Model Optimization
+
+1. Start with a conservative profile such as PC Conservative.
+2. Run the optimization plan and review upload blockers separately from
+   performance-rank offenders.
+3. Request only one optimizer step at a time.
+4. Confirm approval, checkpoint, validation delta, screenshots when available,
+   and rollback proof.
+5. Leave VRCFury compressor, hidden body cut, aggressive Meshia, and one-click
+   Quest optimization in Advanced/Experimental paths until proof exists for the
+   specific avatar.
+
+### Skill Packages and Path-to-Skill
+
+1. Import `.vsk` packages through dry-run/preflight first.
+2. Keep Safe Mode enabled for medium/high-risk packages until you understand the
+   permission request.
+3. A valid signature means integrity and signer continuity, not "verified safe".
+4. Use trust signer, revoke signer, package block, disable, and uninstall when
+   reviewing community skills.
+5. Path-to-Skill exports should contain variables, detector rules, validation
+   gates, and rollback requirements, not private absolute paths, paid assets,
+   API keys, or gateway tokens.
+
+### Support Bundle Flow
+
+1. Run Doctor.
+2. Export the support bundle from Doctor.
+3. Review the bundle locally.
+4. Remove API keys, gateway tokens, paid asset contents, private files, and
+   any screenshots you do not want to share.
+5. Open a GitHub issue and upload or paste the reviewed bundle manually.
+
+## Privacy Boundary
+
+VRCForge keeps avatar assets local by default. API key values, gateway token
+values, paid asset payloads, Booth package contents, FBX files, textures,
+material binaries, and private files should not be sent to model context,
+external agents, support bundles, or `.vsk export` packages. Validation
+metadata, project structure, screenshots, and Unity logs are user-controlled
+and should be redacted or reviewed before sharing.
 
 ## Requirements / 运行环境
 

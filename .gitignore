@@ -17,7 +17,8 @@ src-tauri/target/
 src-tauri/gen/
 config.json
 agent_gateway.json
-docs/
+docs/*
+!docs/COMPATIBILITY_MATRIX.md
 
 AGENTS.md
 CLAUDE.md
