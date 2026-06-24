@@ -6,7 +6,7 @@ VRCForge keeps `start.cmd`, PowerShell scripts, and `quickstart/` as debug paths
 - `VRCForge_Offline_Installer_x64.exe`
 - `VRCForge.exe`
 
-Program files install to `%ProgramFiles%\VRCForge`. User data lives under `%LOCALAPPDATA%\VRCForge` and contains `config/`, `logs/`, `artifacts/`, and `backups/`.
+Program files install to `%ProgramFiles%\VRCForge`. User data lives under `%LOCALAPPDATA%\VRCForge\agentic-app` and contains `config/`, `logs/`, `artifacts/`, and `backups/`.
 
 The payload root `VRCForge.exe` is the Tauri desktop app. Legacy launcher and
 `start_dashboard.cmd` paths remain debug/compatibility surfaces only; they are
@@ -90,10 +90,10 @@ VRCForge_Offline_Installer_x64.exe
 VRCForge_Web_Installer_x64.exe
 ```
 
-For 0.9.0-beta, do not publish until the main release agent has filled the
-release evidence and proof matrix with real artifact paths, sizes, SHA-256
-hashes, and acceptance notes. Placeholder rows are allowed in docs before that
-handoff, but release notes must not imply unverified artifact/hash evidence.
+Before publishing a version, fill the release evidence and proof matrix with
+real artifact paths, sizes, SHA-256 hashes, and acceptance notes. Placeholder
+rows are allowed in docs before that handoff, but release notes must not imply
+unverified artifact/hash evidence.
 
 Do not upload artifacts built from a newer commit into an older existing tag.
 If release contents change after `v<VERSION>` was already created, bump
@@ -106,6 +106,23 @@ Release smoke should also verify first-run resilience: optional failures in
 user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
 loading, or external-agent MCP startup must not prevent the backend and ordinary
 agent chat from opening.
+
+The installer install/uninstall smoke is reusable on any Windows x64 machine.
+Run it from an elevated shell, or start it with UAC from a non-elevated shell.
+Use a disposable install directory for smoke so an existing user install is not
+overwritten:
+
+```powershell
+python scripts\smoke_installer_install_uninstall.py `
+  --installer dist\release\VRCForge_Offline_Installer_x64.exe `
+  --install-dir "$env:ProgramFiles\VRCForge-Smoke" `
+  --backend-port 8791
+```
+
+The script defaults to `%ProgramFiles%\VRCForge`,
+`%LOCALAPPDATA%\VRCForge\agentic-app`, and
+`artifacts\installer-smoke`, but all three can be overridden with
+`--install-dir`, `--user-data-root`, and `--artifacts-dir`.
 
 Manual Unity package fallback smoke should import `VRCForge.unitypackage` into a
 fresh Unity project and verify `Assets/VRCForge/Editor` plus a representative

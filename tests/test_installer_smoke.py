@@ -29,6 +29,7 @@ def make_args(tmp_path: Path, installer: Path, **overrides: object) -> Namespace
         "backend_port": 8791,
         "dry_run": False,
         "allow_blocked": False,
+        "artifacts_dir": "",
     }
     values.update(overrides)
     return Namespace(**values)
@@ -46,6 +47,29 @@ def test_default_user_data_root_matches_tauri_backend_contract(tmp_path, monkeyp
     assert step["ok"] is True
     assert step["matchesTauriAndBackendDefault"] is True
     assert step["legacyRoots"]["config"].endswith(str(Path("VRCForge") / "config"))
+
+
+def test_user_data_root_override_is_valid_but_not_default(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    local_app_data = tmp_path / "LocalAppData"
+    override = tmp_path / "custom-user-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    step = smoke.user_data_root_step(override.resolve(), override_used=True)
+
+    assert step["ok"] is True
+    assert step["overrideUsed"] is True
+    assert step["matchesTauriAndBackendDefault"] is False
+    assert step["expectedDefault"] == str((local_app_data / "VRCForge" / "agentic-app").resolve())
+
+
+def test_default_install_dir_uses_windows_program_files_env(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    program_files = tmp_path / "ProgramFiles"
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+
+    assert smoke.default_install_dir() == program_files / "VRCForge"
 
 
 def test_dry_run_writes_skipped_phase_evidence_without_admin_or_userdata_changes(tmp_path, monkeypatch):
@@ -102,6 +126,45 @@ def test_non_admin_report_marks_install_uninstall_blocked_and_upgrade_skipped(tm
     assert "admin elevation" in report["summary"]["blockedReason"]
 
 
+def test_nsis_install_command_keeps_custom_dir_unquoted_and_last(tmp_path):
+    smoke = load_installer_smoke()
+    installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
+    install_dir = tmp_path / "Program Files" / "VRCForge Smoke"
+
+    command = smoke.nsis_install_command(installer, install_dir)
+
+    assert command.startswith(f'"{installer}" /S ')
+    assert command.endswith(f"/D={install_dir}")
+    assert f'"/D={install_dir}"' not in command
+
+
+def test_write_report_supports_custom_artifacts_dir(tmp_path):
+    smoke = load_installer_smoke()
+    report_dir = tmp_path / "reports"
+    report = {
+        "ok": True,
+        "summary": {"status": "passed"},
+    }
+
+    path = smoke.write_report(report, str(report_dir))
+
+    assert path.parent == report_dir.resolve()
+    assert path.is_file()
+
+
+def test_empty_directory_detection_only_accepts_empty_dirs(tmp_path):
+    smoke = load_installer_smoke()
+    empty_dir = tmp_path / "empty"
+    filled_dir = tmp_path / "filled"
+    empty_dir.mkdir()
+    filled_dir.mkdir()
+    (filled_dir / "file.txt").write_text("x", encoding="utf-8")
+
+    assert smoke.is_empty_directory(empty_dir) is True
+    assert smoke.is_empty_directory(filled_dir) is False
+    assert smoke.is_empty_directory(tmp_path / "missing") is False
+
+
 def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkeypatch):
     smoke = load_installer_smoke()
     local_app_data = tmp_path / "LocalAppData"
@@ -132,7 +195,8 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     monkeypatch.setattr(smoke, "start_installed_backend", lambda args, install_root, user_data_root: FakeProcess())
 
     def fake_run(cmd, **kwargs):
-        if Path(cmd[0]) in {first_installer.resolve(), upgrade_installer.resolve()}:
+        if isinstance(cmd, str) and any(f'"{path.resolve()}"' in cmd for path in (first_installer, upgrade_installer)):
+            assert cmd.endswith(f"/D={install_dir}")
             (install_dir / "backend").mkdir(parents=True, exist_ok=True)
             (install_dir / "dashboard").mkdir(parents=True, exist_ok=True)
             (install_dir / "VRCForge.exe").write_text("desktop", encoding="utf-8")
@@ -140,7 +204,8 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
             (install_dir / "dashboard" / "index.html").write_text("dashboard", encoding="utf-8")
             (install_dir / "Uninstall.exe").write_text("uninstall", encoding="utf-8")
             return CompletedProcess(cmd, 0, "", "")
-        if Path(cmd[0]) == install_dir / "Uninstall.exe":
+        if isinstance(cmd, list) and Path(cmd[0]) == install_dir / "Uninstall.exe":
+            assert kwargs["cwd"] == str(install_dir.parent)
             for path in sorted(install_dir.rglob("*"), reverse=True):
                 if path.is_file():
                     path.unlink()

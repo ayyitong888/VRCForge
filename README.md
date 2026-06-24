@@ -7,9 +7,9 @@ Official repository: https://github.com/ayyitong888/VRCForge
 
 Current public beta target: `0.9.0-beta`.
 
-0.9.0-beta release artifacts and hashes are still pending final main-agent
-acceptance. Until the GitHub Release is published, use the latest published
-`0.8.0-beta` release for stable beta testing.
+0.9.0-beta release artifacts are published as a prerelease for public beta
+testing. Use the installer for normal Windows x64 installs, or the portable zip
+when you need a no-install/debug payload.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -50,11 +50,12 @@ Portable/debug package:
 
 便携 / 调试包：
 
-- `VRCForge_Windows_x64_0.9.0-beta.zip` after release acceptance
+- `VRCForge_Windows_x64_0.9.0-beta.zip`
 - `start_dashboard.cmd`, PowerShell scripts, and `quickstart/` remain available for development and troubleshooting.
 - End users do not need to install Python, Git, uv, or run `pip install` when using the installer. `VRCForge.exe` checks the Unity MCP runtime at startup, uses bundled `uvx` when available, and otherwise downloads uv into `%LOCALAPPDATA%\VRCForge\tools`.
+- The installer writes program files to `%ProgramFiles%\VRCForge`; user data is under `%LOCALAPPDATA%\VRCForge\agentic-app` and is preserved during update/uninstall unless removed manually.
 
-安装器会把程序安装到 `%ProgramFiles%\VRCForge`，用户数据放在 `%LOCALAPPDATA%\VRCForge`。用户数据包括 `config/`、`logs/`、`artifacts/` 和 `backups/`，更新时不会覆盖。
+安装器会把程序安装到 `%ProgramFiles%\VRCForge`，用户数据放在 `%LOCALAPPDATA%\VRCForge\agentic-app`。用户数据包括 `config/`、`logs/`、`artifacts/` 和 `backups/`，更新时不会覆盖。
 
 ## Unity Plugin Flow / Unity 插件流程
 
@@ -80,7 +81,7 @@ If automatic install fails, the desktop app shows the error and log path, then o
 
 Unity plugin install is idempotent per Unity project. After a successful install it writes `.vrcforge/install_state.json`; the same VRCForge version and payload checksum will not reinstall on the next launch. If the state is partial or failed, the desktop app stops and shows repair/uninstall options instead of blindly touching `Assets/` or `Packages/manifest.json` again.
 
-The project picker merges manual folders, VCC user projects, Unity Hub recent projects, and active Unity MCP instances. Active MCP instances are shown first so a running project such as `milltina` can be selected even if it was not under the default scan root.
+The project picker merges manual folders, VCC user projects, Unity Hub recent projects, and active Unity MCP instances. Active MCP instances are shown first so a running Unity project can be selected even if it was not under the default scan root.
 
 `VRCForge.exe` opens the Tauri desktop app directly and starts or reconnects to the local FastAPI runtime. The legacy WebView2 launcher and `start_dashboard.cmd` path remain debug/compatibility surfaces only.
 
@@ -89,9 +90,9 @@ Startup degrades instead of hard-failing. Optional failures in user-data `AGENTS
 ## 0.9 Public Beta Workflow
 
 0.9.0-beta is the public beta line for Golden Path Matrix coverage and support
-hardening. The public release evidence and proof matrix sections are prepared
-as placeholders; the main release agent will replace them with real artifact
-paths, sizes, and SHA-256 hashes after final acceptance.
+hardening. Release evidence is recorded from reusable smoke commands and
+published artifact hashes, with local sample-project proofs kept separate from
+general installer/support gates.
 
 Public beta focus:
 
@@ -117,15 +118,15 @@ session token are available.
 ```powershell
 # Source checkout
 python tools\vrcforge_cli.py doctor
-python tools\vrcforge_cli.py validation run --project E:\unity\milltina
-python tools\vrcforge_cli.py build-test readiness --project E:\unity\milltina
-python tools\vrcforge_cli.py optimization plan --project E:\unity\milltina --target-profile pc_conservative
-python tools\vrcforge_cli.py plan outfit E:\Booth\outfit.unitypackage --project E:\unity\milltina --out %TEMP%\vrcforge-plan.json
+python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
+python tools\vrcforge_cli.py build-test readiness --project C:\Path\To\UnityProject
+python tools\vrcforge_cli.py optimization plan --project C:\Path\To\UnityProject --target-profile pc_conservative
+python tools\vrcforge_cli.py plan outfit C:\Path\To\outfit.unitypackage --project C:\Path\To\UnityProject --out %TEMP%\vrcforge-plan.json
 
 # Packaged build
 backend\vrcforge_backend.exe --cli doctor
 backend\vrcforge_backend.exe --cli --json doctor
-backend\vrcforge_backend.exe --cli checkpoint list --project E:\unity\milltina
+backend\vrcforge_backend.exe --cli checkpoint list --project C:\Path\To\UnityProject
 ```
 
 Safe write flow:

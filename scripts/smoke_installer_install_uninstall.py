@@ -21,7 +21,7 @@ SENTINEL_NAME = "installer-smoke-preservation.json"
 def main() -> int:
     args = parse_args()
     report = run_smoke(args)
-    path = write_report(report)
+    path = write_report(report, args.artifacts_dir)
     print(json.dumps({"ok": report["ok"], "status": report["summary"]["status"], "reportPath": str(path)}, indent=2))
     if report["ok"] or (report["summary"]["status"] == "blocked" and args.allow_blocked):
         return 0
@@ -32,8 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke-test VRCForge NSIS installer install/uninstall.")
     parser.add_argument("--installer", default="dist/release/VRCForge_Offline_Installer_x64.exe")
     parser.add_argument("--upgrade-installer", default="", help="Optional older installer to install before upgrading with --installer.")
-    parser.add_argument("--install-dir", default=r"C:\Program Files\VRCForge")
+    parser.add_argument("--install-dir", default=str(default_install_dir()), help="Defaults to %%ProgramFiles%%\\VRCForge.")
     parser.add_argument("--user-data-root", default="", help="Override the VRCForge user data root. Defaults to %%LOCALAPPDATA%%\\VRCForge\\agentic-app.")
+    parser.add_argument("--artifacts-dir", default="", help="Directory for the JSON smoke report. Defaults to ./artifacts/installer-smoke.")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--backend-port", type=int, default=8791)
     parser.add_argument("--dry-run", action="store_true", help="Write evidence without running installers or changing user data.")
@@ -83,7 +84,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             )
             if not upgrade_installer.is_file() and not args.dry_run:
                 raise RuntimeError("Upgrade installer does not exist.")
-        steps.append(user_data_root_step(user_data_root))
+        steps.append(user_data_root_step(user_data_root, override_used=bool(args.user_data_root.strip())))
         if args.dry_run:
             return build_report(
                 args,
@@ -119,6 +120,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 status="blocked",
                 blocked_reason=blocked_reason,
             )
+        if install_dir.exists() and is_empty_directory(install_dir):
+            install_dir.rmdir()
         if install_dir.exists():
             raise RuntimeError(f"Install directory already exists; refusing to overwrite during smoke: {install_dir}")
 
@@ -173,13 +176,30 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
         uninstall = install_dir / "Uninstall.exe"
         uninstall_cmd = [str(uninstall), "/S"]
-        uninstall_result = subprocess.run(uninstall_cmd, cwd=str(install_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=args.timeout, check=False)
+        uninstall_result = subprocess.run(uninstall_cmd, cwd=str(install_dir.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=args.timeout, check=False)
         steps.append(command_step("installer.uninstall", uninstall_cmd, uninstall_result))
         phases["uninstall"] = "passed" if uninstall_result.returncode == 0 else "failed"
         if uninstall_result.returncode != 0:
             raise RuntimeError("Uninstaller returned a non-zero exit code.")
-        removed = not install_dir.exists()
-        steps.append({"name": "uninstall.removed", "ok": removed, "installDir": str(install_dir)})
+        removed = wait_for_path_removed(install_dir, timeout=30.0)
+        empty_remaining = bool(install_dir.exists() and is_empty_directory(install_dir))
+        cleanup_removed = False
+        if not removed and empty_remaining:
+            try:
+                install_dir.rmdir()
+                cleanup_removed = not install_dir.exists()
+            except OSError:
+                cleanup_removed = False
+        removed = removed or cleanup_removed
+        steps.append(
+            {
+                "name": "uninstall.removed",
+                "ok": removed,
+                "installDir": str(install_dir),
+                "emptyDirectoryRemaining": empty_remaining,
+                "smokeCleanupRemovedEmptyDir": cleanup_removed,
+            }
+        )
         if not removed:
             raise RuntimeError("Install directory still exists after uninstall.")
         preserved = sentinel_path.is_file() and read_json_file(sentinel_path).get("id") == sentinel["id"]
@@ -230,8 +250,14 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_installer(installer: Path, install_dir: Path, timeout: float) -> subprocess.CompletedProcess[str]:
-    cmd = [str(installer), "/S", f"/D={install_dir}"]
+    cmd = nsis_install_command(installer, install_dir)
     return subprocess.run(cmd, cwd=str(installer.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+
+
+def nsis_install_command(installer: Path, install_dir: Path) -> str:
+    # NSIS requires /D to be the final raw command-line segment and not quoted,
+    # even when the target path contains spaces.
+    return f'"{installer}" /S /D={install_dir}'
 
 
 def start_installed_backend(args: argparse.Namespace, install_dir: Path, user_data_root: Path) -> subprocess.Popen[str]:
@@ -272,7 +298,28 @@ def wait_for_health(port: int, timeout: float) -> dict[str, Any]:
     return {}
 
 
-def command_step(name: str, command: list[str], result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+def wait_for_path_removed(path: Path, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not path.exists():
+            return True
+        time.sleep(0.5)
+    return not path.exists()
+
+
+def is_empty_directory(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def command_step(name: str, command: list[str] | str, result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return {
         "name": name,
         "ok": result.returncode == 0,
@@ -307,6 +354,14 @@ def default_user_data_root() -> Path:
     return Path.home() / "AppData" / "Local" / "VRCForge" / "agentic-app"
 
 
+def default_install_dir() -> Path:
+    program_files = os.environ.get("ProgramFiles", "").strip() or os.environ.get("ProgramW6432", "").strip()
+    if program_files:
+        return Path(program_files).expanduser() / "VRCForge"
+    system_drive = os.environ.get("SystemDrive", "").strip() or "C:"
+    return Path(f"{system_drive}\\Program Files") / "VRCForge"
+
+
 def legacy_user_data_roots() -> dict[str, str]:
     base_value = os.environ.get("LOCALAPPDATA", "").strip() or os.environ.get("APPDATA", "").strip()
     base = Path(base_value).expanduser() if base_value else Path.home() / "AppData" / "Local"
@@ -317,13 +372,14 @@ def legacy_user_data_roots() -> dict[str, str]:
     }
 
 
-def user_data_root_step(user_data_root: Path) -> dict[str, Any]:
+def user_data_root_step(user_data_root: Path, *, override_used: bool = False) -> dict[str, Any]:
     expected = default_user_data_root().resolve()
     return {
         "name": "user_data.default_root",
-        "ok": user_data_root == expected,
+        "ok": override_used or user_data_root == expected,
         "path": str(user_data_root),
         "expectedDefault": str(expected),
+        "overrideUsed": override_used,
         "matchesTauriAndBackendDefault": user_data_root == expected,
         "legacyRoots": legacy_user_data_roots(),
     }
@@ -390,8 +446,8 @@ def build_report(
     }
 
 
-def write_report(report: dict[str, Any]) -> Path:
-    root = Path.cwd() / "artifacts" / "installer-smoke"
+def write_report(report: dict[str, Any], artifacts_dir: str = "") -> Path:
+    root = Path(artifacts_dir).expanduser().resolve() if artifacts_dir.strip() else Path.cwd() / "artifacts" / "installer-smoke"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"installer-install-uninstall-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
     path.write_text(json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
