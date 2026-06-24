@@ -672,7 +672,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
     ma_audit = build_ma_responsive_layer_audit(validation)
     ma2bt_plan = build_ma2bt_convertibility_plan(dependency_doctor, ma_audit)
     visual_plan = build_visual_regression_plan(params)
-    rollback = build_rollback_verify(params, validation)
+    rollback = build_rollback_verify(params, validation, dependency_doctor)
     performance_tools_report = build_performance_tools_report(dependency_doctor, validation)
     action_cards = build_action_cards(
         profile,
@@ -818,7 +818,7 @@ def build_optimization_tool_result(
     elif external_name == "optimization.visual-regression.plan":
         result = build_visual_regression_plan(params)
     elif external_name == "optimization.rollback.verify":
-        result = build_rollback_verify(params, validation)
+        result = build_rollback_verify(params, validation, dependency_doctor)
     elif external_name == "optimization.performance-tools.report":
         result = build_performance_tools_report(dependency_doctor, validation)
     else:
@@ -1897,9 +1897,18 @@ def build_visual_regression_plan(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_rollback_verify(params: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+def build_rollback_verify(
+    params: dict[str, Any],
+    validation: dict[str, Any],
+    dependency_doctor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     project_path = _coerce_project_path(params)
     residue = _source_payload(_validation_sources(validation), "generated_residue")
+    dependency_doctor = dependency_doctor if isinstance(dependency_doctor, dict) else build_dependency_doctor(params)
+    ecosystem = build_rollback_ecosystem_coverage(dependency_doctor, validation)
+    coverage = build_rollback_coverage_matrix(project_path, validation, ecosystem, residue)
+    blocking = [item for item in coverage if item.get("required") and item.get("status") == "blocked"]
+    warnings = [item for item in coverage if item.get("required") and item.get("status") == "warning"]
     return {
         "readOnly": True,
         "checkpointInfrastructureRequired": True,
@@ -1907,8 +1916,253 @@ def build_rollback_verify(params: dict[str, Any], validation: dict[str, Any]) ->
         "projectReadable": bool(project_path and project_path.exists()),
         "canGenerateFutureProof": bool(project_path and project_path.exists()),
         "generatedResidueCount": _first_numeric(residue, ("residueCount", "generatedAssetCount")),
-        "futureApplyRule": "Each optimizer apply must run preview -> approval -> checkpoint -> apply -> validation -> rollback proof.",
+        "gitLikeRollbackRequired": True,
+        "hardGate": {
+            "status": "blocked" if blocking else ("warning" if warnings else "pass"),
+            "blockingCount": len(blocking),
+            "warningCount": len(warnings),
+            "blockingIds": [str(item.get("id")) for item in blocking],
+        },
+        "coverage": coverage,
+        "ecosystemCoverage": ecosystem,
+        "futureApplyRule": "Every Unity project write must run preview -> approval -> checkpoint -> apply -> validation -> rollback -> post-restore validation, with Assets/Packages/ProjectSettings and MA/VRCF/NDMF generated state covered.",
+        "notes": [
+            "Rollback is treated like a git-style restore boundary for Unity projects: Assets, Packages, and ProjectSettings are restored together.",
+            "MA, VRCFury, and NDMF build-time tools require generated-residue and post-restore validation evidence before any write path can be called stable.",
+        ],
     }
+
+
+def build_rollback_coverage_matrix(
+    project_path: Path | None,
+    validation: dict[str, Any],
+    ecosystem: dict[str, Any],
+    residue: dict[str, Any],
+) -> list[dict[str, Any]]:
+    project_readable = bool(project_path and project_path.exists())
+    generated_residue = _first_numeric(residue, ("residueCount", "generatedAssetCount"))
+    scanner_statuses = _scanner_statuses(validation)
+    validation_has_sources = bool(scanner_statuses)
+    coverage = [
+        _rollback_coverage_item(
+            "checkpoint.project_root",
+            "Unity project root resolved",
+            project_readable,
+            "approval-time checkpoint cannot run without a readable Unity project root",
+            evidence={"projectPath": str(project_path) if project_path else ""},
+        ),
+        _rollback_coverage_item(
+            "checkpoint.assets",
+            "Assets tree included in checkpoint",
+            project_readable,
+            "Assets must be restored for scene, prefab, material, controller, clip, MA, and VRCF component changes",
+            evidence={"pathspec": "Assets"},
+        ),
+        _rollback_coverage_item(
+            "checkpoint.packages",
+            "Packages manifest and package files included in checkpoint",
+            project_readable,
+            "Packages/manifest.json and local package edits must restore with optimizer dependency changes",
+            evidence={"pathspec": "Packages", "unityCacheCleanup": ["Library/Bee", "Library/ScriptAssemblies", "Library/PackageCache"]},
+        ),
+        _rollback_coverage_item(
+            "checkpoint.project_settings",
+            "ProjectSettings included in checkpoint",
+            project_readable,
+            "ProjectSettings can be touched by Unity/plugin import and must share the same restore boundary",
+            evidence={"pathspec": "ProjectSettings"},
+        ),
+        _rollback_coverage_item(
+            "rollback.unity_reload",
+            "Unity reload after restore",
+            project_readable,
+            "Restored scenes/assets must be reloaded and AssetDatabase refreshed after rollback",
+            evidence={"tool": "vrc_reload_after_checkpoint_restore"},
+        ),
+        _rollback_coverage_item(
+            "rollback.post_restore_validation",
+            "Post-restore validation report",
+            validation_has_sources,
+            "Rollback proof must compare the restored project against the pre-apply validation baseline",
+            evidence={"scannerStatuses": scanner_statuses[:20]},
+        ),
+        _rollback_coverage_item(
+            "rollback.generated_residue",
+            "Generated asset residue check",
+            generated_residue in (0, None),
+            "NDMF/MA/VRCF/optimizer generated assets must be absent or explicitly accounted for after rollback",
+            status_override="warning" if generated_residue is None else None,
+            evidence={"generatedResidueCount": generated_residue},
+        ),
+    ]
+    components = ecosystem.get("components")
+    for item in components if isinstance(components, list) else []:
+        if not isinstance(item, dict):
+            continue
+        coverage.append(
+            _rollback_coverage_item(
+                f"ecosystem.{item.get('id')}",
+                f"{item.get('label')} rollback coverage",
+                bool(item.get("rollbackCovered")),
+                str(item.get("rollbackRequirement") or "Component ecosystem must be covered by checkpoint, residue, and validation proof."),
+                required=bool(item.get("detected")),
+                status_override=str(item.get("coverageStatus") or ""),
+                evidence=item,
+            )
+        )
+    return coverage
+
+
+def _rollback_coverage_item(
+    item_id: str,
+    label: str,
+    ok: bool,
+    requirement: str,
+    *,
+    required: bool = True,
+    status_override: str | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = status_override if status_override in {"pass", "warning", "blocked", "not_detected"} else ("pass" if ok else "blocked")
+    return {
+        "id": item_id,
+        "label": label,
+        "required": required,
+        "status": status,
+        "ok": status in {"pass", "not_detected"} or (status == "warning" and not required),
+        "requirement": requirement,
+        "evidence": evidence or {},
+    }
+
+
+def build_rollback_ecosystem_coverage(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    sources = _validation_sources(validation)
+    avatar_items = _source_payload(sources, "avatar_items")
+    fx = _source_payload(sources, "fx")
+    generated_residue = _source_payload(sources, "generated_residue")
+    residue_count = _first_numeric(generated_residue, ("residueCount", "generatedAssetCount"))
+    scanner_statuses = _scanner_statuses(validation)
+    validation_ready = bool(scanner_statuses)
+    components = [
+        _rollback_ecosystem_component(
+            dependency_doctor,
+            "modular_avatar",
+            "Modular Avatar",
+            avatar_items,
+            fx,
+            residue_count,
+            validation_ready,
+            "MA components, generated animator/menu assets, and MA-driven scene/prefab changes must restore through the same checkpoint.",
+            ("modularavatar", "ma responsive", "ma merge animator", "ma parameters", "ma menu item"),
+        ),
+        _rollback_ecosystem_component(
+            dependency_doctor,
+            "vrcfury",
+            "VRCFury",
+            avatar_items,
+            fx,
+            residue_count,
+            validation_ready,
+            "VRCFury build-time controller, Direct Tree, and parameter-compressor changes must leave no residue after rollback.",
+            ("vrcfury", "fury", "vf.model"),
+        ),
+        _rollback_ecosystem_component(
+            dependency_doctor,
+            "ndmf",
+            "NDMF",
+            avatar_items,
+            fx,
+            residue_count,
+            validation_ready,
+            "NDMF generated assets and build hooks must be accounted for because AAO, LAC, TTT, Meshia, MA2BT, MA, and VRCFury can all run through NDMF.",
+            ("ndmf", "non-destructive modular framework"),
+        ),
+        _rollback_ecosystem_component(
+            dependency_doctor,
+            "ma2bt_pro",
+            "MA2BT-Pro",
+            avatar_items,
+            fx,
+            residue_count,
+            validation_ready,
+            "MA2BT-Pro conversion proof must restore MA-authored FX layer behavior, generated BlendTrees, and controller deltas.",
+            ("ma2bt", "ma_to_blendtree", "ma responsive"),
+        ),
+    ]
+    detected = [item for item in components if item["detected"]]
+    return {
+        "schema": "vrcforge.rollback_ecosystem_coverage.v1",
+        "requiresMaVrcfNdmfProof": bool(detected),
+        "detectedCount": len(detected),
+        "components": components,
+        "summary": {
+            "coveredCount": sum(1 for item in detected if item["rollbackCovered"]),
+            "blockedCount": sum(1 for item in detected if item["coverageStatus"] == "blocked"),
+            "warningCount": sum(1 for item in detected if item["coverageStatus"] == "warning"),
+        },
+    }
+
+
+def _rollback_ecosystem_component(
+    dependency_doctor: dict[str, Any],
+    dependency_id: str,
+    label: str,
+    avatar_items: dict[str, Any],
+    fx: dict[str, Any],
+    residue_count: int | float | None,
+    validation_ready: bool,
+    rollback_requirement: str,
+    tokens: tuple[str, ...],
+) -> dict[str, Any]:
+    dependency = _dependency_by_id(dependency_doctor, dependency_id)
+    package_detected = dependency.get("status") == "installed"
+    component_signals = _detect_component_signals(avatar_items, fx, tokens)
+    detected = bool(package_detected or component_signals)
+    residue_clear = residue_count in (0, None)
+    rollback_covered = bool(detected and validation_ready and residue_clear)
+    if not detected:
+        coverage_status = "not_detected"
+    elif rollback_covered:
+        coverage_status = "pass"
+    elif not validation_ready:
+        coverage_status = "blocked"
+    else:
+        coverage_status = "warning"
+    return {
+        "id": dependency_id,
+        "label": label,
+        "detected": detected,
+        "packageStatus": dependency.get("status") or "unknown",
+        "matchedPackageId": dependency.get("matchedPackageId") or "",
+        "componentSignalCount": len(component_signals),
+        "componentSignals": component_signals[:20],
+        "validationReady": validation_ready,
+        "generatedResidueClear": residue_clear,
+        "generatedResidueCount": residue_count,
+        "rollbackCovered": rollback_covered,
+        "coverageStatus": coverage_status,
+        "rollbackRequirement": rollback_requirement,
+    }
+
+
+def _detect_component_signals(avatar_items: dict[str, Any], fx: dict[str, Any], tokens: tuple[str, ...]) -> list[str]:
+    found: list[str] = []
+    wanted = tuple(token.lower() for token in tokens)
+    for entry in _walk_dicts({"avatar_items": avatar_items, "fx": fx}):
+        text_parts: list[str] = []
+        for key in ("componentTypes", "type", "componentType", "name", "layerName", "stateName", "menuPath", "gameObjectPath"):
+            raw = entry.get(key)
+            if isinstance(raw, list):
+                text_parts.extend(str(item) for item in raw)
+            elif raw is not None:
+                text_parts.append(str(raw))
+        text = " ".join(text_parts)
+        lowered = text.lower()
+        if any(token in lowered for token in wanted):
+            label = text.strip()
+            if label and label not in found:
+                found.append(label[:240])
+    return found
 
 
 def build_action_cards(

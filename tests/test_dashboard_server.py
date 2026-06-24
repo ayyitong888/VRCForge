@@ -2132,10 +2132,13 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(prepared, [project.resolve()])
             bee_cache = project / "Library" / "Bee"
             script_cache = project / "Library" / "ScriptAssemblies"
+            package_cache = project / "Library" / "PackageCache"
             bee_cache.mkdir(parents=True)
             script_cache.mkdir(parents=True)
+            package_cache.mkdir(parents=True)
             (bee_cache / "stale-inputdata.json").write_text("Packages/com.deleted.shader", encoding="utf-8")
             (script_cache / "stale.dll").write_text("stale", encoding="utf-8")
+            (package_cache / "stale-package").write_text("stale", encoding="utf-8")
 
             checkpoint_id = applied["checkpoint"]["id"]
             preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint_id})
@@ -2149,10 +2152,198 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse((project / "Assets" / "generated.txt").exists())
             self.assertFalse(bee_cache.exists())
             self.assertFalse(script_cache.exists())
+            self.assertFalse(package_cache.exists())
             self.assertFalse(restored["unityCacheCleanup"]["skipped"])
             self.assertIn(str(bee_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertIn(str(script_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
+            self.assertIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertEqual(reloaded, [project.resolve()])
+
+    def test_checkpoint_rollback_coverage_audit_tracks_ma_vrcf_ndmf_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets" / "Scenes").mkdir(parents=True)
+            (project / "Assets" / "Prefabs").mkdir()
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            scene = project / "Assets" / "Scenes" / "Avatar.unity"
+            prefab = project / "Assets" / "Prefabs" / "Outfit.prefab"
+            generated = project / "Assets" / "VRCForge" / "Generated" / "RollbackAudit" / "generated.anim"
+            manifest = project / "Packages" / "manifest.json"
+            lock = project / "Packages" / "packages-lock.json"
+            scene.write_text("before scene with MA component", encoding="utf-8")
+            prefab.write_text("before prefab with VRCF component", encoding="utf-8")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "dependencies": {
+                            "nadena.dev.modular-avatar": "1.17.1",
+                            "com.vrcfury.vrcfury": "1.1334.0",
+                            "nadena.dev.ndmf": "1.13.1",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lock.write_text(
+                json.dumps(
+                    {
+                        "dependencies": {
+                            "nadena.dev.modular-avatar": {"version": "1.17.1"},
+                            "com.vrcfury.vrcfury": {"version": "1.1334.0"},
+                            "nadena.dev.ndmf": {"version": "1.13.1"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_restore_handler = lambda _path: {"ok": True}
+
+            def write_handler(args: dict) -> dict:
+                project_root = Path(args["projectRoot"])
+                (project_root / "Assets" / "Scenes" / "Avatar.unity").write_text("after scene", encoding="utf-8")
+                (project_root / "Assets" / "Prefabs" / "Outfit.prefab").write_text("after prefab", encoding="utf-8")
+                generated.parent.mkdir(parents=True)
+                generated.write_text("generated", encoding="utf-8")
+                manifest.write_text(
+                    json.dumps({"dependencies": {"nadena.dev.modular-avatar": "1.17.1"}}),
+                    encoding="utf-8",
+                )
+                package_cache = project_root / "Library" / "PackageCache"
+                bee_cache = project_root / "Library" / "Bee"
+                script_cache = project_root / "Library" / "ScriptAssemblies"
+                package_cache.mkdir(parents=True)
+                bee_cache.mkdir(parents=True)
+                script_cache.mkdir(parents=True)
+                (package_cache / "com.vrcfury.vrcfury@1.1334.0").write_text("stale", encoding="utf-8")
+                (bee_cache / "inputdata.json").write_text("stale", encoding="utf-8")
+                (script_cache / "Assembly-CSharp.dll").write_text("stale", encoding="utf-8")
+                return {"ok": True}
+
+            gateway.register_write_handler("vrcforge_test_ma_vrcf_rollback", "MA/VRCF rollback", "high", write_handler)
+            request = gateway.create_apply_request({
+                "target_tool": "vrcforge_test_ma_vrcf_rollback",
+                "arguments": {"projectRoot": str(project)},
+            })
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertTrue(applied["ok"])
+            checkpoint_audit = applied["checkpoint"]["rollbackCoverageAudit"]
+            self.assertEqual(checkpoint_audit["schema"], "vrcforge.rollback_coverage_audit.v1")
+            checkpoint_checks = {item["id"]: item for item in checkpoint_audit["checks"]}
+            self.assertEqual(checkpoint_checks["scene_prefab_component_state"]["status"], "covered")
+            self.assertEqual(checkpoint_checks["packages_manifest"]["status"], "covered")
+            frameworks = checkpoint_checks["packages_manifest"]["frameworkPackages"]["packages"]
+            self.assertTrue(frameworks["modular_avatar"]["detected"])
+            self.assertTrue(frameworks["vrcfury"]["detected"])
+            self.assertTrue(frameworks["ndmf"]["detected"])
+
+            preview = gateway.preview_restore_checkpoint({"checkpointId": applied["checkpoint"]["id"]})
+            self.assertTrue(preview["ok"])
+            self.assertEqual(preview["rollbackCoverageAudit"]["phase"], "preview")
+            preview_checks = {item["id"]: item for item in preview["rollbackCoverageAudit"]["checks"]}
+            preview_frameworks = preview_checks["packages_manifest"]["frameworkPackages"]["packages"]
+            self.assertTrue(preview_frameworks["vrcfury"]["detected"])
+
+            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+
+            self.assertTrue(restored["ok"])
+            self.assertEqual(scene.read_text(encoding="utf-8"), "before scene with MA component")
+            self.assertEqual(prefab.read_text(encoding="utf-8"), "before prefab with VRCF component")
+            self.assertFalse(generated.exists())
+            restored_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertIn("com.vrcfury.vrcfury", restored_manifest["dependencies"])
+            self.assertFalse((project / "Library" / "PackageCache").exists())
+            self.assertFalse((project / "Library" / "Bee").exists())
+            self.assertFalse((project / "Library" / "ScriptAssemblies").exists())
+            restore_audit = restored["rollbackCoverageAudit"]
+            restore_checks = {item["id"]: item for item in restore_audit["checks"]}
+            self.assertEqual(restore_audit["gateStatus"], "todo")
+            self.assertEqual(restore_checks["package_cache_generated_folders"]["status"], "passed")
+            self.assertEqual(restore_checks["unity_reload_after_restore"]["status"], "passed")
+            self.assertEqual(restore_checks["validation_after_restore"]["status"], "todo")
+            self.assertTrue(any(item["id"] == "run_post_restore_validation" for item in restore_audit["todos"]))
+
+    def test_skill_package_write_uses_local_state_checkpoint_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "avatar-review.vsk"
+            source = root / "source"
+            source.mkdir()
+            (source / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "id": "community.avatar-review",
+                        "name": "Avatar Review Package",
+                        "skill_name": "avatar-review",
+                        "version": "1.0.0",
+                        "author": "Unit Test",
+                        "description": "Dashboard skill package fixture.",
+                        "min_vrcforge_version": "0.5.0",
+                        "permissions": ["read_project"],
+                        "entrypoints": {"skill": "SKILL.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (source / "SKILL.md").write_text(
+                "---\n"
+                "name: avatar-review\n"
+                "title: Avatar Review\n"
+                "description: Imported package skill.\n"
+                "allowed-tools:\n"
+                "  - vrcforge_health\n"
+                "entrypoint-tool: vrcforge_health\n"
+                "---\n"
+                "Inspect project state before edits.\n",
+                encoding="utf-8",
+            )
+            SkillPackageService(root / "build-store", vrcforge_version="0.5.1").export_dev(source, package)
+
+            gateway = AgentGateway(root / "app" / "config" / "agent_gateway.json", root / "audit")
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                dashboard_server.register_agent_gateway_tools()
+                request = gateway.create_apply_request(
+                    {
+                        "target_tool": "vrcforge_import_skill_package",
+                        "arguments": {"packagePath": str(package)},
+                    }
+                )
+                gateway.approve(request["approval"]["id"])
+                applied = gateway.apply_approved({"approval_id": request["approval"]["id"]})
+
+                self.assertTrue(applied["ok"])
+                checkpoint = applied["checkpoint"]
+                self.assertEqual(checkpoint["strategy"], "local_state_archive")
+                self.assertEqual(checkpoint["pathspecs"], ["skill-packages", "skills"])
+                self.assertTrue((gateway.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
+                self.assertTrue((gateway.user_constraints_path.parent / "skill-packages" / "community.avatar-review").is_dir())
+                preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+                self.assertTrue(preview["ok"])
+                self.assertTrue(any("avatar-review" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
+
+                restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+
+                self.assertTrue(restored["ok"])
+                self.assertEqual(restored["status"], "restored")
+                self.assertFalse((gateway.user_skills_dir / "avatar-review").exists())
+                self.assertFalse((gateway.user_constraints_path.parent / "skill-packages").exists())
+                audit = restored["rollbackCoverageAudit"]
+                checks = {item["id"]: item for item in audit["checks"]}
+                self.assertEqual(checks["local_skill_package_store"]["status"], "covered")
+                self.assertEqual(checks["local_projected_user_skills"]["status"], "covered")
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+                dashboard_server.register_agent_gateway_tools()
 
     def test_failed_write_after_checkpoint_returns_checkpoint_for_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2305,6 +2496,47 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_restore_checkpoint", tool_names)
         self.assertIn("vrcforge_restore_checkpoint", write_targets)
         self.assertIn("vrcforge_unity_mcp_write", write_targets)
+
+    def test_write_targets_publish_rollback_policy(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            manifest = client.get("/api/agent/manifest", headers=headers).json()
+            registry = client.get("/api/app/tools/registry").json()
+
+        targets = {item["name"]: item for item in manifest["writeTargets"]}
+        self.assertGreater(len(targets), 10)
+        for name, target in targets.items():
+            policy = target.get("rollbackPolicy")
+            self.assertIsInstance(policy, dict, name)
+            self.assertEqual(policy["schema"], "vrcforge.write_rollback_policy.v1")
+            self.assertTrue(policy["required"], name)
+            self.assertEqual(policy["restoreTool"], "vrcforge_restore_checkpoint")
+            self.assertEqual(policy["coverageAudit"], "vrcforge.rollback_coverage_audit.v1")
+
+        unity_policy = targets["vrcforge_add_modular_avatar_component"]["rollbackPolicy"]
+        self.assertEqual(unity_policy["kind"], "unity_project_checkpoint")
+        self.assertEqual(unity_policy["checkpointScope"], ["Assets", "Packages", "ProjectSettings"])
+        self.assertIn("Modular Avatar", unity_policy["ecosystemCoverageRequired"])
+        self.assertIn("VRCFury", unity_policy["ecosystemCoverageRequired"])
+        self.assertIn("NDMF", unity_policy["ecosystemCoverageRequired"])
+
+        package_policy = targets["vrcforge_import_skill_package"]["rollbackPolicy"]
+        self.assertEqual(package_policy["kind"], "local_state_archive")
+        self.assertEqual(package_policy["checkpointScope"], ["skill-packages", "skills"])
+
+        restore_policy = targets["vrcforge_restore_checkpoint"]["rollbackPolicy"]
+        self.assertEqual(restore_policy["kind"], "checkpoint_restore")
+        self.assertFalse(restore_policy["preWriteCheckpointRequired"])
+
+        registry_targets = {item["name"]: item for item in registry["tools"] if item.get("source") == "write-target"}
+        self.assertEqual(
+            registry_targets["vrcforge_import_skill_package"]["rollbackPolicy"],
+            package_policy,
+        )
 
     def test_checkpoint_recovery_unity_tools_save_and_reload_scenes(self) -> None:
         source = (

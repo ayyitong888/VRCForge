@@ -16,7 +16,7 @@ import zipfile
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
@@ -30,6 +30,32 @@ from optimization_service import (
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
+
+ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
+ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
+UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
+LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
+LOCAL_STATE_CHECKPOINT_TARGETS = {
+    "vrcforge_import_skill_package",
+    "vrcforge_export_skill_package",
+    "vrcforge_set_skill_package_enabled",
+    "vrcforge_uninstall_skill_package",
+}
+ROLLBACK_FRAMEWORK_PACKAGES = {
+    "modular_avatar": {
+        "label": "Modular Avatar",
+        "packageIds": ["nadena.dev.modular-avatar"],
+    },
+    "vrcfury": {
+        "label": "VRCFury",
+        "packageIds": ["com.vrcfury.vrcfury"],
+    },
+    "ndmf": {
+        "label": "NDMF",
+        "packageIds": ["nadena.dev.ndmf"],
+    },
+}
+UNITY_RESTORE_PACKAGE_CACHE_DIRS = ("Bee", "ScriptAssemblies", "PackageCache")
 
 
 class AgentGatewayError(RuntimeError):
@@ -2026,6 +2052,8 @@ class AgentGateway:
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
+        if checkpoint.get("strategy") == "local_state_archive":
+            return self._preview_local_state_checkpoint(checkpoint)
         if checkpoint.get("strategy") == "archive":
             return self._preview_archive_checkpoint(checkpoint)
         git_root = Path(str(checkpoint["gitRoot"]))
@@ -2033,13 +2061,15 @@ class AgentGateway:
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
         diff = self._run_git(git_root, ["diff", "--name-status", ref, "--", *pathspecs])
         status = self._run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
-        return {
+        payload = {
             "ok": diff["ok"] and status["ok"],
             "checkpoint": checkpoint,
             "changedFiles": [line for line in diff["stdout"].splitlines() if line.strip()],
             "workingTreeStatus": [line for line in status["stdout"].splitlines() if line.strip()],
             "error": diff.get("error") or status.get("error") or "",
         }
+        payload["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview")
+        return payload
 
     def restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
@@ -2050,7 +2080,10 @@ class AgentGateway:
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
-        if checkpoint.get("strategy") == "archive":
+        local_state_restore = checkpoint.get("strategy") == "local_state_archive"
+        if local_state_restore:
+            payload = self._restore_local_state_checkpoint(checkpoint)
+        elif checkpoint.get("strategy") == "archive":
             payload = self._restore_archive_checkpoint(checkpoint)
         else:
             git_root = Path(str(checkpoint["gitRoot"]))
@@ -2067,12 +2100,12 @@ class AgentGateway:
                 "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
                 "error": clean.get("error") or "",
             }
-        if payload.get("ok"):
+        if payload.get("ok") and not local_state_restore:
             cache_cleanup = self._cleanup_checkpoint_restore_unity_caches(checkpoint)
             payload["unityCacheCleanup"] = cache_cleanup
             if cache_cleanup.get("errors"):
                 payload["unityCacheCleanupWarning"] = "; ".join(ensure_string_list(cache_cleanup.get("errors")))
-        if payload.get("ok") and self.checkpoint_restore_handler is not None:
+        if payload.get("ok") and not local_state_restore and self.checkpoint_restore_handler is not None:
             try:
                 reload_result = ensure_dict(self.checkpoint_restore_handler(Path(str(checkpoint["projectRoot"]))))
             except Exception as exc:  # noqa: BLE001
@@ -2085,6 +2118,14 @@ class AgentGateway:
                 payload["status"] = "restored_with_unity_reload_warning"
             else:
                 payload["status"] = "restored"
+        elif payload.get("ok") and local_state_restore:
+            payload["status"] = "restored"
+        if payload.get("ok"):
+            payload["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(
+                checkpoint,
+                phase="restore",
+                restore_payload=payload,
+            )
         self.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 
@@ -2092,7 +2133,6 @@ class AgentGateway:
         target_tool = str(approval.get("targetTool") or "")
         if not target_tool or target_tool == "vrcforge_restore_checkpoint":
             return None
-        project_root = self._resolve_checkpoint_project_root(arguments)
         checkpoint_id = f"ckpt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         base_record = {
             "id": checkpoint_id,
@@ -2101,6 +2141,9 @@ class AgentGateway:
             "targetTool": target_tool,
             "status": "unavailable",
         }
+        if target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
+            return self._create_local_state_checkpoint(base_record)
+        project_root = self._resolve_checkpoint_project_root(arguments)
         if project_root is None:
             record = {
                 **base_record,
@@ -2227,6 +2270,7 @@ class AgentGateway:
                 "statusBefore": [line for line in status_before["stdout"].splitlines() if line.strip()] if status_before["ok"] else [],
             }
         )
+        record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
         return record
@@ -2286,6 +2330,85 @@ class AgentGateway:
                 "uncompressedBytes": total_bytes,
             }
         )
+        record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
+        self._append_checkpoint(record)
+        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        return record
+
+    def _create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(record["id"])
+        archive_dir = self.checkpoint_store_dir / "local-state"
+        archive_path = archive_dir / f"{checkpoint_id}.zip"
+        temp_path = archive_path.with_suffix(".zip.tmp")
+        roots = self._local_state_checkpoint_roots()
+        state_roots: list[dict[str, Any]] = []
+        file_count = 0
+        total_bytes = 0
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if temp_path.exists():
+                temp_path.unlink()
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+                for scope, root in roots.items():
+                    resolved = root.resolve()
+                    root_file_count = 0
+                    if resolved.exists():
+                        if resolved.is_symlink() or not resolved.is_dir():
+                            raise ValueError(f"Local state root is not a regular directory: {resolved}")
+                        for source in sorted(resolved.rglob("*")):
+                            if source.is_symlink():
+                                raise ValueError(f"Refusing to checkpoint symlinked local state path: {source}")
+                            if not source.is_file():
+                                continue
+                            relative = f"{scope}/{source.relative_to(resolved).as_posix()}"
+                            archive.write(source, relative)
+                            size = source.stat().st_size
+                            file_count += 1
+                            root_file_count += 1
+                            total_bytes += size
+                    state_roots.append(
+                        {
+                            "id": scope,
+                            "path": str(resolved),
+                            "exists": resolved.exists(),
+                            "fileCount": root_file_count,
+                        }
+                    )
+            os.replace(temp_path, archive_path)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "strategy": "local_state_archive",
+                    "archivePath": str(archive_path),
+                    "pathspecs": list(LOCAL_STATE_CHECKPOINT_SCOPE),
+                    "stateRoots": state_roots,
+                    "error": f"Local state checkpoint failed: {exc}",
+                }
+            )
+            self._append_checkpoint(record)
+            return record
+
+        record.update(
+            {
+                "ok": True,
+                "status": "ready",
+                "strategy": "local_state_archive",
+                "archivePath": str(archive_path),
+                "pathspecs": list(LOCAL_STATE_CHECKPOINT_SCOPE),
+                "stateRoots": state_roots,
+                "fileCount": file_count,
+                "uncompressedBytes": total_bytes,
+            }
+        )
+        record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
         return record
@@ -2318,7 +2441,40 @@ class AgentGateway:
             changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
             changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
             changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
-            return {"ok": True, "checkpoint": checkpoint, "changedFiles": changed, "workingTreeStatus": changed, "error": ""}
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "changedFiles": changed,
+                "workingTreeStatus": changed,
+                "rollbackCoverageAudit": self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview"),
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
+
+    def _preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                archived = {
+                    info.filename: (info.file_size, info.CRC)
+                    for info in archive.infolist()
+                    if not info.is_dir()
+                }
+                for name in archived:
+                    self._validate_local_state_archive_member(name)
+            current = self._local_state_archive_contents()
+            changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
+            changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
+            changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "changedFiles": changed,
+                "workingTreeStatus": changed,
+                "rollbackCoverageAudit": self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview"),
+                "error": "",
+            }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
@@ -2392,6 +2548,400 @@ class AgentGateway:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
 
+    def _restore_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        roots = self._local_state_checkpoint_roots()
+        state_roots = {
+            str(item.get("id") or ""): ensure_dict(item)
+            for item in ensure_list(checkpoint.get("stateRoots"))
+            if isinstance(item, dict)
+        }
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = [info for info in archive.infolist() if not info.is_dir()]
+                for info in members:
+                    self._validate_local_state_archive_member(info.filename)
+
+                current = self._local_state_archive_contents()
+                restored: list[str] = []
+                deleted: list[str] = []
+                app_state_root = self.user_constraints_path.parent.resolve()
+
+                for scope, root in roots.items():
+                    target_root = root.resolve()
+                    if not is_path_within(target_root, app_state_root):
+                        raise ValueError(f"Unsafe local state restore root: {target_root}")
+                    if target_root.exists():
+                        if target_root.is_symlink() or not target_root.is_dir():
+                            raise ValueError(f"Local state restore root is not a regular directory: {target_root}")
+                        shutil.rmtree(target_root)
+                    deleted.extend(name for name in sorted(current) if name == scope or name.startswith(scope + "/"))
+                    if state_roots.get(scope, {}).get("exists"):
+                        target_root.mkdir(parents=True, exist_ok=True)
+
+                for info in members:
+                    parts = PurePosixPath(info.filename).parts
+                    scope = parts[0]
+                    root = roots[scope].resolve()
+                    target = (root / Path(*parts[1:])).resolve()
+                    if not is_path_within(target, root):
+                        raise ValueError(f"Unsafe local state restore target: {target}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
+                    with archive.open(info, "r") as source, temp_target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    os.replace(temp_target, target)
+                    restored.append(info.filename)
+
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "restoredArchive": str(archive_path),
+                "restoredFileCount": len(restored),
+                "restoredFiles": restored,
+                "deletedFileCount": len(deleted),
+                "deletedFiles": deleted,
+                "cleaned": deleted,
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": f"Local state restore failed: {exc}"}
+
+    def _build_checkpoint_rollback_coverage_audit(
+        self,
+        checkpoint: dict[str, Any],
+        phase: str,
+        restore_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        restore_payload = restore_payload or {}
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        if checkpoint.get("strategy") == "local_state_archive":
+            return self._build_local_state_rollback_coverage_audit(checkpoint, phase, restore_payload)
+        touches_assets = self._checkpoint_touches_top_level(checkpoint, "Assets")
+        touches_packages = self._checkpoint_touches_top_level(checkpoint, "Packages")
+        touches_project_settings = self._checkpoint_touches_top_level(checkpoint, "ProjectSettings")
+        project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve() if checkpoint.get("projectRoot") else None
+        stored_framework_snapshot = self._stored_checkpoint_framework_package_snapshot(checkpoint)
+        framework_snapshot = (
+            stored_framework_snapshot
+            if phase != "checkpoint" and stored_framework_snapshot
+            else self._checkpoint_framework_package_snapshot(project_root)
+        )
+
+        blocking_gaps: list[str] = []
+        todos: list[dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
+
+        def add_check(check_id: str, title: str, status: str, details: dict[str, Any]) -> None:
+            checks.append({"id": check_id, "title": title, "status": status, **details})
+            if status == "missing":
+                blocking_gaps.append(check_id)
+
+        add_check(
+            "scene_prefab_component_state",
+            "Scene, prefab, and serialized component state",
+            "covered" if touches_assets else "missing",
+            {
+                "pathspec": "Assets",
+                "covers": [
+                    "scene files",
+                    "prefabs",
+                    "serialized Unity components",
+                    "Modular Avatar and VRCFury components saved under Assets",
+                    "NDMF plugin component settings saved under Assets",
+                ],
+            },
+        )
+        add_check(
+            "generated_assets",
+            "Generated assets",
+            "covered" if touches_assets else "missing",
+            {
+                "pathspec": "Assets",
+                "covers": [
+                    "VRCForge generated assets under Assets",
+                    "optimizer, wardrobe, shader, and import artifacts saved as project assets",
+                ],
+            },
+        )
+        add_check(
+            "packages_manifest",
+            "Packages manifest and lock state",
+            "covered" if touches_packages else "missing",
+            {
+                "pathspec": "Packages",
+                "covers": [
+                    "Packages/manifest.json",
+                    "Packages/packages-lock.json",
+                    "MA, VRCF, NDMF, and optimizer package dependency versions",
+                ],
+                "frameworkPackages": framework_snapshot,
+            },
+        )
+        add_check(
+            "project_settings",
+            "Project settings",
+            "covered" if touches_project_settings else "missing",
+            {
+                "pathspec": "ProjectSettings",
+                "covers": ["Unity project settings that can affect import, build, and validation behavior"],
+            },
+        )
+
+        cache_cleanup = ensure_dict(restore_payload.get("unityCacheCleanup"))
+        cache_status = "planned" if touches_packages else "skipped"
+        cache_details: dict[str, Any] = {
+            "requiresPackagesRestore": touches_packages,
+            "targets": [f"Library/{name}" for name in UNITY_RESTORE_PACKAGE_CACHE_DIRS],
+        }
+        if phase == "restore":
+            if not touches_packages:
+                cache_status = "skipped"
+            elif not cache_cleanup:
+                cache_status = "missing"
+            elif cache_cleanup.get("ok"):
+                cache_status = "passed"
+                cache_details["deleted"] = ensure_string_list(cache_cleanup.get("deleted"))
+            else:
+                cache_status = "warning"
+                cache_details["errors"] = ensure_string_list(cache_cleanup.get("errors"))
+        add_check(
+            "package_cache_generated_folders",
+            "Package cache and generated compiler folders",
+            cache_status,
+            cache_details,
+        )
+
+        reload_result = ensure_dict(restore_payload.get("unityReload"))
+        if phase == "restore":
+            if not self.checkpoint_restore_handler:
+                reload_status = "missing"
+            elif reload_result.get("ok"):
+                reload_status = "passed"
+            else:
+                reload_status = "warning"
+        else:
+            reload_status = "planned" if self.checkpoint_restore_handler else "missing"
+        add_check(
+            "unity_reload_after_restore",
+            "Unity reload after restore",
+            reload_status,
+            {
+                "tool": "vrc_reload_after_checkpoint_restore",
+                "reason": "Restored scenes/assets must be reloaded before MA/VRCF/NDMF scanners or validation can be trusted.",
+            },
+        )
+
+        validation_status = "todo"
+        validation_details = {
+            "required": True,
+            "tools": ["vrcforge_run_validation_report", "vrcforge_build_test_readiness"],
+            "covers": [
+                "Unity compile status",
+                "package dependency status",
+                "MA/VRCF conflict context",
+                "generated residue",
+                "avatar hierarchy, FX, menu, parameter, material, and performance scanners where available",
+            ],
+        }
+        post_restore_validation = ensure_dict(restore_payload.get("postRestoreValidation"))
+        if phase == "restore" and post_restore_validation:
+            validation_status = "passed" if post_restore_validation.get("ok") else "warning"
+            validation_details["result"] = post_restore_validation
+        else:
+            todos.append(
+                {
+                    "id": "run_post_restore_validation",
+                    "status": "todo",
+                    "required": True,
+                    "reason": "Rollback proof must run read-only validation after restore, especially for MA/VRCF/NDMF-heavy avatars.",
+                    "tools": validation_details["tools"],
+                }
+            )
+        add_check("validation_after_restore", "Validation after restore", validation_status, validation_details)
+
+        if blocking_gaps:
+            gate_status = "blocked"
+        elif todos:
+            gate_status = "todo"
+        else:
+            gate_status = "ready"
+        return {
+            "ok": not blocking_gaps,
+            "schema": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+            "phase": phase,
+            "gateStatus": gate_status,
+            "pathspecs": pathspecs,
+            "checks": checks,
+            "blockingGaps": blocking_gaps,
+            "todos": todos,
+            "caveats": [
+                "Raw Unity MCP writes outside VRCForge cannot be checkpointed by this audit.",
+                "Unity reload confirms restored files are reloaded; semantic avatar safety still requires the post-restore validation TODO.",
+            ],
+        }
+
+    def _build_local_state_rollback_coverage_audit(
+        self,
+        checkpoint: dict[str, Any],
+        phase: str,
+        restore_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        restored_files = ensure_string_list(restore_payload.get("restoredFiles"))
+        deleted_files = ensure_string_list(restore_payload.get("deletedFiles"))
+        checks = [
+            {
+                "id": "local_skill_package_store",
+                "title": "Community skill package store",
+                "status": "covered" if "skill-packages" in pathspecs else "missing",
+                "pathspec": "skill-packages",
+                "covers": ["installed .vsk package versions", "skill package registry", "installed package metadata"],
+            },
+            {
+                "id": "local_projected_user_skills",
+                "title": "Projected user skills",
+                "status": "covered" if "skills" in pathspecs else "missing",
+                "pathspec": "skills",
+                "covers": ["SKILL.md projections created by .vsk imports", "user skill enable/disable metadata"],
+            },
+        ]
+        blocking_gaps = [str(item["id"]) for item in checks if item["status"] == "missing"]
+        todos: list[dict[str, Any]] = []
+        if phase == "restore":
+            checks.append(
+                {
+                    "id": "local_state_restore_applied",
+                    "title": "Local state restore applied",
+                    "status": "passed" if restore_payload.get("ok") else "missing",
+                    "restoredFileCount": len(restored_files),
+                    "deletedFileCount": len(deleted_files),
+                }
+            )
+        else:
+            todos.append(
+                {
+                    "id": "preview_or_restore_local_state_checkpoint",
+                    "status": "todo",
+                    "required": True,
+                    "reason": "Preview or restore this checkpoint to verify the exact skill-package/user-skill delta.",
+                    "tools": ["vrcforge_preview_restore_checkpoint", "vrcforge_restore_checkpoint"],
+                }
+            )
+        gate_status = "blocked" if blocking_gaps else ("todo" if todos else "ready")
+        return {
+            "ok": not blocking_gaps,
+            "schema": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+            "phase": phase,
+            "gateStatus": gate_status,
+            "pathspecs": pathspecs,
+            "checks": checks,
+            "blockingGaps": blocking_gaps,
+            "todos": todos,
+            "caveats": [
+                "This checkpoint covers VRCForge local skill-package state, not Unity project files.",
+                "Unity project writes still require the Unity project checkpoint policy.",
+            ],
+        }
+
+    def _checkpoint_framework_package_snapshot(self, project_root: Path | None) -> dict[str, Any]:
+        packages: dict[str, Any] = {
+            key: {
+                "label": info["label"],
+                "packageIds": list(info["packageIds"]),
+                "detected": False,
+                "manifestDependency": False,
+                "lockDependency": False,
+                "versions": [],
+            }
+            for key, info in ROLLBACK_FRAMEWORK_PACKAGES.items()
+        }
+        if project_root is None:
+            return {"ok": False, "projectReadable": False, "packages": packages}
+
+        packages_dir = project_root / "Packages"
+        manifest_deps, manifest_error = self._read_package_dependency_file(packages_dir / "manifest.json")
+        lock_deps, lock_error = self._read_package_dependency_file(packages_dir / "packages-lock.json")
+        for key, info in ROLLBACK_FRAMEWORK_PACKAGES.items():
+            item = packages[key]
+            versions: list[str] = []
+            for package_id in info["packageIds"]:
+                if package_id in manifest_deps:
+                    item["manifestDependency"] = True
+                    versions.append(str(manifest_deps[package_id]))
+                if package_id in lock_deps:
+                    item["lockDependency"] = True
+                    versions.append(str(lock_deps[package_id]))
+            item["detected"] = bool(item["manifestDependency"] or item["lockDependency"])
+            item["versions"] = sorted({version for version in versions if version})
+
+        return {
+            "ok": not (manifest_error or lock_error),
+            "projectReadable": packages_dir.is_dir(),
+            "manifestPath": "Packages/manifest.json",
+            "manifestReadable": bool(manifest_deps) or (packages_dir / "manifest.json").is_file(),
+            "manifestError": manifest_error,
+            "lockPath": "Packages/packages-lock.json",
+            "lockReadable": bool(lock_deps) or (packages_dir / "packages-lock.json").is_file(),
+            "lockError": lock_error,
+            "packages": packages,
+        }
+
+    def _read_package_dependency_file(self, path: Path) -> tuple[dict[str, Any], str]:
+        if not path.is_file():
+            return {}, ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:  # noqa: BLE001
+            return {}, str(exc)
+        dependencies = payload.get("dependencies") if isinstance(payload, dict) else {}
+        if not isinstance(dependencies, dict):
+            return {}, ""
+        result: dict[str, Any] = {}
+        for key, value in dependencies.items():
+            if isinstance(value, dict):
+                result[str(key)] = value.get("version") or value.get("source") or ""
+            else:
+                result[str(key)] = value
+        return result, ""
+
+    def _stored_checkpoint_framework_package_snapshot(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        audit = ensure_dict(checkpoint.get("rollbackCoverageAudit"))
+        for item in audit.get("checks") or []:
+            if isinstance(item, dict) and item.get("id") == "packages_manifest":
+                return ensure_dict(item.get("frameworkPackages"))
+        return {}
+
+    def _local_state_checkpoint_roots(self) -> dict[str, Path]:
+        app_state_root = self.user_constraints_path.parent
+        return {
+            "skill-packages": app_state_root / "skill-packages",
+            "skills": self.user_skills_dir,
+        }
+
+    def _local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
+        result: dict[str, tuple[int, int]] = {}
+        for scope, root in self._local_state_checkpoint_roots().items():
+            if not root.is_dir():
+                continue
+            for source in sorted(root.rglob("*")):
+                if source.is_symlink() or not source.is_file():
+                    continue
+                crc = 0
+                with source.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        crc = zlib.crc32(chunk, crc)
+                relative = f"{scope}/{source.relative_to(root).as_posix()}"
+                result[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
+        return result
+
+    def _validate_local_state_archive_member(self, name: str) -> None:
+        parts = PurePosixPath(str(name)).parts
+        if len(parts) < 2 or parts[0] not in LOCAL_STATE_CHECKPOINT_SCOPE or ".." in parts:
+            raise ValueError(f"Unsafe local state archive member: {name}")
+        if PurePosixPath(str(name)).is_absolute() or Path(str(name)).is_absolute():
+            raise ValueError(f"Unsafe local state archive member: {name}")
+
     def _cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not self._checkpoint_touches_packages(checkpoint):
             return {"ok": True, "skipped": True, "reason": "checkpoint does not restore Packages", "deleted": [], "errors": []}
@@ -2399,7 +2949,7 @@ class AgentGateway:
         library_root = (project_root / "Library").resolve()
         deleted: list[str] = []
         errors: list[str] = []
-        for name in ("Bee", "ScriptAssemblies"):
+        for name in UNITY_RESTORE_PACKAGE_CACHE_DIRS:
             target = (library_root / name).resolve()
             if not is_path_within(target, library_root):
                 errors.append(f"Unsafe Unity cache path skipped: {target}")
@@ -2423,9 +2973,12 @@ class AgentGateway:
         }
 
     def _checkpoint_touches_packages(self, checkpoint: dict[str, Any]) -> bool:
+        return self._checkpoint_touches_top_level(checkpoint, "Packages")
+
+    def _checkpoint_touches_top_level(self, checkpoint: dict[str, Any], top_level: str) -> bool:
         for pathspec in ensure_string_list(checkpoint.get("pathspecs")):
             parts = Path(str(pathspec).replace("\\", "/")).parts
-            if "Packages" in parts:
+            if top_level in parts:
                 return True
         return False
 
@@ -2458,6 +3011,21 @@ class AgentGateway:
     def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not checkpoint.get("ok"):
             return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
+        if checkpoint.get("strategy") == "local_state_archive":
+            archive_path = Path(str(checkpoint.get("archivePath") or ""))
+            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            if not archive_path.is_file() or not pathspecs:
+                return {"ok": False, "checkpoint": checkpoint, "error": "Local state checkpoint metadata is incomplete."}
+            try:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    if archive.testzip() is not None:
+                        raise ValueError("archive CRC validation failed")
+                    for info in archive.infolist():
+                        if not info.is_dir():
+                            self._validate_local_state_archive_member(info.filename)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint is unreadable: {exc}"}
+            return {"ok": True}
         if checkpoint.get("strategy") == "archive":
             archive_path = Path(str(checkpoint.get("archivePath") or ""))
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
@@ -2968,10 +3536,54 @@ class AgentGateway:
                 "description": handler.description,
                 "riskLevel": handler.risk_level,
                 "advanced": handler.advanced,
+                "rollbackPolicy": self._write_handler_rollback_policy(handler),
             }
             for handler in self._write_handlers.values()
             if self._write_handler_visible(handler, config) and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
         ]
+
+    def _write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
+        if handler.name == "vrcforge_restore_checkpoint":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "checkpoint_restore",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE, *LOCAL_STATE_CHECKPOINT_SCOPE],
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "postRestoreValidationRequired": True,
+                "note": "Restores a previously captured Unity project or VRCForge local-state checkpoint.",
+            }
+        if handler.name in LOCAL_STATE_CHECKPOINT_TARGETS:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "local_state_archive",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": True,
+                "checkpointScope": list(LOCAL_STATE_CHECKPOINT_SCOPE),
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "stateRoots": ["VRCForge skill package store", "projected user skills"],
+                "postRestoreValidationRequired": True,
+                "note": "Community skill package writes are checkpointed as VRCForge local app state before mutation.",
+            }
+        return {
+            "schema": ROLLBACK_POLICY_SCHEMA,
+            "required": True,
+            "kind": "unity_project_checkpoint",
+            "approvalRequired": True,
+            "preWriteCheckpointRequired": True,
+            "checkpointScope": list(UNITY_PROJECT_CHECKPOINT_SCOPE),
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+            "postRestoreValidationRequired": True,
+            "generatedResidueAuditRequired": True,
+            "ecosystemCoverageRequired": ["Modular Avatar", "VRCFury", "NDMF", "MA2BT-Pro"],
+            "note": "Every Unity project write must be restorable through the approval-time checkpoint boundary.",
+        }
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
         config = config or self.ensure_config()
@@ -3815,6 +4427,7 @@ class AgentGateway:
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
             "requiresCheckpoint": True,
+            "rollbackPolicy": self._write_handler_rollback_policy(handler),
             "availableInDesktop": visible,
             "availableInMcp": available,
             "availableInCli": visible,

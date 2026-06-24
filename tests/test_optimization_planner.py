@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,59 @@ def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> Non
         step["tool"] for step in path_to_skill["result"]["skillPath"]
     }
     assert path_to_skill["result"]["hardGates"]["blockedParameterCount"] >= 2
+
+
+def test_rollback_verify_requires_git_like_ma_vrcf_ndmf_coverage(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "nadena.dev.modular-avatar", "1.17.1")
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+    install_package(project, "nadena.dev.ndmf", "1.13.1")
+    validation = copy.deepcopy(fake_validation())
+    validation["sources"]["avatar_items"]["payload"]["items"].append(
+        {
+            "gameObjectPath": "Avatar/VRCFury Toggle",
+            "componentTypes": ["VF.Model.VRCFury", "VRCFuryToggle"],
+        }
+    )
+    validation["sources"]["generated_residue"] = {"ok": True, "payload": {"residueCount": 0}}
+
+    rollback = build_optimization_tool_result("optimization.rollback.verify", {"projectPath": str(project)}, validation)["result"]
+
+    assert rollback["gitLikeRollbackRequired"] is True
+    assert rollback["hardGate"]["status"] == "pass"
+    coverage = {item["id"]: item for item in rollback["coverage"]}
+    assert coverage["checkpoint.assets"]["status"] == "pass"
+    assert coverage["checkpoint.packages"]["evidence"]["unityCacheCleanup"] == [
+        "Library/Bee",
+        "Library/ScriptAssemblies",
+        "Library/PackageCache",
+    ]
+    assert coverage["checkpoint.project_settings"]["status"] == "pass"
+    assert coverage["rollback.post_restore_validation"]["status"] == "pass"
+    assert coverage["ecosystem.modular_avatar"]["status"] == "pass"
+    assert coverage["ecosystem.vrcfury"]["status"] == "pass"
+    assert coverage["ecosystem.ndmf"]["status"] == "pass"
+    ecosystem = {item["id"]: item for item in rollback["ecosystemCoverage"]["components"]}
+    assert ecosystem["modular_avatar"]["detected"] is True
+    assert ecosystem["vrcfury"]["detected"] is True
+    assert ecosystem["ndmf"]["detected"] is True
+    assert rollback["ecosystemCoverage"]["requiresMaVrcfNdmfProof"] is True
+
+
+def test_rollback_verify_blocks_when_ma_vrcf_validation_proof_is_missing(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+
+    rollback = build_optimization_tool_result("optimization.rollback.verify", {"projectPath": str(project)}, {"sources": {}})["result"]
+
+    assert rollback["hardGate"]["status"] == "blocked"
+    assert "rollback.post_restore_validation" in rollback["hardGate"]["blockingIds"]
+    assert "ecosystem.vrcfury" in rollback["hardGate"]["blockingIds"]
+    vrcfury = next(item for item in rollback["ecosystemCoverage"]["components"] if item["id"] == "vrcfury")
+    assert vrcfury["detected"] is True
+    assert vrcfury["coverageStatus"] == "blocked"
 
 
 def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
