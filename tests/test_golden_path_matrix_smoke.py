@@ -259,6 +259,13 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
 
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         run_calls.append(command)
+        if any(str(part).endswith("smoke_optimizer_apply_rollback.py") for part in command):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"ok": true, "summary": {"status": "passed"}, "rollbackCoverageAudit": {"schema": "vrcforge.rollback_coverage_audit.v1", "gateStatus": "ready"}}',
+                stderr="",
+            )
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true, "summary": {"status": "passed"}}', stderr="")
 
     report = smoke.GoldenPathMatrixSmoke(
@@ -276,6 +283,13 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
     assert report["ok"] is True
     assert "smoke_shader_adapter_apply_rollback.py" in called_scripts
     assert "smoke_optimizer_apply_rollback.py" in called_scripts
+    optimizer_steps = [
+        step
+        for step in paths_by_id(report)["model_optimization_validation_rollback"]["steps"]
+        if step["name"] == "smoke_optimizer_apply_rollback.py"
+    ]
+    assert optimizer_steps[0]["rollbackCoverageAudit"]["schema"] == "vrcforge.rollback_coverage_audit.v1"
+    assert optimizer_steps[0]["rollbackCoverageGateStatus"] == "ready"
 
 
 def test_cli_matrix_passes_app_token_and_previews_checkpoint(tmp_path: Path) -> None:

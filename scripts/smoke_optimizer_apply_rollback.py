@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import shutil
@@ -27,7 +28,7 @@ def main() -> int:
     smoke = OptimizerApplyRollbackSmoke(args)
     report = smoke.run()
     path = smoke.write_report(report)
-    print(json.dumps({"ok": report["ok"], "reportPath": str(path), "summary": report["summary"]}, ensure_ascii=True, indent=2))
+    print(json.dumps(build_cli_output(report, path), ensure_ascii=True, indent=2))
     return 0 if report["ok"] else 1
 
 
@@ -71,6 +72,8 @@ class OptimizerApplyRollbackSmoke:
         self.before_validation: dict[str, Any] = {}
         self.after_validation: dict[str, Any] = {}
         self.rollback_validation: dict[str, Any] = {}
+        self.rollback_readiness: dict[str, Any] = {}
+        self.rollback_coverage_audit: dict[str, Any] = {}
 
     def run(self) -> dict[str, Any]:
         report: dict[str, Any] = {
@@ -106,6 +109,7 @@ class OptimizerApplyRollbackSmoke:
             applied = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/approve", {})
             execution = ensure_dict(applied.get("execution"))
             checkpoint = ensure_dict(execution.get("checkpoint") or applied.get("checkpoint") or ensure_dict(applied.get("approval")).get("checkpoint"))
+            checkpoint_audit = extract_rollback_coverage_audit(checkpoint)
             checkpoint_id = str(checkpoint.get("id") or "")
             checkpoint_usable = bool(checkpoint.get("ok")) and str(checkpoint.get("status") or "") == "ready" and bool(checkpoint_id)
             if checkpoint_usable:
@@ -120,6 +124,7 @@ class OptimizerApplyRollbackSmoke:
                     "checkpointOk": checkpoint.get("ok"),
                     "checkpointStatus": checkpoint.get("status"),
                     "checkpointStrategy": checkpoint.get("strategy"),
+                    "rollbackCoverageGateStatus": checkpoint_audit.get("gateStatus"),
                     "error": execution.get("error") or applied.get("error") or ensure_dict(applied.get("approval")).get("error"),
                 },
             )
@@ -152,6 +157,7 @@ class OptimizerApplyRollbackSmoke:
 
             restored = self.request_app_json("POST", f"/api/app/agent/approvals/{restore_approval_id}/approve", {})
             restore_execution = ensure_dict(restored.get("execution"))
+            self.rollback_coverage_audit = extract_rollback_coverage_audit(restored)
             self.rollback_done = bool(restored.get("ok")) and restore_execution.get("status") == "applied"
             self.step(
                 "rollback.approve_apply",
@@ -160,6 +166,7 @@ class OptimizerApplyRollbackSmoke:
                     "approvalId": restore_approval_id,
                     "executionStatus": restore_execution.get("status"),
                     "unityReloadOk": ensure_dict(ensure_dict(restore_execution.get("result")).get("unityReload")).get("ok"),
+                    "rollbackCoverageGateStatus": self.rollback_coverage_audit.get("gateStatus"),
                 },
             )
 
@@ -167,6 +174,14 @@ class OptimizerApplyRollbackSmoke:
             self.step("rollback.verify_checkpoint_clean", {"ok": bool(preview_after_restore.get("ok")) and not bool(preview_after_restore.get("changedFiles")), "changedFileCount": len(ensure_list(preview_after_restore.get("changedFiles")))})
             self.rollback_validation = self.validation_report()
             self.step("validation.after_rollback", validation_summary(self.rollback_validation))
+            self.rollback_readiness = self.build_test_readiness()
+            self.step("readiness.after_rollback", readiness_summary(self.rollback_readiness))
+            self.rollback_coverage_audit = attach_post_restore_validation_to_rollback_audit(
+                self.rollback_coverage_audit,
+                validation=self.rollback_validation,
+                readiness=self.rollback_readiness,
+            )
+            self.step("rollback.coverage_audit", rollback_coverage_summary(self.rollback_coverage_audit))
             self.capture_screenshot("screenshot.after_rollback")
             delta_rollback = self.validation_delta(include_rollback=True)
             self.step("validation.delta_after_rollback", delta_summary(delta_rollback, require_rollback=True))
@@ -183,6 +198,7 @@ class OptimizerApplyRollbackSmoke:
             report["steps"] = self.steps
             report["summary"] = self.build_summary(report["ok"])
             report["visualRegression"] = build_visual_regression_artifact(self.steps, source="optimizer_apply_rollback", proof_passed=bool(report["ok"]))
+            report["rollbackCoverageAudit"] = self.rollback_coverage_audit or build_missing_rollback_coverage_audit("restore result did not include rollbackCoverageAudit")
         return report
 
     def bootstrap(self) -> dict[str, Any]:
@@ -244,6 +260,18 @@ class OptimizerApplyRollbackSmoke:
                 "beforeValidation": self.before_validation,
                 "afterValidation": self.after_validation,
                 "rollbackValidation": self.rollback_validation if include_rollback else {},
+            },
+        )
+
+    def build_test_readiness(self) -> dict[str, Any]:
+        return self.request_app_json(
+            "POST",
+            "/api/app/build-test/readiness",
+            {
+                "projectPath": str(self.project_root) if self.project_root else "",
+                "avatarPath": self.args.avatar_path,
+                "includeQuest": True,
+                "maxErrors": 50,
             },
         )
 
@@ -334,6 +362,7 @@ class OptimizerApplyRollbackSmoke:
             "tool": self.args.tool,
             "checkpointId": self.checkpoint_id,
             "rollbackDone": self.rollback_done,
+            "rollbackCoverageGateStatus": ensure_dict(self.rollback_coverage_audit).get("gateStatus"),
             "screenshotDir": str(self.screenshot_dir) if self.args.capture_screenshots else "",
             "failedSteps": [step["name"] for step in self.steps if not step.get("ok")],
         }
@@ -400,6 +429,222 @@ def delta_summary(payload: dict[str, Any], *, require_rollback: bool) -> dict[st
         "rollbackProof": rollback,
         "profileDiff": payload.get("profileDiff"),
         "parameterBudgetDelta": payload.get("parameterBudgetDelta"),
+    }
+
+
+def readiness_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    gate = ensure_dict(payload.get("gate"))
+    status = str(payload.get("status") or "")
+    ok = payload.get("schema") == "vrcforge.build_test_readiness.v1" and status != "blocked" and bool(payload.get("ok", True))
+    return {
+        "ok": ok,
+        "schema": payload.get("schema"),
+        "status": status,
+        "gateStatus": gate.get("status"),
+        "validationSummary": payload.get("validationSummary"),
+    }
+
+
+def extract_rollback_coverage_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates = [
+        ensure_dict(payload.get("rollbackCoverageAudit")),
+        ensure_dict(payload.get("checkpoint")).get("rollbackCoverageAudit"),
+        ensure_dict(payload.get("result")).get("rollbackCoverageAudit"),
+        ensure_dict(ensure_dict(payload.get("execution")).get("result")).get("rollbackCoverageAudit"),
+        ensure_dict(ensure_dict(payload.get("execution")).get("checkpoint")).get("rollbackCoverageAudit"),
+    ]
+    for candidate in candidates:
+        audit = ensure_dict(candidate)
+        if audit.get("schema") == "vrcforge.rollback_coverage_audit.v1":
+            return copy.deepcopy(audit)
+    return {}
+
+
+def build_missing_rollback_coverage_audit(reason: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "schema": "vrcforge.rollback_coverage_audit.v1",
+        "phase": "proof",
+        "gateStatus": "blocked",
+        "pathspecs": [],
+        "checks": [
+            {
+                "id": "rollback_coverage_audit_present",
+                "title": "Rollback coverage audit emitted",
+                "status": "missing",
+                "reason": reason,
+            }
+        ],
+        "blockingGaps": ["rollback_coverage_audit_present"],
+        "todos": [],
+        "caveats": ["The backend did not return rollbackCoverageAudit; proof cannot claim rollback coverage."],
+    }
+
+
+def attach_post_restore_validation_to_rollback_audit(
+    audit: dict[str, Any],
+    *,
+    validation: dict[str, Any] | None = None,
+    readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(audit) if ensure_dict(audit).get("schema") == "vrcforge.rollback_coverage_audit.v1" else build_missing_rollback_coverage_audit("restore result did not include rollbackCoverageAudit")
+    normalized["phase"] = "proof"
+    checks = [item for item in ensure_list(normalized.get("checks")) if isinstance(item, dict)]
+    todos = [item for item in ensure_list(normalized.get("todos")) if isinstance(item, dict)]
+    blocking_gaps = [str(item) for item in ensure_list(normalized.get("blockingGaps"))]
+
+    validation_attachment = build_post_restore_validation_attachment(validation or {})
+    readiness_attachment = build_post_restore_readiness_attachment(readiness or {})
+    if validation_attachment.get("provided"):
+        upsert_check(
+            checks,
+            {
+                "id": "validation_after_restore",
+                "title": "Validation after restore",
+                "status": "passed" if validation_attachment.get("ok") else "warning",
+                "required": True,
+                "result": validation_attachment,
+            },
+        )
+        todos = [item for item in todos if item.get("id") != "run_post_restore_validation"]
+    if readiness_attachment.get("provided"):
+        upsert_check(
+            checks,
+            {
+                "id": "build_test_readiness_after_restore",
+                "title": "Build/Test readiness after restore",
+                "status": "passed" if readiness_attachment.get("ok") else "warning",
+                "required": True,
+                "result": readiness_attachment,
+            },
+        )
+        todos = [item for item in todos if item.get("id") != "run_post_restore_readiness"]
+
+    if not validation_attachment.get("provided"):
+        ensure_todo(
+            todos,
+            {
+                "id": "run_post_restore_validation",
+                "status": "todo",
+                "required": True,
+                "reason": "Rollback proof must attach post-restore vrcforge.validation.v1.",
+                "tools": ["vrcforge_run_validation_report", "vrcforge_build_test_readiness"],
+            },
+        )
+    if validation_attachment.get("provided") and not readiness_attachment.get("provided"):
+        ensure_todo(
+            todos,
+            {
+                "id": "run_post_restore_readiness",
+                "status": "todo",
+                "required": True,
+                "reason": "Rollback proof must attach post-restore Build/Test readiness.",
+                "tools": ["vrcforge_build_test_readiness"],
+            },
+        )
+
+    validation_blocked = validation_attachment.get("provided") and not validation_attachment.get("ok")
+    readiness_blocked = readiness_attachment.get("provided") and not readiness_attachment.get("ok")
+    if validation_blocked and "post_restore_validation_failed" not in blocking_gaps:
+        blocking_gaps.append("post_restore_validation_failed")
+    if readiness_blocked and "post_restore_readiness_failed" not in blocking_gaps:
+        blocking_gaps.append("post_restore_readiness_failed")
+
+    normalized["checks"] = checks
+    normalized["todos"] = todos
+    normalized["blockingGaps"] = blocking_gaps
+    normalized["postRestoreValidation"] = validation_attachment
+    normalized["postRestoreReadiness"] = readiness_attachment
+    if blocking_gaps:
+        normalized["gateStatus"] = "blocked"
+    elif todos:
+        normalized["gateStatus"] = "todo"
+    else:
+        normalized["gateStatus"] = "ready"
+    normalized["ok"] = not bool(blocking_gaps)
+    return normalized
+
+
+def build_post_restore_validation_attachment(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {"provided": False, "ok": False, "status": "missing"}
+    summary = validation_summary(payload)
+    gate_status = summary.get("gateStatus")
+    if summary.get("ok") and summary.get("reportOk"):
+        status = "pass"
+    elif gate_status == "blocked":
+        status = "blocked"
+    else:
+        status = "warning"
+    return {
+        "provided": True,
+        "ok": status == "pass",
+        "status": status,
+        "schema": summary.get("schema"),
+        "gateStatus": gate_status,
+        "findingCount": summary.get("findingCount"),
+        "severityCounts": summary.get("severityCounts"),
+        "reportOk": summary.get("reportOk"),
+    }
+
+
+def build_post_restore_readiness_attachment(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {"provided": False, "ok": False, "status": "missing"}
+    summary = readiness_summary(payload)
+    raw_status = str(summary.get("status") or "")
+    if summary.get("ok") and raw_status in {"ready", "review"}:
+        status = "pass" if raw_status == "ready" else "review"
+        ok = True
+    elif raw_status == "blocked":
+        status = "blocked"
+        ok = False
+    else:
+        status = "warning"
+        ok = False
+    return {
+        "provided": True,
+        "ok": ok,
+        "status": status,
+        "schema": summary.get("schema"),
+        "readinessStatus": raw_status,
+        "gateStatus": summary.get("gateStatus"),
+        "validationSummary": summary.get("validationSummary"),
+    }
+
+
+def upsert_check(checks: list[dict[str, Any]], check: dict[str, Any]) -> None:
+    for index, item in enumerate(checks):
+        if item.get("id") == check.get("id"):
+            checks[index] = check
+            return
+    checks.append(check)
+
+
+def ensure_todo(todos: list[dict[str, Any]], todo: dict[str, Any]) -> None:
+    if not any(item.get("id") == todo.get("id") for item in todos):
+        todos.append(todo)
+
+
+def rollback_coverage_summary(audit: dict[str, Any]) -> dict[str, Any]:
+    normalized = ensure_dict(audit)
+    return {
+        "ok": normalized.get("schema") == "vrcforge.rollback_coverage_audit.v1" and normalized.get("gateStatus") == "ready",
+        "schema": normalized.get("schema"),
+        "gateStatus": normalized.get("gateStatus"),
+        "phase": normalized.get("phase"),
+        "blockingGaps": normalized.get("blockingGaps") or [],
+        "todoCount": len(ensure_list(normalized.get("todos"))),
+        "checkCount": len(ensure_list(normalized.get("checks"))),
+    }
+
+
+def build_cli_output(report: dict[str, Any], path: Path) -> dict[str, Any]:
+    return {
+        "ok": report.get("ok"),
+        "reportPath": str(path),
+        "summary": report.get("summary"),
+        "rollbackCoverageAudit": report.get("rollbackCoverageAudit"),
     }
 
 

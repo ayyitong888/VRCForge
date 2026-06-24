@@ -142,3 +142,93 @@ def test_delta_summary_keeps_profile_diff_and_parameter_delta() -> None:
     assert summary["ok"] is True
     assert summary["profileDiff"]["pc"]["rankAfter"] == "Medium"
     assert summary["parameterBudgetDelta"]["syncedBitsDelta"] == -8
+
+
+def base_todo_rollback_audit() -> dict[str, object]:
+    return {
+        "ok": True,
+        "schema": "vrcforge.rollback_coverage_audit.v1",
+        "phase": "restore",
+        "gateStatus": "todo",
+        "pathspecs": ["Assets", "Packages", "ProjectSettings"],
+        "checks": [
+            {"id": "scene_prefab_component_state", "status": "covered"},
+            {"id": "packages_manifest", "status": "covered"},
+            {"id": "project_settings", "status": "covered"},
+            {"id": "unity_reload_after_restore", "status": "passed"},
+            {"id": "validation_after_restore", "status": "todo"},
+        ],
+        "blockingGaps": [],
+        "todos": [{"id": "run_post_restore_validation", "status": "todo", "required": True}],
+    }
+
+
+def passing_validation_report() -> dict[str, object]:
+    return {
+        "ok": True,
+        "schema": "vrcforge.validation.v1",
+        "summary": {"gateStatus": "pass", "findingCount": 0, "severityCounts": {}},
+        "gate": {"status": "pass"},
+    }
+
+
+def ready_build_test_readiness() -> dict[str, object]:
+    return {
+        "ok": True,
+        "schema": "vrcforge.build_test_readiness.v1",
+        "status": "ready",
+        "gate": {"status": "pass"},
+        "validationSummary": {"gateStatus": "pass", "findingCount": 0},
+    }
+
+
+def test_rollback_coverage_audit_stays_todo_without_post_restore_validation() -> None:
+    module = load_optimizer_smoke_module()
+
+    audit = module.attach_post_restore_validation_to_rollback_audit(base_todo_rollback_audit())
+    summary = module.rollback_coverage_summary(audit)
+
+    assert audit["schema"] == "vrcforge.rollback_coverage_audit.v1"
+    assert audit["gateStatus"] == "todo"
+    assert summary["ok"] is False
+    assert any(item["id"] == "run_post_restore_validation" for item in audit["todos"])
+    checks = {item["id"]: item for item in audit["checks"]}
+    assert checks["validation_after_restore"]["status"] == "todo"
+
+
+def test_rollback_coverage_audit_becomes_ready_with_validation_and_readiness() -> None:
+    module = load_optimizer_smoke_module()
+
+    audit = module.attach_post_restore_validation_to_rollback_audit(
+        base_todo_rollback_audit(),
+        validation=passing_validation_report(),
+        readiness=ready_build_test_readiness(),
+    )
+    summary = module.rollback_coverage_summary(audit)
+
+    assert audit["gateStatus"] == "ready"
+    assert audit["todos"] == []
+    assert audit["postRestoreValidation"]["status"] == "pass"
+    assert audit["postRestoreReadiness"]["status"] == "pass"
+    assert summary["ok"] is True
+    checks = {item["id"]: item for item in audit["checks"]}
+    assert checks["validation_after_restore"]["status"] == "passed"
+    assert checks["build_test_readiness_after_restore"]["status"] == "passed"
+
+
+def test_optimizer_cli_output_includes_rollback_coverage_audit(tmp_path: Path) -> None:
+    module = load_optimizer_smoke_module()
+    audit = module.attach_post_restore_validation_to_rollback_audit(
+        base_todo_rollback_audit(),
+        validation=passing_validation_report(),
+        readiness=ready_build_test_readiness(),
+    )
+
+    output = module.build_cli_output(
+        {"ok": True, "summary": {"status": "passed"}, "rollbackCoverageAudit": audit},
+        tmp_path / "report.json",
+    )
+
+    assert output["ok"] is True
+    assert output["rollbackCoverageAudit"]["schema"] == "vrcforge.rollback_coverage_audit.v1"
+    assert output["rollbackCoverageAudit"]["gateStatus"] == "ready"

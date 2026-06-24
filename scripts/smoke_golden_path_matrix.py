@@ -748,7 +748,7 @@ class GoldenPathMatrixSmoke:
         except Exception as exc:  # noqa: BLE001
             return {"name": command_name(command), "ok": False, "command": safe_command(command), "error": str(exc)}
         output = parse_json_tail(completed.stdout)
-        return {
+        step = {
             "name": command_name(command),
             "ok": completed.returncode == 0 and bool(output.get("ok", True)),
             "command": safe_command(command),
@@ -757,6 +757,11 @@ class GoldenPathMatrixSmoke:
             "stdoutTail": (completed.stdout or "")[-2000:],
             "stderrTail": (completed.stderr or "")[-2000:],
         }
+        rollback_audit = ensure_dict(output.get("rollbackCoverageAudit"))
+        if rollback_audit:
+            step["rollbackCoverageAudit"] = rollback_audit
+            step["rollbackCoverageGateStatus"] = rollback_audit.get("gateStatus")
+        return step
 
     def request_app_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.app_token:
