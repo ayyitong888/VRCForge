@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import struct
+import zlib
 from pathlib import Path
 from types import ModuleType
 
@@ -16,14 +18,36 @@ def load_optimizer_smoke_module() -> ModuleType:
     return module
 
 
+def write_rgb_png(path: Path, width: int, height: int, pixels: list[tuple[int, int, int]]) -> None:
+    assert len(pixels) == width * height
+    rows = []
+    for row_index in range(height):
+        start = row_index * width
+        row_pixels = pixels[start : start + width]
+        rows.append(b"\x00" + bytes(channel for pixel in row_pixels for channel in pixel))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def png_chunk(kind: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(kind)
+    crc = zlib.crc32(payload, crc) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+
 def test_visual_regression_artifact_records_screenshot_hashes(tmp_path: Path) -> None:
     module = load_optimizer_smoke_module()
     before = tmp_path / "before.png"
     after = tmp_path / "after.png"
     rollback = tmp_path / "rollback.png"
-    before.write_bytes(b"before")
-    after.write_bytes(b"after")
-    rollback.write_bytes(b"rollback")
+    write_rgb_png(before, 2, 1, [(0, 0, 0), (255, 255, 255)])
+    write_rgb_png(after, 2, 1, [(0, 0, 0), (0, 255, 255)])
+    write_rgb_png(rollback, 2, 1, [(0, 0, 0), (255, 255, 255)])
 
     artifact = module.build_visual_regression_artifact(
         [
@@ -38,9 +62,21 @@ def test_visual_regression_artifact_records_screenshot_hashes(tmp_path: Path) ->
     assert artifact["schema"] == "vrcforge.visual_regression.v1"
     assert artifact["status"] == "captured"
     assert artifact["requiresHumanReview"] is True
-    assert artifact["screenshots"]["before"]["sha256"] == hashlib.sha256(b"before").hexdigest()
-    assert artifact["screenshots"]["after_apply"]["size"] == len(b"after")
-    assert artifact["scoring"]["mode"] == "not-run"
+    assert artifact["screenshots"]["before"]["sha256"] == hashlib.sha256(before.read_bytes()).hexdigest()
+    assert artifact["screenshots"]["after_apply"]["image"]["width"] == 2
+    assert artifact["screenshots"]["after_apply"]["image"]["height"] == 1
+
+    scoring = artifact["scoring"]
+    after_comparison = scoring["comparisons"]["afterApplyVsBefore"]
+    rollback_comparison = scoring["comparisons"]["rollbackVsBefore"]
+    assert scoring["mode"] == "deterministic-png-rgb-v1"
+    assert scoring["comparable"] is True
+    assert after_comparison["comparable"] is True
+    assert after_comparison["changedPixelRatio"] == 0.5
+    assert after_comparison["meanAbsoluteDifference"] == 0.1666666667
+    assert rollback_comparison["comparable"] is True
+    assert rollback_comparison["changedPixelRatio"] == 0.0
+    assert scoring["rollbackVsBeforeSimilarity"] == 1.0
 
 
 def test_visual_regression_artifact_marks_partial_and_skipped() -> None:
@@ -55,8 +91,36 @@ def test_visual_regression_artifact_marks_partial_and_skipped() -> None:
 
     assert partial["status"] == "partial"
     assert partial["screenshots"]["before"]["warning"] == "missing file"
+    assert partial["scoring"]["comparable"] is False
     assert skipped["status"] == "skipped"
     assert skipped["requiresHumanReview"] is False
+    assert skipped["scoring"]["comparisons"]["afterApplyVsBefore"]["comparable"] is False
+
+
+def test_visual_regression_artifact_marks_unreadable_png_without_failing(tmp_path: Path) -> None:
+    module = load_optimizer_smoke_module()
+    before = tmp_path / "before.png"
+    after = tmp_path / "after.png"
+    before.write_bytes(b"not a png")
+    write_rgb_png(after, 1, 1, [(255, 0, 0)])
+
+    artifact = module.build_visual_regression_artifact(
+        [
+            {"name": "screenshot.before", "captureOk": True, "artifactOk": True, "artifactImagePath": str(before)},
+            {"name": "screenshot.after_apply", "captureOk": True, "artifactOk": True, "artifactImagePath": str(after)},
+        ],
+        source="optimizer_apply_rollback",
+        proof_passed=False,
+    )
+
+    assert artifact["status"] == "partial"
+    assert artifact["screenshots"]["before"]["exists"] is True
+    assert artifact["screenshots"]["before"]["image"]["ok"] is False
+    assert artifact["screenshots"]["before"]["image"]["error"] == "not a PNG file"
+    assert artifact["scoring"]["comparisons"]["afterApplyVsBefore"] == {
+        "comparable": False,
+        "reason": "before_missing_or_unreadable",
+    }
 
 
 def test_delta_summary_keeps_profile_diff_and_parameter_delta() -> None:

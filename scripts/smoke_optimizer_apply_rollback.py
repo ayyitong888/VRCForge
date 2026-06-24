@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import json
 import shutil
+import struct
 import sys
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from smoke_external_agent_bridge import ensure_dict, ensure_list, read_text_file
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def main() -> int:
@@ -402,6 +405,7 @@ def delta_summary(payload: dict[str, Any], *, require_rollback: bool) -> dict[st
 
 def build_visual_regression_artifact(steps: list[dict[str, Any]], *, source: str, proof_passed: bool) -> dict[str, Any]:
     screenshots: dict[str, dict[str, Any]] = {}
+    decoded_images: dict[str, dict[str, Any]] = {}
     for stage in ("before", "after_apply", "after_rollback"):
         step = next((item for item in steps if item.get("name") == f"screenshot.{stage}"), {})
         path = str(step.get("artifactImagePath") or "")
@@ -412,7 +416,13 @@ def build_visual_regression_artifact(steps: list[dict[str, Any]], *, source: str
             "artifactImagePath": path,
         }
         if path:
-            entry.update(file_digest(path))
+            digest = file_digest(path)
+            entry.update(digest)
+            if digest.get("exists"):
+                image_info, rgb_pixels = load_png_rgb(path)
+                entry["image"] = image_info
+                if image_info.get("ok"):
+                    decoded_images[stage] = {"info": image_info, "rgbPixels": rgb_pixels}
         if step.get("error") or step.get("artifactError"):
             entry["warning"] = step.get("error") or step.get("artifactError")
         screenshots[stage] = entry
@@ -429,7 +439,7 @@ def build_visual_regression_artifact(steps: list[dict[str, Any]], *, source: str
         "status": status,
         "proofPassed": bool(proof_passed),
         "requiresHumanReview": status in {"captured", "partial"},
-        "scoring": {"mode": "not-run", "reason": "0.9 baseline records screenshot evidence only; automated scoring is not enabled."},
+        "scoring": build_visual_scoring(decoded_images),
         "screenshots": screenshots,
     }
 
@@ -445,6 +455,279 @@ def file_digest(path: str) -> dict[str, Any]:
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+
+
+def build_visual_scoring(decoded_images: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    comparisons = {
+        "afterApplyVsBefore": compare_decoded_images(decoded_images, "before", "after_apply"),
+        "rollbackVsBefore": compare_decoded_images(decoded_images, "before", "after_rollback"),
+    }
+    return {
+        "mode": "deterministic-png-rgb-v1",
+        "metric": "rgb_changed_pixel_ratio_and_mean_absolute_difference",
+        "comparable": any(bool(item.get("comparable")) for item in comparisons.values()),
+        "comparisons": comparisons,
+        "rollbackVsBeforeSimilarity": comparisons["rollbackVsBefore"].get("similarity"),
+    }
+
+
+def compare_decoded_images(decoded_images: dict[str, dict[str, Any]], before_stage: str, candidate_stage: str) -> dict[str, Any]:
+    before = decoded_images.get(before_stage)
+    candidate = decoded_images.get(candidate_stage)
+    if before is None:
+        return {"comparable": False, "reason": f"{before_stage}_missing_or_unreadable"}
+    if candidate is None:
+        return {"comparable": False, "reason": f"{candidate_stage}_missing_or_unreadable"}
+
+    before_info = ensure_dict(before.get("info"))
+    candidate_info = ensure_dict(candidate.get("info"))
+    before_dimensions = image_dimensions(before_info)
+    candidate_dimensions = image_dimensions(candidate_info)
+    if before_dimensions != candidate_dimensions:
+        return {
+            "comparable": False,
+            "reason": "dimension_mismatch",
+            "beforeDimensions": before_dimensions,
+            f"{candidate_stage}Dimensions": candidate_dimensions,
+        }
+
+    before_pixels = before.get("rgbPixels")
+    candidate_pixels = candidate.get("rgbPixels")
+    if not isinstance(before_pixels, bytes) or not isinstance(candidate_pixels, bytes) or len(before_pixels) != len(candidate_pixels):
+        return {"comparable": False, "reason": "pixel_data_mismatch", "beforeDimensions": before_dimensions, f"{candidate_stage}Dimensions": candidate_dimensions}
+
+    pixel_count = int(before_info.get("pixelCount") or 0)
+    if pixel_count <= 0:
+        return {"comparable": False, "reason": "empty_image", "beforeDimensions": before_dimensions}
+
+    changed_pixels = 0
+    total_absolute_difference = 0
+    for index in range(0, len(before_pixels), 3):
+        red_delta = abs(before_pixels[index] - candidate_pixels[index])
+        green_delta = abs(before_pixels[index + 1] - candidate_pixels[index + 1])
+        blue_delta = abs(before_pixels[index + 2] - candidate_pixels[index + 2])
+        if red_delta or green_delta or blue_delta:
+            changed_pixels += 1
+        total_absolute_difference += red_delta + green_delta + blue_delta
+
+    mean_absolute_difference = total_absolute_difference / float(pixel_count * 3 * 255)
+    return {
+        "comparable": True,
+        "width": before_dimensions["width"],
+        "height": before_dimensions["height"],
+        "pixelCount": pixel_count,
+        "changedPixelCount": changed_pixels,
+        "changedPixelRatio": stable_float(changed_pixels / float(pixel_count)),
+        "meanAbsoluteDifference": stable_float(mean_absolute_difference),
+        "similarity": stable_float(1.0 - mean_absolute_difference),
+    }
+
+
+def image_dimensions(info: dict[str, Any]) -> dict[str, int]:
+    return {"width": int(info.get("width") or 0), "height": int(info.get("height") or 0)}
+
+
+def stable_float(value: float) -> float:
+    return round(float(value), 10)
+
+
+def load_png_rgb(path: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        return {"ok": False, "format": "png", "error": str(exc)}, b""
+    try:
+        return decode_png_rgb(data)
+    except (OSError, ValueError, zlib.error, struct.error) as exc:
+        return {"ok": False, "format": "png", "error": str(exc)}, b""
+
+
+def decode_png_rgb(data: bytes) -> tuple[dict[str, Any], bytes]:
+    if not data.startswith(PNG_SIGNATURE):
+        raise ValueError("not a PNG file")
+
+    width = 0
+    height = 0
+    bit_depth = 0
+    color_type = -1
+    compression_method = 0
+    filter_method = 0
+    interlace_method = 0
+    palette = b""
+    idat_parts: list[bytes] = []
+    offset = len(PNG_SIGNATURE)
+
+    while offset < len(data):
+        if offset + 8 > len(data):
+            raise ValueError("truncated PNG chunk header")
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        chunk_type = data[offset + 4 : offset + 8]
+        chunk_start = offset + 8
+        chunk_end = chunk_start + length
+        crc_end = chunk_end + 4
+        if crc_end > len(data):
+            raise ValueError(f"truncated PNG chunk: {chunk_type.decode('ascii', errors='replace')}")
+        chunk_data = data[chunk_start:chunk_end]
+        offset = crc_end
+
+        if chunk_type == b"IHDR":
+            if length != 13:
+                raise ValueError("invalid PNG IHDR length")
+            width, height, bit_depth, color_type, compression_method, filter_method, interlace_method = struct.unpack(">IIBBBBB", chunk_data)
+        elif chunk_type == b"PLTE":
+            palette = chunk_data
+        elif chunk_type == b"IDAT":
+            idat_parts.append(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+
+    if width <= 0 or height <= 0:
+        raise ValueError("PNG has invalid dimensions")
+    if bit_depth != 8:
+        raise ValueError(f"unsupported PNG bit depth: {bit_depth}")
+    if compression_method != 0:
+        raise ValueError(f"unsupported PNG compression method: {compression_method}")
+    if filter_method != 0:
+        raise ValueError(f"unsupported PNG filter method: {filter_method}")
+    if interlace_method != 0:
+        raise ValueError("interlaced PNG is not supported")
+    if not idat_parts:
+        raise ValueError("PNG has no IDAT data")
+
+    channels = png_channel_count(color_type)
+    row_size = width * channels
+    raw = zlib.decompress(b"".join(idat_parts))
+    expected_size = (row_size + 1) * height
+    if len(raw) < expected_size:
+        raise ValueError("PNG pixel data is truncated")
+
+    rows = reconstruct_png_rows(raw[:expected_size], width=width, height=height, channels=channels)
+    rgb_pixels = png_rows_to_rgb(rows, width=width, color_type=color_type, palette=palette)
+    info = {
+        "ok": True,
+        "format": "png",
+        "width": width,
+        "height": height,
+        "pixelCount": width * height,
+        "bitDepth": bit_depth,
+        "colorType": color_type,
+        "channelMode": png_channel_mode(color_type),
+        "interlaceMethod": interlace_method,
+    }
+    return info, rgb_pixels
+
+
+def png_channel_count(color_type: int) -> int:
+    if color_type == 0:
+        return 1
+    if color_type == 2:
+        return 3
+    if color_type == 3:
+        return 1
+    if color_type == 4:
+        return 2
+    if color_type == 6:
+        return 4
+    raise ValueError(f"unsupported PNG color type: {color_type}")
+
+
+def png_channel_mode(color_type: int) -> str:
+    return {
+        0: "grayscale",
+        2: "rgb",
+        3: "indexed",
+        4: "grayscale_alpha",
+        6: "rgba",
+    }.get(color_type, "unsupported")
+
+
+def reconstruct_png_rows(raw: bytes, *, width: int, height: int, channels: int) -> list[bytes]:
+    row_size = width * channels
+    rows: list[bytes] = []
+    previous = bytearray(row_size)
+    offset = 0
+    for _row_index in range(height):
+        filter_type = raw[offset]
+        offset += 1
+        current = bytearray(raw[offset : offset + row_size])
+        offset += row_size
+        if len(current) != row_size:
+            raise ValueError("PNG row data is truncated")
+        apply_png_filter(current, previous, channels, filter_type)
+        rows.append(bytes(current))
+        previous = current
+    return rows
+
+
+def apply_png_filter(current: bytearray, previous: bytearray, channels: int, filter_type: int) -> None:
+    if filter_type == 0:
+        return
+    if filter_type == 1:
+        for index in range(len(current)):
+            left = current[index - channels] if index >= channels else 0
+            current[index] = (current[index] + left) & 0xFF
+        return
+    if filter_type == 2:
+        for index in range(len(current)):
+            current[index] = (current[index] + previous[index]) & 0xFF
+        return
+    if filter_type == 3:
+        for index in range(len(current)):
+            left = current[index - channels] if index >= channels else 0
+            up = previous[index]
+            current[index] = (current[index] + ((left + up) // 2)) & 0xFF
+        return
+    if filter_type == 4:
+        for index in range(len(current)):
+            left = current[index - channels] if index >= channels else 0
+            up = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            current[index] = (current[index] + paeth_predictor(left, up, upper_left)) & 0xFF
+        return
+    raise ValueError(f"unsupported PNG filter type: {filter_type}")
+
+
+def paeth_predictor(left: int, up: int, upper_left: int) -> int:
+    estimate = left + up - upper_left
+    left_distance = abs(estimate - left)
+    up_distance = abs(estimate - up)
+    upper_left_distance = abs(estimate - upper_left)
+    if left_distance <= up_distance and left_distance <= upper_left_distance:
+        return left
+    if up_distance <= upper_left_distance:
+        return up
+    return upper_left
+
+
+def png_rows_to_rgb(rows: list[bytes], *, width: int, color_type: int, palette: bytes) -> bytes:
+    rgb = bytearray()
+    for row in rows:
+        if color_type == 0:
+            for gray in row:
+                rgb.extend((gray, gray, gray))
+        elif color_type == 2:
+            rgb.extend(row)
+        elif color_type == 3:
+            if not palette:
+                raise ValueError("indexed PNG is missing PLTE palette")
+            for index in row:
+                palette_offset = index * 3
+                if palette_offset + 3 > len(palette):
+                    raise ValueError("indexed PNG references a missing palette entry")
+                rgb.extend(palette[palette_offset : palette_offset + 3])
+        elif color_type == 4:
+            for index in range(0, len(row), 2):
+                gray = row[index]
+                rgb.extend((gray, gray, gray))
+        elif color_type == 6:
+            for index in range(0, len(row), 4):
+                rgb.extend(row[index : index + 3])
+        else:
+            raise ValueError(f"unsupported PNG color type: {color_type}")
+    expected_size = width * len(rows) * 3
+    if len(rgb) != expected_size:
+        raise ValueError("decoded PNG RGB length mismatch")
+    return bytes(rgb)
 
 
 def utc_now() -> str:
