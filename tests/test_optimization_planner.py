@@ -74,7 +74,11 @@ def fake_validation() -> dict:
                     "renderers": [
                         {
                             "rendererPath": "Avatar/Body",
-                            "materials": ["Skin", "Hair Transparent"],
+                            "materials": [
+                                {"name": "SkinLil", "shaderName": "lilToon"},
+                                {"name": "HairPoiyomi", "shaderName": "Poiyomi Toon"},
+                                {"name": "AccessoryStd", "shaderName": "Standard"},
+                            ],
                             "textures": [{"textureName": "Assets/Avatar/body_albedo_4096.png", "width": 4096, "height": 4096}],
                         }
                     ]
@@ -270,12 +274,25 @@ def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> Non
     physbone = build_optimization_tool_result("optimization.physbone.audit", params, validation)
     physbone_plan = build_optimization_tool_result("optimization.physbone.reduce-plan", params, validation)
     hidden_body = build_optimization_tool_result("optimization.aao.hidden-body-cut-plan", params, validation)
+    shader_registry = build_optimization_tool_result("optimization.shader.adapter-registry", params, validation)
     regression = build_optimization_tool_result("optimization.parameter.behavior-regression", params, validation)
     path_to_skill = build_optimization_tool_result("optimization.parameter.path-to-skill", params, validation)
+    ma2bt_skipped = build_optimization_tool_result("optimization.ma2bt.skipped-reasons", params, validation)
 
     assert report["audits"]["physBones"]["summary"]["reportedComponentCount"] == 36
+    assert report["audits"]["shaderAdapterRegistry"]["summary"]["detectedAdapters"] == [
+        "generic-semantic",
+        "liltoon",
+        "poiyomi",
+    ]
+    assert report["audits"]["ma2btSkippedReasons"]["summary"]["skippedLayerCount"] == 1
     assert report["plans"]["physBoneReduce"]["planOnly"] is True
+    assert report["plans"]["physBoneReduce"]["applyRequestTool"] == "optimization.aao.physbone-cleanup-apply-request"
+    assert report["plans"]["physBoneReduce"]["hardGate"]["status"] == "blocked"
+    assert "rollback.proof" in report["plans"]["physBoneReduce"]["hardGate"]["blockingIds"]
     assert report["plans"]["hiddenBodyCut"]["applyBlocked"] is True
+    assert report["plans"]["hiddenBodyCut"]["manualConfirmationRequired"] is True
+    assert report["plans"]["hiddenBodyCut"]["hardGate"]["status"] == "blocked"
     assert report["plans"]["ma2btConvertibility"]["summary"]["skippedLayerCount"] == 1
     assert report["plans"]["ma2btConvertibility"]["diagnostics"][0]["recommendedAction"]
     assert report["plans"]["parameterBehaviorRegression"]["proofReady"] is False
@@ -290,7 +307,15 @@ def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> Non
     assert physbone_plan["result"]["requiredProof"]
     assert hidden_body["planOnly"] is True
     assert hidden_body["result"]["candidateCount"] >= 1
-    assert hidden_body["result"]["applyRequestTool"] is None
+    assert hidden_body["result"]["applyRequestTool"] == "optimization.aao.hidden-body-cut-apply-request"
+    assert "visual_review.proof" in hidden_body["result"]["hardGate"]["blockingIds"]
+    assert shader_registry["result"]["rawPropertyMutationBlocked"] is True
+    assert {item["adapter"] for item in shader_registry["result"]["materialCoverage"]} >= {
+        "generic-semantic",
+        "liltoon",
+        "poiyomi",
+    }
+    assert ma2bt_skipped["result"]["diagnostics"][0]["recommendedAction"]
     assert regression["result"]["summary"]["testCaseCount"] >= 3
     assert regression["result"]["summary"]["dangerParameterCount"] >= 2
     assert "optimization.parameter.behavior-regression" in {
@@ -828,6 +853,92 @@ def test_vrcfury_apply_requests_are_stable_blocked_surfaces(tmp_path: Path) -> N
     assert payload["writeSupported"] is False
     assert payload["readyToRequest"] is False
     assert any("public validated writer path" in reason for reason in payload["blockedReasons"])
+    assert payload["hardGate"]["status"] == "blocked"
+    assert "experimental.writer_proof" in payload["hardGate"]["blockingIds"]
+    assert payload["rollbackRequirements"]["postRestoreValidationRequired"] is True
+
+
+def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.anatawa12.avatar-optimizer", "1.8.0")
+
+    hidden_body = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.aao.hidden-body-cut-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+    physbone = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.aao.physbone-cleanup-apply-request",
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetProfile": "pc_conservative",
+        }
+    )
+
+    assert hidden_body["stableCallable"] is True
+    assert hidden_body["writeSupported"] is False
+    assert hidden_body["readyToRequest"] is False
+    assert hidden_body["versionStage"] == "0.9.x-rc"
+    assert any("manual occlusion evidence" in reason for reason in hidden_body["blockedReasons"])
+    assert hidden_body["hardGate"]["status"] == "blocked"
+    assert hidden_body["rollbackRequirements"]["checkpointScope"] == ["Assets", "Packages", "ProjectSettings"]
+
+    assert physbone["stableCallable"] is True
+    assert physbone["writeSupported"] is False
+    assert physbone["readyToRequest"] is False
+    assert physbone["versionStage"] == "0.9.x-rc"
+    assert any("motion behavior proof" in reason for reason in physbone["blockedReasons"])
+    assert physbone["hardGate"]["status"] == "blocked"
+    assert physbone["rollbackRequirements"]["generatedResidueCheckRequired"] is True
+
+
+def test_optimizer_profile_diff_requires_before_after_and_rollback_snapshots(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    before = fake_validation()
+    after = copy.deepcopy(before)
+    after["sources"]["performance_pc"]["payload"]["rank"] = "Medium"
+    after["sources"]["performance_pc"]["payload"]["triangleCount"] = 36000
+    after["sources"]["performance_quest"]["payload"]["rank"] = "Good"
+    after["sources"]["parameters"]["payload"]["totalEstimatedCost"] = 240
+    after["sources"]["parameters"]["payload"]["totalParameters"] = 5
+
+    payload = build_optimization_tool_result(
+        "optimization.profile.diff",
+        {
+            "projectPath": str(project),
+            "beforeValidation": before,
+            "afterValidation": after,
+            "rollbackValidation": before,
+        },
+        {},
+    )
+    missing = build_optimization_tool_result(
+        "optimization.profile.diff",
+        {"projectPath": str(project), "beforeValidation": before},
+        {},
+    )
+
+    diff = payload["result"]
+    assert payload["readOnly"] is True
+    assert diff["hardGate"]["status"] == "pass"
+    assert diff["pc"]["rankBefore"] == "Good"
+    assert diff["pc"]["rankAfter"] == "Medium"
+    assert diff["pc"]["rankRollback"] == "Good"
+    assert diff["pc"]["metricsDelta"]["triangles"] == -6000
+    assert diff["pc"]["rollbackRankMatchesBefore"] is True
+    assert diff["quest"]["rankChanged"] is True
+    assert diff["parameters"]["syncedBitsDelta"] == -40
+    assert diff["parameters"]["totalCustomParametersDelta"] == -1
+    assert diff["parameters"]["rollbackMatchesBefore"] is True
+    assert missing["result"]["hardGate"]["status"] == "blocked"
+    assert "profile.after" in missing["result"]["hardGate"]["blockingIds"]
+    assert "profile.rollback" in missing["result"]["hardGate"]["blockingIds"]
 
 
 def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(monkeypatch, tmp_path: Path) -> None:

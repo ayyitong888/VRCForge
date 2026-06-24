@@ -97,6 +97,7 @@ import {
   AgentSkillCheck,
   ExecutionMode,
   PermissionState,
+  blockSkillPackage,
   fetchAgentNotes,
   fetchAvatars,
   fetchChats,
@@ -116,15 +117,18 @@ import {
   requestPackageInstall,
   requestRestoreCheckpoint,
   repairUnityMcpBridge,
+  revokeSkillPackageSigner,
   retrySubAgent,
   saveChats,
   saveProjectPrefs,
   saveAgentNotes,
   scanProjectIndex,
   sendAgentMessage,
+  setSkillPackageSafeMode,
   setSkillPackageEnabled,
   setAppSessionToken,
   testProviderCapability,
+  trustSkillPackageSigner,
   updateApiConfig,
   updateDiagnostics,
   updateExternalAgentGateway,
@@ -445,6 +449,8 @@ export default function App() {
   const [savingSkill, setSavingSkill] = useState(false);
   const [skillPackages, setSkillPackages] = useState<SkillPackageEntry[]>([]);
   const [skillPackageStore, setSkillPackageStore] = useState("");
+  const [skillPackageGovernance, setSkillPackageGovernance] = useState<Record<string, unknown>>({});
+  const [skillPackageAudit, setSkillPackageAudit] = useState<Array<Record<string, unknown>>>([]);
   const [loadingSkillPackages, setLoadingSkillPackages] = useState(false);
   const [skillPackageMessage, setSkillPackageMessage] = useState("");
   const [skillPackageError, setSkillPackageError] = useState("");
@@ -1890,6 +1896,8 @@ export default function App() {
       const payload = await fetchSkillPackages(targetEndpoint);
       setSkillPackages(payload.installed || []);
       setSkillPackageStore(payload.store || "");
+      setSkillPackageGovernance((payload.governance || {}) as Record<string, unknown>);
+      setSkillPackageAudit(payload.audit || []);
       return payload;
     } catch (cause) {
       setSkillPackageError(cause instanceof Error ? cause.message : String(cause));
@@ -1977,6 +1985,85 @@ export default function App() {
       setSkillRegistry(skillsPayload);
       setSkillCheck(await checkSkills(endpoint));
       await refresh(endpoint);
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function refreshSkillWorkspaceState() {
+    const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
+    setSkillRegistry(skillsPayload);
+    setSkillCheck(await checkSkills(endpoint));
+    await refresh(endpoint);
+  }
+
+  async function setVskPackageSafeMode(enabled: boolean, reason?: string) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await setSkillPackageSafeMode(endpoint, { enabled, reason: reason || undefined });
+      setSkillPackageMessage(enabled ? "Safe Mode enabled" : "Safe Mode disabled");
+      await refreshSkillWorkspaceState();
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function trustVskPackageSigner(signerFingerprint: string, reason?: string) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await trustSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
+      setSkillPackageMessage("Signer trusted");
+      await refreshSkillWorkspaceState();
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function revokeVskPackageSigner(signerFingerprint: string, reason?: string) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await revokeSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
+      setSkillPackageMessage("Signer revoked");
+      await refreshSkillWorkspaceState();
+      return payload;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSkillPackageError(message);
+      throw cause;
+    } finally {
+      setLoadingSkillPackages(false);
+    }
+  }
+
+  async function blockVskPackage(request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) {
+    setLoadingSkillPackages(true);
+    setSkillPackageMessage("");
+    setSkillPackageError("");
+    try {
+      const payload = await blockSkillPackage(endpoint, request);
+      setSkillPackageMessage("Package blocked");
+      await refreshSkillWorkspaceState();
       return payload;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -2724,12 +2811,18 @@ export default function App() {
               packagesLoading={loadingSkillPackages}
               packageMessage={skillPackageMessage}
               packageError={skillPackageError}
+              packageGovernance={skillPackageGovernance}
+              packageAudit={skillPackageAudit}
               onRefreshPackages={() => void loadSkillPackages()}
               onPreflightPackage={preflightVskPackage}
               onImportPackage={importVskPackage}
               onExportPackage={exportVskPackage}
               onSetPackageEnabled={setVskPackageEnabled}
               onUninstallPackage={uninstallVskPackage}
+              onSetSafeMode={setVskPackageSafeMode}
+              onTrustSigner={trustVskPackageSigner}
+              onRevokeSigner={revokeVskPackageSigner}
+              onBlockPackage={blockVskPackage}
             />
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
@@ -5429,12 +5522,18 @@ function SkillsWorkspace({
   packagesLoading,
   packageMessage,
   packageError,
+  packageGovernance,
+  packageAudit,
   onRefreshPackages,
   onPreflightPackage,
   onImportPackage,
   onExportPackage,
   onSetPackageEnabled,
   onUninstallPackage,
+  onSetSafeMode,
+  onTrustSigner,
+  onRevokeSigner,
+  onBlockPackage,
 }: {
   skills: AgentSkill[];
   skillCount: number;
@@ -5453,12 +5552,18 @@ function SkillsWorkspace({
   packagesLoading: boolean;
   packageMessage: string;
   packageError: string;
+  packageGovernance: Record<string, unknown>;
+  packageAudit: Array<Record<string, unknown>>;
   onRefreshPackages: () => void;
   onPreflightPackage: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImportPackage: (packagePath: string) => Promise<unknown>;
   onExportPackage: (skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) => Promise<unknown>;
   onSetPackageEnabled: (skillPackageId: string, enabled: boolean) => Promise<unknown>;
   onUninstallPackage: (skillPackageId: string) => Promise<unknown>;
+  onSetSafeMode: (enabled: boolean, reason?: string) => Promise<unknown>;
+  onTrustSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
+  onRevokeSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
+  onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
 }) {
   const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
@@ -5841,12 +5946,18 @@ function SkillsWorkspace({
           loading={packagesLoading}
           message={packageMessage}
           error={packageError}
+          governance={packageGovernance}
+          audit={packageAudit}
           onRefresh={onRefreshPackages}
           onPreflight={onPreflightPackage}
           onImport={onImportPackage}
           onExport={onExportPackage}
           onSetEnabled={onSetPackageEnabled}
           onUninstall={onUninstallPackage}
+          onSetSafeMode={onSetSafeMode}
+          onTrustSigner={onTrustSigner}
+          onRevokeSigner={onRevokeSigner}
+          onBlockPackage={onBlockPackage}
         />
         </div>
       </div>
@@ -5860,24 +5971,36 @@ function SkillPackageManagerPanel({
   loading,
   message,
   error,
+  governance,
+  audit,
   onRefresh,
   onPreflight,
   onImport,
   onExport,
   onSetEnabled,
   onUninstall,
+  onSetSafeMode,
+  onTrustSigner,
+  onRevokeSigner,
+  onBlockPackage,
 }: {
   packages: SkillPackageEntry[];
   packageStore: string;
   loading: boolean;
   message: string;
   error: string;
+  governance: Record<string, unknown>;
+  audit: Array<Record<string, unknown>>;
   onRefresh: () => void;
   onPreflight: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImport: (packagePath: string) => Promise<unknown>;
   onExport: (skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) => Promise<unknown>;
   onSetEnabled: (skillPackageId: string, enabled: boolean) => Promise<unknown>;
   onUninstall: (skillPackageId: string) => Promise<unknown>;
+  onSetSafeMode: (enabled: boolean, reason?: string) => Promise<unknown>;
+  onTrustSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
+  onRevokeSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
+  onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
 }) {
   const [packagePath, setPackagePath] = useState("");
   const [exportSkillName, setExportSkillName] = useState("");
@@ -5888,7 +6011,12 @@ function SkillPackageManagerPanel({
   const [localMessage, setLocalMessage] = useState("");
   const [localError, setLocalError] = useState("");
   const [packageActionId, setPackageActionId] = useState("");
+  const [governanceReason, setGovernanceReason] = useState("");
+  const [signerFingerprint, setSignerFingerprint] = useState("");
+  const [blockPackageId, setBlockPackageId] = useState("");
   const preview = normalizeSkillPackagePreview(preflight);
+  const safeModeEnabled = skillPackageSafeModeEnabled(governance);
+  const auditTail = audit.slice(-3).reverse();
   async function runPreflight() {
     if (!packagePath.trim()) {
       return;
@@ -5963,6 +6091,78 @@ function SkillPackageManagerPanel({
       setPackageActionId("");
     }
   }
+  async function runSetSafeMode(enabled: boolean) {
+    setPackageActionId("safe-mode");
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onSetSafeMode(enabled, governanceReason.trim() || undefined);
+      setLocalMessage(enabled ? "Safe Mode enabled" : "Safe Mode disabled");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
+    }
+  }
+  async function runTrustSigner(value = signerFingerprint) {
+    const fingerprint = value.trim();
+    if (!fingerprint || fingerprint === "-") {
+      return;
+    }
+    setPackageActionId(`signer-${fingerprint}`);
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onTrustSigner(fingerprint, governanceReason.trim() || undefined);
+      setLocalMessage("Signer trusted");
+      setSignerFingerprint("");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
+    }
+  }
+  async function runRevokeSigner(value = signerFingerprint) {
+    const fingerprint = value.trim();
+    if (!fingerprint || fingerprint === "-") {
+      return;
+    }
+    setPackageActionId(`signer-${fingerprint}`);
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onRevokeSigner(fingerprint, governanceReason.trim() || undefined);
+      setLocalMessage("Signer revoked");
+      setSignerFingerprint("");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
+    }
+  }
+  async function runBlockPackage(pkg?: SkillPackageEntry) {
+    const id = (pkg ? skillPackageId(pkg) : blockPackageId.trim()).trim();
+    const packageSha256 = pkg ? skillPackagePackageSha(pkg) : "";
+    if ((!id || id === "-") && !packageSha256) {
+      return;
+    }
+    setPackageActionId(`block-${id || packageSha256}`);
+    setLocalMessage("");
+    setLocalError("");
+    try {
+      await onBlockPackage({
+        packageId: id && id !== "-" ? id : undefined,
+        packageSha256: packageSha256 || undefined,
+        reason: governanceReason.trim() || undefined,
+      });
+      setLocalMessage("Package blocked");
+      setBlockPackageId("");
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPackageActionId("");
+    }
+  }
   const displayMessage = localMessage || message;
   const displayError = localError || error;
   return (
@@ -5983,6 +6183,77 @@ function SkillPackageManagerPanel({
           <DataLine label="Store" value={packageStore || "-"} />
           {displayMessage ? <Badge tone="ok" className="w-fit">{displayMessage}</Badge> : null}
           {displayError ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{displayError}</div> : null}
+        </div>
+
+        <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">Governance</span>
+            <Badge tone={safeModeEnabled ? "warn" : "muted"} className="shrink-0">
+              {safeModeEnabled ? "Safe Mode" : "Standard"}
+            </Badge>
+            <Badge tone="muted" className="shrink-0">
+              {audit.length} audit
+            </Badge>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <FieldLabel label="Reason">
+              <input
+                value={governanceReason}
+                onChange={(event) => setGovernanceReason(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
+              />
+            </FieldLabel>
+            <Button
+              type="button"
+              variant={safeModeEnabled ? "outline" : "primary"}
+              className="self-end"
+              disabled={loading || packageActionId === "safe-mode"}
+              onClick={() => void runSetSafeMode(!safeModeEnabled)}
+            >
+              {packageActionId === "safe-mode" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+              {safeModeEnabled ? "Disable Safe Mode" : "Enable Safe Mode"}
+            </Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
+            <FieldLabel label="Signer Fingerprint">
+              <input
+                value={signerFingerprint}
+                onChange={(event) => setSignerFingerprint(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 font-mono text-xs outline-none focus:border-primary"
+              />
+            </FieldLabel>
+            <Button type="button" variant="outline" className="self-end" disabled={loading || !signerFingerprint.trim()} onClick={() => void runTrustSigner()}>
+              <Check className="h-4 w-4" />
+              Trust
+            </Button>
+            <Button type="button" variant="danger" className="self-end" disabled={loading || !signerFingerprint.trim()} onClick={() => void runRevokeSigner()}>
+              <X className="h-4 w-4" />
+              Revoke
+            </Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <FieldLabel label="Package Id">
+              <input
+                value={blockPackageId}
+                onChange={(event) => setBlockPackageId(event.target.value)}
+                className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
+              />
+            </FieldLabel>
+            <Button type="button" variant="danger" className="self-end" disabled={loading || !blockPackageId.trim()} onClick={() => void runBlockPackage()}>
+              <EyeOff className="h-4 w-4" />
+              Block
+            </Button>
+          </div>
+          {auditTail.length ? (
+            <div className="grid gap-1 border-t border-border pt-3 text-xs text-muted-foreground">
+              {auditTail.map((item, index) => (
+                <div key={`${String(item.event || "audit")}-${index}`} className="flex min-w-0 gap-2">
+                  <span className="shrink-0 font-mono">{String(item.event || "audit")}</span>
+                  <span className="min-w-0 truncate">{String(item.skill_id || item.signer_fingerprint || item.package_id || item.reason || "")}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
@@ -6019,6 +6290,8 @@ function SkillPackageManagerPanel({
               <DataLine label="Signer" value={skillPackageSigner(preview)} mono />
             </div>
             <OutputBlock label="Permissions" value={skillPackagePermissions(preview).join("\n")} />
+            {preview.governance ? <OutputBlock label="Governance" value={formatPayload(preview.governance)} /> : null}
+            {preview.dryRun ? <OutputBlock label="Dry Run" value={formatPayload(preview.dryRun)} /> : null}
             {preview.manifest ? <OutputBlock label="Manifest" value={formatPayload(preview.manifest)} /> : null}
           </div>
         ) : null}
@@ -6067,7 +6340,7 @@ function SkillPackageManagerPanel({
         </div>
 
         <div className="overflow-hidden rounded-lg border border-border">
-          <div className="grid grid-cols-[minmax(0,1fr)_88px_150px_180px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+          <div className="grid grid-cols-[minmax(0,1fr)_76px_150px_minmax(300px,390px)] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
             <span className="truncate">Package</span>
             <span className="truncate">Risk</span>
             <span className="truncate">Status</span>
@@ -6081,7 +6354,7 @@ function SkillPackageManagerPanel({
             const enabled = skillPackageEnabled(pkg);
             const busy = loading || packageActionId === id;
             return (
-              <div key={`${id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_88px_150px_180px] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
+              <div key={`${id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_76px_150px_minmax(300px,390px)] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
                 <div className="min-w-0">
                   <div className="truncate font-medium">{skillPackageTitle(pkg)}</div>
                   <div className="truncate text-muted-foreground">{id}</div>
@@ -6104,6 +6377,36 @@ function SkillPackageManagerPanel({
                   >
                     {packageActionId === id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : enabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                     {enabled ? "Disable" : "Enable"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || skillPackageSigner(pkg) === "-"}
+                    onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    Trust
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || skillPackageSigner(pkg) === "-"}
+                    onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Revoke
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || id === "-"}
+                    onClick={() => void runBlockPackage(pkg)}
+                  >
+                    <EyeOff className="h-3.5 w-3.5" />
+                    Block
                   </Button>
                   <Button
                     type="button"
@@ -6148,6 +6451,10 @@ function skillPackageSigner(pkg: SkillPackageEntry): string {
   return String(pkg.signer_fingerprint || pkg.signerFingerprint || "-");
 }
 
+function skillPackagePackageSha(pkg: SkillPackageEntry): string {
+  return String(pkg.package_sha256 || pkg.packageSha256 || "");
+}
+
 function skillPackageEnabled(pkg: SkillPackageEntry): boolean {
   return pkg.enabled !== false && pkg.available !== false;
 }
@@ -6163,6 +6470,11 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   const labels: string[] = [];
   const status = String(pkg.signature_status || pkg.signatureStatus || "").toLowerCase();
   const errorText = [...(pkg.errors || []), ...(pkg.warnings || [])].join(" ").toLowerCase();
+  const governance = skillPackageGovernance(pkg);
+  const signerStatus = String(governance.signerTrustStatus || governance.signer_trust_status || "").toLowerCase();
+  const importAllowed = governance.importAllowed ?? governance.import_allowed;
+  const enableAllowed = governance.enableAllowed ?? governance.enable_allowed;
+  const safeMode = skillPackageSafeMode(governance);
   if (pkg.source === "builtin") {
     labels.push("Built-in");
   }
@@ -6176,6 +6488,25 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   if (errorText.includes("signature")) {
     labels.push("Signature mismatch");
   }
+  if (signerStatus === "trusted") {
+    labels.push("Trusted signer");
+  } else if (signerStatus === "revoked") {
+    labels.push("Revoked signer");
+  } else if (signerStatus === "untrusted") {
+    labels.push("Untrusted signer");
+  }
+  if (safeMode.defaultEnabled === false || safeMode.disablesRiskLevel === true || safeMode.disables_risk_level === true) {
+    labels.push("Safe Mode disabled");
+  }
+  if (importAllowed === false) {
+    labels.push("Import blocked");
+  }
+  if (enableAllowed === false) {
+    labels.push("Enable blocked");
+  }
+  if (pkg.dryRun) {
+    labels.push("Dry run");
+  }
   if (pkg.enabled === false || pkg.available === false || errorText.includes("blocked")) {
     labels.push("Blocked");
   }
@@ -6183,16 +6514,36 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
 }
 
 function skillPackageLabelTone(label: string): "ok" | "warn" | "danger" | "muted" {
-  if (label === "Signed" || label === "Built-in") {
+  if (label === "Signed" || label === "Built-in" || label === "Trusted signer") {
     return "ok";
   }
-  if (label === "Signature mismatch" || label === "Blocked") {
+  if (label === "Signature mismatch" || label === "Blocked" || label === "Revoked signer" || label.includes("blocked")) {
     return "danger";
   }
-  if (label === "Unsigned" || label === "Dev") {
+  if (label === "Unsigned" || label === "Dev" || label === "Untrusted signer" || label === "Safe Mode disabled") {
     return "warn";
   }
   return "muted";
+}
+
+function skillPackageGovernance(pkg: SkillPackageEntry): Record<string, unknown> {
+  return asRecord(pkg.governance) || {};
+}
+
+function skillPackageSafeMode(governance: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(governance.safeMode) || asRecord(governance.safe_mode) || {};
+}
+
+function skillPackageSafeModeEnabled(governance: Record<string, unknown>): boolean {
+  const safeMode = skillPackageSafeMode(governance);
+  return safeMode.enabled === true;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
 }
 
 function FieldLabel({ label, children }: { label: string; children: ReactNode }) {

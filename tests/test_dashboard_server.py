@@ -1264,6 +1264,244 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(packages_after_uninstall, [])
             self.assertFalse(any(skill["name"] == "avatar-review" for skill in skills_after_uninstall))
 
+    def test_skill_package_safe_mode_import_dry_run_and_projection_disable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "package-source"
+            source.mkdir()
+            manifest = {
+                "id": "community.risky-review",
+                "name": "Risky Review Package",
+                "skill_name": "risky-review",
+                "version": "1.0.0",
+                "author": "Unit Test",
+                "description": "Dashboard risky skill package fixture.",
+                "min_vrcforge_version": "0.5.0",
+                "permissions": ["read_project", "unity_modify_materials"],
+                "entrypoints": {"skill": "SKILL.md"},
+            }
+            (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (source / "SKILL.md").write_text(
+                "---\n"
+                "name: risky-review\n"
+                "title: Risky Review\n"
+                "description: Imported risky package skill.\n"
+                "allowed-tools:\n"
+                "  - vrcforge_health\n"
+                "entrypoint-tool: vrcforge_health\n"
+                "---\n"
+                "Inspect project state before edits.\n",
+                encoding="utf-8",
+            )
+            package = SkillPackageService(root / "build-store", vrcforge_version="0.5.1").export_dev(
+                source,
+                root / "risky-review.vsk",
+            ).package_path
+
+            with TestClient(dashboard_server.app) as client:
+                safe_mode = client.post("/api/app/skill-packages/safe-mode", json={"enabled": True})
+                dry_run = client.post(
+                    "/api/app/skill-packages/import",
+                    json={"packagePath": str(package), "dryRun": True},
+                )
+                installed_after_dry_run = client.get("/api/app/skill-packages").json()["installed"]
+                imported = client.post("/api/app/skill-packages/import", json={"packagePath": str(package)})
+                skills = client.get("/api/app/skills").json()["skills"]
+                enable_blocked = client.put(
+                    "/api/app/skill-packages/community.risky-review",
+                    json={"enabled": True},
+                )
+
+            self.assertEqual(safe_mode.status_code, 200)
+            self.assertEqual(dry_run.status_code, 200)
+            self.assertTrue(dry_run.json()["dryRun"])
+            self.assertFalse(dry_run.json()["preview"]["dryRun"]["willWrite"])
+            self.assertFalse(dry_run.json()["preview"]["governance"]["safeMode"]["defaultEnabled"])
+            self.assertEqual(installed_after_dry_run, [])
+            self.assertEqual(imported.status_code, 200)
+            self.assertFalse(imported.json()["imported"]["registry_entry"]["enabled"])
+            self.assertFalse(imported.json()["projectedSkill"]["enabled"])
+            self.assertTrue(any(skill["name"] == "risky-review" and not skill["enabled"] for skill in skills))
+            self.assertEqual(enable_blocked.status_code, 400)
+            self.assertIn("safe mode", enable_blocked.json()["detail"])
+
+    def test_skill_package_revoked_signer_preflight_explains_and_import_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "package-source"
+            source.mkdir()
+            manifest = {
+                "id": "community.signed-review",
+                "name": "Signed Review Package",
+                "skill_name": "signed-review",
+                "version": "1.0.0",
+                "author": "Unit Test",
+                "description": "Dashboard signed skill package fixture.",
+                "min_vrcforge_version": "0.5.0",
+                "permissions": ["read_project"],
+                "entrypoints": {"skill": "SKILL.md"},
+            }
+            (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (source / "SKILL.md").write_text("---\nname: signed-review\n---\nInspect safely.\n", encoding="utf-8")
+            service = SkillPackageService(root / "build-store", vrcforge_version="0.5.1")
+            key_pair = service.generate_signing_keypair()
+            package = service.export_release(source, root / "signed-review.vsk", key_pair.private_key_pem).package_path
+
+            with TestClient(dashboard_server.app) as client:
+                untrusted = client.post("/api/app/skill-packages/preflight", json={"packagePath": str(package)})
+                revoked = client.post(
+                    "/api/app/skill-packages/revoke-signer",
+                    json={"signerFingerprint": key_pair.fingerprint, "reason": "test compromise"},
+                )
+                blocked_preflight = client.post("/api/app/skill-packages/preflight", json={"packagePath": str(package)})
+                blocked_import = client.post("/api/app/skill-packages/import", json={"packagePath": str(package)})
+
+            self.assertEqual(untrusted.status_code, 200)
+            self.assertTrue(untrusted.json()["preview"]["governance"]["signatureVerified"])
+            self.assertFalse(untrusted.json()["preview"]["governance"]["verified"])
+            self.assertEqual(untrusted.json()["preview"]["governance"]["signerTrustStatus"], "untrusted")
+            self.assertEqual(revoked.status_code, 200)
+            self.assertEqual(blocked_preflight.status_code, 200)
+            self.assertEqual(blocked_preflight.json()["preview"]["governance"]["signerTrustStatus"], "revoked")
+            self.assertFalse(blocked_preflight.json()["preview"]["governance"]["importAllowed"])
+            self.assertEqual(blocked_import.status_code, 400)
+            self.assertIn("revoked", blocked_import.json()["detail"])
+
+    def test_path_to_skill_preview_write_and_export_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            preview_dir = root / "preview-should-not-write"
+            source_dir = root / "captured-source"
+            export_source_dir = root / "captured-export-source"
+            package_path = root / "shader-preset.vsk"
+            summary = {
+                "status": "passed",
+                "workflow": "shader_adapter_semantic_tuning",
+                "projectPath": "C:\\Users\\xiao123\\AvatarProject",
+                "avatarPath": "AvatarRoot",
+                "steps": [
+                    {
+                        "name": "shader.apply",
+                        "tool": "vrcforge_apply_shader_tuning",
+                        "params": {
+                            "projectRoot": "C:\\Users\\xiao123\\AvatarProject",
+                            "artifactPath": "C:\\Users\\xiao123\\AvatarProject\\Assets\\VRCForge\\proof.json",
+                            "rendererPath": "AvatarRoot/Hat",
+                        },
+                    }
+                ],
+                "validation": {
+                    "requiresApproval": True,
+                    "requiresCheckpoint": True,
+                    "requiresRollback": True,
+                },
+            }
+
+            with TestClient(dashboard_server.app) as client:
+                preview = client.post(
+                    "/api/app/path-to-skill/preview",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(preview_dir),
+                        "writeSource": True,
+                        "exportVsk": True,
+                    },
+                )
+                written = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(source_dir),
+                        "writeSource": True,
+                    },
+                )
+                exported = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(export_source_dir),
+                        "exportVsk": True,
+                        "confirmExport": True,
+                        "packageOutputPath": str(package_path),
+                    },
+                )
+
+            self.assertEqual(preview.status_code, 200, preview.text)
+            preview_payload = preview.json()
+            self.assertTrue(preview_payload["dryRun"])
+            self.assertTrue(preview_payload["writeSuppressed"])
+            self.assertFalse(preview_dir.exists())
+            serialized_source = json.dumps(preview_payload["sourceFiles"], ensure_ascii=False)
+            self.assertIn("vrcforge.path_to_skill.v1", serialized_source)
+            self.assertIn("{{projectPath}}", serialized_source)
+            self.assertNotIn("C:\\Users", serialized_source)
+
+            self.assertEqual(written.status_code, 200, written.text)
+            self.assertFalse(written.json()["dryRun"])
+            self.assertTrue((source_dir / "manifest.json").is_file())
+            self.assertTrue((source_dir / "SKILL.md").is_file())
+            self.assertTrue((source_dir / "workflows" / "captured-path.json").is_file())
+
+            self.assertEqual(exported.status_code, 200, exported.text)
+            self.assertTrue(package_path.is_file())
+            self.assertEqual(exported.json()["exported"]["signature_status"], "dev")
+            package_preview = SkillPackageService(root / "inspect-store", vrcforge_version="0.9.0-beta").inspect_package(package_path)
+            self.assertEqual(package_preview.manifest["id"], "community.path-to-skill.shader-preset")
+            self.assertEqual(package_preview.manifest["entrypoints"]["workflow"], "workflows/captured-path.json")
+
+    def test_path_to_skill_write_requires_explicit_export_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_path = root / "blocked.vsk"
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": {"status": "passed", "workflow": "optimizer_conservative_profile"},
+                        "packageId": "community.path-to-skill.optimizer-profile",
+                        "exportVsk": True,
+                        "packageOutputPath": str(package_path),
+                    },
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("confirmExport=true", response.json()["detail"])
+            self.assertFalse(package_path.exists())
+
+    def test_path_to_skill_endpoint_rejects_secrets_and_embedded_private_paths(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            secret = client.post(
+                "/api/app/path-to-skill/preview",
+                json={
+                    "summary": {"workflow": "bad", "gatewayToken": "test-token-123456789"},
+                    "packageId": "community.path-to-skill.bad-secret",
+                },
+            )
+            private_path = client.post(
+                "/api/app/path-to-skill/preview",
+                json={
+                    "summary": {
+                        "workflow": "bad",
+                        "notes": "Proof file was C:\\Users\\xiao123\\Desktop\\private-proof.json",
+                    },
+                    "packageId": "community.path-to-skill.bad-path",
+                },
+            )
+
+        self.assertEqual(secret.status_code, 400)
+        self.assertIn("secret", secret.json()["detail"].lower())
+        self.assertEqual(private_path.status_code, 400)
+        self.assertIn("absolute path", private_path.json()["detail"].lower())
+
     def test_roslyn_advanced_skill_requires_full_auto_mode_and_confirmation(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True

@@ -1,0 +1,29 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "read_only",
+  "steps": [
+    {
+      "name": "list_avatars",
+      "tool": "vrcforge_list_avatars",
+      "writes": false
+    },
+    {
+      "name": "scan_avatar",
+      "tool": "vrcforge_avatar_scan",
+      "writes": false
+    },
+    {
+      "name": "optimization_plan",
+      "tool": "vrcforge_optimization_plan",
+      "writes": false
+    }
+  ],
+  "approval": {
+    "required": false,
+    "reason": "All steps are read-only."
+  },
+  "rollback": {
+    "required": false,
+    "reason": "The workflow does not mutate local state or Unity assets."
+  }
+}

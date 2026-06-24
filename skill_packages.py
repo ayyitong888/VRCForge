@@ -37,11 +37,15 @@ RESERVED_PACKAGE_FILES = {LOCK_NAME, SIGNATURE_NAME, PUBLIC_KEY_NAME}
 
 LOCK_SCHEMA = "vrcforge.skill-lock.v1"
 REGISTRY_SCHEMA = "vrcforge.skill-registry.v1"
+GOVERNANCE_SCHEMA = "vrcforge.skill-package-governance.v1"
+GOVERNANCE_DECISION_SCHEMA = "vrcforge.skill-package-governance-decision.v1"
+DRY_RUN_SCHEMA = "vrcforge.skill-package-dry-run.v1"
 
 DEFAULT_MAX_FILE_COUNT = 2_048
 DEFAULT_MAX_FILE_SIZE = 8 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 64 * 1024 * 1024
 DEFAULT_MAX_COMPRESSION_RATIO = 200.0
+DEFAULT_AUDIT_LIMIT = 200
 
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -230,6 +234,8 @@ class ImportPreview:
     file_count: int
     total_size: int
     update_action: str = "new"
+    governance: dict[str, Any] | None = None
+    dry_run: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -245,6 +251,8 @@ class ImportPreview:
             "file_count": self.file_count,
             "total_size": self.total_size,
             "update_action": self.update_action,
+            "governance": dict(self.governance or {}),
+            "dryRun": dict(self.dry_run or {}),
         }
 
 
@@ -641,7 +649,8 @@ class SkillPackageService:
                 allow_downgrade=allow_downgrade,
                 dev_mode=dev_mode,
             )
-            return self._preview_with_action(validated.preview, action)
+            governance = self._evaluate_preview_governance(validated.preview, registry)
+            return self._preview_with_action(validated.preview, action, governance=governance)
 
     def install(
         self,
@@ -662,7 +671,20 @@ class SkillPackageService:
                 allow_downgrade=allow_downgrade,
                 dev_mode=dev_mode,
             )
-            preview = self._preview_with_action(validated.preview, action)
+            governance = self._evaluate_preview_governance(validated.preview, registry)
+            preview = self._preview_with_action(validated.preview, action, governance=governance)
+            if not governance.get("importAllowed", False):
+                self._write_registry_audit(
+                    registry,
+                    {
+                        "event": "skill_package_import_blocked",
+                        "skill_id": skill_id,
+                        "package_sha256": preview.package_sha256,
+                        "signer_fingerprint": preview.signer_fingerprint,
+                        "reasons": list(governance.get("blockingReasons") or []),
+                    },
+                )
+                raise PackageSecurityError(self._format_governance_block("import", governance))
             return self._install_validated(validated.temp_dir, preview, registry, source=source)
 
     def import_package(self, *args: Any, **kwargs: Any) -> InstallResult:
@@ -676,11 +698,32 @@ class SkillPackageService:
         entry = self._find_installed_entry(normalized_id, registry)
         if entry is None:
             raise SkillPackageError(f"Skill package is not installed: {normalized_id}.")
+        governance = self._evaluate_installed_governance(entry, registry)
+        if bool(enabled) and not governance.get("enableAllowed", False):
+            self._write_registry_audit(
+                registry,
+                {
+                    "event": "skill_package_enable_blocked",
+                    "skill_id": normalized_id,
+                    "signer_fingerprint": entry.get("signer_fingerprint"),
+                    "reasons": list(governance.get("blockingReasons") or []),
+                },
+            )
+            raise PackageSecurityError(self._format_governance_block("enable", governance))
         registry_entry = dict(entry)
         registry_entry.pop("versions", None)
         changed = bool(registry_entry.get("enabled", True)) != bool(enabled)
         registry_entry["enabled"] = bool(enabled)
-        self._write_installed_registry_entry(normalized_id, registry_entry, registry)
+        self._write_installed_registry_entry(
+            normalized_id,
+            registry_entry,
+            registry,
+            audit_event={
+                "event": "skill_package_enabled" if bool(enabled) else "skill_package_disabled",
+                "skill_id": normalized_id,
+                "changed": changed,
+            },
+        )
         manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
         return PackageStateResult(normalized_id, registry_entry, manifest, changed)
 
@@ -699,7 +742,11 @@ class SkillPackageService:
             raise PackageSecurityError(f"Installed skill path is not a directory: {skill_root}.")
         manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
         removed_versions = tuple(self._installed_versions(normalized_id))
-        next_registry = {"schema": REGISTRY_SCHEMA, "skills": dict(registry["skills"])}
+        next_registry = self._registry_document(
+            registry,
+            skills=dict(registry["skills"]),
+            audit_event={"event": "skill_package_uninstalled", "skill_id": normalized_id},
+        )
         next_registry["skills"].pop(normalized_id, None)
         self.skill_store.mkdir(parents=True, exist_ok=True)
         self._atomic_write_json(self.registry_path, next_registry)
@@ -716,7 +763,7 @@ class SkillPackageService:
 
     def load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
-            return {"schema": REGISTRY_SCHEMA, "skills": {}}
+            return self._registry_document({"skills": {}})
         if self.registry_path.is_symlink() or not self.registry_path.is_file():
             raise PackageSecurityError("registry.json must be a regular file.")
         value = _load_json_bytes(self.registry_path.read_bytes(), "registry.json")
@@ -732,11 +779,165 @@ class SkillPackageService:
                 entry,
                 label=f"registry entry {skill_id!r}",
             )
-        return {"schema": REGISTRY_SCHEMA, "skills": normalized_skills}
+        return self._registry_document(
+            value,
+            skills=normalized_skills,
+            governance=self._normalize_governance(value.get("governance")),
+            audit=self._normalize_audit(value.get("audit")),
+        )
 
     def list_installed(self) -> list[dict[str, Any]]:
         registry = self.load_registry()
-        return [dict(registry["skills"][key]) for key in sorted(registry["skills"])]
+        return [
+            self._decorate_installed_entry(dict(registry["skills"][key]), registry)
+            for key in sorted(registry["skills"])
+        ]
+
+    def set_safe_mode(self, enabled: bool, *, reason: str | None = None) -> dict[str, Any]:
+        registry = self.load_registry()
+        governance = self._normalize_governance(registry.get("governance"))
+        previous = bool(governance["safe_mode"].get("enabled", False))
+        governance["safe_mode"]["enabled"] = bool(enabled)
+        skills = dict(registry["skills"])
+        disabled = self._disable_governance_blocked_skills(skills, governance) if enabled else []
+        document = self._registry_document(
+            registry,
+            skills=skills,
+            governance=governance,
+            audit_event={
+                "event": "skill_package_safe_mode_updated",
+                "enabled": bool(enabled),
+                "reason": self._normalize_reason(reason),
+                "disabled_skill_ids": disabled,
+            },
+        )
+        self._atomic_write_json(self.registry_path, document)
+        self._sync_installed_metadata(document, disabled)
+        return {
+            "ok": True,
+            "changed": previous != bool(enabled) or bool(disabled),
+            "governance": document["governance"],
+            "disabledSkillIds": disabled,
+        }
+
+    def trust_signer(self, signer_fingerprint: str, *, reason: str | None = None) -> dict[str, Any]:
+        fingerprint = self._normalize_signer_fingerprint(signer_fingerprint)
+        registry = self.load_registry()
+        governance = self._normalize_governance(registry.get("governance"))
+        if fingerprint in governance["revoked_signers"]:
+            raise PackageSecurityError("A revoked signer cannot be trusted until the revocation list is edited.")
+        previous = fingerprint in governance["trusted_signers"]
+        governance["trusted_signers"][fingerprint] = {
+            "trusted_at": self._utc_timestamp(),
+            "reason": self._normalize_reason(reason),
+        }
+        document = self._registry_document(
+            registry,
+            governance=governance,
+            audit_event={
+                "event": "skill_package_signer_trusted",
+                "signer_fingerprint": fingerprint,
+                "reason": self._normalize_reason(reason),
+            },
+        )
+        self._atomic_write_json(self.registry_path, document)
+        return {"ok": True, "changed": not previous, "governance": document["governance"]}
+
+    def revoke_signer(self, signer_fingerprint: str, *, reason: str | None = None) -> dict[str, Any]:
+        fingerprint = self._normalize_signer_fingerprint(signer_fingerprint)
+        registry = self.load_registry()
+        governance = self._normalize_governance(registry.get("governance"))
+        previous = fingerprint in governance["revoked_signers"]
+        governance["trusted_signers"].pop(fingerprint, None)
+        governance["revoked_signers"][fingerprint] = {
+            "revoked_at": self._utc_timestamp(),
+            "reason": self._normalize_reason(reason),
+        }
+        skills = dict(registry["skills"])
+        disabled = self._disable_matching_skills(
+            skills,
+            lambda entry: entry.get("signer_fingerprint") == fingerprint,
+            disabled_reason="revoked_signer",
+        )
+        document = self._registry_document(
+            registry,
+            skills=skills,
+            governance=governance,
+            audit_event={
+                "event": "skill_package_signer_revoked",
+                "signer_fingerprint": fingerprint,
+                "reason": self._normalize_reason(reason),
+                "disabled_skill_ids": disabled,
+            },
+        )
+        self._atomic_write_json(self.registry_path, document)
+        self._sync_installed_metadata(document, disabled)
+        return {
+            "ok": True,
+            "changed": not previous or bool(disabled),
+            "governance": document["governance"],
+            "disabledSkillIds": disabled,
+        }
+
+    def block_package(
+        self,
+        *,
+        package_id: str | None = None,
+        package_sha256: str | None = None,
+        lock_sha256: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = self._normalize_optional_skill_id(package_id)
+        package_hash = self._normalize_optional_sha256(package_sha256, "package_sha256")
+        lock_hash = self._normalize_optional_sha256(lock_sha256, "lock_sha256")
+        if not any((normalized_id, package_hash, lock_hash)):
+            raise PackageSecurityError("Blocklist needs a package id, package SHA-256, or lock SHA-256.")
+        registry = self.load_registry()
+        governance = self._normalize_governance(registry.get("governance"))
+        blocked = governance["blocked_packages"]
+        timestamp = self._utc_timestamp()
+        reason_text = self._normalize_reason(reason)
+        previous = False
+        if normalized_id:
+            previous = normalized_id in blocked["ids"] or previous
+            blocked["ids"][normalized_id] = {"blocked_at": timestamp, "reason": reason_text}
+        if package_hash:
+            previous = package_hash in blocked["package_sha256"] or previous
+            blocked["package_sha256"][package_hash] = {"blocked_at": timestamp, "reason": reason_text}
+        if lock_hash:
+            previous = lock_hash in blocked["lock_sha256"] or previous
+            blocked["lock_sha256"][lock_hash] = {"blocked_at": timestamp, "reason": reason_text}
+        skills = dict(registry["skills"])
+        disabled = self._disable_matching_skills(
+            skills,
+            lambda entry: (
+                (normalized_id is not None and entry.get("id") == normalized_id)
+                or (package_hash is not None and entry.get("package_sha256") == package_hash)
+                or (lock_hash is not None and entry.get("lock_sha256") == lock_hash)
+            ),
+            disabled_reason="blocked_package",
+        )
+        document = self._registry_document(
+            registry,
+            skills=skills,
+            governance=governance,
+            audit_event={
+                "event": "skill_package_blocked",
+                "package_id": normalized_id,
+                "package_sha256": package_hash,
+                "lock_sha256": lock_hash,
+                "reason": reason_text,
+                "disabled_skill_ids": disabled,
+            },
+        )
+        self._atomic_write_json(self.registry_path, document)
+        self._sync_installed_metadata(document, disabled)
+        return {
+            "ok": True,
+            "changed": not previous or bool(disabled),
+            "governance": document["governance"],
+            "disabledSkillIds": disabled,
+        }
 
     @staticmethod
     def _normalize_installed_skill_id(skill_id: str) -> str:
@@ -792,6 +993,14 @@ class SkillPackageService:
         source = entry.get("source")
         if source is not None and not isinstance(source, str):
             raise PackageIntegrityError(f"{label} source must be a string.")
+        package_sha = entry.get("package_sha256")
+        if package_sha is not None and (
+            not isinstance(package_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", package_sha)
+        ):
+            raise PackageIntegrityError(f"{label} has an invalid package SHA-256.")
+        governance = entry.get("governance")
+        if governance is not None and not isinstance(governance, dict):
+            raise PackageIntegrityError(f"{label} governance must be an object.")
         if allow_versions:
             versions = entry.get("versions", [])
             if not isinstance(versions, list) or any(not isinstance(item, str) for item in versions):
@@ -802,6 +1011,387 @@ class SkillPackageService:
                 except ManifestValidationError as exc:
                     raise PackageIntegrityError(f"{label} has an invalid installed version.") from exc
         return dict(entry)
+
+    def _registry_document(
+        self,
+        registry: Mapping[str, Any],
+        *,
+        skills: Mapping[str, dict[str, Any]] | None = None,
+        governance: Mapping[str, Any] | None = None,
+        audit: Sequence[Mapping[str, Any]] | None = None,
+        audit_event: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        audit_entries = self._normalize_audit(audit if audit is not None else registry.get("audit"))
+        if audit_event is not None:
+            audit_entries.append(self._audit_entry(audit_event))
+            audit_entries = audit_entries[-DEFAULT_AUDIT_LIMIT:]
+        return {
+            "schema": REGISTRY_SCHEMA,
+            "skills": dict(skills if skills is not None else registry.get("skills") or {}),
+            "governance": self._normalize_governance(
+                governance if governance is not None else registry.get("governance")
+            ),
+            "audit": audit_entries,
+        }
+
+    @staticmethod
+    def _default_governance() -> dict[str, Any]:
+        return {
+            "schema": GOVERNANCE_SCHEMA,
+            "safe_mode": {
+                "enabled": False,
+                "disable_risk_levels": ["medium", "high"],
+                "block_enable": True,
+            },
+            "trusted_signers": {},
+            "revoked_signers": {},
+            "blocked_packages": {
+                "ids": {},
+                "package_sha256": {},
+                "lock_sha256": {},
+            },
+        }
+
+    @classmethod
+    def _normalize_governance(cls, value: Any) -> dict[str, Any]:
+        default = cls._default_governance()
+        if value is None:
+            return default
+        if not isinstance(value, Mapping):
+            raise PackageIntegrityError("registry governance must be an object.")
+        if value.get("schema", GOVERNANCE_SCHEMA) != GOVERNANCE_SCHEMA:
+            raise PackageIntegrityError("registry governance has an unsupported schema.")
+
+        safe_mode = value.get("safe_mode")
+        if safe_mode is not None and not isinstance(safe_mode, Mapping):
+            raise PackageIntegrityError("registry safe_mode must be an object.")
+        safe_mode = dict(safe_mode or {})
+        disable_levels = safe_mode.get("disable_risk_levels", default["safe_mode"]["disable_risk_levels"])
+        if not isinstance(disable_levels, list) or any(item not in {"low", "medium", "high"} for item in disable_levels):
+            raise PackageIntegrityError("registry safe_mode.disable_risk_levels is invalid.")
+
+        blocked = value.get("blocked_packages")
+        if blocked is not None and not isinstance(blocked, Mapping):
+            raise PackageIntegrityError("registry blocked_packages must be an object.")
+        blocked = dict(blocked or {})
+        return {
+            "schema": GOVERNANCE_SCHEMA,
+            "safe_mode": {
+                "enabled": bool(safe_mode.get("enabled", default["safe_mode"]["enabled"])),
+                "disable_risk_levels": list(dict.fromkeys(disable_levels)),
+                "block_enable": bool(safe_mode.get("block_enable", default["safe_mode"]["block_enable"])),
+            },
+            "trusted_signers": cls._normalize_signer_map(value.get("trusted_signers"), timestamp_key="trusted_at"),
+            "revoked_signers": cls._normalize_signer_map(value.get("revoked_signers"), timestamp_key="revoked_at"),
+            "blocked_packages": {
+                "ids": cls._normalize_blocked_id_map(blocked.get("ids")),
+                "package_sha256": cls._normalize_blocked_hash_map(blocked.get("package_sha256"), "package_sha256"),
+                "lock_sha256": cls._normalize_blocked_hash_map(blocked.get("lock_sha256"), "lock_sha256"),
+            },
+        }
+
+    @classmethod
+    def _normalize_signer_map(cls, value: Any, *, timestamp_key: str) -> dict[str, dict[str, str]]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise PackageIntegrityError("registry signer governance maps must be objects.")
+        normalized: dict[str, dict[str, str]] = {}
+        for raw_fingerprint, raw_meta in value.items():
+            fingerprint = cls._normalize_signer_fingerprint(str(raw_fingerprint))
+            meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+            normalized[fingerprint] = {
+                timestamp_key: str(meta.get(timestamp_key) or ""),
+                "reason": str(meta.get("reason") or "")[:500],
+            }
+        return normalized
+
+    @classmethod
+    def _normalize_blocked_id_map(cls, value: Any) -> dict[str, dict[str, str]]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise PackageIntegrityError("registry blocked package ids must be an object.")
+        normalized: dict[str, dict[str, str]] = {}
+        for raw_id, raw_meta in value.items():
+            skill_id = cls._normalize_optional_skill_id(str(raw_id))
+            if skill_id is None:
+                raise PackageIntegrityError("registry blocked package id is invalid.")
+            meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+            normalized[skill_id] = {
+                "blocked_at": str(meta.get("blocked_at") or ""),
+                "reason": str(meta.get("reason") or "")[:500],
+            }
+        return normalized
+
+    @classmethod
+    def _normalize_blocked_hash_map(cls, value: Any, label: str) -> dict[str, dict[str, str]]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise PackageIntegrityError(f"registry blocked {label} values must be an object.")
+        normalized: dict[str, dict[str, str]] = {}
+        for raw_hash, raw_meta in value.items():
+            digest = cls._normalize_optional_sha256(str(raw_hash), label)
+            if digest is None:
+                raise PackageIntegrityError(f"registry blocked {label} value is invalid.")
+            meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+            normalized[digest] = {
+                "blocked_at": str(meta.get("blocked_at") or ""),
+                "reason": str(meta.get("reason") or "")[:500],
+            }
+        return normalized
+
+    @staticmethod
+    def _normalize_audit(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise PackageIntegrityError("registry audit must be an array.")
+        entries: list[dict[str, Any]] = []
+        for item in value[-DEFAULT_AUDIT_LIMIT:]:
+            if isinstance(item, Mapping):
+                entries.append(dict(item))
+        return entries
+
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _audit_entry(cls, event: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "vrcforge.skill-package-audit.v1",
+            "timestamp": cls._utc_timestamp(),
+            **dict(event),
+        }
+
+    def _write_registry_audit(self, registry: Mapping[str, Any], event: Mapping[str, Any]) -> None:
+        self.skill_store.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_json(self.registry_path, self._registry_document(registry, audit_event=event))
+
+    @classmethod
+    def _normalize_signer_fingerprint(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            raise PackageSecurityError("Signer fingerprint must be a 64-character lowercase SHA-256 hex string.")
+        return normalized
+
+    @classmethod
+    def _normalize_optional_skill_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if len(normalized) > 128 or not SKILL_ID_RE.fullmatch(normalized):
+            raise PackageSecurityError("Package id must be a lowercase reverse-domain id.")
+        return normalized
+
+    @classmethod
+    def _normalize_optional_sha256(cls, value: str | None, label: str) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            raise PackageSecurityError(f"{label} must be a 64-character SHA-256 hex string.")
+        return normalized
+
+    @staticmethod
+    def _normalize_reason(value: str | None) -> str:
+        return str(value or "").strip()[:500]
+
+    def _evaluate_preview_governance(
+        self,
+        preview: ImportPreview,
+        registry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._build_governance_decision(
+            registry=registry,
+            skill_id=str(preview.manifest["id"]),
+            signature_status=preview.signature_status,
+            signer_fingerprint=preview.signer_fingerprint,
+            risk_level=preview.risk_level,
+            package_sha256=preview.package_sha256,
+            lock_sha256=preview.lock_sha256,
+        )
+
+    def _evaluate_installed_governance(
+        self,
+        entry: Mapping[str, Any],
+        registry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._build_governance_decision(
+            registry=registry,
+            skill_id=str(entry.get("id") or ""),
+            signature_status=str(entry.get("signature_status") or ""),
+            signer_fingerprint=entry.get("signer_fingerprint") if isinstance(entry.get("signer_fingerprint"), str) else None,
+            risk_level=str(entry.get("risk_level") or "high"),
+            package_sha256=entry.get("package_sha256") if isinstance(entry.get("package_sha256"), str) else None,
+            lock_sha256=entry.get("lock_sha256") if isinstance(entry.get("lock_sha256"), str) else None,
+        )
+
+    def _build_governance_decision(
+        self,
+        *,
+        registry: Mapping[str, Any],
+        skill_id: str,
+        signature_status: str,
+        signer_fingerprint: str | None,
+        risk_level: str,
+        package_sha256: str | None,
+        lock_sha256: str | None,
+    ) -> dict[str, Any]:
+        governance = self._normalize_governance(registry.get("governance"))
+        blocking_reasons: list[str] = []
+        warnings: list[str] = []
+        signature_verified = signature_status == "signed"
+        signer_status = "unsigned_dev"
+        if signature_verified:
+            signer = self._normalize_signer_fingerprint(str(signer_fingerprint or ""))
+            if signer in governance["revoked_signers"]:
+                signer_status = "revoked"
+                reason = governance["revoked_signers"][signer].get("reason") or "signer revoked"
+                blocking_reasons.append(f"signer revoked: {reason}")
+            elif signer in governance["trusted_signers"]:
+                signer_status = "trusted"
+            else:
+                signer_status = "untrusted"
+                warnings.append("signature is valid, but the signer is not trusted or verified")
+        else:
+            warnings.append("dev package has no signature; this is never verified")
+
+        blocked = governance["blocked_packages"]
+        if skill_id in blocked["ids"]:
+            reason = blocked["ids"][skill_id].get("reason") or "package id is blocklisted"
+            blocking_reasons.append(f"package id blocklisted: {reason}")
+        if package_sha256 and package_sha256 in blocked["package_sha256"]:
+            reason = blocked["package_sha256"][package_sha256].get("reason") or "package SHA-256 is blocklisted"
+            blocking_reasons.append(f"package SHA-256 blocklisted: {reason}")
+        if lock_sha256 and lock_sha256 in blocked["lock_sha256"]:
+            reason = blocked["lock_sha256"][lock_sha256].get("reason") or "lock SHA-256 is blocklisted"
+            blocking_reasons.append(f"lock SHA-256 blocklisted: {reason}")
+
+        safe_mode = governance["safe_mode"]
+        safe_mode_disables = bool(safe_mode.get("enabled")) and risk_level in set(safe_mode.get("disable_risk_levels") or [])
+        if safe_mode_disables:
+            warnings.append(f"safe mode disables {risk_level}-risk imported skills by default")
+
+        import_allowed = not blocking_reasons
+        enable_allowed = import_allowed and not (safe_mode_disables and bool(safe_mode.get("block_enable", True)))
+        return {
+            "schema": GOVERNANCE_DECISION_SCHEMA,
+            "signatureVerified": signature_verified,
+            "verified": False,
+            "verifiedLabel": "not_verified",
+            "signerTrustStatus": signer_status,
+            "safeMode": {
+                "enabled": bool(safe_mode.get("enabled")),
+                "defaultEnabled": bool(import_allowed and not safe_mode_disables),
+                "disablesRiskLevel": bool(safe_mode_disables),
+                "blockEnable": bool(safe_mode.get("block_enable", True)),
+            },
+            "importAllowed": bool(import_allowed),
+            "enableAllowed": bool(enable_allowed),
+            "blockingReasons": blocking_reasons,
+            "warnings": warnings,
+        }
+
+    def _build_dry_run_standard(self, preview: ImportPreview, governance: Mapping[str, Any]) -> dict[str, Any]:
+        skill_id = str(preview.manifest["id"])
+        version = str(preview.manifest["version"])
+        return {
+            "schema": DRY_RUN_SCHEMA,
+            "supported": True,
+            "mode": "package-preflight",
+            "willWrite": False,
+            "wouldImport": bool(governance.get("importAllowed", False)),
+            "wouldEnable": bool(governance.get("safeMode", {}).get("defaultEnabled", False)),
+            "requiresApprovalForApply": True,
+            "writes": [
+                {
+                    "target": "skill-package-store",
+                    "path": f"{skill_id}/versions/{version}",
+                    "blocked": not bool(governance.get("importAllowed", False)),
+                },
+                {
+                    "target": "skill-package-registry",
+                    "path": "registry.json",
+                    "blocked": not bool(governance.get("importAllowed", False)),
+                },
+                {
+                    "target": "projected-user-skill",
+                    "path": str(preview.manifest.get("skill_name") or preview.manifest.get("skillName") or skill_id),
+                    "blocked": not bool(governance.get("importAllowed", False)),
+                },
+            ],
+        }
+
+    @staticmethod
+    def _format_governance_block(action: str, governance: Mapping[str, Any]) -> str:
+        reasons = [str(item) for item in governance.get("blockingReasons") or [] if str(item).strip()]
+        if not reasons and not governance.get("enableAllowed", True):
+            reasons = [str(item) for item in governance.get("warnings") or [] if str(item).strip()]
+        suffix = "; ".join(reasons) if reasons else "blocked by skill package governance"
+        return f"Skill package {action} is blocked: {suffix}."
+
+    def _decorate_installed_entry(self, entry: dict[str, Any], registry: Mapping[str, Any]) -> dict[str, Any]:
+        governance = self._evaluate_installed_governance(entry, registry)
+        entry["governance"] = governance
+        entry["verified"] = False
+        entry["signer_trust_status"] = governance["signerTrustStatus"]
+        entry["safe_mode_disabled"] = bool(governance.get("safeMode", {}).get("disablesRiskLevel"))
+        return entry
+
+    def _disable_matching_skills(
+        self,
+        skills: dict[str, dict[str, Any]],
+        predicate: Any,
+        *,
+        disabled_reason: str,
+    ) -> list[str]:
+        disabled: list[str] = []
+        timestamp = self._utc_timestamp()
+        for skill_id, raw_entry in list(skills.items()):
+            entry = dict(raw_entry)
+            if not predicate(entry):
+                continue
+            if not bool(entry.get("enabled", True)):
+                continue
+            entry["enabled"] = False
+            entry_governance = dict(entry.get("governance") or {})
+            entry_governance["disabled_by"] = disabled_reason
+            entry_governance["disabled_at"] = timestamp
+            entry["governance"] = entry_governance
+            skills[skill_id] = entry
+            disabled.append(skill_id)
+        return disabled
+
+    def _disable_governance_blocked_skills(
+        self,
+        skills: dict[str, dict[str, Any]],
+        governance: Mapping[str, Any],
+    ) -> list[str]:
+        registry = self._registry_document({"skills": skills}, skills=skills, governance=governance)
+        return self._disable_matching_skills(
+            skills,
+            lambda entry: not self._evaluate_installed_governance(entry, registry).get("enableAllowed", False),
+            disabled_reason="safe_mode",
+        )
+
+    def _sync_installed_metadata(self, registry: Mapping[str, Any], skill_ids: Sequence[str]) -> None:
+        for skill_id in skill_ids:
+            entry = registry.get("skills", {}).get(skill_id)
+            if not isinstance(entry, Mapping):
+                continue
+            skill_root = self.skill_store / skill_id
+            if not skill_root.exists():
+                continue
+            installed_entry = dict(entry)
+            installed_entry["versions"] = self._installed_versions(skill_id)
+            self._atomic_write_json(skill_root / "installed.json", installed_entry)
 
     def _export(
         self,
@@ -1288,6 +1878,8 @@ class SkillPackageService:
         skill_id: str,
         registry_entry: dict[str, Any],
         registry: dict[str, Any],
+        *,
+        audit_event: Mapping[str, Any] | None = None,
     ) -> None:
         self.skill_store.mkdir(parents=True, exist_ok=True)
         skill_root = self.skill_store / skill_id
@@ -1300,7 +1892,11 @@ class SkillPackageService:
             installed_entry = dict(registry_entry)
             installed_entry["versions"] = self._installed_versions(skill_id)
             self._atomic_write_json(installed_path, installed_entry)
-        next_registry = {"schema": REGISTRY_SCHEMA, "skills": dict(registry["skills"])}
+        next_registry = self._registry_document(
+            registry,
+            skills=dict(registry["skills"]),
+            audit_event=audit_event,
+        )
         next_registry["skills"][skill_id] = dict(registry_entry)
         self._atomic_write_json(self.registry_path, next_registry)
 
@@ -1340,8 +1936,14 @@ class SkillPackageService:
             return "reinstall"
         return "update"
 
-    @staticmethod
-    def _preview_with_action(preview: ImportPreview, action: str) -> ImportPreview:
+    def _preview_with_action(
+        self,
+        preview: ImportPreview,
+        action: str,
+        *,
+        governance: Mapping[str, Any] | None = None,
+    ) -> ImportPreview:
+        decision = dict(governance or preview.governance or {})
         return ImportPreview(
             package_path=preview.package_path,
             package_sha256=preview.package_sha256,
@@ -1355,6 +1957,8 @@ class SkillPackageService:
             file_count=preview.file_count,
             total_size=preview.total_size,
             update_action=action,
+            governance=decision,
+            dry_run=self._build_dry_run_standard(preview, decision),
         )
 
     def _install_validated(
@@ -1398,18 +2002,27 @@ class SkillPackageService:
 
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             existing_entry = registry["skills"].get(skill_id) or {}
+            governance = preview.governance or self._evaluate_preview_governance(preview, registry)
+            safe_mode_default_enabled = bool(governance.get("safeMode", {}).get("defaultEnabled", True))
+            enabled = bool(existing_entry.get("enabled", True)) and safe_mode_default_enabled
             registry_entry = {
                 "id": skill_id,
                 "name": preview.manifest["name"],
                 "version": version,
-                "enabled": bool(existing_entry.get("enabled", True)),
+                "enabled": enabled,
                 "signer_fingerprint": preview.signer_fingerprint,
                 "signature_status": preview.signature_status,
                 "source": source or str(preview.package_path),
                 "installed_at": timestamp,
+                "package_sha256": preview.package_sha256,
                 "lock_sha256": preview.lock_sha256,
                 "risk_level": preview.risk_level,
                 "permissions": list(preview.permissions),
+                "governance": {
+                    "signer_trust_status": governance.get("signerTrustStatus"),
+                    "verified": False,
+                    "safe_mode_disabled": not enabled and bool(governance.get("safeMode", {}).get("disablesRiskLevel")),
+                },
             }
             versions = sorted(
                 {path.name for path in versions_root.iterdir() if path.is_dir()},
@@ -1418,10 +2031,20 @@ class SkillPackageService:
             installed_entry = dict(registry_entry)
             installed_entry["versions"] = versions
             self._atomic_write_json(installed_path, installed_entry)
-            next_registry = {
-                "schema": REGISTRY_SCHEMA,
-                "skills": dict(registry["skills"]),
-            }
+            next_registry = self._registry_document(
+                registry,
+                skills=dict(registry["skills"]),
+                audit_event={
+                    "event": "skill_package_imported",
+                    "skill_id": skill_id,
+                    "version": version,
+                    "source": source or str(preview.package_path),
+                    "signature_status": preview.signature_status,
+                    "signer_fingerprint": preview.signer_fingerprint,
+                    "risk_level": preview.risk_level,
+                    "enabled": enabled,
+                },
+            )
             next_registry["skills"][skill_id] = registry_entry
             self._atomic_write_json(self.registry_path, next_registry)
             return InstallResult(preview, version_root, registry_entry, changed)

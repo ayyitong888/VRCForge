@@ -1,0 +1,16 @@
+{
+  "id": "community.examples.read-only-avatar-audit",
+  "name": "Read Only Avatar Audit",
+  "skill_name": "read-only-avatar-audit",
+  "version": "1.0.0",
+  "author": "VRCForge Examples",
+  "description": "Read-only avatar scan and reporting skill package example.",
+  "min_vrcforge_version": "0.9.0-beta",
+  "permissions": [
+    "read_project"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/read-only-avatar-audit.json"
+  }
+}

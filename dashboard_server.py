@@ -58,6 +58,7 @@ from optimization_service import (
 )
 from outfit_import_planner import build_outfit_import_plan
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
+from path_to_skill import PathToSkillError, build_path_to_skill_source
 from project_memory_index import scan_project_memory
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_tasks import CancelledError, SubAgentRole, SubAgentTaskRegistry
@@ -570,6 +571,30 @@ class SkillPackagePathRequest(BaseModel):
     allow_downgrade: bool = Field(default=False, alias="allowDowngrade")
     dev_mode: bool = Field(default=False, alias="devMode")
     project_to_user_skills: bool = Field(default=True, alias="projectToUserSkills")
+    dry_run: bool = Field(default=False, alias="dryRun")
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackageSafeModeRequest(BaseModel):
+    enabled: bool
+    reason: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackageSignerRequest(BaseModel):
+    signer_fingerprint: str = Field(alias="signerFingerprint")
+    reason: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class SkillPackageBlockRequest(BaseModel):
+    package_id: str | None = Field(default=None, alias="packageId")
+    package_sha256: str | None = Field(default=None, alias="packageSha256")
+    lock_sha256: str | None = Field(default=None, alias="lockSha256")
+    reason: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -580,6 +605,24 @@ class SkillPackageExportRequest(BaseModel):
     release: bool = False
     private_key_path: str | None = Field(default=None, alias="privateKeyPath")
     private_key_pem: str | None = Field(default=None, alias="privateKeyPem")
+
+    model_config = {"populate_by_name": True}
+
+
+class PathToSkillCaptureRequest(BaseModel):
+    summary: dict[str, Any] = Field(default_factory=dict)
+    package_id: str | None = Field(default=None, alias="packageId")
+    skill_name: str | None = Field(default=None, alias="skillName")
+    title: str | None = None
+    version: str = "1.0.0"
+    author: str = "VRCForge User"
+    min_vrcforge_version: str | None = Field(default=None, alias="minVrcforgeVersion")
+    output_path: str | None = Field(default=None, alias="outputPath")
+    write_source: bool = Field(default=False, alias="writeSource")
+    use_temp_output: bool = Field(default=True, alias="useTempOutput")
+    export_vsk: bool = Field(default=False, alias="exportVsk")
+    confirm_export: bool = Field(default=False, alias="confirmExport")
+    package_output_path: str | None = Field(default=None, alias="packageOutputPath")
 
     model_config = {"populate_by_name": True}
 
@@ -1517,10 +1560,13 @@ def skill_package_error_response(exc: Exception) -> HTTPException:
 
 def list_skill_packages_sync(_params: dict[str, Any] | None = None) -> dict[str, Any]:
     service = skill_package_service()
+    registry = service.load_registry()
     return {
         "ok": True,
         "store": str(service.skill_store),
-        "registry": service.load_registry(),
+        "registry": registry,
+        "governance": registry.get("governance", {}),
+        "audit": registry.get("audit", []),
         "installed": service.list_installed(),
     }
 
@@ -1535,7 +1581,7 @@ def preflight_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "preview": preview.as_dict()}
 
 
-def _project_installed_skill(installed_path: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
+def _project_installed_skill(installed_path: Path, manifest: dict[str, Any], *, enabled: bool = True) -> dict[str, Any] | None:
     skill_file = installed_path / "SKILL.md"
     if not skill_file.is_file():
         return None
@@ -1547,7 +1593,11 @@ def _project_installed_skill(installed_path: Path, manifest: dict[str, Any]) -> 
         raise RuntimeError(f"Refusing to write through symlinked skill directory: {target_dir}")
     target_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(skill_file, target_dir / "SKILL.md")
-    return {"name": target_name, "path": str(target_dir / "SKILL.md")}
+    state: dict[str, Any] | None = None
+    if not enabled:
+        payload = AGENT_GATEWAY.update_user_skill(target_name, {"enabled": False})
+        state = payload.get("skill") if isinstance(payload, dict) else None
+    return {"name": target_name, "path": str(target_dir / "SKILL.md"), "enabled": bool(enabled), "skill": state}
 
 
 def _projected_skill_name(manifest: dict[str, Any]) -> str:
@@ -1584,6 +1634,13 @@ def _delete_projected_skill(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
+    if bool(params.get("dryRun") or params.get("dry_run") or False):
+        preview = service.preflight_import(
+            str(params.get("packagePath") or params.get("package_path") or ""),
+            allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
+            dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
+        )
+        return {"ok": True, "dryRun": True, "preview": preview.as_dict()}
     result = service.install(
         str(params.get("packagePath") or params.get("package_path") or ""),
         source=str(params.get("source") or "local-import"),
@@ -1592,7 +1649,11 @@ def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
     projection = None
     if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
-        projection = _project_installed_skill(result.installed_path, result.preview.manifest)
+        projection = _project_installed_skill(
+            result.installed_path,
+            result.preview.manifest,
+            enabled=bool(result.registry_entry.get("enabled", True)),
+        )
     return {"ok": True, "imported": result.as_dict(), "projectedSkill": projection}
 
 
@@ -1617,6 +1678,58 @@ def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("removeProjectedSkill", params.get("remove_projected_skill", True)) is not False:
         projected = _delete_projected_skill(result.manifest)
     return {"ok": True, "uninstalled": result.as_dict(), "projectedSkill": projected}
+
+
+def _disable_projected_skills_for_packages(service: SkillPackageService, skill_ids: list[str]) -> list[dict[str, Any]]:
+    disabled: list[dict[str, Any]] = []
+    registry = service.load_registry()
+    for skill_id in skill_ids:
+        entry = registry.get("skills", {}).get(skill_id)
+        if not isinstance(entry, dict):
+            continue
+        manifest = service._read_current_manifest(skill_id, str(entry.get("version") or ""))  # noqa: SLF001 - dashboard owns projection sync.
+        if not manifest:
+            continue
+        disabled.append(_set_projected_skill_enabled(manifest, False))
+    return disabled
+
+
+def set_skill_package_safe_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    result = service.set_safe_mode(bool(params.get("enabled")), reason=params.get("reason"))
+    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    return {"ok": True, "safeMode": result, "projectedSkills": projected}
+
+
+def trust_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    result = service.trust_signer(
+        str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
+        reason=params.get("reason"),
+    )
+    return {"ok": True, "signer": result}
+
+
+def revoke_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    result = service.revoke_signer(
+        str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
+        reason=params.get("reason"),
+    )
+    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    return {"ok": True, "signer": result, "projectedSkills": projected}
+
+
+def block_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
+    service = skill_package_service()
+    result = service.block_package(
+        package_id=params.get("packageId") or params.get("package_id"),
+        package_sha256=params.get("packageSha256") or params.get("package_sha256"),
+        lock_sha256=params.get("lockSha256") or params.get("lock_sha256"),
+        reason=params.get("reason"),
+    )
+    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    return {"ok": True, "blocklist": result, "projectedSkills": projected}
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
@@ -1660,6 +1773,105 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         else:
             exported = service.export_dev(source, output_path)
     return {"ok": True, "exported": exported.as_dict()}
+
+
+def _path_to_skill_kwargs(params: dict[str, Any]) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    aliases = {
+        "package_id": ("packageId", "package_id"),
+        "skill_name": ("skillName", "skill_name"),
+        "title": ("title",),
+        "version": ("version",),
+        "author": ("author",),
+        "min_vrcforge_version": ("minVrcforgeVersion", "min_vrcforge_version"),
+    }
+    for target, keys in aliases.items():
+        for key in keys:
+            value = params.get(key)
+            if value is not None and str(value).strip():
+                kwargs[target] = str(value).strip()
+                break
+    return kwargs
+
+
+def _path_to_skill_file_list(source_files: dict[str, str]) -> list[dict[str, Any]]:
+    return [
+        {"path": relative, "bytes": len(content.encode("utf-8"))}
+        for relative, content in sorted(source_files.items())
+    ]
+
+
+def _path_to_skill_vsk_filename(manifest: dict[str, Any]) -> str:
+    raw = str(manifest.get("skill_name") or manifest.get("id") or "captured-skill")
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._")
+    return f"{name or 'captured-skill'}.vsk"
+
+
+def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = False) -> dict[str, Any]:
+    summary = params.get("summary")
+    if not isinstance(summary, dict) or not summary:
+        raise AgentGatewayError("summary is required and must be a JSON object.", status_code=400)
+    export_vsk = bool(params.get("exportVsk") or params.get("export_vsk") or False)
+    if allow_write and export_vsk and not bool(params.get("confirmExport") or params.get("confirm_export") or False):
+        raise AgentGatewayError("confirmExport=true is required before exporting a .vsk package.", status_code=400)
+
+    captured = build_path_to_skill_source(summary, **_path_to_skill_kwargs(params))
+    result: dict[str, Any] = {
+        "ok": True,
+        "schema": "vrcforge.path_to_skill.capture_result.v1",
+        "dryRun": not allow_write,
+        "manifest": captured.manifest,
+        "workflow": captured.workflow,
+        "skillMarkdown": captured.skill_markdown,
+        "sourceFiles": dict(captured.source_files),
+        "files": _path_to_skill_file_list(captured.source_files),
+    }
+    if not allow_write:
+        if any(
+            bool(params.get(key))
+            for key in ("writeSource", "write_source", "outputPath", "output_path", "exportVsk", "export_vsk")
+        ):
+            result["writeSuppressed"] = True
+        return result
+
+    write_requested = bool(
+        params.get("writeSource")
+        or params.get("write_source")
+        or params.get("outputPath")
+        or params.get("output_path")
+        or export_vsk
+    )
+    source_dir: Path | None = None
+    if write_requested:
+        output_text = str(params.get("outputPath") or params.get("output_path") or "").strip()
+        if output_text:
+            source_dir = Path(output_text).expanduser()
+        elif bool(params.get("useTempOutput", params.get("use_temp_output", True))):
+            source_dir = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+        else:
+            raise AgentGatewayError("outputPath is required when useTempOutput=false.", status_code=400)
+        captured.write_to(source_dir)
+        result["dryRun"] = False
+        result["writtenSource"] = {
+            "path": str(source_dir),
+            "files": _path_to_skill_file_list(captured.source_files),
+        }
+
+    if export_vsk:
+        if source_dir is None:
+            source_dir = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+            captured.write_to(source_dir)
+            result["dryRun"] = False
+            result["writtenSource"] = {
+                "path": str(source_dir),
+                "files": _path_to_skill_file_list(captured.source_files),
+            }
+        package_text = str(params.get("packageOutputPath") or params.get("package_output_path") or "").strip()
+        package_output = Path(package_text).expanduser() if package_text else source_dir.parent / _path_to_skill_vsk_filename(captured.manifest)
+        package_output.parent.mkdir(parents=True, exist_ok=True)
+        exported = skill_package_service().export_dev(source_dir, package_output)
+        result["exported"] = exported.as_dict()
+    return result
 
 
 def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -2034,12 +2246,68 @@ def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]
         raise skill_package_error_response(exc) from exc
 
 
+@app.post("/api/app/skill-packages/safe-mode")
+def app_set_skill_package_safe_mode(request: SkillPackageSafeModeRequest) -> dict[str, Any]:
+    try:
+        return set_skill_package_safe_mode_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/trust-signer")
+def app_trust_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
+    try:
+        return trust_skill_package_signer_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/revoke-signer")
+def app_revoke_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
+    try:
+        return revoke_skill_package_signer_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/block-package")
+def app_block_skill_package(request: SkillPackageBlockRequest) -> dict[str, Any]:
+    try:
+        return block_skill_package_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
 @app.post("/api/app/skill-packages/export")
 def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, Any]:
     try:
         return export_skill_package_sync(request.model_dump(by_alias=True))
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/path-to-skill/preview")
+def app_preview_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any]:
+    try:
+        return capture_path_to_skill_sync(request.model_dump(by_alias=True), allow_write=False)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except PathToSkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/path-to-skill/write")
+def app_write_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any]:
+    try:
+        return capture_path_to_skill_sync(request.model_dump(by_alias=True), allow_write=True)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except PathToSkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -13129,6 +13397,10 @@ def normalize_optimization_apply_request_name(tool_name: str) -> str:
         "vrcfury_parameter": "optimization.vrcfury.parameter-compressor-apply-request",
         "vrcfury_parameter_compressor": "optimization.vrcfury.parameter-compressor-apply-request",
         "vrcfury_direct_tree": "optimization.vrcfury.direct-tree-apply-request",
+        "hidden_body_cut": "optimization.aao.hidden-body-cut-apply-request",
+        "aao_hidden_body_cut": "optimization.aao.hidden-body-cut-apply-request",
+        "physbone_cleanup": "optimization.aao.physbone-cleanup-apply-request",
+        "aao_physbone_cleanup": "optimization.aao.physbone-cleanup-apply-request",
     }
     key = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     if key in aliases:
@@ -13223,6 +13495,69 @@ def _find_optimizer_dependency(dependency_doctor: dict[str, Any], optimizer_id: 
     return {}
 
 
+def _optimization_preview_blocked_write_reason(definition: dict[str, Any]) -> str:
+    mode = str(definition.get("mode") or "")
+    if mode == "vrcfury_parameter_compressor":
+        return "VRCFury Parameter Compressor is experimental: writes stay blocked until behavior-regression proof, rollback proof, and a public validated writer path exist."
+    if mode == "vrcfury_direct_tree":
+        return "VRCFury Direct Tree is experimental: VRCForge exposes the request name but blocks writes until controller behavior and rollback proof exist."
+    if mode == "aao_hidden_body_cut":
+        return "AAO hidden body cut is experimental: request preview is blocked until manual occlusion evidence, visual confirmation, validation delta, and rollback proof exist."
+    if mode == "aao_physbone_cleanup":
+        return "AAO PhysBone cleanup is experimental: request preview is blocked until motion behavior proof, validation delta, and rollback proof exist."
+    return "This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet."
+
+
+def _optimization_preview_hard_gate(
+    definition: dict[str, Any],
+    dependency_status: str,
+    blocked_reasons: list[str],
+) -> dict[str, Any]:
+    rows = [
+        {
+            "id": "dependency.installed",
+            "label": "Optimizer dependency installed",
+            "required": True,
+            "status": "pass" if dependency_status == "installed" else "blocked",
+            "blockedReason": None if dependency_status == "installed" else "Install or repair the optimizer dependency first.",
+        },
+        {
+            "id": "rollback.required",
+            "label": "Rollback proof required",
+            "required": True,
+            "status": "pass",
+            "blockedReason": None,
+        },
+    ]
+    if not definition.get("writeSupported"):
+        rows.append(
+            {
+                "id": "experimental.writer_proof",
+                "label": "Experimental writer proof",
+                "required": True,
+                "status": "blocked",
+                "blockedReason": _optimization_preview_blocked_write_reason(definition),
+            }
+        )
+    if blocked_reasons:
+        rows.append(
+            {
+                "id": "preview.blocked_reasons",
+                "label": "Preview-specific blockers",
+                "required": True,
+                "status": "blocked",
+                "blockedReason": "; ".join(blocked_reasons),
+            }
+        )
+    blocking = [row for row in rows if row.get("required") and row.get("status") == "blocked"]
+    return {
+        "status": "blocked" if blocking else "pass",
+        "blockingCount": len(blocking),
+        "blockingIds": [str(row.get("id")) for row in blocking],
+        "rows": rows,
+    }
+
+
 def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     tool = normalize_optimization_apply_request_name(str(params.get("tool") or params.get("externalName") or params.get("gatewayName") or ""))
@@ -13269,10 +13604,7 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     if dependency_status != "installed":
         blocked_reasons.append(f"{dependency.get('label') or definition['optimizerId']} is {dependency_status}; install or repair it first.")
     if not supported_write:
-        if str(definition.get("optimizerId")) == "vrcfury":
-            blocked_reasons.append("VRCFury optimizer writes use internal feature models/menu settings in the inspected package; VRCForge exposes a stable request surface but blocks the write until a public validated writer path exists.")
-        else:
-            blocked_reasons.append("This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet.")
+        blocked_reasons.append(_optimization_preview_blocked_write_reason(definition))
     if not stable_callable:
         blocked_reasons.append("This optimizer is not yet part of the stable avatar optimization skill set.")
     if supported_profiles and profile not in supported_profiles:
@@ -13319,6 +13651,13 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
         "requiresCheckpoint": True,
         "requiresValidation": True,
         "requiresRollbackProof": True,
+        "hardGate": _optimization_preview_hard_gate(definition, dependency_status, blocked_reasons),
+        "rollbackRequirements": {
+            "checkpointScope": ["Assets", "Packages", "ProjectSettings"],
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "postRestoreValidationRequired": True,
+            "generatedResidueCheckRequired": True,
+        },
         "writeSupported": supported_write,
         "stableCallable": stable_callable,
         "supportedProfiles": supported_profiles,

@@ -78,6 +78,21 @@ def export_release(
     return service.export_release(source, output, private_key_pem).package_path
 
 
+def test_read_only_avatar_audit_example_exports_and_preflights(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "examples" / "skill-packages" / "read-only-avatar-audit"
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.9.0-beta")
+
+    package = service.export_dev(source, tmp_path / "read-only-avatar-audit.vsk").package_path
+    preview = service.preflight_import(package).as_dict()
+
+    assert preview["manifest"]["id"] == "community.examples.read-only-avatar-audit"
+    assert preview["manifest"]["entrypoints"]["workflow"] == "workflows/read-only-avatar-audit.json"
+    assert preview["risk_level"] == "low"
+    assert preview["governance"]["importAllowed"] is True
+    assert preview["dryRun"]["willWrite"] is False
+    assert "read_project" in preview["permissions"]
+
+
 def test_signed_release_roundtrip_filters_assets_and_installs_atomically(tmp_path: Path) -> None:
     store = tmp_path / "store"
     service = SkillPackageService(store, vrcforge_version="0.5.1-beta")
@@ -132,6 +147,108 @@ def test_signed_release_roundtrip_filters_assets_and_installs_atomically(tmp_pat
     assert entry["signer_fingerprint"] == key_pair.fingerprint
     assert entry["source"] == "unit-test"
     assert not list(store.glob(".registry.json.*.tmp"))
+
+
+def test_signed_package_trust_is_separate_from_verification(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    key_pair = service.generate_signing_keypair()
+    package = export_release(
+        service,
+        make_skill_source(tmp_path, permissions=["read_project"]),
+        tmp_path / "signed.vsk",
+        key_pair.private_key_pem,
+    )
+
+    preview = service.preflight_import(package).as_dict()
+
+    assert preview["signature_status"] == "signed"
+    assert preview["governance"]["signatureVerified"] is True
+    assert preview["governance"]["verified"] is False
+    assert preview["governance"]["signerTrustStatus"] == "untrusted"
+    assert preview["governance"]["importAllowed"] is True
+
+    trusted = service.trust_signer(key_pair.fingerprint, reason="local test signer")
+    trusted_preview = service.preflight_import(package).as_dict()
+
+    assert trusted["governance"]["trusted_signers"][key_pair.fingerprint]["reason"] == "local test signer"
+    assert trusted_preview["governance"]["signerTrustStatus"] == "trusted"
+    assert trusted_preview["governance"]["verified"] is False
+    assert service.load_registry()["audit"][-1]["event"] == "skill_package_signer_trusted"
+
+
+def test_revoked_signer_blocks_import_and_enable(tmp_path: Path) -> None:
+    key_pair = SkillPackageService.generate_signing_keypair()
+    build_service = SkillPackageService(tmp_path / "build-store", vrcforge_version="0.5.1")
+    package = export_release(
+        build_service,
+        make_skill_source(tmp_path, permissions=["read_project"]),
+        tmp_path / "signed.vsk",
+        key_pair.private_key_pem,
+    )
+    blocked_import = SkillPackageService(tmp_path / "blocked-import", vrcforge_version="0.5.1")
+
+    blocked_import.revoke_signer(key_pair.fingerprint, reason="compromised")
+    preview = blocked_import.preflight_import(package).as_dict()
+
+    assert preview["governance"]["signerTrustStatus"] == "revoked"
+    assert preview["governance"]["importAllowed"] is False
+    assert any("compromised" in item for item in preview["governance"]["blockingReasons"])
+    with pytest.raises(PackageSecurityError, match="revoked"):
+        blocked_import.install(package)
+
+    installed_service = SkillPackageService(tmp_path / "installed-store", vrcforge_version="0.5.1")
+    installed_service.install(package)
+    installed_service.set_enabled("com.example.avatar-helper", False)
+    revoked = installed_service.revoke_signer(key_pair.fingerprint, reason="compromised")
+
+    assert revoked["disabledSkillIds"] == []
+    with pytest.raises(PackageSecurityError, match="revoked"):
+        installed_service.set_enabled("com.example.avatar-helper", True)
+    assert installed_service.load_registry()["audit"][-1]["event"] == "skill_package_enable_blocked"
+
+
+def test_blocklisted_package_blocks_import_and_enable(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    package = service.export_dev(make_skill_source(tmp_path), tmp_path / "dev.vsk").package_path
+    preflight = service.preflight_import(package).as_dict()
+
+    service.block_package(package_id="com.example.avatar-helper", reason="known bad recipe")
+    blocked = service.preflight_import(package).as_dict()
+
+    assert preflight["governance"]["importAllowed"] is True
+    assert blocked["governance"]["importAllowed"] is False
+    assert any("known bad recipe" in item for item in blocked["governance"]["blockingReasons"])
+    with pytest.raises(PackageSecurityError, match="blocklisted"):
+        service.install(package)
+
+    installed_service = SkillPackageService(tmp_path / "installed-store", vrcforge_version="0.5.1")
+    installed_service.install(package)
+    installed_service.set_enabled("com.example.avatar-helper", False)
+    disabled = installed_service.block_package(package_id="com.example.avatar-helper", reason="known bad recipe")
+
+    assert disabled["disabledSkillIds"] == []
+    with pytest.raises(PackageSecurityError, match="blocklisted"):
+        installed_service.set_enabled("com.example.avatar-helper", True)
+
+
+def test_safe_mode_disables_risky_imports_and_blocks_enable(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    risky_source = make_skill_source(tmp_path, permissions=["read_project", "unity_modify_materials"])
+    package = service.export_dev(risky_source, tmp_path / "risky.vsk").package_path
+
+    service.set_safe_mode(True, reason="test lockdown")
+    preview = service.preflight_import(package).as_dict()
+    installed = service.install(package)
+
+    assert preview["governance"]["importAllowed"] is True
+    assert preview["governance"]["enableAllowed"] is False
+    assert preview["governance"]["safeMode"]["defaultEnabled"] is False
+    assert preview["dryRun"]["willWrite"] is False
+    assert preview["dryRun"]["wouldEnable"] is False
+    assert installed.registry_entry["enabled"] is False
+    assert installed.registry_entry["governance"]["safe_mode_disabled"] is True
+    with pytest.raises(PackageSecurityError, match="safe mode"):
+        service.set_enabled("com.example.avatar-helper", True)
 
 
 def test_set_enabled_and_uninstall_package_keep_registry_and_metadata_in_sync(tmp_path: Path) -> None:

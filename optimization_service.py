@@ -148,6 +148,12 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "description": "Plan high-risk hidden body cut review gates without adding AAO Remove Mesh components.",
     },
     {
+        "externalName": "optimization.shader.adapter-registry",
+        "gatewayName": "vrcforge_optimization_shader_adapter_registry",
+        "category": "read/debug",
+        "description": "Detect lilToon, Poiyomi, and generic semantic shader adapter coverage without mutating materials.",
+    },
+    {
         "externalName": "optimization.mesh.triangle-audit",
         "gatewayName": "vrcforge_optimization_mesh_triangle_audit",
         "category": "read/debug",
@@ -236,6 +242,18 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "gatewayName": "vrcforge_optimization_ma2bt_convertibility_plan",
         "category": "plan/preview",
         "description": "Plan MA2BT-Pro conversion candidates and skip reasons without applying MA2BT-Pro.",
+    },
+    {
+        "externalName": "optimization.ma2bt.skipped-reasons",
+        "gatewayName": "vrcforge_optimization_ma2bt_skipped_reasons",
+        "category": "read/debug",
+        "description": "Summarize MA2BT-Pro skipped-layer reasons and recommended review actions without applying conversion.",
+    },
+    {
+        "externalName": "optimization.profile.diff",
+        "gatewayName": "vrcforge_optimization_profile_diff",
+        "category": "read/debug",
+        "description": "Compare before/after/rollback optimization rank, metrics, and parameter budget snapshots without writing.",
     },
     {
         "externalName": "optimization.visual-regression.plan",
@@ -433,8 +451,10 @@ FUTURE_WRITE_REQUEST_TOOLS = [
     {"externalName": "optimization.ttt.atlas-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
     {"externalName": "optimization.ma2bt.convert-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
     {"externalName": "optimization.meshia.simplify-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
-    {"externalName": "optimization.vrcfury.parameter-compressor-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
-    {"externalName": "optimization.vrcfury.direct-tree-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
+    {"externalName": "optimization.vrcfury.parameter-compressor-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
+    {"externalName": "optimization.vrcfury.direct-tree-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
+    {"externalName": "optimization.aao.hidden-body-cut-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
+    {"externalName": "optimization.aao.physbone-cleanup-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
 ]
 
 
@@ -509,7 +529,7 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "mode": "meshia_simplify",
         "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
         "riskLevel": "high",
-        "versionStage": "0.8.1-beta",
+        "versionStage": "0.9.x-rc",
         "writeSupported": True,
         "stableCallable": True,
         "supportedProfiles": ["pc_conservative", "conservative_pc", "pc_medium", "balanced_pc", "custom"],
@@ -525,7 +545,7 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "mode": "vrcfury_parameter_compressor",
         "componentType": "",
         "riskLevel": "high",
-        "versionStage": "0.8.1-beta",
+        "versionStage": "0.9.x-rc",
         "writeSupported": False,
         "stableCallable": True,
         "supportedProfiles": [],
@@ -545,6 +565,36 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "stableCallable": True,
         "supportedProfiles": [],
         "description": "Stable request surface for VRCFury Direct Tree. It returns a blocked preview by default because Direct Tree remains experimental.",
+    },
+    {
+        "externalName": "optimization.aao.hidden-body-cut-apply-request",
+        "gatewayName": "vrcforge_optimization_aao_hidden_body_cut_apply_request",
+        "optimizerId": "aao",
+        "planTool": "optimization.aao.hidden-body-cut-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "aao_hidden_body_cut",
+        "componentType": "Anatawa12.AvatarOptimizer.RemoveMeshByMask",
+        "riskLevel": "high",
+        "versionStage": "0.9.x-rc",
+        "writeSupported": False,
+        "stableCallable": True,
+        "supportedProfiles": [],
+        "description": "Experimental request surface for AAO hidden body cut. It returns a blocked preview until manual occlusion, visual, validation, and rollback proof exist.",
+    },
+    {
+        "externalName": "optimization.aao.physbone-cleanup-apply-request",
+        "gatewayName": "vrcforge_optimization_aao_physbone_cleanup_apply_request",
+        "optimizerId": "aao",
+        "planTool": "optimization.physbone.reduce-plan",
+        "targetTool": "vrcforge_configure_optimizer_component",
+        "mode": "aao_physbone_cleanup",
+        "componentType": "Anatawa12.AvatarOptimizer.MergePhysBone",
+        "riskLevel": "high",
+        "versionStage": "0.9.x-rc",
+        "writeSupported": False,
+        "stableCallable": True,
+        "supportedProfiles": [],
+        "description": "Experimental request surface for AAO PhysBone cleanup. It returns a blocked preview until motion behavior, validation, and rollback proof exist.",
     },
 ]
 
@@ -665,12 +715,14 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
     aao_plan = build_aao_trace_plan(dependency_doctor, validation)
     physbone_reduce_plan = build_physbone_reduce_plan(dependency_doctor, physbone_audit)
     hidden_body_cut_plan = build_aao_hidden_body_cut_plan(dependency_doctor, validation)
+    shader_adapter_registry = build_shader_adapter_registry(dependency_doctor, validation)
     lac_plan = build_lac_profile_plan(profile, dependency_doctor, texture_audit)
     ttt_plan = build_ttt_atlas_plan(dependency_doctor, material_audit, texture_audit)
     meshia_plan = build_meshia_simplify_plan(dependency_doctor, mesh_audit)
     vrcfury_report = build_vrcfury_compatibility_report(dependency_doctor, validation)
     ma_audit = build_ma_responsive_layer_audit(validation)
     ma2bt_plan = build_ma2bt_convertibility_plan(dependency_doctor, ma_audit)
+    ma2bt_skipped_reasons = build_ma2bt_skipped_reason_diagnostics(ma2bt_plan)
     visual_plan = build_visual_regression_plan(params)
     rollback = build_rollback_verify(params, validation, dependency_doctor)
     performance_tools_report = build_performance_tools_report(dependency_doctor, validation)
@@ -718,6 +770,8 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "parameterAnimatorUsage": parameter_animator_usage,
             "parameterCompressibility": parameter_compressibility,
             "maResponsiveLayers": ma_audit,
+            "shaderAdapterRegistry": shader_adapter_registry,
+            "ma2btSkippedReasons": ma2bt_skipped_reasons,
         },
         "plans": {
             "lacProfile": lac_plan,
@@ -733,6 +787,7 @@ def build_optimization_report(params: dict[str, Any], validation_report: dict[st
             "visualRegression": visual_plan,
             "rollbackVerify": rollback,
             "performanceTools": performance_tools_report,
+            "profileDiff": build_optimizer_profile_diff(params, validation),
         },
         "topOffenders": build_top_offenders(baseline, texture_audit, material_audit, mesh_audit, parameter_audit),
         "actionCards": action_cards,
@@ -785,6 +840,8 @@ def build_optimization_tool_result(
         result = build_physbone_reduce_plan(dependency_doctor, build_physbone_audit(validation))
     elif external_name == "optimization.aao.hidden-body-cut-plan":
         result = build_aao_hidden_body_cut_plan(dependency_doctor, validation)
+    elif external_name == "optimization.shader.adapter-registry":
+        result = build_shader_adapter_registry(dependency_doctor, validation)
     elif external_name == "optimization.mesh.triangle-audit":
         result = build_mesh_triangle_audit(validation)
     elif external_name == "optimization.meshia.simplify-plan":
@@ -815,6 +872,12 @@ def build_optimization_tool_result(
         result = build_ma_responsive_layer_audit(validation)
     elif external_name == "optimization.ma2bt.convertibility-plan":
         result = build_ma2bt_convertibility_plan(dependency_doctor, build_ma_responsive_layer_audit(validation))
+    elif external_name == "optimization.ma2bt.skipped-reasons":
+        result = build_ma2bt_skipped_reason_diagnostics(
+            build_ma2bt_convertibility_plan(dependency_doctor, build_ma_responsive_layer_audit(validation))
+        )
+    elif external_name == "optimization.profile.diff":
+        result = build_optimizer_profile_diff(params, validation)
     elif external_name == "optimization.visual-regression.plan":
         result = build_visual_regression_plan(params)
     elif external_name == "optimization.rollback.verify":
@@ -1385,6 +1448,14 @@ def build_vrcfury_parameter_compressor_plan(dependency_doctor: dict[str, Any], v
         "applyRequestTool": "optimization.vrcfury.parameter-compressor-apply-request",
         "applyBlocked": True,
         "blockedReason": "VRCFury Parameter Compressor writes stay experimental until behavior-regression and rollback proof exist.",
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("vrcfury.installed", "VRCFury package detected", dep.get("status") == "installed", "Install or repair VRCFury before any compressor request."),
+                _optimization_gate_row("parameter.safe_candidates", "Safe compression candidates identified", bool(candidates), "Run inventory, menu-map, animator-usage, and compressibility planning first."),
+                _optimization_gate_row("behavior_regression.proof", "Menu/FX behavior regression proof", False, "Capture before/after behavior evidence for every touched parameter before enabling writes."),
+                _optimization_gate_row("rollback.proof", "Rollback proof", False, "A public apply proof must include approval, checkpoint, validation delta, rollback, and post-restore validation."),
+            ]
+        ),
         "candidateCount": len(candidates),
         "candidates": candidates[:120],
         "dangerCounts": {
@@ -1400,6 +1471,7 @@ def build_vrcfury_parameter_compressor_plan(dependency_doctor: dict[str, Any], v
             "PC/Android parameter-order compatibility check",
             "approval -> checkpoint -> apply -> validation -> rollback proof",
         ],
+        "rollbackRequirements": _optimization_rollback_requirements("VRCFury Parameter Compressor"),
     }
 
 
@@ -1698,7 +1770,18 @@ def build_physbone_reduce_plan(dependency_doctor: dict[str, Any], physbone_audit
         },
         "reviewMetrics": review_metrics,
         "candidates": candidates[:120],
-        "writePolicy": "No PhysBone merge/remove writer is exposed in this plan.",
+        "applyBlocked": True,
+        "applyRequestTool": "optimization.aao.physbone-cleanup-apply-request",
+        "writePolicy": "Experimental request-only surface is exposed, but preview stays blocked until motion proof, validation delta, and rollback proof exist.",
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("aao.installed", "AAO package detected", dep.get("status") == "installed", "Install or repair AAO before any PhysBone cleanup request."),
+                _optimization_gate_row("physbone.candidates", "PhysBone cleanup candidates found", bool(candidates or review_metrics), "Run PhysBone audit and reduce plan before requesting cleanup."),
+                _optimization_gate_row("motion_behavior.proof", "Motion behavior proof", False, "Capture Play Mode motion review for every touched PhysBone group."),
+                _optimization_gate_row("validation_delta.proof", "Validation delta proof", False, "Attach before/after validation delta before enabling the request."),
+                _optimization_gate_row("rollback.proof", "Rollback proof", False, "Attach checkpoint restore and post-restore validation proof before enabling the request."),
+            ]
+        ),
         "requiredProof": [
             "baseline PhysBone metrics",
             "Play Mode motion screenshot/video review",
@@ -1706,6 +1789,7 @@ def build_physbone_reduce_plan(dependency_doctor: dict[str, Any], physbone_audit
             "checkpoint restore proof",
             "Quest/mobile component limit review when targeting Android",
         ],
+        "rollbackRequirements": _optimization_rollback_requirements("AAO PhysBone cleanup"),
     }
 
 
@@ -1737,7 +1821,18 @@ def build_aao_hidden_body_cut_plan(dependency_doctor: dict[str, Any], validation
         "blocked": True,
         "blockedReason": "Hidden body cut remains blocked until occlusion evidence, visual proof, and rollback proof are captured.",
         "applyBlocked": True,
-        "applyRequestTool": None,
+        "applyRequestTool": "optimization.aao.hidden-body-cut-apply-request",
+        "manualConfirmationRequired": True,
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("aao.installed", "AAO package detected", dep.get("status") == "installed", "Install or repair AAO before any hidden body cut request."),
+                _optimization_gate_row("hidden_body.candidates", "Hidden body cut candidates found", bool(unique), "Run avatar item and AAO trace scans to identify covered body meshes."),
+                _optimization_gate_row("occlusion.evidence", "Clothing coverage or mask evidence", False, "User must provide or confirm occlusion/mask evidence for each body area."),
+                _optimization_gate_row("visual_review.proof", "Manual visual confirmation", False, "Capture front/side/back and motion/gesture review before writes."),
+                _optimization_gate_row("validation_delta.proof", "Validation delta proof", False, "Attach before/after validation delta before enabling the request."),
+                _optimization_gate_row("rollback.proof", "Rollback proof", False, "Attach checkpoint restore and post-restore validation proof before enabling the request."),
+            ]
+        ),
         "candidateCount": len(unique),
         "candidates": unique[:120],
         "requiredEvidence": [
@@ -1748,6 +1843,7 @@ def build_aao_hidden_body_cut_plan(dependency_doctor: dict[str, Any], validation
             "validation delta with no new errors",
             "checkpoint rollback proof",
         ],
+        "rollbackRequirements": _optimization_rollback_requirements("AAO hidden body cut"),
         "notes": ["This plan does not add AAO Remove Mesh By Mask or Remove Mesh By BlendShape components."],
     }
 
@@ -1817,6 +1913,323 @@ def build_performance_tools_report(dependency_doctor: dict[str, Any], validation
             "textureMemoryBytes": _first_numeric(materials, ("textureMemoryBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")),
         },
     }
+
+
+def build_shader_adapter_registry(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    del dependency_doctor
+    materials = _source_payload(_validation_sources(validation), "materials")
+    rows = _shader_material_rows(materials)
+    material_coverage = []
+    detected_adapters: set[str] = set()
+    for row in rows:
+        adapter = _classify_shader_adapter(row.get("materialName") or "", row.get("shaderName") or "")
+        detected_adapters.add(adapter["adapter"])
+        material_coverage.append({**row, **adapter})
+    adapters = [_shader_adapter_definition(adapter_id, detected_adapters) for adapter_id in ("liltoon", "poiyomi", "generic-semantic")]
+    unsupported_count = sum(1 for item in material_coverage if item.get("adapter") == "unsupported")
+    return {
+        "readOnly": True,
+        "schema": "vrcforge.shader_adapter_registry.v1",
+        "registryVersion": "0.9.x-rc",
+        "rawPropertyMutationBlocked": True,
+        "summary": {
+            "materialCount": len(rows),
+            "detectedAdapters": sorted(detected_adapters - {"unsupported"}),
+            "unsupportedMaterialCount": unsupported_count,
+            "scannerCoverage": "metadata" if rows else "unknown",
+        },
+        "adapters": adapters,
+        "materialCoverage": material_coverage[:160],
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("adapter.registry", "Known shader adapters registered", True, "lilToon, Poiyomi, and generic semantic adapters must be present."),
+                _optimization_gate_row("raw_property.blocked", "Raw property-name mutation blocked", True, "Shader writes must go through semantic adapter allowlists."),
+                _optimization_gate_row("rollback.required", "Shader apply rollback required", True, "Shader/material writes must use approval, checkpoint, validation, and restore."),
+            ]
+        ),
+        "rollbackRequirements": _optimization_rollback_requirements("Shader adapter apply"),
+        "notes": ["This registry detects adapter coverage only; it does not mutate material properties."],
+    }
+
+
+def build_ma2bt_skipped_reason_diagnostics(ma2bt_plan: dict[str, Any]) -> dict[str, Any]:
+    skipped_layers = ma2bt_plan.get("skippedLayers") if isinstance(ma2bt_plan.get("skippedLayers"), list) else []
+    diagnostics = ma2bt_plan.get("diagnostics") if isinstance(ma2bt_plan.get("diagnostics"), list) else []
+    return {
+        "readOnly": True,
+        "schema": "vrcforge.ma2bt.skipped_reasons.v1",
+        "summary": {
+            "skippedLayerCount": ma2bt_plan.get("summary", {}).get("skippedLayerCount"),
+            "convertibleLayerCount": ma2bt_plan.get("summary", {}).get("convertibleLayerCount"),
+            "scannerCoverage": ma2bt_plan.get("summary", {}).get("scannerCoverage"),
+            "diagnosticCount": len(diagnostics),
+        },
+        "skipReasonCounts": ma2bt_plan.get("summary", {}).get("skipReasonCounts") or {},
+        "diagnostics": diagnostics,
+        "skippedLayers": skipped_layers[:160],
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("ma2bt.scan", "MA responsive layer scan available", ma2bt_plan.get("summary", {}).get("scannerCoverage") != "unknown", "Refresh FX animator and MA scans before requesting conversion."),
+                _optimization_gate_row("ma2bt.skipped_reasons", "Skipped layers include reasons", all(item.get("skipReason") for item in skipped_layers), "Every skipped layer must carry a reason and review action.", required=bool(skipped_layers)),
+                _optimization_gate_row("rollback.required", "MA2BT rollback proof required", True, "MA2BT writes must prove MA-authored FX behavior, generated BlendTrees, and controller deltas restore cleanly."),
+            ]
+        ),
+        "rollbackRequirements": _optimization_rollback_requirements("MA2BT-Pro conversion"),
+    }
+
+
+def build_optimizer_profile_diff(params: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    before_report, before_provided = _profile_report_from_params(
+        params,
+        ("beforeValidation", "before_validation", "before"),
+        validation,
+    )
+    after_report, after_provided = _profile_report_from_params(params, ("afterValidation", "after_validation", "after"), {})
+    rollback_report, rollback_provided = _profile_report_from_params(params, ("rollbackValidation", "rollback_validation", "rollback"), {})
+    before = _optimizer_profile_snapshot(before_report)
+    after = _optimizer_profile_snapshot(after_report)
+    rollback = _optimizer_profile_snapshot(rollback_report) if rollback_provided else {}
+    return {
+        "readOnly": True,
+        "schema": "vrcforge.optimization.profile_diff.v1",
+        "summary": {
+            "beforeProvided": before_provided,
+            "afterProvided": after_provided,
+            "rollbackProvided": rollback_provided,
+            "pcRankBefore": before.get("pc", {}).get("rank"),
+            "pcRankAfter": after.get("pc", {}).get("rank"),
+            "pcRankRollback": rollback.get("pc", {}).get("rank") if rollback else None,
+            "questRankBefore": before.get("quest", {}).get("rank"),
+            "questRankAfter": after.get("quest", {}).get("rank"),
+            "questRankRollback": rollback.get("quest", {}).get("rank") if rollback else None,
+        },
+        "hardGate": _optimization_hard_gate(
+            [
+                _optimization_gate_row("profile.before", "Before validation snapshot", before_provided, "Provide beforeValidation or a live validation context."),
+                _optimization_gate_row("profile.after", "After validation snapshot", after_provided, "Provide afterValidation from the applied optimizer state."),
+                _optimization_gate_row("profile.rollback", "Rollback validation snapshot", rollback_provided, "Provide rollbackValidation after restore."),
+            ]
+        ),
+        "before": before,
+        "after": after,
+        "rollback": rollback,
+        "pc": _optimizer_platform_diff(before.get("pc") or {}, after.get("pc") or {}, rollback.get("pc") if rollback else {}),
+        "quest": _optimizer_platform_diff(before.get("quest") or {}, after.get("quest") or {}, rollback.get("quest") if rollback else {}),
+        "parameters": _optimizer_parameter_diff(before.get("parameters") or {}, after.get("parameters") or {}, rollback.get("parameters") if rollback else {}),
+        "requiredProof": [
+            "before vrcforge.validation.v1",
+            "after vrcforge.validation.v1",
+            "rollback vrcforge.validation.v1",
+            "checkpoint id and optimizer request id",
+        ],
+    }
+
+
+def _optimization_gate_row(
+    row_id: str,
+    label: str,
+    passed: bool,
+    blocked_reason: str,
+    *,
+    required: bool = True,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": row_id,
+        "label": label,
+        "required": required,
+        "status": "pass" if passed else ("blocked" if required else "warning"),
+        "ok": bool(passed),
+        "blockedReason": None if passed else blocked_reason,
+        "evidence": evidence or {},
+    }
+
+
+def _optimization_hard_gate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    blocking = [row for row in rows if row.get("required") and row.get("status") == "blocked"]
+    warnings = [row for row in rows if row.get("status") == "warning"]
+    return {
+        "status": "blocked" if blocking else ("warning" if warnings else "pass"),
+        "blockingCount": len(blocking),
+        "warningCount": len(warnings),
+        "blockingIds": [str(row.get("id")) for row in blocking],
+        "rows": rows,
+    }
+
+
+def _optimization_rollback_requirements(subject: str) -> dict[str, Any]:
+    return {
+        "subject": subject,
+        "required": True,
+        "checkpointScope": ["Assets", "Packages", "ProjectSettings"],
+        "requiredArtifacts": [
+            "approval id",
+            "checkpoint id",
+            "before validation",
+            "after validation",
+            "rollback validation",
+            "generated residue check",
+        ],
+        "restoreTool": "vrcforge_restore_checkpoint",
+        "postRestoreValidationRequired": True,
+    }
+
+
+def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for entry in _walk_dicts(materials):
+        renderer = _direct_text(entry, ("rendererPath", "renderer", "gameObjectPath", "objectPath", "path")) or ""
+        shader = _direct_text(entry, ("shaderName", "shader", "shaderPath")) or ""
+        material = _direct_text(entry, ("materialName", "material", "name", "assetPath")) or ""
+        if material or shader:
+            rows.append({"renderer": _safe_asset_label(renderer), "materialName": _safe_asset_label(material), "shaderName": shader[:220]})
+        raw_materials = entry.get("materials")
+        if isinstance(raw_materials, list):
+            for item in raw_materials:
+                text = str(item or "").strip()
+                if text:
+                    rows.append({"renderer": _safe_asset_label(renderer), "materialName": _safe_asset_label(text), "shaderName": shader[:220]})
+    return _unique_by(rows, "materialName")
+
+
+def _classify_shader_adapter(material_name: str, shader_name: str) -> dict[str, Any]:
+    text = f"{material_name} {shader_name}".lower()
+    if "liltoon" in text or "lil toon" in text or "lil/liltoon" in text:
+        adapter = "liltoon"
+        confidence = "high"
+    elif "poiyomi" in text or "poi toon" in text:
+        adapter = "poiyomi"
+        confidence = "high"
+    elif material_name or shader_name:
+        adapter = "generic-semantic"
+        confidence = "medium" if shader_name else "low"
+    else:
+        adapter = "unsupported"
+        confidence = "low"
+    definition = _shader_adapter_definition(adapter, {adapter})
+    return {
+        "adapter": adapter,
+        "confidence": confidence,
+        "safeSemanticProperties": definition.get("safeSemanticProperties") or [],
+        "blockedProperties": definition.get("blockedProperties") or [],
+    }
+
+
+def _shader_adapter_definition(adapter_id: str, detected_adapters: set[str]) -> dict[str, Any]:
+    definitions = {
+        "liltoon": {
+            "label": "lilToon",
+            "knownPackageIds": ["jp.lilxyzw.liltoon"],
+            "safeSemanticProperties": ["main_color", "shade_color", "smoothness", "emission_strength", "rendering_mode"],
+            "blockedProperties": ["raw_property_name", "unknown_texture_slot", "render_queue_without_adapter"],
+        },
+        "poiyomi": {
+            "label": "Poiyomi",
+            "knownPackageIds": ["com.poiyomi.toon"],
+            "safeSemanticProperties": ["main_color", "emission_strength", "smoothness", "metallic", "render_queue"],
+            "blockedProperties": ["raw_property_name", "shader_feature_toggle_without_adapter", "unknown_keyword"],
+        },
+        "generic-semantic": {
+            "label": "Generic semantic",
+            "knownPackageIds": [],
+            "safeSemanticProperties": ["main_color", "smoothness", "metallic", "emission_color"],
+            "blockedProperties": ["raw_property_name", "shader_specific_keyword", "unsupported_blend_mode"],
+        },
+        "unsupported": {
+            "label": "Unsupported",
+            "knownPackageIds": [],
+            "safeSemanticProperties": [],
+            "blockedProperties": ["all_writes"],
+        },
+    }
+    base = definitions.get(adapter_id, definitions["unsupported"])
+    return {
+        "id": adapter_id,
+        **base,
+        "detectedInCurrentScan": adapter_id in detected_adapters,
+        "applyPolicy": "semantic-allowlist-only" if adapter_id != "unsupported" else "blocked",
+    }
+
+
+def _profile_report_from_params(
+    params: dict[str, Any],
+    keys: tuple[str, ...],
+    fallback: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    for key in keys:
+        value = params.get(key)
+        if isinstance(value, dict):
+            return value, True
+    return (fallback if isinstance(fallback, dict) else {}), bool(fallback)
+
+
+def _optimizer_profile_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    sources = _validation_sources(report)
+    pc = _source_payload(sources, "performance_pc")
+    quest = _source_payload(sources, "performance_quest")
+    parameters = _source_payload(sources, "parameters")
+    return {
+        "pc": _optimizer_platform_snapshot(pc),
+        "quest": _optimizer_platform_snapshot(quest),
+        "parameters": {
+            "syncedBits": _first_numeric(parameters, ("syncedBits", "syncedParameterBits", "totalEstimatedCost")),
+            "totalCustomParameters": _first_numeric(parameters, ("totalCustomParameters", "totalParameters")),
+        },
+    }
+
+
+def _optimizer_platform_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": _first_text(payload, ("rank", "performanceRank", "overallRank", "rating")) or "unknown",
+        "triangles": _first_numeric(payload, ("triangleCount", "triangles", "polygonCount", "polygons")),
+        "downloadSizeBytes": _first_size_bytes(payload, ("downloadSizeBytes", "downloadBytes", "compressedSizeBytes", "downloadSizeMb")),
+        "uncompressedSizeBytes": _first_size_bytes(payload, ("uncompressedSizeBytes", "uncompressedBytes", "uncompressedSizeMb")),
+        "textureMemoryBytes": _first_size_bytes(payload, ("textureMemoryBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")),
+        "materialSlots": _first_numeric(payload, ("materialSlotCount", "slotCount", "materialCount")),
+        "skinnedMeshes": _first_numeric(payload, ("skinnedMeshCount", "skinnedMeshes")),
+        "physBoneAffectedTransforms": _first_numeric(payload, ("physBoneAffectedTransforms", "affectedTransforms")),
+    }
+
+
+def _optimizer_platform_diff(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any] | None) -> dict[str, Any]:
+    rollback = rollback or {}
+    metric_keys = [
+        "triangles",
+        "downloadSizeBytes",
+        "uncompressedSizeBytes",
+        "textureMemoryBytes",
+        "materialSlots",
+        "skinnedMeshes",
+        "physBoneAffectedTransforms",
+    ]
+    return {
+        "rankBefore": before.get("rank") or "unknown",
+        "rankAfter": after.get("rank") or "unknown",
+        "rankRollback": rollback.get("rank") if rollback else None,
+        "rankChanged": (before.get("rank") or "unknown") != (after.get("rank") or "unknown"),
+        "rollbackRankMatchesBefore": bool(rollback) and (rollback.get("rank") or "unknown") == (before.get("rank") or "unknown"),
+        "metricsDelta": {key: _numeric_delta(before.get(key), after.get(key)) for key in metric_keys},
+        "rollbackMetricsMatchBefore": bool(rollback)
+        and all(rollback.get(key) == before.get(key) for key in metric_keys if before.get(key) is not None or rollback.get(key) is not None),
+    }
+
+
+def _optimizer_parameter_diff(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any] | None) -> dict[str, Any]:
+    rollback = rollback or {}
+    return {
+        "syncedBitsDelta": _numeric_delta(before.get("syncedBits"), after.get("syncedBits")),
+        "totalCustomParametersDelta": _numeric_delta(before.get("totalCustomParameters"), after.get("totalCustomParameters")),
+        "rollbackMatchesBefore": bool(rollback)
+        and rollback.get("syncedBits") == before.get("syncedBits")
+        and rollback.get("totalCustomParameters") == before.get("totalCustomParameters"),
+    }
+
+
+def _numeric_delta(before: Any, after: Any) -> int | float | None:
+    if isinstance(before, (int, float)) and not isinstance(before, bool) and isinstance(after, (int, float)) and not isinstance(after, bool):
+        delta = after - before
+        return int(delta) if isinstance(delta, float) and delta.is_integer() else delta
+    return None
 
 
 def build_ma_responsive_layer_audit(validation: dict[str, Any]) -> dict[str, Any]:
