@@ -1087,6 +1087,61 @@ export type AvatarListResult = {
   avatarCount?: number;
 };
 
+export type AvatarEncryptionProfileCard = {
+  id: "lite" | "standard" | "paranoid" | string;
+  icon?: string;
+  title?: string;
+  label?: string;
+  description?: string;
+  recommended?: boolean;
+  cost?: string;
+  deviceFit?: string;
+  protection?: string;
+  applyStatus?: string;
+};
+
+export type AvatarEncryptionBenchmarkRow = {
+  profile?: string;
+  label?: string;
+  triangles?: number;
+  avatarScale?: string;
+  baselineFps?: number;
+  estimatedFps?: number;
+  estimatedFpsLoss?: number;
+  estimatedFrameTimeAddedMs?: number;
+  estimatedImpactPercent?: number;
+  gpuCost?: string;
+};
+
+export type AvatarEncryptionPlanResult = {
+  ok: boolean;
+  schema?: string;
+  scan?: {
+    summary?: Record<string, unknown>;
+    targets?: Array<Record<string, unknown>>;
+  };
+  plan?: {
+    status?: string;
+    writeStatus?: string;
+    writeBlockReason?: string;
+    avatarPath?: string;
+    selectedCandidateCount?: number;
+    selectedCandidates?: Array<Record<string, unknown>>;
+    targetShaderFamilies?: string[];
+    profile?: AvatarEncryptionProfileCard & Record<string, unknown>;
+    recommendedProfile?: string;
+    profileCards?: AvatarEncryptionProfileCard[];
+    benchmarkTable?: AvatarEncryptionBenchmarkRow[];
+    benchmarkAssumptions?: Record<string, unknown>;
+    hardGate?: { status?: string; blockingIds?: string[]; warnings?: string[] };
+    futureRequestTools?: Record<string, unknown>;
+    externalAddon?: Record<string, unknown>;
+    platform?: Record<string, unknown>;
+    layers?: Array<Record<string, unknown>>;
+  };
+  error?: string;
+};
+
 export type PackageInstallRequestResult = {
   ok: boolean;
   status?: string;
@@ -1103,6 +1158,8 @@ export type OptimizationApplyRequestResult = {
   preview?: Record<string, unknown>;
   installPlan?: Record<string, unknown>;
 };
+
+export type AvatarEncryptionApplyRequestResult = OptimizationApplyRequestResult;
 
 export type OutfitDependencyPreflight = {
   schema?: string;
@@ -1376,6 +1433,52 @@ export async function fetchAvatars(
   request: { projectPath?: string } = {},
 ): Promise<AvatarListResult> {
   return requestJson<AvatarListResult>(`${endpoint}/api/app/avatars`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function planAvatarEncryption(
+  endpoint: string,
+  request: {
+    projectPath?: string;
+    avatarPath?: string;
+    profile?: string;
+    protectionProfile?: string;
+    platform?: string;
+    targetShaderFamilies?: string[];
+    materialIds?: string[];
+    rendererPaths?: string[];
+    targets?: Array<Record<string, unknown>>;
+    confirmCreatorOwnedAssets?: boolean;
+  },
+): Promise<AvatarEncryptionPlanResult> {
+  return requestJson<AvatarEncryptionPlanResult>(`${endpoint}/api/avatar-encryption/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function requestAvatarEncryptionApply(
+  endpoint: string,
+  request: {
+    projectPath?: string;
+    avatarPath?: string;
+    profile?: string;
+    protectionProfile?: string;
+    targetShaderFamily: string;
+    targetShaderFamilies?: string[];
+    materialIds?: string[];
+    rendererPaths?: string[];
+    targets?: Array<Record<string, unknown>>;
+    outputFolder?: string;
+    confirmCreatorOwnedAssets: boolean;
+    saveAssets?: boolean;
+  },
+): Promise<AvatarEncryptionApplyRequestResult> {
+  return requestJson<AvatarEncryptionApplyRequestResult>(`${endpoint}/api/avatar-encryption/apply-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

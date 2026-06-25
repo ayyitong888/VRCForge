@@ -58,9 +58,12 @@ COMPATIBILITY_TERMS = (
 AVATAR_ENCRYPTION_BOUNDARY_TERMS = (
     "Current source version: `1.0.1`",
     "Latest published stable release: `1.0.0`",
-    "read-only",
-    "Avatar Encryption / Anti-Rip addon preview",
-    "No avatar-encryption apply/remove write tool is exposed yet",
+    "Avatar Encryption / Anti-Rip addon",
+    "private-addon connector",
+    "private module required",
+    "approval",
+    "checkpoint",
+    "rollback",
 )
 OPTIMIZER_STATE_TERMS = (
     "missing_dependency",

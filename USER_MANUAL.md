@@ -6,9 +6,24 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
 Current source version: `1.0.1`. Latest published stable release:
-`1.0.0`. The 1.0.1 source line starts a read-only Avatar Encryption /
-Anti-Rip addon preview for lilToon and Poiyomi. It does not expose
-apply/remove writes yet.
+`1.0.0`. The 1.0.1 source line starts an Avatar Encryption /
+Anti-Rip addon connector preview for lilToon and Poiyomi with scan/plan/preview
+plus request-only interfaces for a separately installed private addon module.
+The public GitHub release does not include the encryption implementation.
+Approved execution still requires explicit approval, checkpoint, validation,
+and rollback.
+
+Anti-Rip profiles:
+
+| Profile | Best for | Protection | Estimated 90Hz impact at 50k / 100k / 200k triangles |
+| --- | --- | --- | --- |
+| Lite | Low-end Windows PC | Low-overhead encryption | ~0.6% / ~1.1% / ~1.9% |
+| Standard | Most PC avatars | Recommended encryption | ~2.0% / ~3.6% / ~6.5% |
+| Paranoid | High-end PC proof builds | Highest preview mode | ~5.5% / ~9.9% / ~17.9% |
+
+All profiles are Windows PC-only. Quest/Android requests are blocked for this
+feature. Lite and Standard can create supervised private-addon requests;
+Paranoid remains preview-only pending additional proof.
 本手册只说明公开使用流程和功能状态，不包含项目私有路径或本地配置细节。
 
 ## Feature Status / 功能状态
@@ -23,7 +38,7 @@ apply/remove writes yet.
 | Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
 | Shader / Material tuning | Semantic material tuning for lilToon, Poiyomi, and conservative Generic fallback | 已可用 / Available |
-| Avatar Encryption / Anti-Rip addon preview | lilToon and Poiyomi shader-encryption research/scan/plan/preview; other shader families compatibility-only | 1.0.1 read-only preview, no apply/remove writes |
+| Avatar Encryption / Anti-Rip addon | lilToon and Poiyomi scan/plan/preview plus private-addon connector request interfaces; other shader families compatibility-only | 1.0.1 connector preview, approval/checkpoint/rollback required; private module required for execution |
 | Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
 | First-run resilient normal-agent fallback | Optional Unity/skill/project failures do not block ordinary agent chat | 已可用 / Available |
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |

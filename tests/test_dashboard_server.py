@@ -1622,11 +1622,21 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_preview_add_modular_avatar_component", tool_names)
         self.assertIn("vrcforge_scan_project_index", tool_names)
         self.assertIn("vrcforge_inspect_outfit_package", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_research_report", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_scan", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_plan", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_preview", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_addon_status", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_liltoon_apply_request", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_poiyomi_apply_request", tool_names)
+        self.assertIn("vrcforge_avatar_encryption_remove_request", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_parameter", tool_names)
         self.assertNotIn("vrcforge_ensure_expression_menu_control", tool_names)
         self.assertNotIn("vrcforge_ensure_animator_state", tool_names)
         self.assertNotIn("vrcforge_create_wardrobe", tool_names)
         self.assertNotIn("vrcforge_manage_wardrobe", tool_names)
+        self.assertNotIn("vrcforge_avatar_encryption_addon_apply", tool_names)
+        self.assertNotIn("vrcforge_avatar_encryption_addon_remove", tool_names)
 
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -5628,6 +5638,16 @@ namespace VRCForge.Editor
         self.assertIn("target.material.shader = shader", source)
         self.assertIn("AssetDatabase.SaveAssets", source)
         self.assertIn("rendererPath or materialAssetPath is required", source)
+
+    def test_avatar_encryption_public_repo_keeps_only_connector_boundary(self) -> None:
+        self.assertFalse(Path("Assets/VRCForge/Editor/AvatarEncryptionTool.cs").exists())
+        self.assertFalse(Path("Assets/VRCForge/Runtime/AvatarEncryption/VRCForgeAvatarEncryptionRestore.shader").exists())
+        source = Path("dashboard_server.py").read_text(encoding="utf-8-sig")
+        self.assertIn("VRCFORGE_AVATAR_ENCRYPTION_ADDON_URL", source)
+        self.assertIn("vrcforge_avatar_encryption_addon_apply", source)
+        self.assertIn("vrcforge_avatar_encryption_addon_remove", source)
+        self.assertNotIn("vrc_apply_avatar_encryption", source)
+        self.assertNotIn("vrc_remove_avatar_encryption", source)
 
     def test_shader_adapter_smoke_script_uses_supervised_paths(self) -> None:
         source = Path("scripts/smoke_shader_adapter_apply_rollback.py").read_text(encoding="utf-8-sig")

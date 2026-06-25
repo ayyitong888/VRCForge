@@ -12,11 +12,24 @@ Latest published stable release: `1.0.0`.
 installer for normal Windows x64 installs, or the portable zip when you need a
 no-install/debug payload.
 
-1.0.1 starts the Avatar Encryption / Anti-Rip addon preview line. This first
-slice is read-only: research report, shader-family scan, plan, and write
-preview for lilToon and Poiyomi first. Generic, Standard/Mobile, and unknown
-shader families are reported as compatibility-only or blocked until a restore
-adapter exists. No avatar-encryption apply/remove write tool is exposed yet.
+1.0.1 starts the Avatar Encryption / Anti-Rip addon connector line. The public
+repo supports lilToon and Poiyomi scan/plan/preview plus request-only interfaces
+for a separately installed private addon module. The public GitHub release does
+not include the encryption implementation. Approved execution still goes
+through VRCForge approval, checkpoint, validation, and rollback. Unsupported
+shader families remain compatibility-only until validated support exists.
+
+Anti-Rip profiles are user-selectable. Standard is the default recommendation.
+
+| Profile | Best for | Protection | Estimated 90Hz impact at 50k / 100k / 200k triangles |
+| --- | --- | --- | --- |
+| Lite | Low-end Windows PC | Low-overhead encryption | ~0.6% / ~1.1% / ~1.9% |
+| Standard | Most PC avatars | Recommended encryption | ~2.0% / ~3.6% / ~6.5% |
+| Paranoid | High-end PC proof builds | Highest preview mode | ~5.5% / ~9.9% / ~17.9% |
+
+All three profiles are Windows PC-only. Quest/Android requests are blocked for
+this feature. Lite and Standard have supervised private-addon request
+interfaces; Paranoid remains preview-only until additional proof is complete.
 
 VRCForge is a local AI workbench for VRChat avatar editing. It connects a Tauri desktop agent workspace, a local FastAPI runtime, and Unity Editor tools so users can review, apply, and restore avatar changes with explicit control.
 
@@ -181,7 +194,7 @@ Model optimization integration strategy and release sequencing are documented in
 | AI face tuning history and presets | AI 捏脸历史与预设 | Available / 可用 |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重算 | Available / 可用 |
 | Shader / Material tuning MVP | Shader / 材质调参 MVP | Available: lilToon, Poiyomi, and conservative Generic semantic fallback |
-| Avatar Encryption / Anti-Rip addon preview | lilToon and Poiyomi shader-encryption scan/plan/preview; other shader families compatibility-only | 1.0.1 read-only preview; apply/remove and rollback proof pending |
+| Avatar Encryption / Anti-Rip addon | lilToon and Poiyomi scan/plan/preview plus private-addon connector request interfaces; other shader families compatibility-only | 1.0.1 connector preview, approval/checkpoint/rollback required; private module required for execution |
 | Vision review with Unity screenshots | Unity 截图识图复核 | Available / 可用 |
 | Model Optimization Planner and proof release | VRAM / material / mesh / parameter audits, one-step optimization planning, conservative delegated apply requests, validation delta, rollback proof, and persistent screenshot evidence | Available: 1.0 stable line; conservative writes remain approval/checkpoint/rollback gated |
 | Phase 2 Unity editor tools | Phase 2 Unity 编辑器工具层 | Available / 可用 |

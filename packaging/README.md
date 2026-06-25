@@ -70,10 +70,19 @@ distribution notes.
 
 ## Commands
 
-`1.0.1` is currently a source preview line for the Avatar Encryption /
+`1.0.1` is currently a connector preview line for the Avatar Encryption /
 Anti-Rip addon, not the latest published stable package. Stable publish
 commands should stay on `1.0.0` until the preview line is explicitly promoted
-with fresh release evidence.
+with fresh release evidence. The public repo must not contain encryption
+implementation files; it may only expose connector/request interfaces for a
+separately installed private addon module. Profile docs must list Lite,
+Standard, and Paranoid, with Standard as the default recommendation and
+Paranoid blocked until additional proof exists.
+All three profiles are Windows PC-only. Quest/Android requests must remain
+blocked for this feature.
+Do not describe implementation details in release notes; say only that 1.0.1
+adds Avatar Encryption / Anti-Rip connector request interfaces with approval,
+checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
@@ -171,5 +180,7 @@ This gate checks current-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
 pointers when they exist in the checkout. While the source tree is on the
 `1.0.1` Avatar Encryption preview line, the gate also checks that public docs
-still say `1.0.0` is the latest published stable release and that
-avatar-encryption apply/remove writers are not exposed.
+still say `1.0.0` is the latest published stable release, direct
+avatar-encryption writers are not exposed, and the public surface is only the
+private-addon connector request interface with explicit approval, checkpoint,
+and rollback.

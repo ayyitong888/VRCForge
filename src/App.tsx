@@ -59,6 +59,9 @@ import {
   AgentSkillResult,
   AgentShellResult,
   AvatarListItem,
+  AvatarEncryptionBenchmarkRow,
+  AvatarEncryptionPlanResult,
+  AvatarEncryptionProfileCard,
   SubAgentTask,
   SubAgentTaskList,
   ApiError,
@@ -113,12 +116,14 @@ import {
   installExternalAgentConnector,
   importSkillPackage,
   planOutfitImport,
+  planAvatarEncryption,
   preflightSkillPackage,
   ProjectPrefs,
   previewRestoreCheckpoint,
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
   requestOptimizationApply,
+  requestAvatarEncryptionApply,
   requestOutfitImport,
   requestPackageInstall,
   requestRestoreCheckpoint,
@@ -173,6 +178,40 @@ const OPTIMIZATION_TARGET_PROFILES = [
   { id: "custom", label: "Custom" },
 ];
 
+const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
+  {
+    id: "lite",
+    label: "Lite",
+    title: "轻量保护",
+    description: "最轻，适合低端设备。",
+    protection: "Low-overhead encryption.",
+    cost: "lowest",
+    deviceFit: "Windows / low-end PC",
+    applyStatus: "available",
+  },
+  {
+    id: "standard",
+    label: "Standard",
+    title: "标准保护",
+    description: "默认推荐，保护和流畅度均衡。",
+    protection: "Recommended encryption.",
+    cost: "balanced",
+    deviceFit: "PC default",
+    recommended: true,
+    applyStatus: "available",
+  },
+  {
+    id: "paranoid",
+    label: "Paranoid",
+    title: "最高保护",
+    description: "最强，适合高端 PC。",
+    protection: "Highest preview mode.",
+    cost: "highest",
+    deviceFit: "high-end PC",
+    applyStatus: "blocked_until_blendshape_proof",
+  },
+];
+
 type OptimizationActionOptions = {
   atlasTargetMaterials?: string;
   rendererPath?: string;
@@ -214,7 +253,7 @@ type ConversationItem =
   | { id: string; type: "compact"; text: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 
-type ActiveView = "chat" | "doctor" | "optimization" | "skills" | "checkpoints" | "settings";
+type ActiveView = "chat" | "doctor" | "optimization" | "protection" | "skills" | "checkpoints" | "settings";
 
 type ChatThread = {
   id: string;
@@ -421,6 +460,16 @@ export default function App() {
   const [selectedOptimizationProof, setSelectedOptimizationProof] = useState<OptimizationProofDetail | null>(null);
   const [loadingOptimizationProofs, setLoadingOptimizationProofs] = useState(false);
   const [optimizationProofMessage, setOptimizationProofMessage] = useState("");
+  const [protectionPlan, setProtectionPlan] = useState<AvatarEncryptionPlanResult | null>(null);
+  const [protectionProfile, setProtectionProfile] = useState("standard");
+  const [protectionAvatarPath, setProtectionAvatarPath] = useState("");
+  const [protectionAvatars, setProtectionAvatars] = useState<AvatarListItem[]>([]);
+  const [protectionOwnsAssets, setProtectionOwnsAssets] = useState(false);
+  const [loadingProtection, setLoadingProtection] = useState(false);
+  const [loadingProtectionAvatars, setLoadingProtectionAvatars] = useState(false);
+  const [protectionMessage, setProtectionMessage] = useState("");
+  const [protectionAvatarMessage, setProtectionAvatarMessage] = useState("");
+  const [requestingProtectionFamily, setRequestingProtectionFamily] = useState("");
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
@@ -804,6 +853,18 @@ export default function App() {
   useEffect(() => {
     if (activeView === "optimization" && runtimeConnected) {
       void loadOptimizationAvatars();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (activeView === "protection" && runtimeConnected) {
+      void loadProtectionPlan();
+    }
+  }, [activeView, runtimeConnected, endpoint, activeProjectPath, protectionProfile, protectionOwnsAssets]);
+
+  useEffect(() => {
+    if (activeView === "protection" && runtimeConnected) {
+      void loadProtectionAvatars();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
@@ -1840,6 +1901,126 @@ export default function App() {
     }
   }
 
+  async function openProtection() {
+    setActiveView("protection");
+    setError("");
+    await loadProtectionPlan();
+    await loadProtectionAvatars();
+  }
+
+  async function loadProtectionPlan(target = endpoint, profile = protectionProfile) {
+    setLoadingProtection(true);
+    setProtectionMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await planAvatarEncryption(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+        avatarPath: protectionAvatarPath.trim() || undefined,
+        profile,
+        protectionProfile: profile,
+        confirmCreatorOwnedAssets: protectionOwnsAssets,
+      });
+      setProtectionPlan(payload);
+      const plan = protectionPlanPayload(payload);
+      const candidateCount = Number(plan.selectedCandidateCount ?? 0);
+      const connector = (plan.externalAddon || {}) as Record<string, unknown>;
+      const connectorConfigured = Boolean(connector.configured);
+      const writeStatus = String(plan.writeStatus || "");
+      setProtectionMessage(
+        payload.ok
+          ? connectorConfigured && writeStatus !== "blocked"
+            ? `${candidateCount} target${candidateCount === 1 ? "" : "s"} ready for private addon request`
+            : `${candidateCount} target${candidateCount === 1 ? "" : "s"} found; private addon required`
+          : payload.error || "Protection plan returned warnings",
+      );
+    } catch (cause) {
+      setProtectionMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingProtection(false);
+    }
+  }
+
+  async function loadProtectionAvatars(target = endpoint) {
+    setLoadingProtectionAvatars(true);
+    setProtectionAvatarMessage("");
+    try {
+      let targetEndpoint = target;
+      if (!runtimeConnected && target === endpoint) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await fetchAvatars(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+      });
+      const avatars = (payload.avatars ?? []).filter((item) => Boolean(item.avatarPath));
+      setProtectionAvatars(avatars);
+      if (!protectionAvatarPath.trim() && avatars.length === 1 && avatars[0].avatarPath) {
+        setProtectionAvatarPath(avatars[0].avatarPath);
+      }
+      setProtectionAvatarMessage(
+        payload.ok
+          ? avatars.length
+            ? `${avatars.length} avatar${avatars.length === 1 ? "" : "s"} found`
+            : "No scene avatars found"
+          : "Avatar scan returned warnings",
+      );
+    } catch (cause) {
+      setProtectionAvatarMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingProtectionAvatars(false);
+    }
+  }
+
+  async function requestProtectionApply(targetFamily: "liltoon" | "poiyomi") {
+    const avatarPath = protectionAvatarPath.trim();
+    if (!avatarPath) {
+      setProtectionMessage("Set avatar path before requesting protection.");
+      return;
+    }
+    if (!protectionOwnsAssets) {
+      setProtectionMessage("Confirm asset ownership before requesting protection.");
+      return;
+    }
+    setRequestingProtectionFamily(targetFamily);
+    setProtectionMessage("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await requestAvatarEncryptionApply(targetEndpoint, {
+        projectPath: activeProjectPath || undefined,
+        avatarPath,
+        profile: protectionProfile,
+        protectionProfile,
+        targetShaderFamily: targetFamily,
+        targetShaderFamilies: [targetFamily],
+        confirmCreatorOwnedAssets: true,
+      });
+      setProtectionMessage(payload.approval ? `Approval queued: ${payload.approval.id}` : payload.error || "Request queued.");
+      await refreshSilently(targetEndpoint);
+      await loadProtectionPlan(targetEndpoint);
+    } catch (cause) {
+      setProtectionMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRequestingProtectionFamily("");
+    }
+  }
+
   async function repairUnityBridgeFromDoctor(target = endpoint) {
     setRepairingUnityBridge(true);
     setDoctorMessage("");
@@ -2674,16 +2855,18 @@ export default function App() {
 
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
-      <div className="grid h-screen grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-4 py-4">
-          <div className="flex h-10 items-center gap-3 px-2">
+      <div className="grid h-screen grid-cols-[64px_minmax(0,1fr)] md:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-2 py-4 md:px-4 max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden">
+          <div className="flex h-10 items-center justify-center gap-3 px-2 md:justify-start">
             <Bot className="h-5 w-5 shrink-0 text-primary" />
-            <div className="truncate text-base font-semibold">VRCForge</div>
+            <div className="hidden truncate text-base font-semibold md:block">VRCForge</div>
           </div>
 
           <nav className="mt-5 space-y-1">
             <button
               onClick={newTemporaryChat}
+              aria-label="临时对话"
+              title="临时对话"
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "chat" && !activeProjectPath && !activeChat
@@ -2695,6 +2878,8 @@ export default function App() {
               <span className="truncate">临时对话</span>
             </button>
             <button
+              aria-label="新项目"
+              title="新项目"
               onClick={() => {
                 setProjectModalError("");
                 setShowProjectModal(true);
@@ -2706,6 +2891,8 @@ export default function App() {
             </button>
             <button
               onClick={() => void openDoctor()}
+              aria-label="Doctor"
+              title="Doctor"
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "doctor"
@@ -2718,6 +2905,8 @@ export default function App() {
             </button>
             <button
               onClick={() => void openOptimization()}
+              aria-label="Optimization"
+              title="Optimization"
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "optimization"
@@ -2729,7 +2918,23 @@ export default function App() {
               <span className="truncate">Optimization</span>
             </button>
             <button
+              onClick={() => void openProtection()}
+              aria-label="Protection"
+              title="Protection"
+              className={cn(
+                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                activeView === "protection"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <Shield className="h-4 w-4 shrink-0" />
+              <span className="truncate">Protection</span>
+            </button>
+            <button
               onClick={() => void openSkills()}
+              aria-label="能力库"
+              title="能力库"
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "skills"
@@ -2742,6 +2947,8 @@ export default function App() {
             </button>
             <button
               onClick={() => void openCheckpoints()}
+              aria-label="Checkpoints"
+              title="Checkpoints"
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "checkpoints"
@@ -2848,21 +3055,23 @@ export default function App() {
           <div className="mt-auto">
             <button
               onClick={() => void openSettings()}
+              aria-label="设置"
+              title="设置"
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-10 w-full min-w-0 items-center justify-center gap-3 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-3",
                 activeView === "settings"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
               )}
             >
               <Settings className="h-4 w-4 shrink-0" />
-              <span className="truncate">设置</span>
+              <span className="hidden truncate md:inline">设置</span>
             </button>
           </div>
         </aside>
 
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
-          <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
+          <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3 md:px-6">
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : "临时对话"}</span>
               <span className="text-muted-foreground">/</span>
@@ -2871,6 +3080,8 @@ export default function App() {
                   ? "Doctor"
                   : activeView === "optimization"
                     ? "Optimization"
+                    : activeView === "protection"
+                      ? "Protection"
                   : activeView === "skills"
                     ? "能力库"
                     : activeView === "settings"
@@ -3022,6 +3233,26 @@ export default function App() {
               onOverwriteAdjustment={overwriteAdjustment}
               onRenameAdjustment={renameAdjustment}
               onDeleteAdjustment={removeAdjustment}
+            />
+          ) : activeView === "protection" ? (
+            <ProtectionWorkspace
+              plan={protectionPlan}
+              selectedProjectPath={activeProjectPath}
+              avatarPath={protectionAvatarPath}
+              avatars={protectionAvatars}
+              profile={protectionProfile}
+              ownsAssets={protectionOwnsAssets}
+              loading={loadingProtection}
+              loadingAvatars={loadingProtectionAvatars}
+              message={protectionMessage}
+              avatarMessage={protectionAvatarMessage}
+              requestingFamily={requestingProtectionFamily}
+              onAvatarPathChange={setProtectionAvatarPath}
+              onProfileChange={setProtectionProfile}
+              onOwnsAssetsChange={setProtectionOwnsAssets}
+              onRefresh={() => void loadProtectionPlan()}
+              onRefreshAvatars={() => void loadProtectionAvatars()}
+              onRequestApply={(family) => void requestProtectionApply(family)}
             />
           ) : activeView === "optimization" ? (
             <OptimizationWorkspace
@@ -4984,6 +5215,267 @@ function ConnectorToggle({
         {checked ? "On" : "Off"}
       </Badge>
     </button>
+  );
+}
+
+function ProtectionWorkspace({
+  plan,
+  selectedProjectPath,
+  avatarPath,
+  avatars,
+  profile,
+  ownsAssets,
+  loading,
+  loadingAvatars,
+  message,
+  avatarMessage,
+  requestingFamily,
+  onAvatarPathChange,
+  onProfileChange,
+  onOwnsAssetsChange,
+  onRefresh,
+  onRefreshAvatars,
+  onRequestApply,
+}: {
+  plan: AvatarEncryptionPlanResult | null;
+  selectedProjectPath: string;
+  avatarPath: string;
+  avatars: AvatarListItem[];
+  profile: string;
+  ownsAssets: boolean;
+  loading: boolean;
+  loadingAvatars: boolean;
+  message: string;
+  avatarMessage: string;
+  requestingFamily: string;
+  onAvatarPathChange: (value: string) => void;
+  onProfileChange: (value: string) => void;
+  onOwnsAssetsChange: (value: boolean) => void;
+  onRefresh: () => void;
+  onRefreshAvatars: () => void;
+  onRequestApply: (family: "liltoon" | "poiyomi") => void;
+}) {
+  const planPayload = protectionPlanPayload(plan);
+  const activeProfile = protectionProfileCards(plan).find((item) => item.id === profile) || PROTECTION_PROFILE_FALLBACKS[1];
+  const benchmarkRows = protectionBenchmarkRows(plan);
+  const benchmarkGroups = groupProtectionBenchmarks(benchmarkRows);
+  const hardGate = protectionRecord(planPayload.hardGate);
+  const blockingIds = protectionArray(hardGate.blockingIds).map((item) => String(item));
+  const connector = protectionRecord(planPayload.externalAddon);
+  const connectorConfigured = Boolean(connector.configured);
+  const requestReady = planPayload.status === "request_ready" && planPayload.writeStatus !== "blocked" && connectorConfigured;
+  const profileApplyBlocked = String(activeProfile.applyStatus || "").startsWith("blocked");
+  const selectedCandidates = protectionArray(planPayload.selectedCandidates);
+  const hasLilToon = selectedCandidates.length === 0 || protectionFamilyAvailable(selectedCandidates, "liltoon");
+  const hasPoiyomi = selectedCandidates.length === 0 || protectionFamilyAvailable(selectedCandidates, "poiyomi");
+  const canRequest = requestReady && ownsAssets && Boolean(avatarPath.trim()) && !profileApplyBlocked && !loading;
+  const impact = protectionImpactSummary(benchmarkRows, profile);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-6 sm:py-8">
+      <div className="mx-auto grid max-w-6xl gap-6">
+        <section className="flex min-w-0 flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <Shield className="h-4 w-4 shrink-0 text-primary" />
+              <h1 className="truncate text-lg font-semibold">Anti-Rip Protection</h1>
+              {activeProfile.recommended ? (
+                <Badge tone="ok" className="shrink-0">
+                  Recommended
+                </Badge>
+              ) : null}
+            </div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || "No Unity project selected"}</div>
+          </div>
+          <Badge tone={requestReady ? "ok" : "warn"} className="shrink-0">
+            {requestReady ? "ready to request" : connectorConfigured ? "needs review" : "private addon required"}
+          </Badge>
+          <Badge tone={profileApplyBlocked ? "warn" : "muted"} className="shrink-0">
+            {activeProfile.label || profile}
+          </Badge>
+          <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Refresh
+          </Button>
+        </section>
+
+        <section className="grid gap-3 md:grid-cols-3">
+          {protectionProfileCards(plan).map((card) => {
+            const selected = card.id === profile;
+            return (
+              <button
+                key={card.id}
+                type="button"
+                onClick={() => onProfileChange(String(card.id))}
+                className={cn(
+                  "min-w-0 rounded-lg border bg-card p-4 text-left transition-colors",
+                  selected ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 hover:bg-muted/40",
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Shield className="h-4 w-4 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1 truncate text-sm font-semibold">{card.title || card.label || card.id}</div>
+                  {card.recommended ? (
+                    <Badge tone="ok" className="shrink-0">
+                      Default
+                    </Badge>
+                  ) : null}
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">{card.description || "-"}</div>
+                <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
+                  <DataLine label="Protection" value={card.protection || "-"} />
+                  <DataLine label="Device" value={card.deviceFit || "-"} />
+                  <DataLine label="Impact" value={protectionCostLabel(card.cost)} />
+                </div>
+                {String(card.applyStatus || "").startsWith("blocked") ? (
+                  <Badge tone="warn" className="mt-3">
+                    Proof gate
+                  </Badge>
+                ) : null}
+              </button>
+            );
+          })}
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)]">
+          <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-3 flex min-w-0 items-center gap-2">
+              <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Plan target</div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <select
+                value={avatars.some((item) => item.avatarPath === avatarPath) ? avatarPath : ""}
+                onChange={(event) => onAvatarPathChange(event.target.value)}
+                disabled={loadingAvatars || avatars.length === 0}
+                className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:text-muted-foreground"
+              >
+                <option value="">{loadingAvatars ? "Scanning avatars" : avatars.length ? "Select avatar" : "No scene avatars"}</option>
+                {avatars.map((avatar, index) => {
+                  const value = avatar.avatarPath || "";
+                  return (
+                    <option key={`${value}-${index}`} value={value}>
+                      {avatarOptionLabel(avatar)}
+                    </option>
+                  );
+                })}
+              </select>
+              <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loadingAvatars} onClick={onRefreshAvatars}>
+                {loadingAvatars ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Avatars
+              </Button>
+            </div>
+            <div className="mt-2 flex min-w-0 items-center gap-2">
+              <input
+                value={avatarPath}
+                onChange={(event) => onAvatarPathChange(event.target.value)}
+                placeholder="Avatar scene path"
+                className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              />
+              <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Plan
+              </Button>
+            </div>
+            <label className="mt-3 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={ownsAssets}
+                onChange={(event) => onOwnsAssetsChange(event.target.checked)}
+                className="h-4 w-4 shrink-0 rounded border-border"
+              />
+              <span className="min-w-0 truncate">I own or am allowed to edit these avatar assets.</span>
+            </label>
+            {avatarMessage ? <div className="mt-2 truncate text-xs text-muted-foreground">{avatarMessage}</div> : null}
+            {message ? <div className="mt-2 truncate text-xs text-muted-foreground">{message}</div> : null}
+          </div>
+
+          <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-3 flex min-w-0 items-center gap-2">
+              <Shield className="h-4 w-4 shrink-0 text-primary" />
+              <div className="truncate text-sm font-semibold">Preview</div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <OptimizationMetric label="Targets" value={formatOptimizationMetric(planPayload.selectedCandidateCount)} />
+              <OptimizationMetric label="Mode" value={activeProfile.label || profile} />
+              <OptimizationMetric label="Plan" value={String(planPayload.status || "not loaded")} />
+              <OptimizationMetric label="Expected" value={impact} />
+            </div>
+            {blockingIds.length ? (
+              <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
+                {blockingIds.slice(0, 4).map((item) => (
+                  <DataLine key={item} label="Gate" value={protectionGateLabel(item)} />
+                ))}
+              </div>
+            ) : null}
+            <div className="mt-3 flex min-w-0 flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                disabled={!canRequest || !hasLilToon || requestingFamily === "liltoon"}
+                onClick={() => onRequestApply("liltoon")}
+              >
+                {requestingFamily === "liltoon" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
+                Request lilToon
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                disabled={!canRequest || !hasPoiyomi || requestingFamily === "poiyomi"}
+                onClick={() => onRequestApply("poiyomi")}
+              >
+                {requestingFamily === "poiyomi" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
+                Request Poiyomi
+              </Button>
+              <Badge tone="muted" className="h-8 shrink-0">
+                approval required
+              </Badge>
+            </div>
+          </div>
+        </section>
+
+        <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+          <div className="mb-3 flex min-w-0 items-center gap-2">
+            <Gauge className="h-4 w-4 shrink-0 text-primary" />
+            <div className="truncate text-sm font-semibold">Estimated frame impact</div>
+            <Badge tone="muted" className="ml-auto shrink-0">
+              planning estimate
+            </Badge>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[560px] border-separate border-spacing-0 text-left text-xs">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="border-b border-border px-3 py-2 font-medium">Avatar size</th>
+                  {PROTECTION_PROFILE_FALLBACKS.map((item) => (
+                    <th key={item.id} className="border-b border-border px-3 py-2 font-medium">
+                      {item.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {benchmarkGroups.map((group) => (
+                  <tr key={group.scale}>
+                    <td className="border-b border-border/70 px-3 py-2 text-muted-foreground">{group.scale}</td>
+                    {PROTECTION_PROFILE_FALLBACKS.map((item) => {
+                      const row = group.byProfile[String(item.id)];
+                      return (
+                        <td key={item.id} className="border-b border-border/70 px-3 py-2">
+                          {row ? `${formatProofValue(row.estimatedFps)} fps / ${formatProofValue(row.estimatedImpactPercent)}%` : "-"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -7605,7 +8097,7 @@ function SidebarSection({
   onToggleCollapse?: () => void;
 }) {
   return (
-    <section className="mt-8 min-w-0">
+    <section className="mt-8 min-w-0 max-md:hidden">
       {onToggleCollapse ? (
         <button
           type="button"
@@ -7910,6 +8402,119 @@ function formatProofValue(value: unknown): string {
     return Number.isInteger(value) ? String(value) : value.toFixed(2);
   }
   return String(value);
+}
+
+function protectionRecord(value: unknown): Record<string, unknown> {
+  return optimizationRecord(value);
+}
+
+function protectionArray(value: unknown): unknown[] {
+  return optimizationArray(value);
+}
+
+function protectionPlanPayload(result: AvatarEncryptionPlanResult | null): Record<string, unknown> {
+  return protectionRecord(result?.plan);
+}
+
+function protectionProfileCards(result: AvatarEncryptionPlanResult | null): AvatarEncryptionProfileCard[] {
+  const plan = protectionPlanPayload(result);
+  const cards = protectionArray(plan.profileCards).filter((item): item is AvatarEncryptionProfileCard => Boolean(item) && typeof item === "object");
+  if (!cards.length) {
+    return PROTECTION_PROFILE_FALLBACKS;
+  }
+  const seen = new Set<string>();
+  return [...cards, ...PROTECTION_PROFILE_FALLBACKS].filter((item) => {
+    const id = String(item.id || "");
+    if (!id || seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    return true;
+  });
+}
+
+function protectionBenchmarkRows(result: AvatarEncryptionPlanResult | null): AvatarEncryptionBenchmarkRow[] {
+  const plan = protectionPlanPayload(result);
+  return protectionArray(plan.benchmarkTable).filter((item): item is AvatarEncryptionBenchmarkRow => Boolean(item) && typeof item === "object");
+}
+
+function groupProtectionBenchmarks(rows: AvatarEncryptionBenchmarkRow[]): Array<{ scale: string; byProfile: Record<string, AvatarEncryptionBenchmarkRow> }> {
+  const groups: Array<{ scale: string; triangles: number; byProfile: Record<string, AvatarEncryptionBenchmarkRow> }> = [];
+  for (const row of rows) {
+    const triangles = Number(row.triangles || 0);
+    const scale = row.avatarScale || (triangles ? `${Math.round(triangles / 10000)}万面` : "unknown");
+    let group = groups.find((item) => item.scale === scale);
+    if (!group) {
+      group = { scale, triangles, byProfile: {} };
+      groups.push(group);
+    }
+    if (row.profile) {
+      group.byProfile[String(row.profile)] = row;
+    }
+  }
+  return groups.sort((a, b) => a.triangles - b.triangles).map(({ scale, byProfile }) => ({ scale, byProfile }));
+}
+
+function protectionFamilyAvailable(candidates: unknown[], family: "liltoon" | "poiyomi"): boolean {
+  return candidates.some((candidate) => {
+    const item = protectionRecord(candidate);
+    const familyId = String(item.shaderFamilyId || item.shaderFamily || "").toLowerCase();
+    if (family === "liltoon") {
+      return familyId.includes("liltoon") || familyId.includes("liltoon");
+    }
+    return familyId.includes("poiyomi") || familyId.includes("poi");
+  });
+}
+
+function protectionCostLabel(value?: string): string {
+  const cost = String(value || "").toLowerCase();
+  if (cost === "lowest") {
+    return "Lowest";
+  }
+  if (cost === "balanced") {
+    return "Balanced";
+  }
+  if (cost === "highest") {
+    return "Highest";
+  }
+  return value || "-";
+}
+
+function protectionGateLabel(value: string): string {
+  if (value === "platform.windows_only") {
+    return "Windows avatar only";
+  }
+  if (value === "profile.paranoid_blendshape_proof_required") {
+    return "Highest mode needs proof";
+  }
+  if (value === "profile.custom_layers_not_supported") {
+    return "Choose one of the three modes";
+  }
+  if (value === "layer.experimental_or_research_only") {
+    return "Layer still in testing";
+  }
+  if (value === "targets.requested_targets_not_found") {
+    return "Selected target not found";
+  }
+  if (value === "shader_family.no_liltoon_or_poiyomi_candidate") {
+    return "No supported shader target";
+  }
+  if (value === "shader_family.requested_restore_adapter_missing") {
+    return "Shader adapter missing";
+  }
+  if (value === "plan.untrusted_external_plan") {
+    return "Plan needs fresh scan";
+  }
+  return "Needs review";
+}
+
+function protectionImpactSummary(rows: AvatarEncryptionBenchmarkRow[], profile: string): string {
+  const candidates = rows.filter((row) => row.profile === profile);
+  if (!candidates.length) {
+    return "not estimated";
+  }
+  const maxImpact = Math.max(...candidates.map((row) => Number(row.estimatedImpactPercent || 0)));
+  return `${formatProofValue(maxImpact)}% max`;
 }
 
 function avatarOptionLabel(avatar: AvatarListItem): string {

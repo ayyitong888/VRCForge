@@ -119,7 +119,11 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
 }
+USER_CONSTRAINTS_INLINE_CHARACTER_LIMIT = 4000
+USER_CONSTRAINTS_PREVIEW_CHARACTER_LIMIT = 240
 WRAPPER_ONLY_WRITE_TARGETS = {
+    "vrcforge_avatar_encryption_addon_apply",
+    "vrcforge_avatar_encryption_addon_remove",
     "vrcforge_configure_optimizer_component",
     "vrcforge_install_vpm_package",
 }
@@ -148,12 +152,53 @@ AVATAR_ENCRYPTION_TOOL_SPECS: tuple[dict[str, Any], ...] = (
         "permissionMode": "preview",
         "risk": "plan",
     },
+    {
+        "name": "vrcforge_avatar_encryption_addon_status",
+        "title": "Avatar Encryption Addon Status",
+        "permissionMode": "read_only",
+        "risk": "read_only",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_liltoon_apply_request",
+        "title": "Avatar Encryption lilToon Apply Request",
+        "permissionMode": "approval",
+        "risk": "high",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_poiyomi_apply_request",
+        "title": "Avatar Encryption Poiyomi Apply Request",
+        "permissionMode": "approval",
+        "risk": "high",
+    },
+    {
+        "name": "vrcforge_avatar_encryption_remove_request",
+        "title": "Avatar Encryption Remove Request",
+        "permissionMode": "approval",
+        "risk": "high",
+    },
 )
 AVATAR_ENCRYPTION_TOOL_NAMES = tuple(str(item["name"]) for item in AVATAR_ENCRYPTION_TOOL_SPECS)
-AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS = (
+AVATAR_ENCRYPTION_READ_TOOL_NAMES = (
+    "vrcforge_avatar_encryption_research_report",
+    "vrcforge_avatar_encryption_scan",
+)
+AVATAR_ENCRYPTION_PLAN_TOOL_NAMES = (
+    "vrcforge_avatar_encryption_plan",
+    "vrcforge_avatar_encryption_preview",
+)
+AVATAR_ENCRYPTION_STATUS_TOOL_NAMES = (
+    "vrcforge_avatar_encryption_addon_status",
+)
+AVATAR_ENCRYPTION_APPLY_REQUEST_TOOL_NAMES = (
     "vrcforge_avatar_encryption_liltoon_apply_request",
     "vrcforge_avatar_encryption_poiyomi_apply_request",
+)
+AVATAR_ENCRYPTION_REMOVE_REQUEST_TOOL_NAMES = (
     "vrcforge_avatar_encryption_remove_request",
+)
+AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS = (
+    "vrcforge_avatar_encryption_addon_apply",
+    "vrcforge_avatar_encryption_addon_remove",
 )
 ADJUSTMENT_CHECKPOINT_KINDS = {"face", "shader"}
 ADJUSTMENT_CHECKPOINT_TARGETS = {
@@ -311,7 +356,7 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_avatar_encryption_research_report": {
         "title": "Avatar Encryption Research Report",
         "inputs": ["Optional includeExternalReferences flag."],
-        "outputs": ["Read-only Avatar Encryption / Anti-Rip addon research packet and security boundaries."],
+        "outputs": ["Read-only Avatar Encryption / Anti-Rip addon boundary and connector status packet."],
         "sideEffects": "none",
         "backupRestore": "not required; research report never writes Unity assets",
         "tags": ["avatar-encryption", "anti-rip", "shader", "research", "liltoon", "poiyomi"],
@@ -327,20 +372,56 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_avatar_encryption_plan": {
         "title": "Avatar Encryption Plan",
         "permissionMode": "preview",
-        "inputs": ["Avatar path or inventory, target shader families, key channel, platform, and layer list."],
-        "outputs": ["Read-only preview plan with lilToon/Poiyomi priorities, key/channel warnings, proof requirements, and blocked future write tools."],
+        "inputs": ["Avatar path or inventory, target shader families, profile, and platform."],
+        "outputs": ["Plan with lilToon/Poiyomi priorities, connector status, proof requirements, and private-addon request tools."],
         "sideEffects": "none",
-        "backupRestore": "not required in 1.0.1; future apply/remove must use checkpoint, validation, and rollback proof",
-        "tags": ["avatar-encryption", "anti-rip", "shader", "plan", "preview-only", "liltoon", "poiyomi"],
+        "backupRestore": "not required for planning; apply/remove request tools require approval, checkpoint, validation, and rollback proof",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "plan", "liltoon", "poiyomi"],
     },
     "vrcforge_avatar_encryption_preview": {
         "title": "Avatar Encryption Write Preview",
         "permissionMode": "preview",
         "inputs": ["Avatar encryption plan or the same arguments accepted by avatar-encryption.plan."],
-        "outputs": ["No-write preview of future generated mesh/material copy targets and rollback policy."],
+        "outputs": ["No-write preview of private-addon request targets, request readiness, and rollback policy."],
         "sideEffects": "none",
-        "backupRestore": "not required in 1.0.1; future apply/remove must use checkpoint, validation, and rollback proof",
+        "backupRestore": "not required for preview; apply/remove request tools require approval, checkpoint, validation, and rollback proof",
         "tags": ["avatar-encryption", "anti-rip", "shader", "preview", "no-direct-apply"],
+    },
+    "vrcforge_avatar_encryption_liltoon_apply_request": {
+        "title": "Avatar Encryption lilToon Apply Request",
+        "permissionMode": "approval_required",
+        "inputs": ["Avatar path or inventory, lilToon material targets, PC platform, profile, and creator-owned confirmation."],
+        "outputs": ["Approval request for a configured private lilToon addon connector."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon",
+        "backupRestore": "requires explicit approval, pre-write checkpoint, private addon remove request, and checkpoint rollback",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "write-request", "liltoon", "rollback"],
+    },
+    "vrcforge_avatar_encryption_poiyomi_apply_request": {
+        "title": "Avatar Encryption Poiyomi Apply Request",
+        "permissionMode": "approval_required",
+        "inputs": ["Avatar path or inventory, Poiyomi material targets, PC platform, profile, and creator-owned confirmation."],
+        "outputs": ["Approval request for a configured private Poiyomi addon connector."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon",
+        "backupRestore": "requires explicit approval, pre-write checkpoint, private addon remove request, and checkpoint rollback",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "write-request", "poiyomi", "rollback"],
+    },
+    "vrcforge_avatar_encryption_remove_request": {
+        "title": "Avatar Encryption Remove Request",
+        "permissionMode": "approval_required",
+        "inputs": ["Avatar path plus manifest path or generated output folder."],
+        "outputs": ["Approval request for configured private addon removal."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon",
+        "backupRestore": "requires explicit approval and pre-write checkpoint; checkpoint rollback remains available if remove cannot resolve an original asset",
+        "tags": ["avatar-encryption", "anti-rip", "shader", "remove-request", "rollback"],
+    },
+    "vrcforge_avatar_encryption_addon_status": {
+        "title": "Avatar Encryption Addon Status",
+        "permissionMode": "read_only",
+        "inputs": ["none"],
+        "outputs": ["Private addon connector configuration status."],
+        "sideEffects": "none",
+        "backupRestore": "not required; status check never writes Unity assets",
+        "tags": ["avatar-encryption", "anti-rip", "connector", "status"],
     },
     "vrcforge_build_test_readiness": {
         "title": "Build & Test Readiness",
@@ -855,21 +936,117 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "tags": ["builtin", "group", "shader", "material", "write"],
     },
     {
-        "name": "avatar-encryption-addon-preview",
-        "title": "Avatar Encryption Addon Preview",
-        "description": "Read, scan, plan, and preview the optional anti-rip shader encryption addon without writing Unity assets.",
+        "name": "avatar-encryption-research-scan",
+        "title": "Avatar Encryption Research & Scan",
+        "description": "Read the optional anti-rip shader encryption research packet and scan lilToon/Poiyomi compatibility candidates.",
+        "category": "avatar-encryption",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": "avatar encryption research, anti-rip boundaries, shader-family candidate scan, lilToon/Poiyomi compatibility",
+        "inputs": ["Optional avatar path or material inventory."],
+        "outputs": ["Research packet, lilToon/Poiyomi candidate scan, compatibility-only blocked shader families, and security boundaries."],
+        "sideEffects": "none",
+        "backupRestore": "not required; this skill never writes Unity assets",
+        "allowedTools": [*AVATAR_ENCRYPTION_READ_TOOL_NAMES, *AVATAR_ENCRYPTION_STATUS_TOOL_NAMES, "vrcforge_scan_materials"],
+        "disallowedTools": [],
+        "entrypointTool": "vrcforge_avatar_encryption_scan",
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "read-only", "liltoon", "poiyomi"],
+    },
+    {
+        "name": "avatar-encryption-plan-preview",
+        "title": "Avatar Encryption Plan & Preview",
+        "description": "Build a no-write Avatar Encryption plan and generated-copy preview before any apply request is created.",
         "category": "avatar-encryption",
         "permissionMode": "preview",
-        "riskLevel": "low",
-        "whenToUse": "avatar encryption, anti-rip, shader encryption, lilToon encryption, Poiyomi encryption, mesh obfuscation preview",
+        "riskLevel": "medium",
+        "whenToUse": "avatar encryption plan, mesh obfuscation preview, rollback proof planning, generated asset preview",
         "inputs": ["Avatar path or material inventory, target shader families, key channel, platform, and obfuscation layers."],
-        "outputs": ["Read-only research packet, lilToon/Poiyomi candidate scan, compatibility-only blocked families, preview plan, and rollback proof requirements."],
-        "sideEffects": "none; 1.0.1 does not provide apply/remove writes",
-        "backupRestore": "not required for preview; future apply/remove must use approval, checkpoint, validation, visual proof, and rollback",
-        "allowedTools": [*AVATAR_ENCRYPTION_TOOL_NAMES, "vrcforge_scan_materials"],
-        "disallowedTools": list(AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS),
+        "outputs": ["No-write plan, request readiness, generated mesh/material copy preview, hard-gate blockers, and rollback requirements."],
+        "sideEffects": "none",
+        "backupRestore": "not required for preview; apply/remove skills require approval, checkpoint, generated manifest, validation, and rollback",
+        "allowedTools": [*AVATAR_ENCRYPTION_READ_TOOL_NAMES, *AVATAR_ENCRYPTION_PLAN_TOOL_NAMES, *AVATAR_ENCRYPTION_STATUS_TOOL_NAMES, "vrcforge_scan_materials"],
+        "disallowedTools": [],
         "entrypointTool": "vrcforge_avatar_encryption_plan",
-        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "preview-only", "liltoon", "poiyomi"],
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "preview", "no-direct-apply"],
+    },
+    {
+        "name": "avatar-encryption-liltoon-apply-request",
+        "title": "Avatar Encryption lilToon Apply Request",
+        "description": "Request supervised lilToon Avatar Encryption apply through the dedicated approval/checkpoint path.",
+        "category": "avatar-encryption",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "lilToon avatar encryption apply request, creator-owned clothes/accessory mesh obfuscation",
+        "inputs": ["Creator-owned confirmation, avatar path or inventory, lilToon targets, PC platform, and safe layers."],
+        "outputs": ["Approval request for a configured private addon connector; direct connector execution stays hidden."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon after checkpoint",
+        "backupRestore": "requires explicit approval, pre-write checkpoint, generated manifest, remove request, validation/visual proof, and rollback",
+        "allowedTools": [
+            *AVATAR_ENCRYPTION_READ_TOOL_NAMES,
+            *AVATAR_ENCRYPTION_PLAN_TOOL_NAMES,
+            *AVATAR_ENCRYPTION_STATUS_TOOL_NAMES,
+            "vrcforge_avatar_encryption_liltoon_apply_request",
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_list_checkpoints",
+            "vrcforge_preview_restore_checkpoint",
+            "vrcforge_restore_checkpoint",
+        ],
+        "disallowedTools": list(AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS),
+        "entrypointTool": "vrcforge_avatar_encryption_liltoon_apply_request",
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "write-request", "liltoon", "rollback"],
+    },
+    {
+        "name": "avatar-encryption-poiyomi-apply-request",
+        "title": "Avatar Encryption Poiyomi Apply Request",
+        "description": "Request supervised Poiyomi Avatar Encryption apply through the dedicated approval/checkpoint path.",
+        "category": "avatar-encryption",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "Poiyomi avatar encryption apply request, creator-owned clothes/accessory mesh obfuscation",
+        "inputs": ["Creator-owned confirmation, avatar path or inventory, Poiyomi targets, PC platform, and safe layers."],
+        "outputs": ["Approval request for a configured private addon connector; direct connector execution stays hidden."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon after checkpoint",
+        "backupRestore": "requires explicit approval, pre-write checkpoint, generated manifest, remove request, validation/visual proof, and rollback",
+        "allowedTools": [
+            *AVATAR_ENCRYPTION_READ_TOOL_NAMES,
+            *AVATAR_ENCRYPTION_PLAN_TOOL_NAMES,
+            *AVATAR_ENCRYPTION_STATUS_TOOL_NAMES,
+            "vrcforge_avatar_encryption_poiyomi_apply_request",
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_list_checkpoints",
+            "vrcforge_preview_restore_checkpoint",
+            "vrcforge_restore_checkpoint",
+        ],
+        "disallowedTools": list(AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS),
+        "entrypointTool": "vrcforge_avatar_encryption_poiyomi_apply_request",
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "write-request", "poiyomi", "rollback"],
+    },
+    {
+        "name": "avatar-encryption-remove-rollback",
+        "title": "Avatar Encryption Remove & Rollback",
+        "description": "Request supervised Avatar Encryption removal, generated asset cleanup, and checkpoint rollback verification.",
+        "category": "avatar-encryption",
+        "permissionMode": "approval_required",
+        "riskLevel": "high",
+        "whenToUse": "remove avatar encryption, restore original meshes/materials, rollback encrypted avatar changes",
+        "inputs": ["Manifest path or output folder, avatar path, delete-generated-assets flag, and remove confirmation."],
+        "outputs": ["Approval request for configured private addon removal plus checkpoint rollback tools for hard recovery."],
+        "sideEffects": "creates an approval request only; approved execution is handed to the configured private addon after checkpoint",
+        "backupRestore": "normal cleanup uses the manifest remove request; hard recovery uses vrcforge_restore_checkpoint",
+        "allowedTools": [
+            "vrcforge_avatar_encryption_remove_request",
+            *AVATAR_ENCRYPTION_STATUS_TOOL_NAMES,
+            "vrcforge_request_apply",
+            "vrcforge_apply_approved",
+            "vrcforge_list_checkpoints",
+            "vrcforge_preview_restore_checkpoint",
+            "vrcforge_restore_checkpoint",
+        ],
+        "disallowedTools": list(AVATAR_ENCRYPTION_DISALLOWED_WRITE_TOOLS),
+        "entrypointTool": "vrcforge_avatar_encryption_remove_request",
+        "tags": ["builtin", "group", "avatar-encryption", "anti-rip", "shader", "remove-request", "rollback"],
     },
     {
         "name": "approval-restore-control",
@@ -2071,6 +2248,14 @@ class AgentGateway:
                 if checkpoint.get("blocking"):
                     raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
             result = write_handler.handler(arguments)
+            if isinstance(result, dict) and result.get("ok") is False:
+                message = (
+                    result.get("error")
+                    or result.get("message")
+                    or result.get("reason")
+                    or f"{target_tool} returned ok=false."
+                )
+                raise AgentGatewayError(str(message))
             with self._lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
@@ -3583,6 +3768,8 @@ class AgentGateway:
         for tool in self._tools.values():
             skills.append(self._skill_from_tool(tool, config))
         for handler in self._write_handlers.values():
+            if handler.name in WRAPPER_ONLY_WRITE_TARGETS:
+                continue
             skills.append(self._skill_from_write_handler(handler, config))
         return sorted(skills, key=lambda item: (str(item.get("category") or ""), str(item.get("name") or "")))
 
@@ -4088,34 +4275,78 @@ class AgentGateway:
     ) -> dict[str, Any]:
         if not snapshot.content:
             return dict(params)
-        return self._with_user_constraints(params, snapshot)
+        return self._with_user_constraints(params, snapshot, include_content=False, append_instruction=False)
 
     def _with_user_constraints(
         self,
         params: dict[str, Any],
         snapshot: UserConstraintsSnapshot,
+        *,
+        include_content: bool | None = None,
+        append_instruction: bool = True,
     ) -> dict[str, Any]:
         enriched = dict(params)
-        enriched["_vrcforge_user_constraints"] = {
-            "source": "user_agents_md",
-            "path": str(snapshot.path),
-            "content": snapshot.content,
-        }
-        enriched.setdefault("user_constraints", snapshot.content)
-        enriched.setdefault("userConstraints", snapshot.content)
-        instruction = enriched.get("instruction")
-        constraints_block = (
-            "\n\nUser constraints from %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md:\n"
-            f"{snapshot.content}"
+        if include_content is None:
+            include_content = len(snapshot.content) <= USER_CONSTRAINTS_INLINE_CHARACTER_LIMIT
+        enriched["_vrcforge_user_constraints"] = self._user_constraints_payload(
+            snapshot,
+            include_content=include_content,
         )
+        if include_content:
+            enriched.setdefault("user_constraints", snapshot.content)
+            enriched.setdefault("userConstraints", snapshot.content)
+        instruction = enriched.get("instruction")
+        constraints_block = self._user_constraints_instruction_block(snapshot, include_content=include_content)
+        if not append_instruction:
+            return enriched
         if isinstance(instruction, str) and instruction.strip():
-            if snapshot.content not in instruction:
+            if constraints_block.strip() not in instruction:
                 enriched["instruction"] = instruction.rstrip() + constraints_block
         elif "instruction" in enriched or any(
             key in enriched for key in ("avatar", "avatar_path", "avatarPath", "inventory", "changes", "adjustments")
         ):
             enriched["instruction"] = "Follow the user constraints below." + constraints_block
         return enriched
+
+    def _user_constraints_payload(
+        self,
+        snapshot: UserConstraintsSnapshot,
+        *,
+        include_content: bool,
+    ) -> dict[str, Any]:
+        content_hash = hashlib.sha256(snapshot.content.encode("utf-8")).hexdigest() if snapshot.content else ""
+        preview = snapshot.content[:USER_CONSTRAINTS_PREVIEW_CHARACTER_LIMIT]
+        payload: dict[str, Any] = {
+            "source": "user_agents_md",
+            "path": str(snapshot.path),
+            "contentHash": content_hash,
+            "contentLength": len(snapshot.content),
+            "contentPreview": preview,
+            "contentInline": bool(include_content),
+        }
+        if include_content:
+            payload["content"] = snapshot.content
+        else:
+            payload["contentRedacted"] = True
+        return payload
+
+    def _user_constraints_instruction_block(
+        self,
+        snapshot: UserConstraintsSnapshot,
+        *,
+        include_content: bool,
+    ) -> str:
+        if include_content:
+            return (
+                "\n\nUser constraints from %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md:\n"
+                f"{snapshot.content}"
+            )
+        content_hash = hashlib.sha256(snapshot.content.encode("utf-8")).hexdigest() if snapshot.content else ""
+        return (
+            "\n\nUser constraints are active in %LOCALAPPDATA%\\VRCForge\\agentic-app\\AGENTS.md "
+            f"(sha256={content_hash}, characters={len(snapshot.content)}). "
+            "The full text is kept out of tool parameters to avoid oversized Unity/MCP command lines."
+        )
 
     @property
     def default_workspace_root(self) -> Path:

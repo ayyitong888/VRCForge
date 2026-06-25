@@ -1,0 +1,37 @@
+# VRCForge line-ending policy
+# The committed tree uses LF. Without this file, contributors whose Git has a
+# different core.autocrlf setting regenerate the whole tree as a CRLF diff,
+# which destroys blame and buries real changes. Normalize every text file to
+# LF in the repository so the checkout is deterministic on every machine.
+
+* text=auto eol=lf
+
+# Binary assets: never apply text/EOL filters.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.bmp   binary
+*.webp  binary
+*.psd   binary
+*.tga   binary
+*.fbx   binary
+*.unitypackage binary
+*.dll   binary
+*.exe   binary
+*.pdb   binary
+*.so    binary
+*.dylib binary
+*.zip   binary
+*.7z    binary
+*.gz    binary
+*.tar   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.wav   binary
+*.mp3   binary
+*.ogg   binary
+*.pdf   binary

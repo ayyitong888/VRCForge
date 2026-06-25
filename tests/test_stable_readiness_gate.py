@@ -57,8 +57,7 @@ def write_minimum_tree(tmp_path: Path) -> None:
         "Doctor First validation report First rollback Booth outfit model optimization external agents .vsk support bundle "
         "Privacy Boundary API key Gateway token paid asset private files .vsk export "
         "Current source version: `1.0.1` Latest published stable release: `1.0.0` "
-        "Avatar Encryption / Anti-Rip addon preview read-only "
-        "No avatar-encryption apply/remove write tool is exposed yet"
+        "Avatar Encryption / Anti-Rip addon private-addon connector private module required approval checkpoint rollback"
     )
     for path in ("README.md", "USER_MANUAL.md", "packaging/README.md"):
         target = tmp_path / path
@@ -71,7 +70,7 @@ def write_minimum_tree(tmp_path: Path) -> None:
     compatibility = (
         "Unity VRChat SDK Modular Avatar NDMF VRCFury AAO LAC TTT Meshia "
         "MA2BT-Pro Thry lilToon Poiyomi Known conflicts Known safe profiles "
-        "Avatar Encryption / Anti-Rip addon preview read-only no apply/remove writer"
+        "Avatar Encryption / Anti-Rip addon private-addon connector private module required approval checkpoint rollback"
     )
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)

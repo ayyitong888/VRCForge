@@ -267,8 +267,56 @@ MATERIAL_NUMERIC_RANGES = {
 AVATAR_ENCRYPTION_SCHEMA = "vrcforge.avatar_encryption.v1"
 AVATAR_ENCRYPTION_ADDON_VERSION = "1.0.1"
 AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES = PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS
-AVATAR_ENCRYPTION_DEFAULT_LAYERS = ("position_permutation", "uv_obfuscation")
-AVATAR_ENCRYPTION_EXPERIMENTAL_LAYERS = {"normal_tangent_scramble", "blendshape_delta_obfuscation"}
+AVATAR_ENCRYPTION_RECOMMENDED_PROFILE = "standard"
+AVATAR_ENCRYPTION_BENCHMARK_TRIANGLES = (50_000, 100_000, 200_000)
+AVATAR_ENCRYPTION_ADDON_APPLY_TOOL = "vrcforge_avatar_encryption_addon_apply"
+AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL = "vrcforge_avatar_encryption_addon_remove"
+AVATAR_ENCRYPTION_ADDON_URL_ENV = "VRCFORGE_AVATAR_ENCRYPTION_ADDON_URL"
+AVATAR_ENCRYPTION_ADDON_TOKEN_ENV = "VRCFORGE_AVATAR_ENCRYPTION_ADDON_TOKEN"
+AVATAR_ENCRYPTION_PROFILES: dict[str, dict[str, Any]] = {
+    "lite": {
+        "id": "lite",
+        "label": "Lite",
+        "uiTitle": "轻量保护",
+        "uiDescription": "最快，适合低端 Windows PC。",
+        "icon": "shield",
+        "recommended": False,
+        "gpuCost": "lowest",
+        "deviceFit": "Windows / low-end PC",
+        "protectionLevel": "Low-overhead Avatar Encryption.",
+        "plainProtection": "Low-overhead encryption.",
+        "applyStatus": "available",
+        "costWeight": 0.6,
+    },
+    "standard": {
+        "id": "standard",
+        "label": "Standard",
+        "uiTitle": "标准保护",
+        "uiDescription": "默认推荐，保护和流畅度平衡。",
+        "icon": "shield",
+        "recommended": True,
+        "gpuCost": "balanced",
+        "deviceFit": "PC default",
+        "protectionLevel": "Recommended Avatar Encryption.",
+        "plainProtection": "Recommended encryption.",
+        "applyStatus": "available",
+        "costWeight": 2.0,
+    },
+    "paranoid": {
+        "id": "paranoid",
+        "label": "Paranoid",
+        "uiTitle": "最高保护",
+        "uiDescription": "最强，适合高端 PC。",
+        "icon": "shield",
+        "recommended": False,
+        "gpuCost": "highest",
+        "deviceFit": "high-end PC",
+        "protectionLevel": "Highest preview mode; additional proof is still required.",
+        "plainProtection": "Highest preview mode.",
+        "applyStatus": "blocked_until_blendshape_proof",
+        "costWeight": 5.5,
+    },
+}
 
 
 def runtime_settings_path() -> str:
@@ -411,6 +459,7 @@ class TuningLocksAiSelectRequest(DashboardRequest):
 
 class AvatarScopedConnectionRequest(ConnectionRequest):
     avatar_path: str | None = Field(default=None, alias="avatarPath")
+    project_path: str | None = Field(default=None, alias="projectPath")
 
     model_config = {"populate_by_name": True}
 
@@ -486,9 +535,13 @@ class AvatarEncryptionPlanRequest(AvatarEncryptionScanRequest):
         default_factory=lambda: list(AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES),
         alias="targetShaderFamilies",
     )
-    key_channel: str = Field(default="avatar_parameter_32bit", alias="keyChannel")
+    material_ids: list[str] = Field(default_factory=list, alias="materialIds")
+    renderer_paths: list[str] = Field(default_factory=list, alias="rendererPaths")
+    targets: list[dict[str, Any]] = Field(default_factory=list)
+    profile: str = AVATAR_ENCRYPTION_RECOMMENDED_PROFILE
+    protection_profile: str | None = Field(default=None, alias="protectionProfile")
     platform: str = "pc"
-    layers: list[str] = Field(default_factory=lambda: list(AVATAR_ENCRYPTION_DEFAULT_LAYERS))
+    target_platform: str | None = Field(default=None, alias="targetPlatform")
     confirm_creator_owned_assets: bool = Field(default=False, alias="confirmCreatorOwnedAssets")
 
     model_config = {"populate_by_name": True}
@@ -496,6 +549,26 @@ class AvatarEncryptionPlanRequest(AvatarEncryptionScanRequest):
 
 class AvatarEncryptionPreviewRequest(AvatarEncryptionPlanRequest):
     plan: dict[str, Any] | None = None
+
+
+class AvatarEncryptionApplyRequest(AvatarEncryptionPreviewRequest):
+    target_shader_family: str | None = Field(default=None, alias="targetShaderFamily")
+    output_folder: str = Field(default="Assets/VRCForgeGenerated/AvatarEncryption", alias="outputFolder")
+    preview_unity_write: bool = Field(default=False, alias="previewUnityWrite")
+    save_assets: bool = Field(default=True, alias="saveAssets")
+
+    model_config = {"populate_by_name": True}
+
+
+class AvatarEncryptionRemoveRequest(AvatarScopedConnectionRequest):
+    manifest_path: str | None = Field(default=None, alias="manifestPath")
+    output_folder: str = Field(default="Assets/VRCForgeGenerated/AvatarEncryption", alias="outputFolder")
+    delete_generated_assets: bool = Field(default=True, alias="deleteGeneratedAssets")
+    confirm_remove: bool = Field(default=False, alias="confirmRemove")
+    preview_unity_write: bool = Field(default=False, alias="previewUnityWrite")
+    save_assets: bool = Field(default=True, alias="saveAssets")
+
+    model_config = {"populate_by_name": True}
 
 
 class AdjustmentCheckpointCreateRequest(BaseModel):
@@ -4373,6 +4446,25 @@ async def avatar_encryption_preview(request: AvatarEncryptionPreviewRequest) -> 
     return await asyncio.to_thread(preview_avatar_encryption_sync, request)
 
 
+@app.post("/api/avatar-encryption/apply-request")
+async def avatar_encryption_apply_request(request: AvatarEncryptionApplyRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        request_avatar_encryption_apply_sync,
+        request.model_dump(by_alias=True),
+        request.target_shader_family,
+        "desktop-agent",
+    )
+
+
+@app.post("/api/avatar-encryption/remove-request")
+async def avatar_encryption_remove_request(request: AvatarEncryptionRemoveRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        request_avatar_encryption_remove_sync,
+        request.model_dump(by_alias=True),
+        "desktop-agent",
+    )
+
+
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
     return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
@@ -5470,7 +5562,7 @@ def build_avatar_encryption_research_report_sync(request: AvatarEncryptionResear
             {
                 "id": "avacrypt-v2-liltoon",
                 "label": "AvaCrypt V2 lilToon fork",
-                "role": "research reference for UV/keyed restore ideas",
+                "role": "research reference for optional Anti-Rip compatibility",
                 "reusePolicy": "research only until license, trust, and code review are complete",
             },
             {
@@ -5485,59 +5577,104 @@ def build_avatar_encryption_research_report_sync(request: AvatarEncryptionResear
         "ok": True,
         "schema": AVATAR_ENCRYPTION_SCHEMA,
         "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
-        "phase": "M0/M2",
+        "phase": "M0/M4",
         "track": "avatar-encryption-addon",
         "readOnly": True,
-        "writeStatus": "blocked_until_disposable_prototype_and_rollback_proof",
+        "writeStatus": "private_addon_connector_required",
+        "writeBoundary": "Apply/remove are exposed only as dedicated approval requests that hand off to a configured private addon connector.",
         "firstClassShaderFamilies": ["lilToon", "Poiyomi"],
         "compatibilityPolicy": {
-            "genericSemantic": "scan-only; blocked preview until a restore shader adapter exists",
+            "genericSemantic": "scan-only until validated support exists",
             "standardOrUnknown": "compatibility report only; never auto-convert",
             "otherShaderFamilies": "collect family/material evidence and keep apply blocked by default",
         },
         "securityPrinciples": [
             "Opt-in only; never run as part of normal optimization/import flows.",
             "Creator-owned local assets only.",
-            "Generated encrypted copies must preserve originals and use checkpointed apply/remove later.",
-            "Do not market as unbreakable DRM; shader bytecode and material state may be reverse engineered.",
-            "Do not write secrets, paid asset payloads, or generated encrypted meshes into .vsk packages.",
+            "Generated encrypted copies preserve originals and must use checkpointed apply/remove requests.",
+            "Describe protection claims as Avatar Encryption / Anti-Rip hardening with proof gates.",
+            "Do not write secrets, paid asset payloads, or private addon outputs into .vsk packages.",
         ],
         "keyModel": [
             {
-                "id": "avatar_parameter_32bit",
-                "status": "compatibility_demo",
-                "security": "low",
-                "notes": "A 32-bit Avatar 3.0 parameter cannot carry an AES-256 secret; use only as shard/selector/demo value.",
-            },
-            {
-                "id": "baked_per_avatar_secret",
-                "status": "required_hybrid_component",
-                "security": "medium",
-                "notes": "Useful only when combined with per-mesh salts and no secret leakage in support bundles or packages.",
-            },
-            {
-                "id": "osc_companion",
-                "status": "research_required",
-                "security": "stronger_possible",
-                "notes": "Potential stronger/rotating key path, but usability and VRChat compatibility need proof.",
+                "id": "internal",
+                "status": "managed_by_vrcforge",
+                "security": "mvp",
+                "notes": "Implementation details are intentionally omitted from public reports.",
             },
         ],
         "layers": [
-            {"id": "position_permutation", "status": "target_for_liltoon_m1", "default": True},
-            {"id": "uv_obfuscation", "status": "target_for_liltoon_m1", "default": True},
-            {"id": "normal_tangent_scramble", "status": "experimental", "default": False},
-            {"id": "blendshape_delta_obfuscation", "status": "research_only_high_risk", "default": False},
+            {"id": "lite", "status": "available", "default": False},
+            {"id": "standard", "status": "available", "default": True},
+            {"id": "paranoid", "status": "proof_gated", "default": False},
         ],
         "milestones": [
             "M0 research packet",
             "M1 local disposable lilToon prototype",
             "M2 VRCForge scan/plan/preview skill",
-            "M3 lilToon apply/remove request after proof",
-            "M4 Poiyomi apply/remove request after shared restore abstraction",
+            "M3 lilToon apply/remove request with checkpointed generated copies",
+            "M4 Poiyomi apply/remove request through the shared restore abstraction",
             "M5 governed .vsk addon packaging",
         ],
         "externalReferences": references,
     }
+
+
+def avatar_encryption_addon_status_sync() -> dict[str, Any]:
+    base_url = os.environ.get(AVATAR_ENCRYPTION_ADDON_URL_ENV, "").strip().rstrip("/")
+    token_present = bool(os.environ.get(AVATAR_ENCRYPTION_ADDON_TOKEN_ENV, "").strip())
+    return {
+        "ok": True,
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "connector": {
+            "configured": bool(base_url),
+            "baseUrlConfigured": bool(base_url),
+            "tokenPresent": token_present,
+            "applyTool": AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
+            "removeTool": AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
+            "contract": "private-addon-rest-v1",
+            "publicRepoImplementation": False,
+            "status": "configured" if base_url else "private_addon_not_configured",
+            "blocker": "" if base_url else "Set VRCFORGE_AVATAR_ENCRYPTION_ADDON_URL to a trusted private addon endpoint before apply/remove.",
+        },
+    }
+
+
+def call_avatar_encryption_addon(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+    status = avatar_encryption_addon_status_sync()
+    connector = ensure_dict(status.get("connector"))
+    base_url = os.environ.get(AVATAR_ENCRYPTION_ADDON_URL_ENV, "").strip().rstrip("/")
+    if not base_url:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "schema": AVATAR_ENCRYPTION_SCHEMA,
+            "error": str(connector.get("blocker") or "Private Avatar Encryption addon is not configured."),
+            "connector": connector,
+        }
+    url = f"{base_url}/api/v1/avatar-encryption/{endpoint.lstrip('/')}"
+    body = json.dumps({"schema": AVATAR_ENCRYPTION_SCHEMA, "params": params}, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token = os.environ.get(AVATAR_ENCRYPTION_ADDON_TOKEN_ENV, "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - configured trusted local/private addon endpoint.
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return {
+            "ok": False,
+            "status": "failed",
+            "schema": AVATAR_ENCRYPTION_SCHEMA,
+            "error": f"Private Avatar Encryption addon call failed: {exc}",
+            "connector": connector,
+        }
+    result = ensure_dict_payload(payload, "avatar encryption private addon response")
+    result.setdefault("schema", AVATAR_ENCRYPTION_SCHEMA)
+    result.setdefault("connector", connector)
+    return result
 
 
 def scan_avatar_encryption_sync(request: AvatarEncryptionScanRequest) -> dict[str, Any]:
@@ -5570,6 +5707,7 @@ def scan_avatar_encryption_sync(request: AvatarEncryptionScanRequest) -> dict[st
 
 
 def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[str, Any]:
+    profile = avatar_encryption_request_profile(request)
     scan = scan_avatar_encryption_sync(
         AvatarEncryptionScanRequest(
             settings_path=request.settings_path,
@@ -5587,9 +5725,11 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         item for item in scan["targets"]
         if item.get("status") == "candidate" and item.get("shaderFamilyId") in target_families
     ]
-    layer_plan = build_avatar_encryption_layer_plan(request.layers)
-    key_channel = build_avatar_encryption_key_channel(str(request.key_channel or "avatar_parameter_32bit"))
-    platform = normalize_avatar_encryption_platform(request.platform)
+    requested_target_filter_active = has_avatar_encryption_target_filter(request)
+    if requested_target_filter_active:
+        selected_candidates = filter_avatar_encryption_requested_targets(selected_candidates, request)
+    platform = normalize_avatar_encryption_platform(request.target_platform or request.platform)
+    addon_status = avatar_encryption_addon_status_sync()
     warnings: list[str] = []
     blocking_ids: list[str] = []
 
@@ -5597,22 +5737,40 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         warnings.append("Creator-owned asset confirmation is required before any future apply/remove request.")
     if not selected_candidates:
         blocking_ids.append("shader_family.no_liltoon_or_poiyomi_candidate")
+        if requested_target_filter_active:
+            blocking_ids.append("targets.requested_targets_not_found")
     if unsupported_target_families:
         blocking_ids.append("shader_family.requested_restore_adapter_missing")
     if platform["status"] != "supported":
-        blocking_ids.append("platform.pc_only")
-    if any(layer.get("status") in {"blocked", "research_only"} for layer in layer_plan):
-        blocking_ids.append("layer.experimental_or_research_only")
+        blocking_ids.append("platform.windows_only")
+    if not addon_status["connector"]["configured"]:
+        blocking_ids.append("addon.private_module_not_configured")
+    if profile.get("applyStatus") != "available":
+        blocking_ids.append("profile.paranoid_blendshape_proof_required")
 
-    plan_status = "blocked" if blocking_ids else "preview_ready"
+    plan_status = "blocked" if blocking_ids else "request_ready"
     plan = {
         "schema": AVATAR_ENCRYPTION_SCHEMA,
         "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
-        "phase": "M2-preview",
+        "phase": "M3/M4-apply-request",
         "status": plan_status,
         "readOnly": True,
-        "writeStatus": "blocked",
-        "writeBlockReason": "1.0.1 ships scan/plan/preview only; apply/remove wait for disposable prototype, shader fork review, validation, and rollback proof.",
+        "writeStatus": "blocked" if blocking_ids else "approval_request_available",
+        "writeBlockReason": (
+            "; ".join(blocking_ids)
+            if blocking_ids
+            else "Direct apply remains blocked. Use the dedicated request tools; approved execution is handed to the configured private addon after checkpoint."
+        ),
+        "profile": profile,
+        "recommendedProfile": AVATAR_ENCRYPTION_RECOMMENDED_PROFILE,
+        "profileCards": avatar_encryption_profile_cards(),
+        "benchmarkTable": avatar_encryption_benchmark_table(),
+        "benchmarkAssumptions": {
+            "kind": "estimated_static_profile_budget",
+            "baselineFps": 90,
+            "avatarScales": list(AVATAR_ENCRYPTION_BENCHMARK_TRIANGLES),
+            "note": "Deterministic planning estimate for profile comparison; replace with captured GPU data when project-specific benchmark evidence exists.",
+        },
         "avatarPath": scan.get("avatarPath") or request.avatar_path or "",
         "targetShaderFamilies": list(target_families),
         "unsupportedTargetFamilies": unsupported_target_families,
@@ -5620,11 +5778,11 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
         "selectedCandidateCount": len(selected_candidates),
         "selectedCandidates": selected_candidates,
         "compatibilityTargets": scan["compatibilityTargets"],
-        "keyChannel": key_channel,
+        "externalAddon": addon_status["connector"],
         "platform": platform,
-        "layers": layer_plan,
+        "layers": [{"id": "profile_managed", "label": str(profile.get("label") or "Profile"), "status": "managed_by_private_addon"}],
         "hardGate": {
-            "status": "blocked" if blocking_ids else "preview_only",
+            "status": "blocked" if blocking_ids else "request_ready",
             "blockingIds": blocking_ids,
             "warnings": warnings,
         },
@@ -5634,30 +5792,50 @@ def plan_avatar_encryption_sync(request: AvatarEncryptionPlanRequest) -> dict[st
             "requiredBeforeWrite": True,
         },
         "proofRequirements": avatar_encryption_proof_requirements(),
+        "dynamicTimePolicy": {"mode": "private_addon_managed", "details": "Implementation details are intentionally omitted from public reports."},
         "futureRequestTools": {
             "liltoonApplyRequest": "vrcforge_avatar_encryption_liltoon_apply_request",
             "poiyomiApplyRequest": "vrcforge_avatar_encryption_poiyomi_apply_request",
             "removeRequest": "vrcforge_avatar_encryption_remove_request",
-            "status": "not_registered_in_1.0.1",
+            "status": "registered_request_only_private_addon_connector",
         },
         "futureCapabilities": [
-            {"id": "liltoon.apply_request", "tool": "vrcforge_avatar_encryption_liltoon_apply_request", "registered": False},
-            {"id": "poiyomi.apply_request", "tool": "vrcforge_avatar_encryption_poiyomi_apply_request", "registered": False},
-            {"id": "remove.restore_originals", "tool": "vrcforge_avatar_encryption_remove_request", "registered": False},
+            {"id": "liltoon.apply_request", "tool": "vrcforge_avatar_encryption_liltoon_apply_request", "registered": True},
+            {"id": "poiyomi.apply_request", "tool": "vrcforge_avatar_encryption_poiyomi_apply_request", "registered": True},
+            {"id": "remove.restore_originals", "tool": "vrcforge_avatar_encryption_remove_request", "registered": True},
         ],
         "nextSteps": [
-            "Run this preview on a disposable avatar before any shader fork or mesh copy.",
-            "Prototype lilToon restore include first with position + UV obfuscation only.",
-            "Use the same scan/plan schema for Poiyomi once the lilToon restore boundary is proven.",
+            "Run apply requests on creator-owned disposable copies before using them on production avatars.",
+            "Capture before/apply/remove/rollback visual evidence for each real project proof.",
+            "Use remove request first for normal cleanup; use checkpoint rollback when remove cannot resolve an original asset.",
             "Keep Generic/Standard/unknown shader families as compatibility-only until a restore adapter exists.",
+            "Configure the private Avatar Encryption addon before any apply/remove request can execute.",
         ],
     }
     return {"ok": True, "schema": AVATAR_ENCRYPTION_SCHEMA, "scan": scan, "plan": plan}
 
 
 def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> dict[str, Any]:
-    plan_payload = request.plan if request.plan else plan_avatar_encryption_sync(request).get("plan")
-    plan = ensure_dict(plan_payload)
+    if request.plan and request.inventory is None and not request.avatar_path:
+        plan_payload = copy.deepcopy(request.plan)
+        plan = ensure_dict(plan_payload)
+        hard_gate = ensure_dict(plan.get("hardGate"))
+        blocking_ids = [
+            str(item)
+            for item in ensure_list_payload(hard_gate.get("blockingIds") or [], "avatar encryption hard gate blockers")
+        ]
+        if "plan.untrusted_external_plan" not in blocking_ids:
+            blocking_ids.append("plan.untrusted_external_plan")
+        hard_gate["status"] = "blocked"
+        hard_gate["blockingIds"] = blocking_ids
+        plan["status"] = "blocked"
+        plan["writeStatus"] = "blocked"
+        plan["writeBlockReason"] = "; ".join(blocking_ids)
+        plan["selectedCandidates"] = []
+        plan["hardGate"] = hard_gate
+    else:
+        plan_payload = plan_avatar_encryption_sync(request).get("plan")
+        plan = ensure_dict(plan_payload)
     candidates = ensure_list_payload(plan.get("selectedCandidates") or [], "avatar encryption selected candidates")
     eligible_candidates, blocked_candidates = filter_avatar_encryption_preview_candidates(candidates)
     write_targets = [
@@ -5672,9 +5850,9 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
             "adapterId": normalize_avatar_encryption_shader_family(item.get("shaderFamilyId") or item.get("shaderFamily")),
             "targetResolutionStatus": "resolved" if item.get("rendererPath") and item.get("materialId") else "needs_resolution",
             "wouldCreate": [
-                "encrypted mesh copy under Assets/VRCForgeGenerated/AvatarEncryption",
-                "material copy remapped to a reviewed restore shader fork",
-                "encryption manifest with redacted salt/key metadata only",
+                "private addon output under the configured VRCForge output folder",
+                "approval audit entry",
+                "private addon rollback manifest",
             ],
             "wouldModifyOriginalAsset": False,
         }
@@ -5688,9 +5866,14 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
         "previewOnly": True,
         "writeAllowed": False,
         "wouldWrite": False,
+        "applyRequestReady": bool(write_targets) and ensure_dict(plan.get("hardGate")).get("status") == "request_ready",
         "blockedApply": {
-            "status": "blocked",
-            "reason": "1.0.1 is read/plan/preview only. No mesh, material, shader, package, or secret writes are available.",
+            "status": "approval_required" if write_targets and ensure_dict(plan.get("hardGate")).get("status") == "request_ready" else "blocked",
+            "reason": (
+                "Direct apply is unavailable. Use lilToon/Poiyomi apply-request; approved execution creates a pre-write checkpoint."
+                if write_targets and ensure_dict(plan.get("hardGate")).get("status") == "request_ready"
+                else "Avatar-encryption apply request is blocked by the hard gate or has no eligible lilToon/Poiyomi targets."
+            ),
         },
         "plan": plan,
         "writeTargetsPreview": write_targets,
@@ -5699,9 +5882,177 @@ def preview_avatar_encryption_sync(request: AvatarEncryptionPreviewRequest) -> d
             "futureScope": ["Assets", "Packages", "ProjectSettings"],
             "requiresCheckpoint": True,
             "removeMustRestoreOriginalMeshesAndMaterials": True,
+            "normalCleanupTool": "vrcforge_avatar_encryption_remove_request",
+            "checkpointRollbackTool": "vrcforge_restore_checkpoint",
             "supportBundlesMustRedactSecrets": True,
         },
     }
+
+
+def request_avatar_encryption_apply_sync(
+    params: dict[str, Any],
+    target_family: str | None = None,
+    agent_name: str = "external-agent",
+) -> dict[str, Any]:
+    params = dict(params or {})
+    family = normalize_avatar_encryption_shader_family(target_family or params.get("targetShaderFamily") or params.get("target_shader_family") or "")
+    if family not in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES:
+        families = normalize_avatar_encryption_target_families(params.get("targetShaderFamilies") or params.get("target_shader_families"))
+        family = families[0] if families and families[0] in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES else ""
+    if family not in AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES:
+        return {"ok": False, "status": "blocked", "error": "targetShaderFamily must be lilToon or Poiyomi for avatar-encryption apply requests."}
+
+    params["targetShaderFamilies"] = [family]
+    request = AvatarEncryptionApplyRequest(**params)
+    preview = preview_avatar_encryption_sync(request)
+    plan = ensure_dict(preview.get("plan"))
+    hard_gate = ensure_dict(plan.get("hardGate"))
+    write_targets = ensure_list_payload(preview.get("writeTargetsPreview") or [], "avatar encryption write target preview")
+    blocked_reasons: list[str] = []
+    if hard_gate.get("status") != "request_ready":
+        blocked_reasons.extend(str(item) for item in ensure_list_payload(hard_gate.get("blockingIds") or [], "avatar encryption hard gate blockers"))
+    if not request.confirm_creator_owned_assets:
+        blocked_reasons.append("ownership.confirm_creator_owned_assets_required")
+    if not write_targets:
+        blocked_reasons.append("targets.no_liltoon_or_poiyomi_targets")
+
+    if blocked_reasons:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "; ".join(blocked_reasons),
+            "preview": preview,
+        }
+
+    avatar_path = str(plan.get("avatarPath") or request.avatar_path or "").strip()
+    profile = ensure_dict(plan.get("profile"))
+    apply_arguments = {
+        "avatarPath": avatar_path,
+        "projectPath": request.project_path or "",
+        "profile": str(profile.get("id") or AVATAR_ENCRYPTION_RECOMMENDED_PROFILE),
+        "protectionProfile": str(profile.get("id") or AVATAR_ENCRYPTION_RECOMMENDED_PROFILE),
+        "targetShaderFamily": family,
+        "targets": write_targets,
+        "outputFolder": request.output_folder,
+        "platform": str(ensure_dict(plan.get("platform")).get("id") or request.target_platform or request.platform or "pc"),
+        "targetPlatform": str(ensure_dict(plan.get("platform")).get("id") or request.target_platform or request.platform or "pc"),
+        "connectorContract": "private-addon-rest-v1",
+        "preview": bool(request.preview_unity_write),
+        "confirmCreatorOwnedAssets": True,
+        "saveAssets": bool(request.save_assets),
+    }
+    request_preview = {
+        **preview,
+        "readyToRequest": True,
+        "targetTool": AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
+        "targetShaderFamily": family,
+        "applyArguments": {
+            **apply_arguments,
+            "targets": write_targets,
+        },
+        "directApplyVisible": False,
+        "requiresExplicitApproval": True,
+        "checkpointRequired": True,
+        "rollback": {
+            "removeRequestTool": "vrcforge_avatar_encryption_remove_request",
+            "checkpointRestoreTool": "vrcforge_restore_checkpoint",
+            "manifestRequired": True,
+        },
+        "limitations": [
+            "MVP blocks targets that still need additional validation.",
+            "The public repository provides only the connector and supervised request path.",
+            "Lite/Standard are available request profiles; Paranoid is blocked until additional proof is complete.",
+            "A configured private Avatar Encryption addon is required for execution.",
+        ],
+    }
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
+            "arguments": apply_arguments,
+            "reason": f"Request supervised Avatar Encryption apply for {avatar_encryption_shader_family_label(family)}.",
+            "preview": request_preview,
+            "agent_name": agent_name,
+            "requires_explicit_approval": True,
+            "explicit_approval_reason": "Avatar Encryption apply changes selected avatar assets; explicit approval is required even when global auto mode is enabled.",
+        },
+        internal_wrapper=True,
+    )
+
+
+def request_avatar_encryption_remove_sync(params: dict[str, Any], agent_name: str = "external-agent") -> dict[str, Any]:
+    params = dict(params or {})
+    request = AvatarEncryptionRemoveRequest(**params)
+    if not request.confirm_remove:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "confirmRemove=true is required before creating an avatar-encryption remove request.",
+        }
+    if not str(request.manifest_path or "").strip() and not str(request.avatar_path or "").strip():
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "manifestPath or avatarPath is required before creating an avatar-encryption remove request.",
+        }
+    addon_status = avatar_encryption_addon_status_sync()
+    if not addon_status["connector"]["configured"]:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "addon.private_module_not_configured",
+            "connector": addon_status["connector"],
+        }
+    arguments = {
+        "avatarPath": request.avatar_path or "",
+        "projectPath": request.project_path or "",
+        "manifestPath": request.manifest_path or "",
+        "outputFolder": request.output_folder,
+        "deleteGeneratedAssets": bool(request.delete_generated_assets),
+        "preview": bool(request.preview_unity_write),
+        "confirmRemove": True,
+        "saveAssets": bool(request.save_assets),
+    }
+    preview = {
+        "ok": True,
+        "schema": AVATAR_ENCRYPTION_SCHEMA,
+        "addonVersion": AVATAR_ENCRYPTION_ADDON_VERSION,
+        "previewOnly": True,
+        "readyToRequest": True,
+        "targetTool": AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
+        "directApplyVisible": False,
+        "requiresExplicitApproval": True,
+        "checkpointRequired": True,
+        "avatarPath": request.avatar_path or "",
+        "manifestPath": request.manifest_path or "",
+        "outputFolder": request.output_folder,
+        "deleteGeneratedAssets": bool(request.delete_generated_assets),
+        "rollback": {
+            "checkpointRestoreTool": "vrcforge_restore_checkpoint",
+            "checkpointStillAvailable": True,
+        },
+    }
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
+            "arguments": arguments,
+            "reason": "Request supervised Avatar Encryption remove/restore.",
+            "preview": preview,
+            "agent_name": agent_name,
+            "requires_explicit_approval": True,
+            "explicit_approval_reason": "Avatar Encryption remove restores renderer mesh/material references and may delete generated assets; explicit approval is required.",
+        },
+        internal_wrapper=True,
+    )
+
+
+def apply_avatar_encryption_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = dict(params or {})
+    return call_avatar_encryption_addon("apply", params)
+
+
+def remove_avatar_encryption_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = dict(params or {})
+    return call_avatar_encryption_addon("remove", params)
 
 
 def build_avatar_encryption_scan_payload(
@@ -5740,7 +6091,8 @@ def build_avatar_encryption_scan_payload(
         "policy": {
             "primaryFamilies": ["lilToon", "Poiyomi"],
             "otherFamilies": "compatibility-only blocked preview",
-            "applyAvailable": False,
+            "applyAvailable": True,
+            "applyMode": "dedicated_request_tool_only",
         },
     }
 
@@ -5771,7 +6123,6 @@ def build_avatar_encryption_target(material: dict[str, Any]) -> dict[str, Any]:
         "status": "candidate" if first_class else "blocked",
         "recommendedAdapter": f"{family_id}_restore_adapter" if first_class else "",
         "adapterDecision": shader_adapter_definition(family_id),
-        "defaultLayers": list(AVATAR_ENCRYPTION_DEFAULT_LAYERS) if first_class else [],
         "blockers": blockers,
         "warnings": warnings,
     }
@@ -5794,6 +6145,77 @@ def normalize_avatar_encryption_target_families(values: list[str] | None) -> tup
         if family not in families:
             families.append(family)
     return tuple(families or AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES)
+
+
+def normalize_avatar_encryption_profile(value: Any) -> str:
+    profile = str(value or AVATAR_ENCRYPTION_RECOMMENDED_PROFILE).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "low": "lite",
+        "light": "lite",
+        "balanced": "standard",
+        "default": "standard",
+        "normal": "standard",
+        "high": "paranoid",
+        "max": "paranoid",
+        "maximum": "paranoid",
+    }
+    profile = aliases.get(profile, profile)
+    return profile if profile in AVATAR_ENCRYPTION_PROFILES else AVATAR_ENCRYPTION_RECOMMENDED_PROFILE
+
+
+def avatar_encryption_profile_definition(profile_id: str) -> dict[str, Any]:
+    profile = copy.deepcopy(AVATAR_ENCRYPTION_PROFILES.get(profile_id) or AVATAR_ENCRYPTION_PROFILES[AVATAR_ENCRYPTION_RECOMMENDED_PROFILE])
+    return profile
+
+
+def avatar_encryption_request_profile(request: AvatarEncryptionPlanRequest) -> dict[str, Any]:
+    profile_id = normalize_avatar_encryption_profile(request.protection_profile or request.profile)
+    return avatar_encryption_profile_definition(profile_id)
+
+
+def avatar_encryption_profile_cards() -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for profile_id in ("lite", "standard", "paranoid"):
+        profile = avatar_encryption_profile_definition(profile_id)
+        cards.append({
+            "id": profile["id"],
+            "icon": profile["icon"],
+            "title": profile["uiTitle"],
+            "label": profile["label"],
+            "description": profile["uiDescription"],
+            "recommended": bool(profile.get("recommended")),
+            "cost": profile["gpuCost"],
+            "deviceFit": profile["deviceFit"],
+            "protection": profile["plainProtection"],
+            "applyStatus": profile["applyStatus"],
+        })
+    return cards
+
+
+def avatar_encryption_benchmark_table() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    baseline_fps = 90.0
+    baseline_frame_ms = 1000.0 / baseline_fps
+    for triangles in AVATAR_ENCRYPTION_BENCHMARK_TRIANGLES:
+        scale = (triangles / 50_000.0) ** 0.85
+        for profile_id in ("lite", "standard", "paranoid"):
+            profile = AVATAR_ENCRYPTION_PROFILES[profile_id]
+            impact_percent = round(float(profile["costWeight"]) * scale, 1)
+            estimated_fps = round(baseline_fps * (1.0 - impact_percent / 100.0), 1)
+            frame_ms = 1000.0 / max(estimated_fps, 1.0)
+            rows.append({
+                "profile": profile_id,
+                "label": profile["label"],
+                "triangles": triangles,
+                "avatarScale": f"{triangles // 1000}k triangles",
+                "baselineFps": int(baseline_fps),
+                "estimatedFps": estimated_fps,
+                "estimatedFpsLoss": round(baseline_fps - estimated_fps, 1),
+                "estimatedFrameTimeAddedMs": round(frame_ms - baseline_frame_ms, 2),
+                "estimatedImpactPercent": impact_percent,
+                "gpuCost": profile["gpuCost"],
+            })
+    return rows
 
 
 def filter_avatar_encryption_preview_candidates(candidates: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -5823,6 +6245,46 @@ def filter_avatar_encryption_preview_candidates(candidates: list[Any]) -> tuple[
     return eligible, blocked
 
 
+def has_avatar_encryption_target_filter(request: AvatarEncryptionPlanRequest) -> bool:
+    return bool(request.material_ids or request.renderer_paths or request.targets)
+
+
+def filter_avatar_encryption_requested_targets(
+    candidates: list[dict[str, Any]],
+    request: AvatarEncryptionPlanRequest,
+) -> list[dict[str, Any]]:
+    material_ids = {str(value or "").strip() for value in request.material_ids}
+    renderer_paths = {str(value or "").strip() for value in request.renderer_paths}
+    renderer_ids: set[str] = set()
+    for target in request.targets:
+        if not isinstance(target, dict):
+            continue
+        material_id = str(target.get("materialId") or target.get("material_id") or "").strip()
+        renderer_path = str(target.get("rendererPath") or target.get("renderer_path") or "").strip()
+        renderer_id = str(target.get("rendererId") or target.get("renderer_id") or "").strip()
+        if material_id:
+            material_ids.add(material_id)
+        if renderer_path:
+            renderer_paths.add(renderer_path)
+        if renderer_id:
+            renderer_ids.add(renderer_id)
+
+    material_ids.discard("")
+    renderer_paths.discard("")
+    renderer_ids.discard("")
+    if not (material_ids or renderer_paths or renderer_ids):
+        return candidates
+
+    selected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        material_id = str(candidate.get("materialId") or "").strip()
+        renderer_path = str(candidate.get("rendererPath") or "").strip()
+        renderer_id = str(candidate.get("rendererId") or "").strip()
+        if material_id in material_ids or renderer_path in renderer_paths or renderer_id in renderer_ids:
+            selected.append(candidate)
+    return selected
+
+
 def normalize_avatar_encryption_platform(value: Any) -> dict[str, Any]:
     platform = str(value or "pc").strip().lower()
     if platform in {"pc", "windows"}:
@@ -5832,67 +6294,20 @@ def normalize_avatar_encryption_platform(value: Any) -> dict[str, Any]:
             "id": "quest_android",
             "label": "Quest/Android",
             "status": "blocked",
-            "reason": "Quest/Android shader and lookup constraints need separate proof.",
+            "reason": "Avatar Encryption is Windows PC-only; Quest/Android requests are blocked for this feature.",
         }
     return {"id": platform or "unknown", "label": platform or "unknown", "status": "blocked", "reason": "Unknown platform."}
 
 
-def build_avatar_encryption_layer_plan(values: list[str] | None) -> list[dict[str, Any]]:
-    requested = [str(value or "").strip().lower() for value in (values or AVATAR_ENCRYPTION_DEFAULT_LAYERS)]
-    if not requested:
-        requested = list(AVATAR_ENCRYPTION_DEFAULT_LAYERS)
-    layer_plan: list[dict[str, Any]] = []
-    for layer in requested:
-        if layer in {"position", "vertex", "position_permutation"}:
-            layer_plan.append({"id": "position_permutation", "status": "preview_supported", "default": True})
-        elif layer in {"uv", "uv_obfuscation", "uv_encrypt"}:
-            layer_plan.append({"id": "uv_obfuscation", "status": "preview_supported", "default": True})
-        elif layer in {"normal", "tangent", "normal_tangent", "normal_tangent_scramble"}:
-            layer_plan.append({"id": "normal_tangent_scramble", "status": "blocked", "reason": "Needs lighting/outline/matcap proof."})
-        elif layer in {"blendshape", "blend_shape", "blendshape_delta", "blendshape_delta_obfuscation"}:
-            layer_plan.append({"id": "blendshape_delta_obfuscation", "status": "research_only", "reason": "High risk for visemes, face tracking, and animation clips."})
-        else:
-            layer_plan.append({"id": layer or "unknown", "status": "blocked", "reason": "Unknown encryption layer."})
-    return dedupe_avatar_encryption_layers(layer_plan)
-
-
-def dedupe_avatar_encryption_layers(layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    result: list[dict[str, Any]] = []
-    for layer in layers:
-        layer_id = str(layer.get("id") or "")
-        if layer_id in seen:
-            continue
-        seen.add(layer_id)
-        result.append(layer)
-    return result
-
-
-def build_avatar_encryption_key_channel(value: str) -> dict[str, Any]:
-    key = str(value or "avatar_parameter_32bit").strip().lower()
-    if key in {"avatar_parameter_32bit", "parameter", "avatar3_parameter"}:
-        return {
-            "id": "avatar_parameter_32bit",
-            "status": "compatibility_demo",
-            "security": "low",
-            "warning": "32-bit Avatar 3.0 parameter cannot carry a full AES-256 secret.",
-        }
-    if key in {"osc", "osc_companion"}:
-        return {"id": "osc_companion", "status": "research_required", "security": "stronger_possible"}
-    if key in {"baked", "baked_per_avatar_secret"}:
-        return {"id": "baked_per_avatar_secret", "status": "hybrid_component", "security": "medium"}
-    return {"id": key, "status": "blocked", "security": "unknown", "warning": "Unsupported key channel."}
-
-
 def avatar_encryption_proof_requirements() -> list[str]:
     return [
-        "Disposable avatar only until shader fork and rollback are reviewed.",
-        "Source assets preserved; future apply generates encrypted mesh/material copies.",
+        "Disposable avatar proof is required before using this on a production avatar.",
+        "Source assets are preserved; private addon output is checkpointed.",
         "Unity compile errors remain zero.",
         "Build/Test readiness or explainable blocker is recorded.",
-        "Visual proof includes before, correct-key restored, wrong-key/scrambled, and rollback screenshots.",
-        "Remove operation restores original meshes and materials.",
-        "Support bundles redact keys, salts, secrets, and encryption manifests.",
+        "Visual proof includes before, applied, removed, and rollback screenshots.",
+        "Remove operation restores the original avatar state.",
+        "Support bundles redact secrets and private project details.",
     ]
 
 
@@ -7377,15 +7792,20 @@ def apply_parameter_optimization_direct(
 
 def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
     output_path = build_dashboard_artifact_path("shader_material_inventory", avatar_path, "json")
-    result = invoke_unity_mcp(
-        settings,
-        "vrc_scan_avatar_materials",
-        {
-            "avatarPath": avatar_path or "",
-            "outputPath": str(output_path),
-            "refreshAssets": False,
-        },
-    )
+    original_timeout = int(settings.unity_mcp_timeout_seconds or 30)
+    settings.unity_mcp_timeout_seconds = max(original_timeout, 120)
+    try:
+        result = invoke_unity_mcp(
+            settings,
+            "vrc_scan_avatar_materials",
+            {
+                "avatarPath": avatar_path or "",
+                "outputPath": str(output_path),
+                "refreshAssets": False,
+            },
+        )
+    finally:
+        settings.unity_mcp_timeout_seconds = original_timeout
     if output_path.exists():
         payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
         payload.setdefault("jsonPath", str(output_path))
@@ -10978,7 +11398,7 @@ def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
             "timeoutSeconds": snippet_timeout,
         },
     )
-    return {"ok": True, "result": serialize_result(result)}
+    return {"ok": result.exit_code == 0, "result": serialize_result(result)}
 
 
 ADDON_FRAMEWORKS: dict[str, dict[str, Any]] = {
@@ -15645,6 +16065,44 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         lambda params: preview_avatar_encryption_sync(AvatarEncryptionPreviewRequest(**(params or {}))),
     )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_addon_status",
+        "Read the private Avatar Encryption addon connector status.",
+        "read/debug",
+        lambda params: avatar_encryption_addon_status_sync(),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_liltoon_apply_request",
+        "Request supervised lilToon Avatar Encryption apply through approval, checkpoint, generated copies, and rollback.",
+        "supervised-write",
+        lambda params: request_avatar_encryption_apply_sync(
+            ensure_dict(params or {}),
+            "liltoon",
+            agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
+        ),
+        write=True,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_poiyomi_apply_request",
+        "Request supervised Poiyomi Avatar Encryption apply through approval, checkpoint, generated copies, and rollback.",
+        "supervised-write",
+        lambda params: request_avatar_encryption_apply_sync(
+            ensure_dict(params or {}),
+            "poiyomi",
+            agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
+        ),
+        write=True,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_avatar_encryption_remove_request",
+        "Request supervised Avatar Encryption remove/restore through approval, checkpoint, and generated asset cleanup.",
+        "supervised-write",
+        lambda params: request_avatar_encryption_remove_sync(
+            ensure_dict(params or {}),
+            agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
+        ),
+        write=True,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
@@ -15711,6 +16169,18 @@ def register_agent_gateway_tools() -> None:
         "Restore the last shader/material tuning undo point.",
         "medium",
         lambda params: restore_shader_material_plan_sync(ShaderMaterialRestoreRequest(**params)),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
+        "Hand off approved Avatar Encryption apply requests to a configured private addon connector.",
+        "high",
+        apply_avatar_encryption_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
+        "Hand off approved Avatar Encryption remove requests to a configured private addon connector.",
+        "high",
+        remove_avatar_encryption_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_undo_blendshapes",
