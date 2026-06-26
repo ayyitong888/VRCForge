@@ -17,6 +17,9 @@ src-tauri/target/
 src-tauri/gen/
 config.json
 agent_gateway.json
+app-session-token
+chat-transcripts.json
+.__wtest
 docs/*
 !docs/COMPATIBILITY_MATRIX.md
 
