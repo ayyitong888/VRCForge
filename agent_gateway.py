@@ -33,6 +33,7 @@ ToolHandler = Callable[[dict[str, Any]], Any]
 
 ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
 ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
+APPLY_RECOVERY_SCHEMA = "vrcforge.interrupted_apply_recovery.v1"
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 LOCAL_STATE_CHECKPOINT_TARGETS = {
@@ -40,6 +41,11 @@ LOCAL_STATE_CHECKPOINT_TARGETS = {
     "vrcforge_export_skill_package",
     "vrcforge_set_skill_package_enabled",
     "vrcforge_uninstall_skill_package",
+}
+APPLY_RECOVERY_ACTIVE_STATUSES = {"applying", "needs_recovery", "restore_failed"}
+APPLY_RECOVERY_EXEMPT_WRITE_TARGETS = {
+    "vrcforge_restore_checkpoint",
+    "vrcforge_resolve_interrupted_apply_recovery",
 }
 ROLLBACK_FRAMEWORK_PACKAGES = {
     "modular_avatar": {
@@ -638,12 +644,41 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["checkpoint", "restore", "preview"],
     },
+    "vrcforge_list_interrupted_apply_recoveries": {
+        "title": "Interrupted Apply Recovery",
+        "inputs": ["Optional project root, includeResolved, and limit."],
+        "outputs": ["Pending crash/hang recovery records, last checkpoint, and write-blocking status."],
+        "sideEffects": "none",
+        "tags": ["checkpoint", "restore", "crash-recovery"],
+    },
+    "vrcforge_preview_interrupted_apply_recovery": {
+        "title": "Interrupted Apply Recovery Preview",
+        "inputs": ["Recovery id or checkpoint id."],
+        "outputs": ["Recovery record plus checkpoint restore preview."],
+        "sideEffects": "none",
+        "tags": ["checkpoint", "restore", "crash-recovery", "preview"],
+    },
+    "vrcforge_export_interrupted_apply_incident_bundle": {
+        "title": "Interrupted Apply Incident Bundle",
+        "inputs": ["Recovery id or checkpoint id."],
+        "outputs": ["Local incident bundle path with recovery, checkpoint preview, and recent audit logs."],
+        "sideEffects": "writes a local support bundle under the VRCForge audit directory",
+        "tags": ["checkpoint", "restore", "crash-recovery", "support"],
+    },
     "vrcforge_restore_checkpoint": {
         "title": "Checkpoint Restore",
         "inputs": ["Checkpoint id and confirmRestore=true."],
         "outputs": ["Restore result, cleaned files, and checkpoint metadata."],
         "sideEffects": "restores Assets/Packages/ProjectSettings from a pre-write git checkpoint after approval",
         "tags": ["checkpoint", "restore", "write"],
+    },
+    "vrcforge_resolve_interrupted_apply_recovery": {
+        "title": "Resolve Interrupted Apply Recovery",
+        "permissionMode": "approval_required",
+        "inputs": ["Recovery id and confirmResolved=true."],
+        "outputs": ["Resolved recovery record."],
+        "sideEffects": "marks a persisted interrupted-write recovery as manually resolved after approval",
+        "tags": ["checkpoint", "restore", "crash-recovery", "write"],
     },
     "vrcforge_unity_mcp_write": {
         "title": "Supervised Unity MCP Write",
@@ -1073,6 +1108,10 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_list_checkpoints",
             "vrcforge_preview_restore_checkpoint",
             "vrcforge_restore_checkpoint",
+            "vrcforge_list_interrupted_apply_recoveries",
+            "vrcforge_preview_interrupted_apply_recovery",
+            "vrcforge_export_interrupted_apply_incident_bundle",
+            "vrcforge_resolve_interrupted_apply_recovery",
         ],
         "entrypointTool": "vrcforge_request_apply",
         "tags": ["builtin", "group", "approval", "restore"],
@@ -2231,11 +2270,31 @@ class AgentGateway:
             if not write_handler:
                 raise AgentGatewayError(f"Write target is no longer available: {target_tool}", status_code=404)
 
+            active_recoveries = self._active_apply_recoveries()
+            if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
+                self.append_audit(
+                    {
+                        "event": "approval_blocked_by_interrupted_apply_recovery",
+                        "approvalId": approval_id,
+                        "targetTool": target_tool,
+                        "recoveries": active_recoveries,
+                    }
+                )
+                return {
+                    "ok": False,
+                    "status": "blocked_recovery",
+                    "approval": approval,
+                    "recoveries": active_recoveries,
+                    "recovery": active_recoveries[0],
+                    "error": "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
+                }
+
             approval["status"] = "applying"
             self._approvals[approval_id] = approval
             self.append_audit({"event": "approval_applying", "approval": approval})
 
         checkpoint: dict[str, Any] | None = None
+        recovery: dict[str, Any] | None = None
         try:
             user_constraints = self.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -2247,6 +2306,8 @@ class AgentGateway:
                 approval["checkpoint"] = checkpoint
                 if checkpoint.get("blocking"):
                     raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                if checkpoint.get("ok"):
+                    recovery = self._start_apply_recovery(approval, arguments, checkpoint)
             result = write_handler.handler(arguments)
             if isinstance(result, dict) and result.get("ok") is False:
                 message = (
@@ -2262,6 +2323,13 @@ class AgentGateway:
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
                 self._approvals[approval_id] = approval
                 self.append_audit({"event": "approval_applied", "approval": approval})
+            if recovery:
+                self._finish_apply_recovery(
+                    recovery,
+                    status="applied",
+                    resolution="write_completed",
+                    result_summary=summarize_params(result if isinstance(result, dict) else {"result": result}),
+                )
             payload = {"ok": True, "status": "applied", "approval": approval, "result": result}
             if checkpoint:
                 payload["checkpoint"] = checkpoint
@@ -2273,6 +2341,13 @@ class AgentGateway:
                 approval["error"] = str(exc)
                 self._approvals[approval_id] = approval
                 self.append_audit({"event": "approval_failed", "approval": approval})
+            if recovery:
+                self._finish_apply_recovery(
+                    recovery,
+                    status="needs_recovery",
+                    resolution="write_failed_after_checkpoint",
+                    error=str(exc),
+                )
             payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
             if checkpoint:
                 payload["checkpoint"] = checkpoint
@@ -2320,6 +2395,98 @@ class AgentGateway:
             entries = [entry for entry in entries if normalize_filesystem_path(str(entry.get("projectRoot") or "")) == normalized]
         entries = entries[:limit]
         return {"ok": True, "checkpoints": entries, "count": len(entries)}
+
+    def list_interrupted_apply_recoveries(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        include_resolved = bool(params.get("includeResolved") or params.get("include_resolved"))
+        limit = max(1, min(int(params.get("limit") or 50), 500))
+        project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
+        recoveries = self._coalesced_apply_recoveries(include_resolved=include_resolved)
+        if project_filter:
+            normalized = normalize_filesystem_path(project_filter)
+            recoveries = [
+                recovery for recovery in recoveries
+                if normalize_filesystem_path(str(recovery.get("projectRoot") or "")) == normalized
+            ]
+        recoveries = recoveries[:limit]
+        active = [recovery for recovery in recoveries if self._apply_recovery_blocks_writes(recovery)]
+        return {
+            "ok": True,
+            "schema": APPLY_RECOVERY_SCHEMA,
+            "recoveries": recoveries,
+            "count": len(recoveries),
+            "activeCount": len(active),
+            "blockingWrites": bool(active),
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
+        }
+
+    def preview_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        recovery = self._select_apply_recovery(params, include_resolved=bool(params.get("includeResolved") or params.get("include_resolved")))
+        if not recovery:
+            return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
+        checkpoint_id = str(recovery.get("checkpointId") or recovery.get("checkpoint_id") or "").strip()
+        checkpoint_preview = (
+            self.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+            if checkpoint_id
+            else {"ok": False, "error": "recovery has no checkpointId."}
+        )
+        payload = {
+            "ok": True,
+            "schema": APPLY_RECOVERY_SCHEMA,
+            "recovery": recovery,
+            "checkpointPreview": checkpoint_preview,
+            "blockingWrites": self._apply_recovery_blocks_writes(recovery),
+            "restoreRequest": {
+                "targetTool": "vrcforge_restore_checkpoint",
+                "arguments": {"checkpointId": checkpoint_id, "confirmRestore": True},
+            },
+            "manualResolveRequest": {
+                "targetTool": "vrcforge_resolve_interrupted_apply_recovery",
+                "arguments": {"recoveryId": str(recovery.get("id") or ""), "confirmResolved": True},
+            },
+        }
+        return payload
+
+    def export_interrupted_apply_incident_bundle(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        recovery = self._select_apply_recovery(params, include_resolved=True)
+        if not recovery:
+            return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
+        preview = self.preview_interrupted_apply_recovery({"recoveryId": recovery.get("id"), "includeResolved": True})
+        generated_at = utc_now_iso()
+        bundle = {
+            "schema": "vrcforge.interrupted_apply_incident_bundle.v1",
+            "generatedAt": generated_at,
+            "recovery": recovery,
+            "preview": preview,
+            "recentAuditLogs": self.recent_audit_logs(limit=80),
+        }
+        bundle_dir = self.audit_dir / "incident-bundles"
+        filename = f"{recovery.get('id') or 'recovery'}-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        bundle_path = bundle_dir / filename
+        atomic_write_json(bundle_path, bundle)
+        self.append_audit({"event": "apply_recovery_incident_bundle_exported", "recoveryId": recovery.get("id"), "path": str(bundle_path)})
+        return {"ok": True, "schema": bundle["schema"], "path": str(bundle_path), "bundle": bundle}
+
+    def resolve_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        if params.get("confirm_resolved") is not True and params.get("confirmResolved") is not True:
+            return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "confirmResolved=true is required to resolve an interrupted apply recovery."}
+        recovery = self._select_apply_recovery(params, include_resolved=True)
+        if not recovery:
+            return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
+        if not self._apply_recovery_blocks_writes(recovery):
+            return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "already_resolved", "recovery": recovery}
+        resolution_note = str(params.get("note") or params.get("reason") or "User confirmed the interrupted write was handled outside VRCForge.").strip()
+        resolved = self._finish_apply_recovery(
+            recovery,
+            status="dismissed",
+            resolution="manual_confirmed",
+            note=resolution_note,
+        )
+        return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "resolved", "recovery": resolved}
 
     def list_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -2599,12 +2766,19 @@ class AgentGateway:
                 phase="restore",
                 restore_payload=payload,
             )
+            resolved_recoveries = self._resolve_apply_recoveries_for_checkpoint(
+                str(checkpoint.get("id") or ""),
+                resolution="checkpoint_restored",
+                restore_payload=payload,
+            )
+            if resolved_recoveries:
+                payload["resolvedApplyRecoveries"] = resolved_recoveries
         self.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 
     def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         target_tool = str(approval.get("targetTool") or "")
-        if not target_tool or target_tool == "vrcforge_restore_checkpoint":
+        if not target_tool or target_tool in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
             return None
         checkpoint_id = f"ckpt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         base_record = {
@@ -3548,6 +3722,194 @@ class AgentGateway:
                 return entry
         return None
 
+    def _read_apply_recovery_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
+        if not self.apply_recovery_log_path.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for line in self.apply_recovery_log_path.read_text(encoding="utf-8").splitlines()[-max(1, limit):]:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("schema") == APPLY_RECOVERY_SCHEMA:
+                entries.append(payload)
+        return entries
+
+    def _append_apply_recovery_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        payload = redact_sensitive(
+            {
+                "schema": APPLY_RECOVERY_SCHEMA,
+                "updatedAt": now,
+                **entry,
+            }
+        )
+        if not payload.get("createdAt"):
+            payload["createdAt"] = now
+        self.apply_recovery_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.apply_recovery_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        return payload
+
+    def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for entry in self._read_apply_recovery_entries(limit=2000):
+            recovery_id = str(entry.get("id") or "").strip()
+            if not recovery_id:
+                continue
+            previous = states.get(recovery_id, {})
+            merged = {**previous, **entry}
+            merged["blockingWrites"] = self._apply_recovery_blocks_writes(merged)
+            states[recovery_id] = merged
+        recoveries = list(states.values())
+        if not include_resolved:
+            recoveries = [recovery for recovery in recoveries if self._apply_recovery_blocks_writes(recovery)]
+        return sorted(
+            recoveries,
+            key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""),
+            reverse=True,
+        )
+
+    def _active_apply_recoveries(self) -> list[dict[str, Any]]:
+        return self._coalesced_apply_recoveries(include_resolved=False)
+
+    def _apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
+        return str(recovery.get("status") or "") in APPLY_RECOVERY_ACTIVE_STATUSES
+
+    def _select_apply_recovery(self, params: dict[str, Any], *, include_resolved: bool = False) -> dict[str, Any] | None:
+        requested_id = str(
+            params.get("recovery_id")
+            or params.get("recoveryId")
+            or params.get("id")
+            or ""
+        ).strip()
+        checkpoint_id = str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip()
+        recoveries = self._coalesced_apply_recoveries(include_resolved=include_resolved)
+        if requested_id:
+            for recovery in recoveries:
+                if recovery.get("id") == requested_id:
+                    return recovery
+            return None
+        if checkpoint_id:
+            for recovery in recoveries:
+                if str(recovery.get("checkpointId") or "") == checkpoint_id:
+                    return recovery
+            return None
+        return recoveries[0] if recoveries else None
+
+    def _start_apply_recovery(
+        self,
+        approval: dict[str, Any],
+        arguments: dict[str, Any],
+        checkpoint: dict[str, Any],
+    ) -> dict[str, Any]:
+        target_tool = str(approval.get("targetTool") or "")
+        recovery_id = f"recovery_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        error_text = " ".join(
+            str(value or "")
+            for value in (
+                approval.get("reason"),
+                checkpoint.get("error"),
+                arguments.get("error"),
+                arguments.get("message"),
+            )
+        )
+        record = {
+            "id": recovery_id,
+            "status": "applying",
+            "resolution": "",
+            "createdAt": utc_now_iso(),
+            "approvalId": str(approval.get("id") or ""),
+            "targetTool": target_tool,
+            "riskLevel": str(approval.get("riskLevel") or ""),
+            "projectRoot": str(checkpoint.get("projectRoot") or arguments.get("projectRoot") or arguments.get("project_root") or ""),
+            "avatarPath": str(arguments.get("avatarPath") or arguments.get("avatar_path") or ""),
+            "checkpointId": str(checkpoint.get("id") or ""),
+            "checkpoint": checkpoint,
+            "argumentsSummary": summarize_params(arguments),
+            "incidentKind": self._classify_apply_recovery_incident(error_text, target_tool),
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
+            "blockingWrites": True,
+        }
+        saved = self._append_apply_recovery_entry(record)
+        self.append_audit({"event": "apply_recovery_started", "recovery": saved})
+        return saved
+
+    def _finish_apply_recovery(
+        self,
+        recovery: dict[str, Any],
+        *,
+        status: str,
+        resolution: str,
+        error: str = "",
+        note: str = "",
+        result_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        text = " ".join([str(error or ""), str(note or ""), str(recovery.get("targetTool") or "")])
+        record: dict[str, Any] = {
+            "id": str(recovery.get("id") or ""),
+            "status": status,
+            "resolution": resolution,
+            "resolvedAt": utc_now_iso() if status not in APPLY_RECOVERY_ACTIVE_STATUSES else "",
+            "approvalId": str(recovery.get("approvalId") or ""),
+            "targetTool": str(recovery.get("targetTool") or ""),
+            "projectRoot": str(recovery.get("projectRoot") or ""),
+            "avatarPath": str(recovery.get("avatarPath") or ""),
+            "checkpointId": str(recovery.get("checkpointId") or ""),
+            "checkpoint": ensure_dict(recovery.get("checkpoint")),
+            "incidentKind": self._classify_apply_recovery_incident(text, str(recovery.get("targetTool") or "")),
+            "restoreTool": "vrcforge_restore_checkpoint",
+            "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
+            "blockingWrites": status in APPLY_RECOVERY_ACTIVE_STATUSES,
+        }
+        if error:
+            record["error"] = error
+        if note:
+            record["note"] = note
+        if result_summary is not None:
+            record["resultSummary"] = result_summary
+        saved = self._append_apply_recovery_entry(record)
+        self.append_audit({"event": "apply_recovery_updated", "recovery": saved})
+        return saved
+
+    def _resolve_apply_recoveries_for_checkpoint(
+        self,
+        checkpoint_id: str,
+        *,
+        resolution: str,
+        restore_payload: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not checkpoint_id:
+            return []
+        resolved: list[dict[str, Any]] = []
+        for recovery in self._active_apply_recoveries():
+            if str(recovery.get("checkpointId") or "") != checkpoint_id:
+                continue
+            resolved.append(
+                self._finish_apply_recovery(
+                    recovery,
+                    status="restored",
+                    resolution=resolution,
+                    result_summary=summarize_params(restore_payload or {}),
+                )
+            )
+        return resolved
+
+    def _classify_apply_recovery_incident(self, text: str, target_tool: str = "") -> str:
+        lowered = f"{text or ''} {target_tool or ''}".lower()
+        if any(token in lowered for token in ("timeout", "timed out", "hang", "hung", "not responding")):
+            return "unity_timeout_or_hang"
+        if any(token in lowered for token in ("crash", "crashed", "exited", "exit", "process died", "quit")):
+            return "unity_process_exit"
+        if any(token in lowered for token in ("modal", "dialog", "busy", "locked", "license")):
+            return "unity_modal_or_busy"
+        if any(token in lowered for token in ("mcp", "bridge", "connect", "disconnected", "unavailable", "offline")):
+            return "unity_bridge_unavailable"
+        if any(token in lowered for token in ("package", "manifest", "dependency", "compile", "compiler")):
+            return "package_or_compile_conflict"
+        return "write_interrupted"
+
     def _read_adjustment_checkpoint_entries(self) -> list[dict[str, Any]]:
         if not self.adjustment_checkpoint_log_path.exists():
             return []
@@ -3925,6 +4287,10 @@ class AgentGateway:
         return self.audit_dir / "adjustment-checkpoints.json"
 
     @property
+    def apply_recovery_log_path(self) -> Path:
+        return self.audit_dir / "apply-recoveries.jsonl"
+
+    @property
     def checkpoint_store_dir(self) -> Path:
         return self.audit_dir / "checkpoint-archives"
 
@@ -4188,6 +4554,20 @@ class AgentGateway:
                 "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
                 "postRestoreValidationRequired": True,
                 "note": "Restores a previously captured Unity project or VRCForge local-state checkpoint.",
+            }
+        if handler.name == "vrcforge_resolve_interrupted_apply_recovery":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "interrupted_apply_recovery_resolution",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "recoveryLedger": APPLY_RECOVERY_SCHEMA,
+                "postRestoreValidationRequired": False,
+                "note": "Marks a persisted interrupted-write recovery as manually resolved after the user confirms the Unity project state was handled.",
             }
         if handler.name in LOCAL_STATE_CHECKPOINT_TARGETS:
             return {
@@ -5331,6 +5711,9 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_preview_restore_backup",
         "vrcforge_list_checkpoints",
         "vrcforge_preview_restore_checkpoint",
+        "vrcforge_list_interrupted_apply_recoveries",
+        "vrcforge_preview_interrupted_apply_recovery",
+        "vrcforge_export_interrupted_apply_incident_bundle",
         "vrcforge_scan_avatar_performance",
         "vrcforge_scan_thry_avatar_performance",
         "vrcforge_package_manager_status",

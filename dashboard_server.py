@@ -610,6 +610,13 @@ class AdjustmentCheckpointSelectRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class InterruptedApplyRecoveryResolveRequest(BaseModel):
+    confirm_resolved: bool = Field(default=False, alias="confirmResolved")
+    note: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
 class ClothingToggleRequest(ConnectionRequest):
     object_path: str
     active: bool
@@ -1453,6 +1460,82 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.get("/api/app/recoveries")
+def app_list_interrupted_apply_recoveries(projectRoot: str = "", limit: int = 50, includeResolved: bool = False) -> dict[str, Any]:
+    return AGENT_GATEWAY.list_interrupted_apply_recoveries(
+        {"projectRoot": projectRoot, "limit": limit, "includeResolved": includeResolved}
+    )
+
+
+@app.post("/api/app/recoveries/{recovery_id}/preview")
+def app_preview_interrupted_apply_recovery(recovery_id: str) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Interrupted apply recovery was not found.")
+    return payload
+
+
+@app.post("/api/app/recoveries/{recovery_id}/restore")
+async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> dict[str, Any]:
+    preview = AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
+    if not preview.get("ok"):
+        raise HTTPException(status_code=404, detail=preview.get("error") or "Interrupted apply recovery was not found.")
+    checkpoint = ensure_dict(ensure_dict(preview.get("checkpointPreview")).get("checkpoint"))
+    checkpoint_id = str(checkpoint.get("id") or "")
+    if not checkpoint_id:
+        raise HTTPException(status_code=400, detail="Interrupted apply recovery has no restorable checkpoint.")
+    arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    if checkpoint.get("projectRoot"):
+        arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_restore_checkpoint",
+                "arguments": arguments,
+                "reason": "Restore Unity project files after an interrupted or failed approved write.",
+                "preview": preview,
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/recoveries/{recovery_id}/resolve")
+async def app_request_resolve_interrupted_apply_recovery(
+    recovery_id: str,
+    request: InterruptedApplyRecoveryResolveRequest,
+) -> dict[str, Any]:
+    arguments = request.model_dump(by_alias=True, exclude_none=True)
+    arguments["recoveryId"] = recovery_id
+    if arguments.get("confirmResolved") is not True:
+        raise HTTPException(status_code=400, detail="confirmResolved=true is required.")
+    try:
+        payload = AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_resolve_interrupted_apply_recovery",
+                "arguments": arguments,
+                "reason": "Mark an interrupted approved write as manually resolved.",
+                "preview": AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id}),
+                "agent_name": "desktop-agent",
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/recoveries/{recovery_id}/incident-bundle")
+def app_export_interrupted_apply_incident_bundle(recovery_id: str) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.export_interrupted_apply_incident_bundle({"recoveryId": recovery_id})
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload.get("error") or "Interrupted apply recovery was not found.")
     return payload
 
 
@@ -16122,6 +16205,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", preview_add_outfit_workflow_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.list_checkpoints(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.preview_restore_checkpoint(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.list_interrupted_apply_recoveries(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.preview_interrupted_apply_recovery(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.export_interrupted_apply_incident_bundle(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
@@ -16355,6 +16441,12 @@ def register_agent_gateway_tools() -> None:
         "Restore Unity project files from a pre-write VRCForge checkpoint.",
         "high",
         lambda params: AGENT_GATEWAY.restore_checkpoint(params or {}),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_resolve_interrupted_apply_recovery",
+        "Mark an interrupted approved write as manually resolved after explicit confirmation.",
+        "medium",
+        lambda params: AGENT_GATEWAY.resolve_interrupted_apply_recovery(params or {}),
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_unity_mcp_write",
