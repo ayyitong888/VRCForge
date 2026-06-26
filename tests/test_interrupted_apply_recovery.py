@@ -156,6 +156,42 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             self.assertTrue(unblocked["ok"])
             self.assertEqual(len(calls), 1)
 
+    def test_unity_prepare_failure_falls_back_to_file_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": False, "error": "Unity MCP unavailable"}
+
+            def failing_write(args: dict) -> dict:
+                project_root = Path(args["projectRoot"])
+                (project_root / "Assets" / "generated-after-prepare-warning.txt").write_text("generated", encoding="utf-8")
+                raise RuntimeError("Unity crashed after file checkpoint")
+
+            gateway.register_write_handler("vrcforge_test_prepare_fallback", "Prepare fallback write", "high", failing_write)
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_prepare_fallback",
+                    "arguments": {"projectRoot": str(project)},
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertFalse(applied["ok"])
+            checkpoint = applied["checkpoint"]
+            self.assertTrue(checkpoint["ok"])
+            self.assertEqual(checkpoint["strategy"], "archive")
+            self.assertEqual(checkpoint["unityPrepare"]["error"], "Unity MCP unavailable")
+            self.assertIn("Unity prepare checkpoint failed", " ".join(checkpoint.get("warnings") or []))
+
+            recoveries = gateway.list_interrupted_apply_recoveries()
+            self.assertTrue(recoveries["blockingWrites"])
+            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            self.assertTrue(restored["ok"])
+            self.assertFalse((project / "Assets" / "generated-after-prepare-warning.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

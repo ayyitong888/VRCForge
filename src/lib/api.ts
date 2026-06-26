@@ -187,6 +187,29 @@ export type AgentCheckpointPreview = {
   error?: string;
 };
 
+export type InterruptedApplyRecovery = {
+  id: string;
+  schema?: string;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  targetTool?: string;
+  projectRoot?: string;
+  checkpointId?: string;
+  approvalId?: string;
+  resolution?: string;
+  error?: string;
+  resolvedAt?: string;
+  note?: string;
+};
+
+export type InterruptedApplyRecoveryPreview = {
+  ok: boolean;
+  recovery?: InterruptedApplyRecovery;
+  checkpointPreview?: AgentCheckpointPreview;
+  error?: string;
+};
+
 export type AdjustmentCheckpoint = {
   id: string;
   schema?: string;
@@ -1703,6 +1726,56 @@ export async function requestRestoreCheckpoint(
   checkpointId: string,
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
   return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/restore`, {
+    method: "POST",
+  });
+}
+
+export async function fetchInterruptedApplyRecoveries(
+  endpoint: string,
+  options: { projectRoot?: string; includeResolved?: boolean } = {},
+): Promise<{ ok: boolean; recoveries: InterruptedApplyRecovery[]; count: number }> {
+  const params = new URLSearchParams();
+  if (options.projectRoot) params.set("projectRoot", options.projectRoot);
+  if (options.includeResolved) params.set("includeResolved", "true");
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/recoveries${suffix}`);
+}
+
+export async function previewInterruptedApplyRecovery(
+  endpoint: string,
+  recoveryId: string,
+): Promise<InterruptedApplyRecoveryPreview> {
+  return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/preview`, {
+    method: "POST",
+  });
+}
+
+export async function requestRestoreInterruptedApplyRecovery(
+  endpoint: string,
+  recoveryId: string,
+): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/restore`, {
+    method: "POST",
+  });
+}
+
+export async function resolveInterruptedApplyRecovery(
+  endpoint: string,
+  recoveryId: string,
+  body: { confirmResolved: boolean; note?: string },
+): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function exportInterruptedApplyIncidentBundle(
+  endpoint: string,
+  recoveryId: string,
+): Promise<{ ok: boolean; bundlePath?: string; path?: string; error?: string }> {
+  return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/incident-bundle`, {
     method: "POST",
   });
 }

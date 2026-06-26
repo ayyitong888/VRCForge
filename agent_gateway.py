@@ -2815,16 +2815,12 @@ class AgentGateway:
                 prepare_result = {"ok": False, "error": str(exc)}
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
-                record.update(
-                    {
-                        "ok": False,
-                        "blocking": True,
-                        "status": "failed",
-                        "error": str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint."),
-                    }
-                )
-                self._append_checkpoint(record)
-                return record
+                warning = str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint.")
+                record["unityPrepareWarning"] = warning
+                record["warnings"] = [
+                    *ensure_string_list(record.get("warnings")),
+                    "Unity prepare checkpoint failed; using file-level checkpoint fallback.",
+                ]
 
         git_root_result = self._run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:

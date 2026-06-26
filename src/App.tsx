@@ -62,6 +62,8 @@ import {
   AvatarEncryptionBenchmarkRow,
   AvatarEncryptionPlanResult,
   AvatarEncryptionProfileCard,
+  InterruptedApplyRecovery,
+  InterruptedApplyRecoveryPreview,
   SubAgentTask,
   SubAgentTaskList,
   ApiError,
@@ -97,6 +99,7 @@ import {
   fetchDiagnostics,
   fetchDoctor,
   fetchExternalAgentConnectors,
+  fetchInterruptedApplyRecoveries,
   fetchOptimizationPlan,
   fetchOptimizationProof,
   fetchOptimizationProofs,
@@ -120,13 +123,16 @@ import {
   preflightSkillPackage,
   ProjectPrefs,
   previewRestoreCheckpoint,
+  previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
   requestOptimizationApply,
   requestAvatarEncryptionApply,
+  requestRestoreInterruptedApplyRecovery,
   requestOutfitImport,
   requestPackageInstall,
   requestRestoreCheckpoint,
+  resolveInterruptedApplyRecovery,
   selectAdjustmentCheckpoint,
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
@@ -148,6 +154,7 @@ import {
   updatePermission,
   updateSkill,
   overwriteAdjustmentCheckpoint,
+  exportInterruptedApplyIncidentBundle,
   uninstallExternalAgentConnector,
   uninstallSkillPackage,
 } from "./lib/api";
@@ -524,13 +531,17 @@ export default function App() {
   const [exportingSupportBundle, setExportingSupportBundle] = useState(false);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
   const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
+  const [interruptedRecoveries, setInterruptedRecoveries] = useState<InterruptedApplyRecovery[]>([]);
   const [adjustmentCheckpoints, setAdjustmentCheckpoints] = useState<AdjustmentCheckpoint[]>([]);
   const [checkpointPreview, setCheckpointPreview] = useState<AgentCheckpointPreview | null>(null);
+  const [recoveryPreview, setRecoveryPreview] = useState<InterruptedApplyRecoveryPreview | null>(null);
   const [adjustmentPreview, setAdjustmentPreview] = useState<AdjustmentCheckpointPreview | null>(null);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
   const [restoringCheckpointId, setRestoringCheckpointId] = useState("");
+  const [recoveryBusyId, setRecoveryBusyId] = useState("");
   const [adjustmentBusyId, setAdjustmentBusyId] = useState("");
   const [checkpointMessage, setCheckpointMessage] = useState("");
+  const [recoveryMessage, setRecoveryMessage] = useState("");
   const [adjustmentMessage, setAdjustmentMessage] = useState("");
   const [agentNotes, setAgentNotes] = useState("");
   const [agentNotesPath, setAgentNotesPath] = useState("");
@@ -1129,6 +1140,18 @@ export default function App() {
         });
       }
       await refresh();
+      const executionRecord = asRecord(payload.execution);
+      const executionTargetTool = typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "";
+      const executionResultRecord = asRecord(executionResult);
+      const resolvedRecoveries = executionResultRecord?.resolvedApplyRecoveries;
+      const shouldRefreshCheckpoints =
+        activeView === "checkpoints" ||
+        executionTargetTool === "vrcforge_restore_checkpoint" ||
+        executionTargetTool === "vrcforge_resolve_interrupted_apply_recovery" ||
+        Array.isArray(resolvedRecoveries);
+      if (shouldRefreshCheckpoints) {
+        await loadCheckpoints();
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -2479,16 +2502,23 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      const [payload, adjustmentPayload] = await Promise.all([
+      const [payload, recoveryPayload, adjustmentPayload] = await Promise.all([
         fetchCheckpoints(targetEndpoint, activeProjectPath || undefined),
+        fetchInterruptedApplyRecoveries(targetEndpoint, { projectRoot: activeProjectPath || undefined }),
         fetchAdjustmentCheckpoints(targetEndpoint, { projectRoot: activeProjectPath || undefined }),
       ]);
       const nextCheckpoints = payload.checkpoints || [];
+      const nextRecoveries = recoveryPayload.recoveries || [];
       const nextAdjustmentCheckpoints = adjustmentPayload.checkpoints || [];
       setCheckpoints(nextCheckpoints);
+      setInterruptedRecoveries(nextRecoveries);
       setAdjustmentCheckpoints(nextAdjustmentCheckpoints);
       if (checkpointPreview?.checkpoint?.id && !nextCheckpoints.some((item) => item.id === checkpointPreview.checkpoint?.id)) {
         setCheckpointPreview(null);
+      }
+      const recoveryId = recoveryPreview?.recovery?.id;
+      if (recoveryId && !nextRecoveries.some((item) => item.id === recoveryId)) {
+        setRecoveryPreview(null);
       }
       const adjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id;
       if (adjustmentId && !nextAdjustmentCheckpoints.some((item) => item.id === adjustmentId)) {
@@ -2536,6 +2566,91 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setRestoringCheckpointId("");
+    }
+  }
+
+  async function previewRecovery(recoveryId: string) {
+    setRecoveryBusyId(recoveryId);
+    setRecoveryMessage("");
+    setError("");
+    try {
+      const payload = await previewInterruptedApplyRecovery(endpoint, recoveryId);
+      setRecoveryPreview(payload);
+      if (!payload.ok) {
+        setError(payload.error || "Recovery preview failed.");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryBusyId("");
+    }
+  }
+
+  async function restoreRecovery(recoveryId: string) {
+    setRecoveryBusyId(`restore:${recoveryId}`);
+    setRecoveryMessage("");
+    setError("");
+    try {
+      const payload = await requestRestoreInterruptedApplyRecovery(endpoint, recoveryId);
+      if (payload.status === "pending") {
+        setRecoveryMessage("Restore approval is pending.");
+      } else if (payload.ok) {
+        setRecoveryMessage("Interrupted write restored.");
+      } else {
+        setRecoveryMessage(String(payload.error || "Restore request failed."));
+      }
+      await refresh();
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryBusyId("");
+    }
+  }
+
+  async function exportRecoveryBundle(recoveryId: string) {
+    setRecoveryBusyId(`bundle:${recoveryId}`);
+    setRecoveryMessage("");
+    setError("");
+    try {
+      const payload = await exportInterruptedApplyIncidentBundle(endpoint, recoveryId);
+      if (payload.ok) {
+        setRecoveryMessage(`Incident bundle exported: ${payload.bundlePath || payload.path || "-"}`);
+      } else {
+        setRecoveryMessage(String(payload.error || "Incident bundle export failed."));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryBusyId("");
+    }
+  }
+
+  async function resolveRecovery(recoveryId: string) {
+    if (!window.confirm("Mark this interrupted write as resolved without restoring its checkpoint?")) {
+      return;
+    }
+    setRecoveryBusyId(`resolve:${recoveryId}`);
+    setRecoveryMessage("");
+    setError("");
+    try {
+      const payload = await resolveInterruptedApplyRecovery(endpoint, recoveryId, {
+        confirmResolved: true,
+        note: "Resolved from the desktop Checkpoints view.",
+      });
+      if (payload.status === "pending") {
+        setRecoveryMessage("Resolve approval is pending.");
+      } else if (payload.ok) {
+        setRecoveryMessage("Interrupted write resolved.");
+      } else {
+        setRecoveryMessage(String(payload.error || "Resolve request failed."));
+      }
+      await refresh();
+      await loadCheckpoints();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryBusyId("");
     }
   }
 
@@ -3214,18 +3329,26 @@ export default function App() {
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace
               checkpoints={checkpoints}
+              interruptedRecoveries={interruptedRecoveries}
               adjustmentCheckpoints={adjustmentCheckpoints}
               selectedProjectPath={activeProjectPath}
               preview={checkpointPreview}
+              recoveryPreview={recoveryPreview}
               adjustmentPreview={adjustmentPreview}
               loading={loadingCheckpoints}
               restoringId={restoringCheckpointId}
+              recoveryBusyId={recoveryBusyId}
               adjustmentBusyId={adjustmentBusyId}
               message={checkpointMessage}
+              recoveryMessage={recoveryMessage}
               adjustmentMessage={adjustmentMessage}
               onRefresh={() => void loadCheckpoints()}
               onPreview={previewCheckpoint}
               onRestore={restoreCheckpoint}
+              onPreviewRecovery={previewRecovery}
+              onRestoreRecovery={restoreRecovery}
+              onExportRecoveryBundle={exportRecoveryBundle}
+              onResolveRecovery={resolveRecovery}
               onCreateAdjustment={createAdjustment}
               onPreviewAdjustment={previewAdjustment}
               onSelectAdjustment={selectAdjustment}
@@ -3617,6 +3740,21 @@ export default function App() {
               </div>
             </>
           )}
+          {activeView !== "chat" && pendingApprovalItems.length > 0 ? (
+            <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
+              <div className="mx-auto max-w-4xl space-y-3">
+                {pendingApprovalItems.map((approval) => (
+                  <ApprovalCard
+                    key={approval.id}
+                    approval={approval}
+                    loading={loading}
+                    onApprove={approveShell}
+                    onReject={rejectShell}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
       </div>
 
@@ -6069,18 +6207,26 @@ function ProofMetricCard({ title, before, after, rollback }: { title: string; be
 
 function CheckpointWorkspace({
   checkpoints,
+  interruptedRecoveries,
   adjustmentCheckpoints,
   selectedProjectPath,
   preview,
+  recoveryPreview,
   adjustmentPreview,
   loading,
   restoringId,
+  recoveryBusyId,
   adjustmentBusyId,
   message,
+  recoveryMessage,
   adjustmentMessage,
   onRefresh,
   onPreview,
   onRestore,
+  onPreviewRecovery,
+  onRestoreRecovery,
+  onExportRecoveryBundle,
+  onResolveRecovery,
   onCreateAdjustment,
   onPreviewAdjustment,
   onSelectAdjustment,
@@ -6090,18 +6236,26 @@ function CheckpointWorkspace({
   onDeleteAdjustment,
 }: {
   checkpoints: AgentCheckpoint[];
+  interruptedRecoveries: InterruptedApplyRecovery[];
   adjustmentCheckpoints: AdjustmentCheckpoint[];
   selectedProjectPath: string;
   preview: AgentCheckpointPreview | null;
+  recoveryPreview: InterruptedApplyRecoveryPreview | null;
   adjustmentPreview: AdjustmentCheckpointPreview | null;
   loading: boolean;
   restoringId: string;
+  recoveryBusyId: string;
   adjustmentBusyId: string;
   message: string;
+  recoveryMessage: string;
   adjustmentMessage: string;
   onRefresh: () => void;
   onPreview: (checkpointId: string) => void;
   onRestore: (checkpointId: string) => void;
+  onPreviewRecovery: (recoveryId: string) => void;
+  onRestoreRecovery: (recoveryId: string) => void;
+  onExportRecoveryBundle: (recoveryId: string) => void;
+  onResolveRecovery: (recoveryId: string) => void;
   onCreateAdjustment: (kind: "face" | "shader") => void;
   onPreviewAdjustment: (checkpointId: string) => void;
   onSelectAdjustment: (checkpointId: string, slot: "A" | "B") => void;
@@ -6111,15 +6265,101 @@ function CheckpointWorkspace({
   onDeleteAdjustment: (checkpointId: string) => void;
 }) {
   const selectedId = preview?.checkpoint?.id || "";
+  const selectedRecoveryId = recoveryPreview?.recovery?.id || "";
   const selectedAdjustmentId = adjustmentPreview?.adjustmentCheckpoint?.id || "";
   const changedFiles = preview?.changedFiles || [];
   const workingTreeStatus = preview?.workingTreeStatus || [];
+  const recoveryCheckpointPreview = recoveryPreview?.checkpointPreview || null;
+  const recoveryChangedFiles = recoveryCheckpointPreview?.changedFiles || [];
+  const recoveryWorkingTreeStatus = recoveryCheckpointPreview?.workingTreeStatus || [];
   const adjustmentChangedFiles = adjustmentPreview?.changedFiles || [];
   const adjustmentWorkingTreeStatus = adjustmentPreview?.workingTreeStatus || [];
   return (
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
       <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
         <div className="grid min-w-0 gap-6">
+          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <div className="mb-4 flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+              <div className="truncate text-sm font-semibold">Interrupted Writes</div>
+              <Badge tone={interruptedRecoveries.length > 0 ? "warn" : "muted"} className="ml-auto shrink-0">
+                {interruptedRecoveries.length}
+              </Badge>
+            </div>
+            <div className="max-h-[24vh] space-y-2 overflow-auto pr-1">
+              {interruptedRecoveries.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">
+                  No interrupted writes.
+                </div>
+              ) : null}
+              {interruptedRecoveries.map((recovery) => {
+                const busy =
+                  recoveryBusyId === recovery.id ||
+                  recoveryBusyId.endsWith(`:${recovery.id}`) ||
+                  recoveryBusyId.startsWith(`${recovery.id}:`);
+                const status = recovery.status || "needs_recovery";
+                return (
+                  <div
+                    key={recovery.id}
+                    className={cn(
+                      "grid min-w-0 gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                      selectedRecoveryId === recovery.id ? "border-primary bg-primary/5" : "border-border",
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs">{recovery.id}</span>
+                      <Badge tone={status === "applying" ? "warn" : status === "needs_recovery" ? "danger" : "muted"} className="h-6 shrink-0">
+                        {status}
+                      </Badge>
+                      {busy ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" /> : null}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">{recovery.targetTool || "-"}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{recovery.checkpointId || "-"}</div>
+                    <div className="flex min-w-0 flex-wrap gap-1.5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onPreviewRecovery(recovery.id)}
+                        disabled={Boolean(recoveryBusyId)}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="danger"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onRestoreRecovery(recovery.id)}
+                        disabled={Boolean(recoveryBusyId)}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Restore
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onExportRecoveryBundle(recovery.id)}
+                        disabled={Boolean(recoveryBusyId)}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onResolveRecovery(recovery.id)}
+                        disabled={Boolean(recoveryBusyId)}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
           <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
               <History className="h-4 w-4 shrink-0 text-primary" />
@@ -6303,6 +6543,61 @@ function CheckpointWorkspace({
         </div>
 
         <div className="grid min-w-0 gap-6">
+          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+            <div className="mb-5 flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+              <div className="truncate text-sm font-semibold">Recovery Preview</div>
+              {recoveryPreview ? (
+                <Badge tone={recoveryPreview.ok ? "warn" : "danger"} className="ml-auto shrink-0">
+                  {recoveryPreview.recovery?.status || (recoveryPreview.ok ? "ready" : "blocked")}
+                </Badge>
+              ) : null}
+            </div>
+
+            {!recoveryPreview ? (
+              <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                Select an interrupted write.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                <div className="grid gap-3">
+                  <DataLine label="Recovery" value={recoveryPreview.recovery?.id || "-"} mono />
+                  <DataLine label="Target" value={recoveryPreview.recovery?.targetTool || "-"} />
+                  <DataLine label="Checkpoint" value={recoveryPreview.recovery?.checkpointId || "-"} mono />
+                  <DataLine label="Project" value={recoveryPreview.recovery?.projectRoot || "-"} />
+                  {recoveryPreview.error ? <DataLine label="Error" value={recoveryPreview.error} /> : null}
+                </div>
+                <OutputBlock label="Changed files" value={recoveryChangedFiles.join("\n")} />
+                <OutputBlock label="Working tree" value={recoveryWorkingTreeStatus.join("\n")} />
+                {recoveryMessage ? <div className="text-sm text-muted-foreground">{recoveryMessage}</div> : null}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!recoveryPreview.recovery?.id || Boolean(recoveryBusyId)}
+                    onClick={() => recoveryPreview.recovery?.id && onExportRecoveryBundle(recoveryPreview.recovery.id)}
+                  >
+                    {recoveryBusyId.startsWith("bundle:") ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    Bundle
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={!recoveryPreview.ok || !recoveryPreview.recovery?.id || Boolean(recoveryBusyId)}
+                    onClick={() => recoveryPreview.recovery?.id && onRestoreRecovery(recoveryPreview.recovery.id)}
+                  >
+                    {recoveryBusyId.startsWith("restore:") ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-4 w-4" />
+                    )}
+                    Restore
+                  </Button>
+                </div>
+              </div>
+            )}
+          </section>
+
           <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
             <div className="mb-5 flex items-center gap-2">
               <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
