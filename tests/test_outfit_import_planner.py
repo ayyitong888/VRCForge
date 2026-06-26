@@ -5,7 +5,12 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-from outfit_import_planner import build_outfit_import_plan
+import outfit_import_planner as planner
+from outfit_import_planner import (
+    build_outfit_import_plan,
+    build_post_import_outfit_validation,
+    detect_magenta_materials,
+)
 
 
 def write_tar_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -272,3 +277,95 @@ def test_loose_prefab_plan_targets_assets_folder_without_file_contents(tmp_path:
     assert "Assets/VRCForge/ImportedOutfits/Dress/Dress.prefab" in plan["expectedAssetPaths"]
     assert "SECRET_PREFAB_TEXT" not in rendered
     assert "SECRET_TEXTURE_BYTES" not in rendered
+
+
+# --- Fix #2: post-import magenta / missing-shader validation -----------------
+
+
+def test_detect_magenta_flags_missing_and_error_shaders() -> None:
+    inventory = {
+        "materials": [
+            {"material_id": "m_ok", "renderer_path": "Body", "shader_name": "lilToon"},
+            {"material_id": "m_missing", "renderer_path": "Dress", "shader_name": ""},
+            {"material_id": "m_err", "renderer_path": "Hair", "shader_name": "Hidden/InternalErrorShader"},
+        ]
+    }
+
+    magenta = detect_magenta_materials(inventory)
+    reasons = {item["materialId"]: item["reason"] for item in magenta}
+
+    assert set(reasons) == {"m_missing", "m_err"}
+    assert reasons["m_missing"] == "missing_shader_reference"
+    assert reasons["m_err"] == "internal_error_shader"
+
+
+def test_post_import_validation_blocks_on_magenta_with_remediation() -> None:
+    inventory = {"materials": [{"material_id": "m_missing", "renderer_path": "Dress", "shader_name": ""}]}
+
+    report = build_post_import_outfit_validation(inventory, base_avatar_name="Milltina")
+
+    assert report["schema"] == planner.POST_IMPORT_VALIDATION_SCHEMA
+    assert report["status"] == "magenta_detected"
+    assert report["blocking"] is True
+    assert report["magentaCount"] == 1
+    assert report["affectedRenderers"] == ["Dress"]
+    assert report["remediation"]
+    assert any("before" in step.lower() for step in report["remediation"])
+
+
+def test_post_import_validation_passes_on_healthy_materials() -> None:
+    inventory = {"materials": [{"material_id": "m_ok", "renderer_path": "Body", "shader_name": "Poiyomi/Toon"}]}
+
+    report = build_post_import_outfit_validation(inventory)
+
+    assert report["status"] == "ok"
+    assert report["blocking"] is False
+    assert report["magentaCount"] == 0
+    assert report["remediation"] == []
+
+
+# --- Fix #3: externalized / extensible avatar alias table --------------------
+
+
+def _reset_alias_cache() -> None:
+    planner._AVATAR_ALIAS_CACHE = None
+    planner._AVATAR_ALIAS_CACHE_KEY = None
+
+
+def test_avatar_alias_override_extends_builtin_table(tmp_path: Path, monkeypatch) -> None:
+    override = tmp_path / "aliases.json"
+    override.write_text(json.dumps({"novaria": ["novaria"]}), encoding="utf-8")
+    monkeypatch.setenv(planner.AVATAR_ALIAS_OVERRIDE_ENV, str(override))
+    _reset_alias_cache()
+    try:
+        table = planner.avatar_compatibility_aliases()
+        assert "milltina" in table  # builtin defaults still present
+        assert "novaria" in table  # override merged in
+        detected = planner.detect_avatar_aliases(["Assets/Outfits/Novaria_Dress.prefab"])
+        assert "novaria" in detected
+    finally:
+        _reset_alias_cache()
+
+
+def test_avatar_alias_override_accepts_wrapped_form(tmp_path: Path, monkeypatch) -> None:
+    override = tmp_path / "aliases.json"
+    override.write_text(json.dumps({"avatars": {"novaria": ["novaria"]}}), encoding="utf-8")
+    monkeypatch.setenv(planner.AVATAR_ALIAS_OVERRIDE_ENV, str(override))
+    _reset_alias_cache()
+    try:
+        assert "novaria" in planner.avatar_compatibility_aliases()
+    finally:
+        _reset_alias_cache()
+
+
+def test_avatar_alias_override_malformed_file_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setenv(planner.AVATAR_ALIAS_OVERRIDE_ENV, str(bad))
+    _reset_alias_cache()
+    try:
+        table = planner.avatar_compatibility_aliases()  # must not raise
+        assert table["milltina"]
+        assert "novaria" not in table
+    finally:
+        _reset_alias_cache()

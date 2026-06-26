@@ -13,6 +13,13 @@ Before publishing a release package:
       and resolve any public-doc or COMPATIBILITY_MATRIX blocker before
       publishing a stable release or stable refresh. This includes the Doctor
       support bundle flow.
+* [ ] For a stable release or stable refresh, add the freshness/liveness guards
+      so a stale or writes-skipped artifact cannot carry the gate:
+      `--max-artifact-age-hours <N>` blocks any required smoke artifact older
+      than `N` hours, and `--require-live-writes` rejects a Golden Path Matrix
+      artifact that ran with `safeDefault=True` (writes skipped) instead of a
+      real live write. Both flags are opt-in; capture a fresh Golden Path Matrix
+      artifact with live writes before enabling `--require-live-writes`.
 * [ ] Run `packaging/check_third_party_licenses.ps1` and stop the release if any
       bundled component fails its license gate.
 * [ ] Add every bundled third-party component to

@@ -29,11 +29,23 @@ release work can be accepted or refreshed.
 | Avatar Encryption addon | 1.0.1 connector preview for lilToon and Poiyomi first | Research/scan/plan/preview plus private-addon connector request interfaces; Lite/Standard/Paranoid profiles; Standard is the default; public repo contains no encryption implementation | Windows PC-only; Quest/Android is blocked for this feature; private addon module is required for execution |
 | Face/shader adjustment timeline | 1.0.1 source-line A/B checkpoints for high-frequency tuning | API and desktop Checkpoints UI support CRUD, overwrite, A/B selection, preview, and restore-approval apply | Applies must stay on the normal checkpoint/approval/rollback chain |
 
+## Avatar Compatibility Aliases
+
+VRCForge ships a builtin alias table that maps common base-avatar names and
+their nicknames so outfit/compatibility detection recognizes them. The builtin
+defaults are not exhaustive. To recognize an avatar that is not in the default
+list, set `VRCFORGE_AVATAR_ALIAS_PATH` to a JSON file that adds or extends
+aliases. The file may be either flat (`{ "canonicalName": ["alias", ...] }`) or
+wrapped (`{ "avatars": { "canonicalName": ["alias", ...] } }`). The override is
+merged on top of the builtin defaults, so it only adds coverage and never
+removes it; a missing or malformed file is ignored without error.
+
 ## Known Conflicts
 
 | Conflict | Expected behavior |
 | --- | --- |
 | Already-installed shader support package appears inside an imported outfit package | Skip or report the dependency instead of blindly importing duplicate support packages |
+| Outfit material imports with a missing or InternalError shader (magenta / pink render) | Post-import validation raises a blocking `Error` listing the magenta materials and renderers; import the required shader support package before the outfit prefab, then re-import |
 | Unity compile errors before apply | Block write-heavy workflows until compile status is understood |
 | Missing VRChat SDK performance type | Report a degraded validation source such as `missing_sdk_type` instead of hiding the reason |
 | External MCP client requests direct executor targets | Keep direct apply hidden; require named request tools and VRCForge approval |

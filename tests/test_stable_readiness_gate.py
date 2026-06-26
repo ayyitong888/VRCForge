@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -244,3 +245,79 @@ def test_stable_readiness_gate_writes_report(tmp_path):
 
     assert path.parent == (tmp_path / "reports").resolve()
     assert json.loads(path.read_text(encoding="utf-8")) == report
+
+
+# --- Fix #1: freshness guard + require-live-writes ---------------------------
+
+
+def _step(report: dict, name: str) -> dict:
+    return next(step for step in report["steps"] if step["name"] == name)
+
+
+def test_freshness_guard_disabled_by_default(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+
+    assert not any(step["name"].startswith("freshness.") for step in report["steps"])
+    assert report["policy"]["maxArtifactAgeHours"] is None
+
+
+def test_freshness_guard_passes_when_artifacts_are_recent(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, max_artifact_age_hours=24.0))
+
+    assert _step(report, "freshness.golden_path_matrix")["ok"] is True
+    assert report["ok"] is True
+    assert report["policy"]["maxArtifactAgeHours"] == 24.0
+
+
+def test_freshness_guard_blocks_stale_artifact(tmp_path, monkeypatch):
+    import os
+
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    stale = tmp_path / "artifacts" / "golden-path-matrix" / "golden-path-matrix.json"
+    old = time.time() - 100 * 3600
+    os.utime(stale, (old, old))
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, max_artifact_age_hours=24.0))
+
+    assert report["ok"] is False
+    assert "freshness.golden_path_matrix" in report["summary"]["blockingSteps"]
+
+
+def test_require_live_writes_blocks_safe_default_artifact(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, require_live_writes=True))
+
+    assert report["ok"] is False
+    assert "golden_path_matrix.safe_default" in report["summary"]["blockingSteps"]
+    assert report["policy"]["requireLiveWrites"] is True
+
+
+def test_require_live_writes_passes_when_live_writes_proven(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    write_json(
+        tmp_path / "artifacts" / "golden-path-matrix" / "golden-path-matrix.json",
+        {
+            "schema": "vrcforge.golden_path_matrix.v1",
+            "ok": True,
+            "summary": {"status": "passed", "failedCount": 0, "safeDefault": False},
+        },
+    )
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, require_live_writes=True))
+
+    assert _step(report, "golden_path_matrix.safe_default")["ok"] is True

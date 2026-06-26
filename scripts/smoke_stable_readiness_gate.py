@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifacts-dir", default="artifacts/stable-readiness-gate")
     parser.add_argument("--stale-version", action="append", default=["0.9.0-beta"], help="Stale version string that must not appear in current public docs.")
     parser.add_argument("--allow-blocked", action="store_true", help="Exit 0 even when required readiness gates are blocked.")
+    parser.add_argument(
+        "--max-artifact-age-hours",
+        type=float,
+        default=0.0,
+        help="If > 0, each smoke/proof artifact must have been written within this many hours, else the gate blocks. Default 0 disables the freshness guard.",
+    )
+    parser.add_argument(
+        "--require-live-writes",
+        action="store_true",
+        help="Require the Golden Path Matrix artifact to prove real live writes (safeDefault=false) instead of accepting the safe-default writes-skipped run.",
+    )
     return parser.parse_args()
 
 
@@ -137,12 +149,40 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     steps.append(check_doc_contains(Path("docs/OPTIMIZATION_STRATEGY.md"), "optimizer_state_machine.public", OPTIMIZER_STATE_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/RELEASE_CHECKLIST.md"), "release_checklist.stable_gate", ("smoke_stable_readiness_gate.py", "COMPATIBILITY_MATRIX", "support bundle"), required=True))
     steps.append(check_release_manifest(Path(args.release_manifest), version))
-    steps.append(check_packaged_backend(resolve_evidence_path(args.packaged_backend_smoke, "artifacts/packaged-backend-smoke-*/packaged-bootstrap-summary.json"), version))
-    steps.append(check_payload_zip(resolve_evidence_path(args.payload_zip_smoke, "artifacts/payload-smoke/*/summary.json"), version))
-    steps.append(check_golden_path_matrix(resolve_evidence_path(args.golden_path_matrix, "artifacts/golden-path-matrix/*.json")))
-    steps.append(check_optimizer_request_guard(resolve_evidence_path(args.optimizer_request_guard_smoke, "artifacts/optimizer-request-guard-smoke/*.json")))
-    steps.append(check_external_agent_smoke(resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")))
-    steps.append(check_installer_smoke(resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")))
+
+    # Resolve smoke/proof artifacts once so the same path feeds both the content
+    # check and the optional freshness guard below.
+    max_age_hours = float(getattr(args, "max_artifact_age_hours", 0.0) or 0.0)
+    require_live_writes = bool(getattr(args, "require_live_writes", False))
+    packaged_backend_path = resolve_evidence_path(args.packaged_backend_smoke, "artifacts/packaged-backend-smoke-*/packaged-bootstrap-summary.json")
+    payload_zip_path = resolve_evidence_path(args.payload_zip_smoke, "artifacts/payload-smoke/*/summary.json")
+    golden_path_matrix_path = resolve_evidence_path(args.golden_path_matrix, "artifacts/golden-path-matrix/*.json")
+    optimizer_guard_path = resolve_evidence_path(args.optimizer_request_guard_smoke, "artifacts/optimizer-request-guard-smoke/*.json")
+    external_agent_path = resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")
+    installer_path = resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")
+
+    steps.append(check_packaged_backend(packaged_backend_path, version))
+    steps.append(check_payload_zip(payload_zip_path, version))
+    steps.append(check_golden_path_matrix(golden_path_matrix_path, require_live_writes=require_live_writes))
+    steps.append(check_optimizer_request_guard(optimizer_guard_path))
+    steps.append(check_external_agent_smoke(external_agent_path))
+    steps.append(check_installer_smoke(installer_path))
+
+    # Freshness guard (opt-in). Default 0 disables it so existing callers keep their
+    # exact behavior; CI/release can pass a window so a stale-but-passing artifact
+    # cannot carry the gate. Run artifacts only — versioned docs and the fixed
+    # release manifest are intentionally not age-checked.
+    if max_age_hours > 0:
+        for fresh_name, fresh_path in (
+            ("packaged_backend_smoke", packaged_backend_path),
+            ("payload_zip_smoke", payload_zip_path),
+            ("golden_path_matrix", golden_path_matrix_path),
+            ("optimizer_request_guard_smoke", optimizer_guard_path),
+            ("external_agent_smoke", external_agent_path),
+            ("installer_smoke", installer_path),
+        ):
+            steps.append(check_artifact_freshness(f"freshness.{fresh_name}", fresh_path, max_age_hours))
+
     steps.append(check_doc_contains(Path(args.release_evidence), "local_release_evidence.current", (version, "Golden Path Matrix", "Installer install/uninstall"), required=False))
     steps.append(check_doc_contains(Path(args.proof_matrix), "local_proof_matrix.current", (version, "Golden Path Matrix", "External-agent request"), required=False))
 
@@ -170,6 +210,8 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             "privacyBoundaryRequiredBeforeStable": True,
             "installerAdminBlockedKeepsGateBlockedUnlessAllowBlocked": True,
             "localEvidenceDocsAreAdvisoryForFreshClones": True,
+            "maxArtifactAgeHours": max_age_hours if max_age_hours > 0 else None,
+            "requireLiveWrites": require_live_writes,
         },
     }
 
@@ -343,18 +385,30 @@ def check_payload_zip(path: Path, version: str) -> dict[str, Any]:
     )
 
 
-def check_golden_path_matrix(path: Path) -> dict[str, Any]:
+def check_golden_path_matrix(path: Path, require_live_writes: bool = False) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("golden_path_matrix.safe_default", False, True, path, reason=parse_error, category="golden-path")
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    safe_default = summary.get("safeDefault")
+    # Default: the packaged safe-default (writes-skipped) artifact is accepted, which
+    # is correct for a clean clone with no Unity attached. With --require-live-writes
+    # the gate instead demands a run that actually performed live writes
+    # (safeDefault is False), so a real apply/rollback path was exercised.
+    safe_default_ok = (safe_default is False) if require_live_writes else (safe_default is True)
     ok = bool(
         payload.get("schema") == "vrcforge.golden_path_matrix.v1"
         and payload.get("ok") is True
         and summary.get("status") == "passed"
         and int(summary.get("failedCount") or 0) == 0
-        and summary.get("safeDefault") is True
+        and safe_default_ok
     )
+    if ok:
+        reason = ""
+    elif require_live_writes and safe_default is not False:
+        reason = "live-writes mode requires a Golden Path Matrix run with safeDefault=false (real writes proven)"
+    else:
+        reason = "packaged safe-default Golden Path Matrix did not pass"
     return evidence_step(
         "golden_path_matrix.safe_default",
         ok,
@@ -363,8 +417,8 @@ def check_golden_path_matrix(path: Path) -> dict[str, Any]:
         category="golden-path",
         schema=str(payload.get("schema") or ""),
         fields_checked=["ok", "summary.status", "summary.failedCount", "summary.safeDefault"],
-        reason="" if ok else "packaged safe-default Golden Path Matrix did not pass",
-        details={"summary": summary},
+        reason=reason,
+        details={"summary": summary, "requireLiveWrites": require_live_writes},
     )
 
 
@@ -513,6 +567,37 @@ def resolve_evidence_path(explicit: str, pattern: str) -> Path:
     if not candidates:
         return Path(pattern)
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def check_artifact_freshness(name: str, path: Path, max_age_hours: float) -> dict[str, Any]:
+    """Blocking step: a smoke/proof artifact must have been written recently.
+
+    The newest-by-mtime artifact selection means an old passing run can carry the
+    gate forever. This guard fails when the resolved artifact is older than the
+    configured window so the gate reflects a current run, not a fossilized one.
+    """
+    if not path.is_file():
+        return {
+            "name": name,
+            "category": "freshness",
+            "required": True,
+            "ok": False,
+            "path": str(path),
+            "maxAgeHours": max_age_hours,
+            "error": "evidence artifact is missing for freshness check",
+        }
+    age_hours = max(0.0, (time.time() - path.stat().st_mtime) / 3600.0)
+    ok = age_hours <= max_age_hours
+    return {
+        "name": name,
+        "category": "freshness",
+        "required": True,
+        "ok": ok,
+        "path": str(path),
+        "ageHours": round(age_hours, 2),
+        "maxAgeHours": max_age_hours,
+        "error": "" if ok else f"evidence artifact is older than {max_age_hours}h (age {round(age_hours, 2)}h)",
+    }
 
 
 def normalize_manifest_artifacts(manifest: dict[str, Any]) -> list[dict[str, Any]]:

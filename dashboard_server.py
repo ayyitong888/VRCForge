@@ -56,7 +56,11 @@ from optimization_service import (
     build_optimization_tool_result,
     normalize_tool_name,
 )
-from outfit_import_planner import build_outfit_import_plan
+from outfit_import_planner import (
+    build_outfit_import_plan,
+    build_post_import_outfit_validation,
+    detect_magenta_materials,
+)
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import PathToSkillError, build_path_to_skill_source
 from project_memory_index import scan_project_memory
@@ -13553,6 +13557,37 @@ def _material_validation(findings: list[dict[str, Any]], result: dict[str, Any])
     if not result.get("ok"):
         return
     payload = result.get("payload") or {}
+    # Post-import magenta / broken-shader gate. A material whose shader reference is
+    # missing or compiled to Unity's internal error shader renders magenta/pink in
+    # the editor, which almost always means the outfit prefab was imported before its
+    # shader/material support package. This is a blocking Error (not a soft warning)
+    # so a visibly broken outfit cannot pass validation quietly.
+    inventory = payload.get("inventory") if isinstance(payload.get("inventory"), dict) else payload
+    magenta = detect_magenta_materials(inventory)
+    if magenta:
+        post_import = build_post_import_outfit_validation(inventory)
+        affected = post_import.get("affectedRenderers") or []
+        _validation_add_finding(
+            findings,
+            "Materials / shaders",
+            "Error",
+            "Magenta / missing-shader materials after import",
+            (
+                f"{len(magenta)} material(s) imported with a missing or error shader "
+                "(they render magenta/pink in Unity). Import the shader and the outfit's "
+                "material/texture support package before the clothing prefab, then re-import "
+                "the prefab and re-run validation."
+            ),
+            "materials",
+            {
+                "magentaCount": post_import.get("magentaCount"),
+                "magentaMaterials": post_import.get("magentaMaterials"),
+                "affectedRenderers": affected,
+                "remediation": post_import.get("remediation"),
+                "postImportSchema": post_import.get("schema"),
+            },
+        )
+        return
     unsupported = _validation_max_number(payload, "unsupportedShaderCount", "unsupportedMaterialCount")
     missing = _validation_list_count(payload, "missingMaterials", "missingShaders")
     if unsupported or missing:

@@ -199,6 +199,13 @@ blocked reason before it can be treated as stable.
 4. Request the supervised import only after reviewing the plan.
 5. Validate, inspect screenshots when relevant, then roll back if the result is
    not what you expected.
+6. Post-import material validation runs automatically. If any imported material
+   has a missing or broken shader reference (the magenta / pink render in
+   Unity), validation raises a blocking `Error` under "Materials / shaders" and
+   lists the affected materials and renderers. The fix is to import the shader
+   support package (lilToon, Poiyomi, or the outfit's required shader) before
+   the outfit prefab, then re-run the import; magenta means the shader was not
+   present when the material loaded, not that the mesh is broken.
 
 ### Safe Model Optimization
 

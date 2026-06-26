@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +32,12 @@ SUPPORT_PACKAGE_PATTERNS = [
 ]
 NON_IMPORT_SUPPORT_PATTERNS = [r"\bpsd\b", r"\bphotoshop\b"]
 
-AVATAR_COMPATIBILITY_ALIASES: dict[str, list[str]] = {
+# Built-in defaults. These are a *heuristic* name-matching seed for common public
+# avatar bases, not an allow-list: any VRChat-standard avatar still imports. The
+# active table is resolved through avatar_compatibility_aliases(), which merges
+# these defaults with an optional user/community override file so new avatar bases
+# can be added without editing code. See AVATAR_ALIAS_OVERRIDE_ENV below.
+BUILTIN_AVATAR_COMPATIBILITY_ALIASES: dict[str, list[str]] = {
     "milltina": ["milltina", "miltina", "\u30df\u30eb\u30c6\u30a3\u30ca"],
     "manuka": ["manuka", "\u30de\u30cc\u30ab"],
     "sapphy": ["sapphy", "\u30b5\u30d5\u30a3\u30fc", "\u590f\u83f2"],
@@ -49,6 +56,81 @@ AVATAR_COMPATIBILITY_ALIASES: dict[str, list[str]] = {
     "karin": ["karin"],
     "mamehinata": ["mamehinata"],
 }
+
+# Optional override file: a JSON object mapping a canonical avatar key to a list of
+# name aliases, either flat ({"myavatar": ["my avatar", "..."]}) or wrapped
+# ({"avatars": {...}}). User/community entries are merged on top of the builtin
+# defaults, so the table is data-driven and extensible without a code change.
+AVATAR_ALIAS_OVERRIDE_ENV = "VRCFORGE_AVATAR_ALIAS_PATH"
+
+# Backward-compatible name for any external importer; the live logic uses the
+# merged result from avatar_compatibility_aliases().
+AVATAR_COMPATIBILITY_ALIASES: dict[str, list[str]] = BUILTIN_AVATAR_COMPATIBILITY_ALIASES
+
+_AVATAR_ALIAS_CACHE: dict[str, list[str]] | None = None
+_AVATAR_ALIAS_CACHE_KEY: tuple[str, float] | None = None
+
+
+def _coerce_alias_overrides(raw: Any) -> dict[str, list[str]]:
+    """Normalize an override document into {canonical: [aliases]}; ignore junk."""
+    if isinstance(raw, dict) and isinstance(raw.get("avatars"), dict):
+        raw = raw["avatars"]
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        canonical = str(key or "").strip().casefold()
+        if not canonical:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            continue
+        aliases = [str(item).strip() for item in value if str(item or "").strip()]
+        # Always let the canonical key itself match as an alias.
+        if canonical not in [a.casefold() for a in aliases]:
+            aliases.append(canonical)
+        if aliases:
+            overrides[canonical] = aliases
+    return overrides
+
+
+def load_avatar_alias_overrides(path: str | os.PathLike[str] | None = None) -> dict[str, list[str]]:
+    """Read the optional override file. Never raises: malformed/missing -> {}."""
+    candidate = str(path or os.environ.get(AVATAR_ALIAS_OVERRIDE_ENV, "") or "").strip()
+    if not candidate:
+        return {}
+    file_path = Path(candidate)
+    if not file_path.is_file():
+        return {}
+    try:
+        raw = json.loads(file_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return _coerce_alias_overrides(raw)
+
+
+def avatar_compatibility_aliases() -> dict[str, list[str]]:
+    """Builtin defaults merged with the optional override file (cached by path+mtime)."""
+    global _AVATAR_ALIAS_CACHE, _AVATAR_ALIAS_CACHE_KEY
+    candidate = str(os.environ.get(AVATAR_ALIAS_OVERRIDE_ENV, "") or "").strip()
+    mtime = 0.0
+    if candidate:
+        try:
+            mtime = Path(candidate).stat().st_mtime
+        except OSError:
+            mtime = 0.0
+    cache_key = (candidate, mtime)
+    if _AVATAR_ALIAS_CACHE is not None and _AVATAR_ALIAS_CACHE_KEY == cache_key:
+        return _AVATAR_ALIAS_CACHE
+    merged: dict[str, list[str]] = {key: list(value) for key, value in BUILTIN_AVATAR_COMPATIBILITY_ALIASES.items()}
+    for canonical, aliases in load_avatar_alias_overrides(candidate).items():
+        existing = merged.get(canonical, [])
+        merged[canonical] = list(dict.fromkeys([*existing, *aliases]))
+    _AVATAR_ALIAS_CACHE = merged
+    _AVATAR_ALIAS_CACHE_KEY = cache_key
+    return merged
+
 
 DEPENDENCY_RULES: list[dict[str, Any]] = [
     {
@@ -784,7 +866,7 @@ def build_avatar_compatibility_preflight(
 
 def canonical_avatar_name(value: str) -> str:
     normalized = normalize_avatar_token(value)
-    for canonical, aliases in AVATAR_COMPATIBILITY_ALIASES.items():
+    for canonical, aliases in avatar_compatibility_aliases().items():
         if any(normalize_avatar_token(alias) and normalize_avatar_token(alias) in normalized for alias in aliases):
             return canonical
     return normalized
@@ -792,7 +874,7 @@ def canonical_avatar_name(value: str) -> str:
 
 def detect_avatar_aliases(values: list[str]) -> set[str]:
     detected: set[str] = set()
-    for canonical, aliases in AVATAR_COMPATIBILITY_ALIASES.items():
+    for canonical, aliases in avatar_compatibility_aliases().items():
         for value in values:
             if avatar_alias_matches(value, aliases):
                 detected.add(canonical)
@@ -802,8 +884,9 @@ def detect_avatar_aliases(values: list[str]) -> set[str]:
 
 def avatar_alias_evidence(values: list[str], detected: set[str]) -> dict[str, list[str]]:
     evidence: dict[str, list[str]] = {}
+    aliases_table = avatar_compatibility_aliases()
     for canonical in detected:
-        aliases = AVATAR_COMPATIBILITY_ALIASES.get(canonical, [])
+        aliases = aliases_table.get(canonical, [])
         matches = [value for value in values if avatar_alias_matches(value, aliases)]
         evidence[canonical] = sorted(dict.fromkeys(matches), key=str.lower)[:10]
     return evidence
@@ -830,6 +913,99 @@ def avatar_alias_matches(value: str, aliases: list[str]) -> bool:
 
 def normalize_avatar_token(value: str) -> str:
     return re.sub(r"[\s_\-().\[\]{}]+", "", (value or "").casefold())
+
+
+POST_IMPORT_VALIDATION_SCHEMA = "vrcforge.outfit_post_import_validation.v1"
+# Unity renders a material magenta/pink when its shader reference is missing or the
+# shader failed to compile (it falls back to Hidden/InternalErrorShader). These are
+# the post-import signals that the outfit's shader/material support was not imported
+# before the prefab.
+ERROR_SHADER_TOKENS = ("hidden/internalerrorshader", "internalerror", "internal-error")
+
+
+def _material_lookup(material: dict[str, Any], *names: str) -> str:
+    for name in names:
+        if name in material:
+            text = str(material.get(name) or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def material_shader_is_magenta(shader_name: str) -> bool:
+    """True when a shader name indicates a missing/error (magenta) material."""
+    name = (shader_name or "").strip().casefold()
+    if not name:
+        return True
+    return any(token in name for token in ERROR_SHADER_TOKENS)
+
+
+def detect_magenta_materials(inventory: Any) -> list[dict[str, Any]]:
+    """Flag materials whose shader is missing or the Unity internal error shader."""
+    materials = inventory.get("materials") if isinstance(inventory, dict) else None
+    if not isinstance(materials, list):
+        materials = []
+    flagged: list[dict[str, Any]] = []
+    for material in materials:
+        if not isinstance(material, dict):
+            continue
+        shader_name = _material_lookup(material, "shader_name", "shaderName")
+        if not material_shader_is_magenta(shader_name):
+            continue
+        flagged.append(
+            {
+                "materialId": _material_lookup(material, "material_id", "materialId"),
+                "materialName": _material_lookup(material, "material_name", "materialName"),
+                "rendererPath": _material_lookup(material, "renderer_path", "rendererPath", "item_path"),
+                "meshName": _material_lookup(material, "mesh_name", "meshName"),
+                "slotIndex": material.get("slot_index", material.get("slotIndex", 0)),
+                "shaderName": shader_name,
+                "reason": "missing_shader_reference" if not shader_name else "internal_error_shader",
+            }
+        )
+    return flagged
+
+
+def build_post_import_outfit_validation(
+    inventory: Any,
+    base_avatar_name: str | None = None,
+) -> dict[str, Any]:
+    """Post-import check: did the outfit land with broken (magenta) shaders?
+
+    This is the validation that was missing before — the planner only warned
+    *before* import. After import, a magenta material almost always means the
+    shader/material support package was not imported before the outfit prefab.
+    """
+    magenta = detect_magenta_materials(inventory)
+    affected_renderers = sorted({item["rendererPath"] for item in magenta if item.get("rendererPath")})
+    status = "ok" if not magenta else "magenta_detected"
+    if magenta:
+        message = (
+            f"{len(magenta)} material(s) imported with a missing or error shader "
+            "(they render magenta/pink in Unity)."
+        )
+        remediation = [
+            "Import the shader package (lilToon / Poiyomi / etc.) the outfit needs first.",
+            "Import the outfit's material/texture support package BEFORE the clothing prefab.",
+            "Re-import the outfit prefab so its materials rebind to the now-present shader.",
+            "Re-run this validation; magenta count should drop to zero.",
+        ]
+    else:
+        message = "No magenta/missing-shader materials were detected after import."
+        remediation = []
+    return {
+        "schema": POST_IMPORT_VALIDATION_SCHEMA,
+        "status": status,
+        "baseAvatarName": (base_avatar_name or "").strip(),
+        "magentaCount": len(magenta),
+        "magentaMaterials": magenta[:50],
+        "affectedRenderers": affected_renderers[:50],
+        # Advisory by default at the planner layer; the dashboard validation layer
+        # raises it to a blocking Error finding so a broken outfit cannot pass quietly.
+        "blocking": bool(magenta),
+        "message": message,
+        "remediation": remediation,
+    }
 
 
 def infer_avatar_name_from_project(project_root: Path | None) -> str:

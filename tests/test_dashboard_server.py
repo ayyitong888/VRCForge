@@ -6673,5 +6673,44 @@ namespace VRCForge.Editor
         self.assertEqual({symptom["code"] for symptom in payload["symptoms"]}, {"unknown"})
 
 
+class MaterialMagentaValidationTests(unittest.TestCase):
+    """Fix #2: a post-import magenta/missing-shader material must block validation."""
+
+    @staticmethod
+    def _materials_result(materials: list[dict]) -> dict:
+        return {"ok": True, "payload": {"inventory": {"materials": materials}, "materials": materials}}
+
+    def test_magenta_material_emits_blocking_error_finding(self) -> None:
+        findings: list[dict] = []
+        result = self._materials_result(
+            [
+                {"material_id": "m_ok", "renderer_path": "Body", "shader_name": "lilToon"},
+                {"material_id": "m_missing", "renderer_path": "Dress", "shader_name": ""},
+                {"material_id": "m_err", "renderer_path": "Hair", "shader_name": "Hidden/InternalErrorShader"},
+            ]
+        )
+
+        dashboard_server._material_validation(findings, result)
+
+        magenta = [item for item in findings if item.get("severity") == "Error"]
+        self.assertEqual(len(magenta), 1)
+        detail = magenta[0].get("detail") or {}
+        self.assertEqual(detail.get("magentaCount"), 2)
+        self.assertIn("Dress", detail.get("affectedRenderers", []))
+        self.assertIn("Hair", detail.get("affectedRenderers", []))
+        self.assertTrue(detail.get("remediation"))
+
+    def test_healthy_materials_do_not_emit_error(self) -> None:
+        findings: list[dict] = []
+        result = self._materials_result(
+            [{"material_id": "m_ok", "renderer_path": "Body", "shader_name": "Poiyomi/Toon"}]
+        )
+
+        dashboard_server._material_validation(findings, result)
+
+        self.assertFalse([item for item in findings if item.get("severity") == "Error"])
+        self.assertTrue([item for item in findings if item.get("severity") == "Info"])
+
+
 if __name__ == "__main__":
     unittest.main()
