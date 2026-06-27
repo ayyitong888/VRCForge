@@ -3041,8 +3041,8 @@ export default function App() {
             </button>
             <button
               onClick={() => void openDoctor()}
-              aria-label="Doctor"
-              title="Doctor"
+              aria-label={t("sidebar.doctor")}
+              title={t("sidebar.doctor")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "doctor"
@@ -3051,12 +3051,12 @@ export default function App() {
               )}
             >
               <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">Doctor</span>
+              <span className="truncate">{t("sidebar.doctor")}</span>
             </button>
             <button
               onClick={() => void openOptimization()}
-              aria-label="Optimization"
-              title="Optimization"
+              aria-label={t("sidebar.optimization")}
+              title={t("sidebar.optimization")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "optimization"
@@ -3065,7 +3065,7 @@ export default function App() {
               )}
             >
               <Gauge className="h-4 w-4 shrink-0" />
-              <span className="truncate">Optimization</span>
+              <span className="truncate">{t("sidebar.optimization")}</span>
             </button>
             <button
               onClick={() => void openProtection()}
@@ -3227,9 +3227,9 @@ export default function App() {
               <span className="text-muted-foreground">/</span>
               <span className="truncate font-medium">
                 {activeView === "doctor"
-                  ? "Doctor"
+                  ? t("sidebar.doctor")
                   : activeView === "optimization"
-                    ? "Optimization"
+                    ? t("sidebar.optimization")
                     : activeView === "protection"
                       ? t("encryption.protection")
                   : activeView === "skills"
