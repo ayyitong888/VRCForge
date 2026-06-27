@@ -725,6 +725,8 @@ class ExternalAgentGatewayUpdateRequest(BaseModel):
     allow_write_requests: bool | None = Field(default=None, alias="allowWriteRequests")
     revoke_token: bool = Field(default=False, alias="revokeToken")
     checkpoint_archive_max_size_mb: int | None = Field(default=None, alias="checkpointArchiveMaxSizeMb")
+    delete_checkpoint_archive_ids: list[str] | None = Field(default=None, alias="deleteCheckpointArchiveIds")
+    checkpoint_archive_directory: str | None = Field(default=None, alias="checkpointArchiveDirectory")
 
     model_config = {"populate_by_name": True}
 
@@ -2532,9 +2534,34 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     AGENT_GATEWAY.save_config(config)
     if checkpoint_limit is not None:
         prune_summary = AGENT_GATEWAY.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
+
+    delete_ids = params.get("deleteCheckpointArchiveIds")
+    if delete_ids is None:
+        delete_ids = params.get("delete_checkpoint_archive_ids")
+    delete_summary: dict[str, Any] | None = None
+    if delete_ids:
+        try:
+            delete_summary = AGENT_GATEWAY.delete_checkpoint_archives(delete_ids)
+        except Exception as exc:  # noqa: BLE001
+            delete_summary = {"ok": False, "error": str(exc)}
+
+    relocate_dir = params.get("checkpointArchiveDirectory")
+    if relocate_dir is None:
+        relocate_dir = params.get("checkpoint_archive_directory")
+    relocate_summary: dict[str, Any] | None = None
+    if isinstance(relocate_dir, str) and relocate_dir.strip():
+        try:
+            relocate_summary = AGENT_GATEWAY.relocate_checkpoint_archives(relocate_dir)
+        except Exception as exc:  # noqa: BLE001
+            relocate_summary = {"ok": False, "error": str(exc)}
+
     status = external_agent_status_sync()
     if prune_summary:
         status["gateway"]["checkpointArchivePrune"] = prune_summary
+    if delete_summary is not None:
+        status["gateway"]["checkpointArchiveDelete"] = delete_summary
+    if relocate_summary is not None:
+        status["gateway"]["checkpointArchiveRelocate"] = relocate_summary
     return status
 
 

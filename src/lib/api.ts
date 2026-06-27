@@ -551,10 +551,22 @@ export type ExternalAgentConnectorStatus = {
       ok?: boolean;
       schema?: string;
       directory?: string;
+      defaultDirectory?: string;
+      relocated?: boolean;
       sizeBytes?: number;
       sizeMb?: number;
       archiveCount?: number;
+      protectedCount?: number;
       maxSizeMb?: number;
+      archives?: Array<{
+        checkpointId?: string;
+        path?: string;
+        sizeBytes?: number;
+        sizeMb?: number;
+        modifiedAt?: number;
+        protected?: boolean;
+        label?: string;
+      }>;
     };
     checkpointArchivePrune?: {
       ok?: boolean;
@@ -569,6 +581,29 @@ export type ExternalAgentConnectorStatus = {
       deletedCount?: number;
       deletedBytes?: number;
       protectedCount?: number;
+    };
+    checkpointArchiveDelete?: {
+      ok?: boolean;
+      error?: string;
+      directory?: string;
+      requestedCount?: number;
+      deletedCount?: number;
+      deletedBytes?: number;
+      protectedSkipped?: string[];
+      archiveCount?: number;
+    };
+    checkpointArchiveRelocate?: {
+      ok?: boolean;
+      code?: string;
+      error?: string;
+      directory?: string;
+      from?: string;
+      to?: string;
+      unchanged?: boolean;
+      copiedCount?: number;
+      rewrittenCount?: number;
+      removedOldCount?: number;
+      archiveCount?: number;
     };
   };
   clients?: Record<
@@ -808,7 +843,14 @@ export async function fetchExternalAgentConnectors(endpoint: string, projectPath
 
 export async function updateExternalAgentGateway(
   endpoint: string,
-  request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean; checkpointArchiveMaxSizeMb?: number },
+  request: {
+    enabled?: boolean;
+    allowWriteRequests?: boolean;
+    revokeToken?: boolean;
+    checkpointArchiveMaxSizeMb?: number;
+    deleteCheckpointArchiveIds?: string[];
+    checkpointArchiveDirectory?: string;
+  },
 ): Promise<ExternalAgentConnectorStatus> {
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/gateway`, {
     method: "POST",

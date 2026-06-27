@@ -1283,6 +1283,108 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(payload["gateway"]["checkpointArchivePrune"]["deletedCount"], 0)
             self.assertTrue(archive_path.exists())
 
+    def test_external_agent_gateway_relocate_checkpoint_archives_rewrites_paths(self) -> None:
+        # 安全关键：检查点把绝对 archivePath 持久化在 checkpoints.jsonl，迁移必须复制 ZIP
+        # 并改写记录，否则回滚会找不到存档。这里证明改写后的路径指向新目录里真实存在的文件。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            old_dir = gateway.checkpoint_store_dir / "project"
+            old_dir.mkdir(parents=True)
+            old_zip = old_dir / "ckpt_relocate.zip"
+            old_zip.write_bytes(b"x" * 1024)
+            gateway.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
+            gateway.checkpoint_log_path.write_text(
+                json.dumps(
+                    {"id": "ckpt_relocate", "archivePath": str(old_zip), "strategy": "archive"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            new_root = root / "moved-archives"
+
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/external-agent/gateway",
+                        json={"checkpointArchiveDirectory": str(new_root)},
+                    )
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+            payload = response.json()
+            self.assertEqual(response.status_code, 200)
+            relocate = payload["gateway"]["checkpointArchiveRelocate"]
+            self.assertTrue(relocate["ok"])
+            self.assertEqual(relocate["copiedCount"], 1)
+            self.assertEqual(relocate["rewrittenCount"], 1)
+
+            new_zip = new_root / "project" / "ckpt_relocate.zip"
+            self.assertTrue(new_zip.exists())
+            self.assertFalse(old_zip.exists())
+            self.assertEqual(gateway.checkpoint_store_dir.resolve(), new_root.resolve())
+
+            record = json.loads(gateway.checkpoint_log_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(Path(record["archivePath"]).resolve(), new_zip.resolve())
+
+    def test_external_agent_gateway_relocate_blocked_by_active_recovery(self) -> None:
+        # 有未结的写入恢复时迁移必须被安全闸拒绝，否则迁移途中回滚会找不到旧存档。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            old_dir = gateway.checkpoint_store_dir / "project"
+            old_dir.mkdir(parents=True)
+            old_zip = old_dir / "ckpt_guard.zip"
+            old_zip.write_bytes(b"x" * 1024)
+            gateway._append_apply_recovery_entry(
+                {"id": "rec_1", "checkpointId": "ckpt_guard", "status": "needs_recovery"}
+            )
+            new_root = root / "moved-archives"
+
+            result = gateway.relocate_checkpoint_archives(str(new_root))
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "active_recovery")
+            self.assertTrue(old_zip.exists())
+            self.assertFalse((new_root / "project" / "ckpt_guard.zip").exists())
+
+    def test_external_agent_gateway_delete_checkpoint_archives_protects_active_recovery(self) -> None:
+        # 多选清理时，活跃恢复检查点对应的存档必须被强制保护、跳过不删。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            archive_dir = gateway.checkpoint_store_dir / "project"
+            archive_dir.mkdir(parents=True)
+            keep = archive_dir / "ckpt_protected.zip"
+            drop = archive_dir / "ckpt_free.zip"
+            keep.write_bytes(b"x" * 1024)
+            drop.write_bytes(b"x" * 1024)
+            gateway._append_apply_recovery_entry(
+                {"id": "rec_2", "checkpointId": "ckpt_protected", "status": "applying"}
+            )
+
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/external-agent/gateway",
+                        json={"deleteCheckpointArchiveIds": ["ckpt_protected", "ckpt_free"]},
+                    )
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+            payload = response.json()
+            self.assertEqual(response.status_code, 200)
+            delete = payload["gateway"]["checkpointArchiveDelete"]
+            self.assertTrue(delete["ok"])
+            self.assertEqual(delete["deletedCount"], 1)
+            self.assertIn("ckpt_protected", delete["protectedSkipped"])
+            self.assertTrue(keep.exists())
+            self.assertFalse(drop.exists())
+
     def test_skill_package_import_projects_skill_and_export_endpoint_builds_vsk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

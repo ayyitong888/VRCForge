@@ -84,6 +84,7 @@ class AgentGatewayConfig:
     execution_mode: str = "approval"
     roslyn_risk_acknowledged: bool = False
     checkpoint_archive_max_size_mb: int = 0
+    checkpoint_archive_dir: str = ""
 
 
 @dataclass
@@ -1380,6 +1381,9 @@ class AgentGateway:
         # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
         self.llm_planner_label: str = ""
         self.llm_reasoning_trace: dict[str, Any] = {}
+        # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
+        # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
+        self._checkpoint_store_override: Path | None = None
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -1443,6 +1447,7 @@ class AgentGateway:
                 "execution_mode": "approval",
                 "roslyn_risk_acknowledged": False,
                 "checkpoint_archive_max_size_mb": 0,
+                "checkpoint_archive_dir": "",
             }
             for key, value in defaults.items():
                 if key not in raw:
@@ -1462,7 +1467,11 @@ class AgentGateway:
                 checkpoint_archive_max_size_mb=normalize_checkpoint_archive_max_size_mb(
                     raw.get("checkpoint_archive_max_size_mb")
                 ),
+                checkpoint_archive_dir=normalize_checkpoint_archive_dir(
+                    raw.get("checkpoint_archive_dir")
+                ),
             )
+            self._sync_checkpoint_store_override(config)
             if changed:
                 self.save_config(config)
             return config
@@ -1482,8 +1491,23 @@ class AgentGateway:
             "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
                 config.checkpoint_archive_max_size_mb
             ),
+            "checkpoint_archive_dir": normalize_checkpoint_archive_dir(
+                config.checkpoint_archive_dir
+            ),
         }
         atomic_write_json(self.config_path, payload)
+        self._sync_checkpoint_store_override(config)
+
+    def _sync_checkpoint_store_override(self, config: AgentGatewayConfig) -> None:
+        """根据配置里的迁移目录刷新内存覆盖路径，供 checkpoint_store_dir 读取。"""
+        raw = normalize_checkpoint_archive_dir(config.checkpoint_archive_dir)
+        if raw:
+            try:
+                self._checkpoint_store_override = Path(raw)
+            except (TypeError, ValueError):
+                self._checkpoint_store_override = None
+        else:
+            self._checkpoint_store_override = None
 
     def authenticate(
         self,
@@ -2410,15 +2434,286 @@ class AgentGateway:
         config = config or self.ensure_config()
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
+        protected_ids = self._protected_checkpoint_archive_ids()
+        labels = self._checkpoint_archive_labels()
+        items = [
+            {
+                "checkpointId": item["checkpointId"],
+                "path": str(item["path"]),
+                "sizeBytes": item["sizeBytes"],
+                "sizeMb": round(item["sizeBytes"] / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
+                "modifiedAt": item["modifiedAt"],
+                "protected": item["checkpointId"] in protected_ids,
+                "label": labels.get(item["checkpointId"], ""),
+            }
+            for item in sorted(archives, key=lambda x: x["modifiedAt"], reverse=True)
+        ]
         return {
             "ok": True,
-            "schema": "vrcforge.checkpoint_archive_storage.v1",
+            "schema": "vrcforge.checkpoint_archive_storage.v2",
             "directory": str(self.checkpoint_store_dir),
+            "defaultDirectory": str(self.default_checkpoint_store_dir),
+            "relocated": getattr(self, "_checkpoint_store_override", None) is not None,
             "sizeBytes": total_bytes,
             "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
             "archiveCount": len(archives),
+            "protectedCount": sum(1 for item in items if item["protected"]),
             "maxSizeMb": normalize_checkpoint_archive_max_size_mb(config.checkpoint_archive_max_size_mb),
+            "archives": items[:500],
         }
+
+    def _checkpoint_archive_labels(self) -> dict[str, str]:
+        """checkpointId -> 简短标签，便于前端列表辨认存档来源。"""
+        labels: dict[str, str] = {}
+        for entry in self._read_checkpoint_entries(limit=1000):
+            cid = str(entry.get("id") or "").strip()
+            if not cid or cid in labels:
+                continue
+            label = str(
+                entry.get("targetTool")
+                or entry.get("reason")
+                or entry.get("strategy")
+                or ""
+            ).strip()
+            created = str(entry.get("createdAt") or "").strip()
+            labels[cid] = (f"{label} · {created}" if label and created else label or created)
+        return labels
+
+    def delete_checkpoint_archives(self, checkpoint_ids: Any) -> dict[str, Any]:
+        """删除用户在面板里勾选的存档；活跃恢复检查点强制保护，不会被删。"""
+        requested = {
+            str(cid).strip()
+            for cid in (checkpoint_ids or [])
+            if str(cid).strip()
+        }
+        archives = self._checkpoint_archive_files()
+        protected_ids = self._protected_checkpoint_archive_ids()
+        deleted: list[dict[str, Any]] = []
+        protected_skipped: list[str] = []
+        for archive in archives:
+            cid = archive["checkpointId"]
+            if cid not in requested:
+                continue
+            if cid in protected_ids:
+                protected_skipped.append(cid)
+                continue
+            path = archive["path"]
+            try:
+                path.unlink()
+            except OSError as exc:
+                self.append_audit(
+                    {
+                        "event": "checkpoint_archive_delete_failed",
+                        "path": str(path),
+                        "error": str(exc),
+                    }
+                )
+                continue
+            deleted.append(
+                {
+                    "path": str(path),
+                    "checkpointId": cid,
+                    "sizeBytes": archive["sizeBytes"],
+                }
+            )
+            self._remove_empty_checkpoint_archive_parents(path.parent)
+        if deleted:
+            self.append_audit(
+                {
+                    "event": "checkpoint_archive_deleted",
+                    "deletedCount": len(deleted),
+                    "deletedBytes": sum(item["sizeBytes"] for item in deleted),
+                    "protectedSkipped": protected_skipped,
+                }
+            )
+        usage = self.checkpoint_archive_usage()
+        return {
+            "ok": True,
+            "schema": "vrcforge.checkpoint_archive_delete.v1",
+            "directory": str(self.checkpoint_store_dir),
+            "requestedCount": len(requested),
+            "deletedCount": len(deleted),
+            "deletedBytes": sum(item["sizeBytes"] for item in deleted),
+            "protectedSkipped": protected_skipped,
+            "deleted": deleted[:50],
+            "sizeBytes": usage["sizeBytes"],
+            "sizeMb": usage["sizeMb"],
+            "archiveCount": usage["archiveCount"],
+        }
+
+    def relocate_checkpoint_archives(self, target_directory: Any) -> dict[str, Any]:
+        """把检查点存档目录迁到新位置：先复制 ZIP、改写 checkpoints.jsonl 中的
+        archivePath、再切换配置、最后删除旧文件。任何一步崩溃都不会让回滚失效，
+        因为旧目录在改写+切配置成功前始终保持可用。"""
+        config = self.ensure_config()
+        raw = normalize_checkpoint_archive_dir(target_directory)
+        if not raw:
+            return {"ok": False, "code": "directory_required", "error": "checkpoint archive directory required"}
+        # 安全闸：有未结的写入恢复/回滚时拒绝迁移，避免迁移途中回滚找不到旧存档。
+        if self._active_apply_recoveries():
+            return {
+                "ok": False,
+                "code": "active_recovery",
+                "error": "an apply rollback is still pending; resolve it before relocating",
+            }
+        new_dir = Path(raw)
+        if not new_dir.is_absolute():
+            return {"ok": False, "code": "not_absolute", "error": "directory must be an absolute path"}
+        current_dir = self.checkpoint_store_dir
+        try:
+            current_resolved = current_dir.resolve()
+        except OSError:
+            current_resolved = current_dir
+        try:
+            new_resolved = new_dir.resolve()
+        except OSError:
+            new_resolved = new_dir
+        if new_resolved == current_resolved:
+            # 目录没变，仅确保配置持久化。
+            config.checkpoint_archive_dir = str(new_resolved)
+            self.save_config(config)
+            usage = self.checkpoint_archive_usage(config)
+            return {
+                "ok": True,
+                "schema": "vrcforge.checkpoint_archive_relocate.v1",
+                "unchanged": True,
+                "directory": str(self.checkpoint_store_dir),
+                "copiedCount": 0,
+                "rewrittenCount": 0,
+                "removedOldCount": 0,
+                "sizeBytes": usage["sizeBytes"],
+                "archiveCount": usage["archiveCount"],
+            }
+        # 禁止新旧目录互相嵌套，否则复制/删除会自噬。
+        if current_resolved == new_resolved or current_resolved in new_resolved.parents or new_resolved in current_resolved.parents:
+            return {"ok": False, "code": "nested", "error": "new directory must not nest with the current one"}
+        try:
+            new_resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return {"ok": False, "code": "mkdir_failed", "error": str(exc)}
+        probe = new_resolved / ".vrcforge-write-test"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            return {"ok": False, "code": "not_writable", "error": str(exc)}
+
+        # 1) 复制全部 ZIP（保持相对结构），同时记录 checkpointId -> 新绝对路径。
+        id_to_new_path: dict[str, str] = {}
+        copied = 0
+        if current_dir.is_dir():
+            for src in current_dir.rglob("*.zip"):
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(current_dir)
+                dst = new_resolved / rel
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                except OSError as exc:
+                    self.append_audit(
+                        {"event": "checkpoint_archive_relocate_copy_failed", "path": str(src), "error": str(exc)}
+                    )
+                    return {"ok": False, "code": "copy_failed", "error": f"{src}: {exc}"}
+                id_to_new_path[src.stem] = str(dst)
+                copied += 1
+
+        # 2) 改写 checkpoints.jsonl 中已复制存档的 archivePath（按 checkpointId 精确映射）。
+        rewritten = self._rewrite_checkpoint_archive_paths(id_to_new_path)
+
+        # 3) 切换配置 + 内存覆盖，从此 checkpoint_store_dir 指向新目录。
+        config.checkpoint_archive_dir = str(new_resolved)
+        self.save_config(config)
+
+        # 4) 复制与改写都成功后，再清理旧目录里的 ZIP（尽力而为）。
+        removed_old = 0
+        if current_dir.is_dir():
+            for src in list(current_dir.rglob("*.zip")):
+                try:
+                    src.unlink()
+                    removed_old += 1
+                    self._remove_old_relocate_parents(src.parent, current_resolved)
+                except OSError:
+                    continue
+            try:
+                if not any(current_dir.iterdir()):
+                    current_dir.rmdir()
+            except OSError:
+                pass
+
+        self.append_audit(
+            {
+                "event": "checkpoint_archive_relocated",
+                "from": str(current_resolved),
+                "to": str(new_resolved),
+                "copiedCount": copied,
+                "rewrittenCount": rewritten,
+                "removedOldCount": removed_old,
+            }
+        )
+        usage = self.checkpoint_archive_usage(config)
+        return {
+            "ok": True,
+            "schema": "vrcforge.checkpoint_archive_relocate.v1",
+            "directory": str(self.checkpoint_store_dir),
+            "from": str(current_resolved),
+            "to": str(new_resolved),
+            "copiedCount": copied,
+            "rewrittenCount": rewritten,
+            "removedOldCount": removed_old,
+            "sizeBytes": usage["sizeBytes"],
+            "archiveCount": usage["archiveCount"],
+        }
+
+    def _rewrite_checkpoint_archive_paths(self, id_to_new_path: dict[str, str]) -> int:
+        """按 checkpointId 把 checkpoints.jsonl 里命中的 archivePath 改写成新路径。"""
+        if not id_to_new_path:
+            return 0
+        path = self.checkpoint_log_path
+        if not path.exists():
+            return 0
+        lines = path.read_text(encoding="utf-8").splitlines()
+        out: list[str] = []
+        changed = 0
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                out.append(line)
+                continue
+            if isinstance(record, dict):
+                stored = record.get("archivePath")
+                if isinstance(stored, str) and stored:
+                    cid = str(record.get("id") or Path(stored).stem)
+                    new_path = id_to_new_path.get(cid)
+                    if new_path and new_path != stored:
+                        record["archivePath"] = new_path
+                        changed += 1
+                        out.append(json.dumps(record, ensure_ascii=False))
+                        continue
+            out.append(line)
+        if changed:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        return changed
+
+    def _remove_old_relocate_parents(self, start: Path, root: Path) -> None:
+        current = start
+        while True:
+            try:
+                resolved = current.resolve()
+            except OSError:
+                break
+            if resolved == root or root not in resolved.parents:
+                break
+            try:
+                if any(current.iterdir()):
+                    break
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
     def prune_checkpoint_archives(
         self,
@@ -4430,6 +4725,13 @@ class AgentGateway:
 
     @property
     def checkpoint_store_dir(self) -> Path:
+        override = getattr(self, "_checkpoint_store_override", None)
+        if override is not None:
+            return override
+        return self.audit_dir / "checkpoint-archives"
+
+    @property
+    def default_checkpoint_store_dir(self) -> Path:
         return self.audit_dir / "checkpoint-archives"
 
     @property
@@ -6362,6 +6664,11 @@ def normalize_checkpoint_archive_max_size_mb(value: Any) -> int:
     if amount <= 0:
         return 0
     return min(amount, CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT)
+
+
+def normalize_checkpoint_archive_dir(value: Any) -> str:
+    """检查点存档迁移目录：仅做去空白，存在性/可写性在迁移时再校验。"""
+    return str(value or "").strip()
 
 
 def summarize_params(value: Any) -> dict[str, Any]:
