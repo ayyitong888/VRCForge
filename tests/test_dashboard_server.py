@@ -733,6 +733,43 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(restored.json()["permission"]["roslynRiskAcknowledged"])
             self.assertEqual(mock_unity_ack.call_count, 2)
 
+    @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", side_effect=RuntimeError("Unity MCP timed out"))
+    def test_agentic_permission_does_not_block_on_unity_roslyn_acknowledgement(self, mock_unity_ack) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/permission",
+                json={
+                    "execution_mode": "roslyn_full_auto",
+                    "acknowledge_roslyn_risk": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["permission"]["executionMode"], "roslyn_full_auto")
+        self.assertTrue(payload["permission"]["roslynRiskAcknowledged"])
+        self.assertFalse(payload["unityAcknowledgement"]["ok"])
+        self.assertIn("Unity acknowledgement sync is pending", payload["unityAcknowledgement"]["warning"])
+        mock_unity_ack.assert_called_once_with()
+
+    @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_unity_roslyn_acknowledgement_uses_short_timeout(self, mock_load_settings, mock_invoke) -> None:
+        settings = SimpleNamespace(
+            unity_mcp_timeout_seconds=30,
+            unity_mcp_retries=4,
+            unity_mcp_retry_backoff_seconds=1.0,
+        )
+        mock_load_settings.return_value = settings
+
+        with self.assertRaises(dashboard_server.UnityMcpError):
+            dashboard_server.acknowledge_unity_roslyn_risk_sync()
+
+        self.assertEqual(settings.unity_mcp_timeout_seconds, 3)
+        self.assertEqual(settings.unity_mcp_retries, 1)
+        self.assertEqual(settings.unity_mcp_retry_backoff_seconds, 0.0)
+        mock_invoke.assert_called_once()
+
     def test_agent_runtime_message_observes_and_plans_without_unity(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.post("/api/app/agent/message", json={"message": "检查仓库状态"})

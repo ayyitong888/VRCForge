@@ -1327,7 +1327,7 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if payload["permission"].get("roslynFullAuto") and payload["permission"].get("roslynRiskAcknowledged"):
         try:
-            payload["unityAcknowledgement"] = acknowledge_unity_roslyn_risk_sync()
+            payload["unityAcknowledgement"] = await asyncio.to_thread(acknowledge_unity_roslyn_risk_sync)
         except Exception as exc:  # noqa: BLE001
             payload["unityAcknowledgement"] = {
                 "ok": False,
@@ -11411,6 +11411,9 @@ def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
 
 def acknowledge_unity_roslyn_risk_sync() -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request({}))
+    settings.unity_mcp_timeout_seconds = min(int(settings.unity_mcp_timeout_seconds or 30), 3)
+    settings.unity_mcp_retries = 1
+    settings.unity_mcp_retry_backoff_seconds = 0.0
     result = invoke_unity_mcp(settings, "vrc_acknowledge_roslyn_risk", {})
     return {
         "ok": result.exit_code == 0,

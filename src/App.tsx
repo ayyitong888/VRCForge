@@ -973,10 +973,11 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      await updatePermission(endpoint, mode, acknowledge);
-      await refresh();
+      const payload = await updatePermission(endpoint, mode, acknowledge);
+      setBootstrap((current) => (current ? { ...current, permission: payload.permission } : current));
       setShowRoslynWarning(false);
       setPendingMode(null);
+      void refreshSilently();
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 409) {
         setPendingMode("roslyn_full_auto");
