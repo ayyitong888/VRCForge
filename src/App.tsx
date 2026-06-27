@@ -32,9 +32,12 @@ import {
   Sun,
   TerminalSquare,
   Trash2,
+  Globe,
   Wrench,
   X,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import i18n, { SUPPORTED_LOCALES, setLocale } from "./i18n";
 import {
   FormEvent,
   MouseEvent as ReactMouseEvent,
@@ -189,8 +192,8 @@ const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
   {
     id: "lite",
     label: "Lite",
-    title: "轻量保护",
-    description: "最轻，适合低端设备。",
+    title: i18n.t("encryption.profiles.liteTitle"),
+    description: i18n.t("encryption.profiles.liteDesc"),
     protection: "Low-overhead encryption.",
     cost: "lowest",
     deviceFit: "Windows / low-end PC",
@@ -198,9 +201,9 @@ const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
   },
   {
     id: "standard",
-    label: "Standard",
-    title: "标准保护",
-    description: "默认推荐，保护和流畅度均衡。",
+    label: i18n.t("package.standard"),
+    title: i18n.t("encryption.profiles.standardTitle"),
+    description: i18n.t("encryption.profiles.standardDesc"),
     protection: "Recommended encryption.",
     cost: "balanced",
     deviceFit: "PC default",
@@ -210,8 +213,8 @@ const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
   {
     id: "paranoid",
     label: "Paranoid",
-    title: "最高保护",
-    description: "最强，适合高端 PC。",
+    title: i18n.t("encryption.profiles.paranoidTitle"),
+    description: i18n.t("encryption.profiles.paranoidDesc"),
     protection: "Highest preview mode.",
     cost: "highest",
     deviceFit: "high-end PC",
@@ -246,7 +249,7 @@ function formatConnectorActionMessage(client: ExternalAgentConnectorClient, acti
   }
   if (action.action === "install") {
     const toolCount = action.handshake?.toolCount;
-    const ready = action.handshake?.ready ? "ready" : action.handshake?.connected ? "connected" : "checked";
+    const ready = action.handshake?.ready ? i18n.t("connector.ready") : action.handshake?.connected ? i18n.t("connector.connected") : "checked";
     return `${label} installed; ${ready}${toolCount !== undefined ? `, ${toolCount} tools` : ""}`;
   }
   return `${label} ${verb}`;
@@ -336,13 +339,13 @@ const VRCHAT_AVATAR_AGENT_NAMES = [
 ];
 
 const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
-  { value: "approval", label: "受限模式", description: "沙箱模式：高风险命令与写操作逐项审批，最安全。" },
-  { value: "auto", label: "自动审批", description: "审批自动通过并留痕，Roslyn 高级能力保持关闭。" },
-  { value: "roslyn_full_auto", label: "完全权限", description: "自动审批 + Roslyn 全自动，风险最高，首次开启需确认。" },
+  { value: "approval", label: i18n.t("executionMode.approval"), description: i18n.t("executionMode.approvalDesc") },
+  { value: "auto", label: i18n.t("header.autoApproval"), description: i18n.t("executionMode.autoDesc") },
+  { value: "roslyn_full_auto", label: i18n.t("header.fullPermission"), description: i18n.t("executionMode.roslynFullAutoDesc") },
 ];
 
 function executionModeLabel(mode?: string): string {
-  return EXECUTION_MODES.find((item) => item.value === mode)?.label || "受限模式";
+  return EXECUTION_MODES.find((item) => item.value === mode)?.label || i18n.t("executionMode.approval");
 }
 
 function isTauriRuntime() {
@@ -412,6 +415,7 @@ function loadThemePreference(): ThemeMode {
 
 
 export default function App() {
+  const { t } = useTranslation();
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
@@ -582,7 +586,7 @@ export default function App() {
   const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
   const skillCount = skillRegistry?.count ?? skills.length;
   const slashCommands = useMemo(() => {
-    const list: Array<{ name: string; title: string }> = [{ name: "compact", title: "压缩当前会话历史，释放上下文" }];
+    const list: Array<{ name: string; title: string }> = [{ name: "compact", title: t("chat.slashCompact") }];
     for (const skill of skills) {
       if (!skill.name || skill.enabled === false || skill.available === false || skill.userInvocable === false) {
         continue;
@@ -595,10 +599,10 @@ export default function App() {
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
   const agentModeLabel = !runtimeConnected
-    ? "核心未连接"
+    ? t("agent.modeLabel.notConnected")
     : vrcForgeSkillsReady
-      ? `头像能力 ${vrcForgeToolsCount}`
-      : "基础模式";
+      ? t("agent.modeLabel.skillsReady", { count: vrcForgeToolsCount })
+      : t("agent.modeLabel.basicMode");
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
 
   const hiddenPathSet = useMemo(
@@ -642,21 +646,21 @@ export default function App() {
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
-  const projectPromptTitle = activeProjectPath && activeProjectName ? `想在 ${activeProjectName} 里改什么？` : "随心聊点什么？";
+  const projectPromptTitle = activeProjectPath && activeProjectName ? `想在 ${activeProjectName} 里改什么？` : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
       return null;
     }
     if (loading && !error) {
-      return { name: "扫描中", meta: "wait" };
+      return { name: t("agent.emptyProjectState.scanning"), meta: "wait" };
     }
     if (hasStartupIssue || !runtimeConnected) {
-      return { name: "核心未连接", meta: "retry" };
+      return { name: t("agent.modeLabel.notConnected"), meta: "retry" };
     }
     if (error) {
-      return { name: "刷新失败", meta: "retry" };
+      return { name: t("agent.emptyProjectState.refreshFailed"), meta: "retry" };
     }
-    return { name: "未发现 Unity 项目", meta: "empty" };
+    return { name: t("agent.emptyProjectState.noUnityProject"), meta: "empty" };
   }, [error, hasStartupIssue, loading, projectItems.length, runtimeConnected]);
 
   useLayoutEffect(() => {
@@ -1012,7 +1016,7 @@ export default function App() {
 
   async function compactChat() {
     if (!activeChat || activeChat.items.length === 0) {
-      setError("当前会话还没有可压缩的内容。");
+      setError(t("compact.noContent"));
       return;
     }
     const chatId = activeChat.id;
@@ -1030,7 +1034,7 @@ export default function App() {
       const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items));
       summary = (payload.summary || "").trim();
       if (summary) {
-        summary = `（模型压缩摘要，共 ${payload.entryCount ?? items.length} 条消息）\n${summary}`;
+        summary = `${t("compact.modelSummary", { count: payload.entryCount ?? items.length })}\n${summary}`;
       }
     } catch {
       summary = "";
@@ -1096,7 +1100,7 @@ export default function App() {
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
-          throw new Error("核心未连接，消息未发送。");
+          throw new Error(t("agent.coreDisconnectedSend"));
         }
         targetEndpoint = readyEndpoint;
       }
@@ -1416,7 +1420,7 @@ export default function App() {
     }
     const accepted = saved.customPaths.some((item) => item.replace(/\//g, "\\").toLowerCase() === path.replace(/\//g, "\\").toLowerCase());
     if (!accepted) {
-      setProjectModalError("请输入真正的 Unity 工程根目录：这一层必须同时包含 Assets/、Packages/ 和 ProjectSettings/ProjectVersion.txt。");
+      setProjectModalError(t("project.invalidProjectRoot"));
       return;
     }
     setNewProjectPath("");
@@ -2139,7 +2143,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await importSkillPackage(endpoint, { packagePath });
-      setSkillPackageMessage(payload.changed === false ? "Package already installed" : "Package imported");
+      setSkillPackageMessage(payload.changed === false ? "Package already installed" : t("package.messages.packageImported"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
       setSkillRegistry(skillsPayload);
       setSkillCheck(await checkSkills(endpoint));
@@ -2160,7 +2164,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await exportSkillPackage(endpoint, { skillName, outputPath, release, privateKeyPath: privateKeyPath || undefined });
-      setSkillPackageMessage(release ? "Release package exported" : "Dev package exported");
+      setSkillPackageMessage(release ? t("package.messages.releaseExported") : t("package.messages.devExported"));
       return payload;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -2177,7 +2181,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await setSkillPackageEnabled(endpoint, skillPackageId, { enabled, syncProjectedSkill: true });
-      setSkillPackageMessage(enabled ? "Package enabled" : "Package disabled");
+      setSkillPackageMessage(enabled ? t("package.messages.packageEnabled") : t("package.messages.packageDisabled"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
       setSkillRegistry(skillsPayload);
       setSkillCheck(await checkSkills(endpoint));
@@ -2198,7 +2202,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await uninstallSkillPackage(endpoint, skillPackageId, { removeProjectedSkill: true });
-      setSkillPackageMessage("Package uninstalled");
+      setSkillPackageMessage(t("package.messages.packageUninstalled"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
       setSkillRegistry(skillsPayload);
       setSkillCheck(await checkSkills(endpoint));
@@ -2226,7 +2230,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await setSkillPackageSafeMode(endpoint, { enabled, reason: reason || undefined });
-      setSkillPackageMessage(enabled ? "Safe Mode enabled" : "Safe Mode disabled");
+      setSkillPackageMessage(enabled ? t("package.messages.safeModeEnabled") : t("package.labels.safeModeDisabled"));
       await refreshSkillWorkspaceState();
       return payload;
     } catch (cause) {
@@ -2244,7 +2248,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await trustSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
-      setSkillPackageMessage("Signer trusted");
+      setSkillPackageMessage(t("package.messages.signerTrusted"));
       await refreshSkillWorkspaceState();
       return payload;
     } catch (cause) {
@@ -2262,7 +2266,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await revokeSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
-      setSkillPackageMessage("Signer revoked");
+      setSkillPackageMessage(t("package.messages.signerRevoked"));
       await refreshSkillWorkspaceState();
       return payload;
     } catch (cause) {
@@ -2280,7 +2284,7 @@ export default function App() {
     setSkillPackageError("");
     try {
       const payload = await blockSkillPackage(endpoint, request);
-      setSkillPackageMessage("Package blocked");
+      setSkillPackageMessage(t("package.messages.packageBlocked"));
       await refreshSkillWorkspaceState();
       return payload;
     } catch (cause) {
@@ -2451,7 +2455,7 @@ export default function App() {
     try {
       const payload = await saveAgentNotes(endpoint, agentNotes);
       setAgentNotesPath(payload.path);
-      setNotesMessage("已保存");
+      setNotesMessage(t("settings.saved"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -2672,7 +2676,7 @@ export default function App() {
         projectRoot: activeProjectPath || undefined,
         label: kind === "face" ? "Face adjustment" : "Shader adjustment",
       });
-      setAdjustmentMessage(`${kind === "face" ? "Face" : "Shader"} checkpoint created.`);
+      setAdjustmentMessage(`${kind === "face" ? t("checkpoint.face") : t("checkpoint.shader")} checkpoint created.`);
       setAdjustmentPreview(payload.baseCheckpoint ? { ok: true, checkpoint: payload.baseCheckpoint, adjustmentCheckpoint: payload.checkpoint } : null);
       await loadCheckpoints(targetEndpoint);
     } catch (cause) {
@@ -2907,7 +2911,7 @@ export default function App() {
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
         if (!readyEndpoint) {
-          setModelsError("核心未连接，无法获取模型列表");
+          setModelsError(t("provider.coreDisconnectedModels"));
           return;
         }
         targetEndpoint = readyEndpoint;
@@ -2921,7 +2925,7 @@ export default function App() {
       const models = payload.models || [];
       setModelOptions(models);
       if (models.length === 0) {
-        setModelsError("该供应商未返回模型列表，可手动填写模型名");
+        setModelsError(t("provider.noModelsReturned"));
       } else if (!models.some((item) => item.id === apiModel)) {
         setApiModel(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
       }
@@ -2980,8 +2984,8 @@ export default function App() {
           <nav className="mt-5 space-y-1">
             <button
               onClick={newTemporaryChat}
-              aria-label="临时对话"
-              title="临时对话"
+              aria-label={t("sidebar.tempChat")}
+              title={t("sidebar.tempChat")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "chat" && !activeProjectPath && !activeChat
@@ -2990,11 +2994,11 @@ export default function App() {
               )}
             >
               <MessageSquare className="h-4 w-4 shrink-0" />
-              <span className="truncate">临时对话</span>
+              <span className="truncate">{t("sidebar.tempChat")}</span>
             </button>
             <button
-              aria-label="新项目"
-              title="新项目"
+              aria-label={t("sidebar.newProject")}
+              title={t("sidebar.newProject")}
               onClick={() => {
                 setProjectModalError("");
                 setShowProjectModal(true);
@@ -3002,7 +3006,7 @@ export default function App() {
               className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <FolderPlus className="h-4 w-4 shrink-0" />
-              <span className="truncate">新项目</span>
+              <span className="truncate">{t("sidebar.newProject")}</span>
             </button>
             <button
               onClick={() => void openDoctor()}
@@ -3034,8 +3038,8 @@ export default function App() {
             </button>
             <button
               onClick={() => void openProtection()}
-              aria-label="Protection"
-              title="Protection"
+              aria-label={t("encryption.protection")}
+              title={t("encryption.protection")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "protection"
@@ -3044,12 +3048,12 @@ export default function App() {
               )}
             >
               <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">Protection</span>
+              <span className="truncate">{t("encryption.protection")}</span>
             </button>
             <button
               onClick={() => void openSkills()}
-              aria-label="能力库"
-              title="能力库"
+              aria-label={t("sidebar.skills")}
+              title={t("sidebar.skills")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "skills"
@@ -3058,12 +3062,12 @@ export default function App() {
               )}
             >
               <Wrench className="h-4 w-4 shrink-0" />
-              <span className="truncate">能力库</span>
+              <span className="truncate">{t("sidebar.skills")}</span>
             </button>
             <button
               onClick={() => void openCheckpoints()}
-              aria-label="Checkpoints"
-              title="Checkpoints"
+              aria-label={t("checkpoint.checkpoints")}
+              title={t("checkpoint.checkpoints")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
                 activeView === "checkpoints"
@@ -3072,11 +3076,11 @@ export default function App() {
               )}
             >
               <History className="h-4 w-4 shrink-0" />
-              <span className="truncate">Checkpoints</span>
+              <span className="truncate">{t("checkpoint.checkpoints")}</span>
             </button>
           </nav>
 
-          <SidebarSection title="项目">
+          <SidebarSection title={t("sidebar.projects")}>
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
@@ -3112,7 +3116,7 @@ export default function App() {
                       : projectChats.map((chat) => (
                       <SidebarChat
                         key={chat.id}
-                        title={chat.title || "新对话"}
+                        title={chat.title || t("sidebar.newChat")}
                         active={activeView === "chat" && chat.id === activeChatId}
                         indent
                         pinned={chat.pinned}
@@ -3133,12 +3137,12 @@ export default function App() {
                 );
               })
             ) : (
-              <SidebarProject name={emptyProjectState?.name || "未发现 Unity 项目"} meta={emptyProjectState?.meta} active />
+              <SidebarProject name={emptyProjectState?.name || t("agent.emptyProjectState.noUnityProject")} meta={emptyProjectState?.meta} active />
             )}
           </SidebarSection>
 
           <SidebarSection
-            title="对话"
+            title={t("sidebar.chats")}
             collapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
             onToggleCollapse={() => toggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}
           >
@@ -3146,7 +3150,7 @@ export default function App() {
               temporaryChats.map((chat) => (
                 <SidebarChat
                   key={chat.id}
-                  title={chat.title || "新对话"}
+                  title={chat.title || t("sidebar.newChat")}
                   active={activeView === "chat" && chat.id === activeChatId}
                   pinned={chat.pinned}
                   renaming={renamingChatId === chat.id}
@@ -3163,15 +3167,15 @@ export default function App() {
                 />
               ))
             ) : (
-              <div className="px-3 py-1 text-xs text-muted-foreground/70">暂无临时对话</div>
+              <div className="px-3 py-1 text-xs text-muted-foreground/70">{t("sidebar.noTempChats")}</div>
             )}
           </SidebarSection>
 
           <div className="mt-auto">
             <button
               onClick={() => void openSettings()}
-              aria-label="设置"
-              title="设置"
+              aria-label={t("sidebar.settings")}
+              title={t("sidebar.settings")}
               className={cn(
                 "flex h-10 w-full min-w-0 items-center justify-center gap-3 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-3",
                 activeView === "settings"
@@ -3180,7 +3184,7 @@ export default function App() {
               )}
             >
               <Settings className="h-4 w-4 shrink-0" />
-              <span className="hidden truncate md:inline">设置</span>
+              <span className="hidden truncate md:inline">{t("sidebar.settings")}</span>
             </button>
           </div>
         </aside>
@@ -3188,7 +3192,7 @@ export default function App() {
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
           <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3 md:px-6">
             <div className="flex min-w-0 items-center gap-2 text-sm">
-              <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : "临时对话"}</span>
+              <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : t("sidebar.tempChat")}</span>
               <span className="text-muted-foreground">/</span>
               <span className="truncate font-medium">
                 {activeView === "doctor"
@@ -3196,27 +3200,27 @@ export default function App() {
                   : activeView === "optimization"
                     ? "Optimization"
                     : activeView === "protection"
-                      ? "Protection"
+                      ? t("encryption.protection")
                   : activeView === "skills"
-                    ? "能力库"
+                    ? t("sidebar.skills")
                     : activeView === "settings"
-                      ? "设置"
+                      ? t("sidebar.settings")
                       : activeChat
-                        ? activeChat.title || "当前会话"
-                        : "新任务"}
+                        ? activeChat.title || t("header.currentSession")
+                        : t("header.newTask")}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {permission?.roslynFullAuto ? (
                 <Badge tone="danger">
                   <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
-                  完全权限
+                  {t("header.fullPermission")}
                 </Badge>
               ) : permission?.executionMode === "auto" ? (
-                <Badge tone="warn">自动审批</Badge>
+                <Badge tone="warn">{t("header.autoApproval")}</Badge>
               ) : null}
-              <StatusChip ok={runtimeConnected} label={runtimeConnected ? "核心在线" : "核心离线"} />
-              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} 待确认</Badge>
+              <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
+              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
               <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
@@ -3229,7 +3233,7 @@ export default function App() {
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <div className="font-medium">
-                    {hasStartupIssue ? "Startup issue detected" : "Environment needs attention"}
+                    {hasStartupIssue ? t("header.startupIssueDetected") : t("header.envNeedsAttention")}
                   </div>
                   <div className="break-words text-amber-900/80 dark:text-amber-100/80">
                     {hasStartupIssue
@@ -3244,7 +3248,7 @@ export default function App() {
                   Doctor
                 </Button>
                 <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => void retryStartupOrHealth()} disabled={loading}>
-                  {loading ? "Retrying" : "Retry"}
+                  {loading ? "Retrying" : t("doctor.retry")}
                 </Button>
                 <Button
                   variant="ghost"
@@ -3267,7 +3271,7 @@ export default function App() {
                   onClick={() => void startRuntime()}
                   disabled={loading}
                 >
-                  {loading ? "重连中" : "重连"}
+                  {loading ? t("header.reconnecting") : t("header.reconnect")}
                 </Button>
               </div>
             </div>
@@ -3290,7 +3294,7 @@ export default function App() {
                 }
                 void navigator.clipboard
                   .writeText(JSON.stringify(doctorReport, null, 2))
-                  .then(() => setDoctorMessage("已复制诊断摘要"))
+                  .then(() => setDoctorMessage(t("doctor.copiedSummary")))
                   .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
               }}
             />
@@ -3410,17 +3414,17 @@ export default function App() {
           ) : activeView === "settings" ? (
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
               <div className="mx-auto w-full max-w-3xl">
-                <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
-                <p className="mt-1 text-sm text-muted-foreground">配置权限模式、模型供应商与全局自定义指令。</p>
+                <h1 className="text-2xl font-semibold tracking-tight">{t("sidebar.settings")}</h1>
+                <p className="mt-1 text-sm text-muted-foreground">{t("settings.subtitle")}</p>
 
                 <section className="mt-10">
                   <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">权限模式</h2>
+                    <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
                     <Badge tone={permission?.roslynFullAuto ? "danger" : permission?.autoApprove ? "warn" : "muted"} className="shrink-0">
-                      当前：{executionModeLabel(permission?.executionMode)}
+                      {t("settings.currentMode", { mode: executionModeLabel(permission?.executionMode) })}
                     </Badge>
                   </div>
-                  <p className="mt-1 text-sm text-muted-foreground">控制智能体执行命令与写操作时的审批策略，随时可切换。</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.permissionModeDescription")}</p>
                   <div className="mt-4 grid gap-3">
                     {EXECUTION_MODES.map((mode) => (
                       <button
@@ -3439,7 +3443,7 @@ export default function App() {
                           <span className="truncate text-sm font-medium">{mode.label}</span>
                           {mode.value === "roslyn_full_auto" ? (
                             <Badge tone="danger" className="shrink-0">
-                              高风险
+                              {t("settings.highRisk")}
                             </Badge>
                           ) : null}
                           {permission?.executionMode === mode.value ? (
@@ -3451,24 +3455,49 @@ export default function App() {
                     ))}
                   </div>
                   {permission?.roslynRiskAcknowledged ? (
-                    <div className="mt-3 text-xs text-muted-foreground">完全权限风险确认：已确认（仅首次开启时弹出）</div>
+                    <div className="mt-3 text-xs text-muted-foreground">{t("settings.roslynConfirmed")}</div>
                   ) : null}
                 </section>
 
                 <section className="mt-12">
-                  <h2 className="text-base font-semibold">新手引导</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">重新打开首次启动的三步引导（连接核心 / 绑定模型 / 选择项目）。</p>
+                  <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
                   <div className="mt-4">
                     <Button type="button" variant="outline" onClick={restartOnboarding}>
                       <RefreshCw className="mr-1 h-4 w-4" />
-                      重新引导
+                      {t("settings.restartOnboarding")}
                     </Button>
                   </div>
                 </section>
 
                 <section className="mt-12">
-                  <h2 className="text-base font-semibold">模型供应商</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">连接供应商后点击「刷新模型列表」，即可从该账号可用的模型中选择。</p>
+                  <h2 className="text-base font-semibold">
+                    <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
+                    {t("settings.language")}
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.languageDesc")}</p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {SUPPORTED_LOCALES.map((loc) => (
+                      <button
+                        key={loc.code}
+                        type="button"
+                        onClick={() => setLocale(loc.code)}
+                        className={cn(
+                          "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+                          i18n.language === loc.code
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border bg-card text-foreground hover:bg-accent",
+                        )}
+                      >
+                        {loc.label}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="mt-12">
+                  <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
                   <div className="mt-4">
                     <ProviderSetup
                       provider={apiProvider}
@@ -3495,7 +3524,7 @@ export default function App() {
 
                 <section className="mt-12">
                   <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">Diagnostics</h2>
+                    <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
                     {diagnosticsMessage ? (
                       <Badge tone="ok" className="shrink-0">
                         {diagnosticsMessage}
@@ -3507,7 +3536,7 @@ export default function App() {
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-sm font-medium">Debug logging</div>
                         <div className="mt-1 truncate text-xs text-muted-foreground">
-                          {diagnosticsStatus?.debugLogging ? "Recording local API, MCP, agent, checkpoint, and runtime interactions" : "Off"}
+                          {diagnosticsStatus?.debugLogging ? "Recording local API, MCP, agent, checkpoint, and runtime interactions" : t("connector.off")}
                         </div>
                       </div>
                       <Badge tone={diagnosticsStatus?.debugLogging ? "warn" : "muted"} className="shrink-0">
@@ -3554,7 +3583,7 @@ export default function App() {
 
                 <section className="mt-12 pb-6">
                   <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">自定义指令</h2>
+                    <h2 className="truncate text-base font-semibold">{t("settings.customInstructions")}</h2>
                     {notesMessage ? (
                       <Badge tone="ok" className="shrink-0">
                         {notesMessage}
@@ -3562,7 +3591,7 @@ export default function App() {
                     ) : null}
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    写给智能体的全局规则与偏好（AGENTS.md），会注入每一次规划、审批与执行。
+                    {t("settings.customInstructionsDesc")}
                   </p>
                   {agentNotesPath ? <p className="mt-1 truncate text-xs text-muted-foreground/70">{agentNotesPath}</p> : null}
                   <form onSubmit={saveNotes} className="mt-4">
@@ -3573,13 +3602,13 @@ export default function App() {
                         setNotesMessage("");
                       }}
                       disabled={!agentNotesLoaded}
-                      placeholder={agentNotesLoaded ? "例如：回复使用中文；改动 Unity 工程前先列出计划；禁止删除任何资源文件……" : "核心未连接，无法加载 AGENTS.md"}
+                      placeholder={agentNotesLoaded ? t("settings.customInstructionsPlaceholder") : t("settings.customInstructionsDisabled")}
                       className="min-h-56 w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm leading-relaxed outline-none focus:border-primary disabled:bg-muted"
                     />
                     <div className="mt-3 flex justify-end">
                       <Button type="submit" disabled={savingNotes || !agentNotesLoaded}>
                         {savingNotes ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                        保存
+                        {t("common.save")}
                       </Button>
                     </div>
                   </form>
@@ -3692,7 +3721,7 @@ export default function App() {
                       <div className="max-w-[78%] rounded-2xl bg-primary/80 px-4 py-3 text-sm text-primary-foreground">
                         <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
                           <Loader2 className="h-3 w-3 animate-spin" />
-                          已排队 · 当前任务结束后自动发送
+                          {t("chat.queued")}
                         </div>
                         <p className="whitespace-pre-wrap break-words">{text}</p>
                       </div>
@@ -3762,22 +3791,22 @@ export default function App() {
         ? (() => {
             const steps = [
               {
-                title: "连接核心与 Unity",
+                title: t("onboarding.step1Title"),
                 done: runtimeConnected,
-                doneDesc: "核心已在线，连接正常。",
-                todoDesc: "正在等待核心启动，连上后这一步会自动完成；若长时间离线，点下方「重试连接」。",
+                doneDesc: t("onboarding.step1DoneDesc"),
+                todoDesc: t("onboarding.step1TodoDesc"),
                 action: (
                   <Button variant="outline" disabled={loading} onClick={() => void startRuntime()}>
                     <RefreshCw className="mr-1 h-4 w-4" />
-                    {loading ? "连接中…" : "重试连接"}
+                    {loading ? t("onboarding.connecting") : t("onboarding.retryConnection")}
                   </Button>
                 ),
               },
               {
-                title: "绑定模型供应商",
+                title: t("onboarding.step2Title"),
                 done: Boolean(apiConfig?.apiKeyPresent),
-                doneDesc: "模型密钥已配置，可以用自然语言对话了。",
-                todoDesc: "去设置里选择供应商并填入密钥，保存成功后这一步会自动完成，引导会自己回来。",
+                doneDesc: t("onboarding.step2DoneDesc"),
+                todoDesc: t("onboarding.step2TodoDesc"),
                 action: (
                   <Button
                     variant="outline"
@@ -3787,15 +3816,15 @@ export default function App() {
                     }}
                   >
                     <Settings className="mr-1 h-4 w-4" />
-                    去设置
+                    {t("onboarding.goToSettings")}
                   </Button>
                 ),
               },
               {
-                title: "选择 Unity 项目",
+                title: t("onboarding.step3Title"),
                 done: projectItems.length > 0,
-                doneDesc: "已发现 Unity 项目，左侧边栏可直接进入。",
-                todoDesc: "扫描到项目后这一步自动完成；也可以用「新项目」手动填路径，或先跳过用临时对话。",
+                doneDesc: t("onboarding.step3DoneDesc"),
+                todoDesc: t("onboarding.step3TodoDesc"),
                 action: (
                   <Button
                     variant="outline"
@@ -3806,7 +3835,7 @@ export default function App() {
                     }}
                   >
                     <FolderPlus className="mr-1 h-4 w-4" />
-                    新项目
+                    {t("sidebar.newProject")}
                   </Button>
                 ),
               },
@@ -3818,9 +3847,9 @@ export default function App() {
                 <section className="w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-panel">
                   <div className="flex min-w-0 items-center gap-3">
                     <Sparkles className="h-5 w-5 shrink-0 text-primary" />
-                    <h2 className="truncate text-lg font-semibold">欢迎使用 VRCForge</h2>
+                    <h2 className="truncate text-lg font-semibold">{t("onboarding.welcome")}</h2>
                     <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                      第 {onboardingStep + 1} / {steps.length} 步
+                      {t("onboarding.stepProgress", { current: onboardingStep + 1, total: steps.length })}
                     </span>
                   </div>
                   <div className="mt-4 flex items-center gap-2">
@@ -3847,7 +3876,7 @@ export default function App() {
                       )}
                       <div className="truncate text-sm font-medium">{step.title}</div>
                       <Badge tone={step.done ? "ok" : "muted"} className="ml-auto shrink-0">
-                        {step.done ? "已完成" : "检测中"}
+                        {step.done ? t("onboarding.done") : t("onboarding.detecting")}
                       </Badge>
                     </div>
                     <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>
@@ -3855,12 +3884,12 @@ export default function App() {
                   </div>
                   <div className="mt-6 flex items-center gap-3">
                     <Button variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>
-                      跳过引导
+                      {t("onboarding.skipOnboarding")}
                     </Button>
                     <div className="ml-auto flex gap-3">
                       {onboardingStep > 0 ? (
                         <Button variant="outline" onClick={() => setOnboardingStep((value) => Math.max(0, value - 1))}>
-                          上一步
+                          {t("onboarding.prevStep")}
                         </Button>
                       ) : null}
                       <Button
@@ -3873,7 +3902,7 @@ export default function App() {
                           }
                         }}
                       >
-                        {isLast ? "开始使用" : "下一步"}
+                        {isLast ? t("onboarding.startUsing") : t("onboarding.nextStep")}
                       </Button>
                     </div>
                   </div>
@@ -3890,7 +3919,7 @@ export default function App() {
           className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm shadow-panel transition-colors hover:bg-muted"
         >
           <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-          <span>继续新手引导（第 {onboardingStep + 1} / 3 步）</span>
+          <span>{t("onboarding.continueOnboarding", { step: onboardingStep + 1 })}</span>
         </button>
       ) : null}
 
@@ -3899,7 +3928,7 @@ export default function App() {
           <section className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
             <div className="flex min-w-0 items-center gap-2">
               <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
-              <h2 className="truncate text-lg font-semibold">选择 Unity 项目</h2>
+              <h2 className="truncate text-lg font-semibold">{t("onboarding.step3Title")}</h2>
               <button
                 type="button"
                 className="ml-auto shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -3913,7 +3942,7 @@ export default function App() {
             </div>
             <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
               <div>
-                <div className="mb-2 text-xs font-medium text-muted-foreground">已扫描到的项目</div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.scannedProjects")}</div>
                 {projectItems.length > 0 ? (
                   <div className="space-y-1">
                     {projectItems.map((project) => {
@@ -3937,7 +3966,7 @@ export default function App() {
                           {isCustom ? (
                             <button
                               type="button"
-                              title="从列表移除（不删除文件）"
+                              title={t("project.removeFromList")}
                               disabled={savingProjectPrefs}
                               className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-background hover:text-destructive group-hover:opacity-100"
                               onClick={() => removeCustomProject(project.path || "")}
@@ -3951,13 +3980,13 @@ export default function App() {
                   </div>
                 ) : (
                   <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                    暂未扫描到项目，可以在下方手动填入 Unity 工程文件夹路径。
+                    {t("project.noProjectsHint")}
                   </p>
                 )}
               </div>
               {hiddenProjects.length > 0 ? (
                 <div>
-                  <div className="mb-2 text-xs font-medium text-muted-foreground">已隐藏的项目</div>
+                  <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.hiddenProjects")}</div>
                   <div className="space-y-1">
                     {hiddenProjects.map((project) => (
                       <div key={project.path} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
@@ -3971,7 +4000,7 @@ export default function App() {
                           onClick={() => unhideProject(project.path || "")}
                         >
                           <Eye className="mr-1 h-3.5 w-3.5" />
-                          恢复
+                          {t("project.restore")}
                         </Button>
                       </div>
                     ))}
@@ -3979,7 +4008,7 @@ export default function App() {
                 </div>
               ) : null}
               <div>
-                <div className="mb-2 text-xs font-medium text-muted-foreground">手动添加项目文件夹</div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
                 <div className="flex gap-2">
                   <input
                     value={newProjectPath}
@@ -3993,16 +4022,16 @@ export default function App() {
                         void addProjectPath();
                       }
                     }}
-                    placeholder="例如 D:\Unity\MyAvatarProject"
+                    placeholder={t("project.pathPlaceholder")}
                     className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
                   />
                   <Button type="button" disabled={savingProjectPrefs || !newProjectPath.trim()} onClick={() => void addProjectPath()}>
                     {savingProjectPrefs ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                    添加
+                    {t("common.add")}
                   </Button>
                 </div>
                 {projectModalError ? <p className="mt-2 text-xs text-destructive">{projectModalError}</p> : null}
-                <p className="mt-2 text-xs text-muted-foreground">填入 Unity 工程根目录的完整路径，添加后会保存到本地，下次启动仍然可见。</p>
+                <p className="mt-2 text-xs text-muted-foreground">{t("project.pathHint")}</p>
               </div>
             </div>
           </section>
@@ -4044,7 +4073,7 @@ export default function App() {
                     }}
                   >
                     <Pin className={cn("h-4 w-4 shrink-0", pinned ? "text-primary" : "")} />
-                    {pinned ? "取消置顶项目" : "置顶项目"}
+                    {pinned ? t("project.unpinProject") : t("project.pinProject")}
                   </button>
                   <button
                     type="button"
@@ -4055,7 +4084,7 @@ export default function App() {
                     }}
                   >
                     <FolderOpen className="h-4 w-4 shrink-0" />
-                    在资源管理器中打开
+                    {t("project.openInExplorer")}
                   </button>
                   <button
                     type="button"
@@ -4066,7 +4095,7 @@ export default function App() {
                     }}
                   >
                     <Plus className="h-4 w-4 shrink-0" />
-                    在此项目新对话
+                    {t("project.newChatInProject")}
                   </button>
                   <button
                     type="button"
@@ -4077,7 +4106,7 @@ export default function App() {
                     }}
                   >
                     <Pencil className="h-4 w-4 shrink-0" />
-                    重命名项目
+                    {t("project.renameProject")}
                   </button>
                   <button
                     type="button"
@@ -4088,7 +4117,7 @@ export default function App() {
                     }}
                   >
                     {collapsed ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                    {collapsed ? "展开对话" : "折叠对话"}
+                    {collapsed ? t("project.expandChats") : t("project.collapseChats")}
                   </button>
                   {projectChatCount > 0 || archivedChatCount > 0 ? (
                     <button
@@ -4100,7 +4129,7 @@ export default function App() {
                       }}
                     >
                       <Archive className="h-4 w-4 shrink-0" />
-                      {projectChatCount > 0 ? "归档项目会话" : "恢复归档会话"}
+                      {projectChatCount > 0 ? t("project.archiveChats") : t("project.restoreArchived")}
                     </button>
                   ) : null}
                   <button
@@ -4112,7 +4141,7 @@ export default function App() {
                     }}
                   >
                     <EyeOff className="h-4 w-4 shrink-0" />
-                    隐藏项目
+                    {t("project.hideProject")}
                   </button>
                   {isCustom ? (
                     <button
@@ -4124,7 +4153,7 @@ export default function App() {
                       }}
                     >
                       <Trash2 className="h-4 w-4 shrink-0" />
-                      移除项目
+                      {t("project.removeProject")}
                     </button>
                   ) : null}
                 </div>
@@ -4146,7 +4175,7 @@ export default function App() {
             onClick={() => copySelection(selectionMenu.text)}
           >
             <Copy className="h-3.5 w-3.5 shrink-0" />
-            复制
+            {t("contextMenu.copy")}
           </button>
           <button
             type="button"
@@ -4154,7 +4183,7 @@ export default function App() {
             onClick={() => addSelectionToComposer(selectionMenu.text)}
           >
             <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-            添加到对话
+            {t("contextMenu.addToChat")}
           </button>
           <button
             type="button"
@@ -4162,7 +4191,7 @@ export default function App() {
             onClick={() => askInNewSession(selectionMenu.text)}
           >
             <Bot className="h-3.5 w-3.5 shrink-0" />
-            新会话提问
+            {t("contextMenu.askInNewSession")}
           </button>
         </div>
       ) : null}
@@ -4199,7 +4228,7 @@ export default function App() {
                     }}
                   >
                     <Pin className="h-4 w-4 shrink-0" />
-                    {menuChat.pinned ? "取消置顶" : "置顶对话"}
+                    {menuChat.pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}
                   </button>
                   <button
                     type="button"
@@ -4210,7 +4239,7 @@ export default function App() {
                     }}
                   >
                     <Pencil className="h-4 w-4 shrink-0" />
-                    重命名对话
+                    {t("contextMenu.renameChat")}
                   </button>
                   <button
                     type="button"
@@ -4221,7 +4250,7 @@ export default function App() {
                     }}
                   >
                     <Trash2 className="h-4 w-4 shrink-0" />
-                    永久删除
+                    {t("contextMenu.permanentDelete")}
                   </button>
                 </div>
               </>
@@ -4234,17 +4263,17 @@ export default function App() {
           <section className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-panel">
             <div className="flex min-w-0 items-center gap-2 text-destructive">
               <Trash2 className="h-4 w-4 shrink-0" />
-              <h2 className="truncate text-base font-semibold">永久删除对话</h2>
+              <h2 className="truncate text-base font-semibold">{t("deleteModal.title")}</h2>
             </div>
             <p className="mt-3 text-sm text-muted-foreground">
-              「{chats.find((chat) => chat.id === deleteTargetId)?.title || "新对话"}」将被永久删除，本地记录一并清除，无法恢复。
+              「{chats.find((chat) => chat.id === deleteTargetId)?.title || t("sidebar.newChat")}」将被永久删除，本地记录一并清除，无法恢复。
             </p>
             <div className="mt-5 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setDeleteTargetId("")}>
-                取消
+                {t("deleteModal.cancel")}
               </Button>
               <Button variant="danger" onClick={() => deleteChatPermanently(deleteTargetId)}>
-                永久删除
+                {t("contextMenu.permanentDelete")}
               </Button>
             </div>
           </section>
@@ -4256,21 +4285,21 @@ export default function App() {
           <section className="w-full max-w-lg rounded-lg border border-destructive/40 bg-card p-6 shadow-panel">
             <div className="flex min-w-0 items-center gap-3 text-destructive">
               <AlertTriangle className="h-5 w-5 shrink-0" />
-              <h2 className="truncate text-lg font-semibold">开启完全权限</h2>
+              <h2 className="truncate text-lg font-semibold">{t("roslynModal.title")}</h2>
             </div>
             <p className="mt-4 text-sm text-muted-foreground">
-              完全权限会自动通过所有审批，并启用 Roslyn 全自动写入能力。代理可以在不经确认的情况下修改 Unity 工程文件，存在不可逆风险。此确认仅在首次开启时出现。
+              {t("roslynModal.description")}
             </p>
             <div className="mt-5 grid gap-3 text-sm">
-              <DataLine label="风险确认" value={permission?.roslynRiskAcknowledged ? "已确认" : "未确认"} />
-              <DataLine label="目标模式" value="完全权限（Roslyn 全自动）" />
+              <DataLine label={t("roslynModal.riskConfirmTitle")} value={permission?.roslynRiskAcknowledged ? t("roslynModal.confirmed") : t("roslynModal.notConfirmed")} />
+              <DataLine label={t("roslynModal.targetMode")} value={t("roslynModal.targetModeValue")} />
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setShowRoslynWarning(false)}>
-                取消
+                {t("deleteModal.cancel")}
               </Button>
               <Button variant="danger" onClick={confirmRoslynWarning} disabled={loading}>
-                我已知风险，开启完全权限
+                {t("roslynModal.confirmButton")}
               </Button>
             </div>
           </section>
@@ -4309,6 +4338,7 @@ function Composer({
   onBindProject?: (path: string) => void;
   queuedCount?: number;
 }) {
+  const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [bindMenuOpen, setBindMenuOpen] = useState(false);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
@@ -4339,7 +4369,7 @@ function Composer({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-          placeholder="随心输入"
+          placeholder={t("chat.inputPlaceholder")}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -4395,7 +4425,7 @@ function Composer({
             {sending ? (
               <Badge tone="warn" className="max-w-[240px] truncate">
                 <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
-                执行中 · 继续输入可排队引导{queuedCount > 0 ? `（${queuedCount} 条待发）` : ""}
+                {t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
               </Badge>
             ) : null}
           </div>
@@ -4409,10 +4439,10 @@ function Composer({
           type="button"
           className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted hover:text-foreground"
           onClick={() => setBindMenuOpen((open) => !open)}
-          title="切换对话绑定的项目"
+          title={t("chat.switchProject")}
         >
           {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
-          <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : "临时对话 · 不绑定项目"}</span>
+          <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : t("chat.tempChatHint")}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0" />
         </button>
         {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
@@ -4427,7 +4457,7 @@ function Composer({
               }}
             >
               <MessageSquare className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">临时对话 · 不绑定项目</span>
+              <span className="min-w-0 flex-1 truncate">{t("chat.tempChatHint")}</span>
               <Check className={cn("h-4 w-4 shrink-0 text-primary", projectLabel ? "opacity-0" : "")} />
             </button>
             {projects.map((project) => (
@@ -4446,7 +4476,7 @@ function Composer({
               </button>
             ))}
             <div className="mt-1 border-t border-border px-2.5 py-1.5 text-xs text-muted-foreground/70">
-              临时对话同样拥有完整智能体能力（技能 / Shell / Unity 工具），只是不归档到项目下。
+              {t("chat.tempChatDesc")}
             </div>
           </div>
         ) : null}
@@ -4472,6 +4502,7 @@ function ProjectIndexPanel({
   onScan: () => void;
   onReview: () => void;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   if (!projectPath) {
     return null;
@@ -4486,7 +4517,7 @@ function ProjectIndexPanel({
   const total = Number(summary.totalFiles || 0);
   const scannerFamilies = summary.scannerFamilies || [];
   const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : loading ? "muted" : changed && !firstScan ? "warn" : "ok";
-  const statusLabel = error ? "失败" : loading ? "索引中" : firstScan ? "基线" : changed ? "有变更" : "干净";
+  const statusLabel = error ? t("skillStatus.failed") : loading ? t("project.statusIndexing") : firstScan ? t("project.statusBaseline") : changed ? t("project.statusChanged") : t("project.statusClean");
   const changeText = firstScan
     ? `${formatCount(total)} indexed`
     : `+${added} ~${modified} -${deleted}${guidChanges ? ` guid ${guidChanges}` : ""}`;
@@ -4507,7 +4538,7 @@ function ProjectIndexPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <Search className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">项目变更 · {projectName || shortPath(projectPath)}</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("project.changes", { name: projectName || shortPath(projectPath) })}</span>
           <Badge tone={statusTone} className="shrink-0">
             {statusLabel}
           </Badge>
@@ -4516,15 +4547,15 @@ function ProjectIndexPanel({
         <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onScan}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
-        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onReview} title="后台复查项目变更">
+        <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={loading} onClick={onReview} title={t("project.reviewChanges")}>
           <Bot className="h-3.5 w-3.5" />
-          复查
+          {t("outfit.review")}
         </Button>
       </div>
       {open ? (
         <div className="space-y-3 border-t border-border px-3 py-3">
-          {error ? <DataLine label="Error" value={error} /> : null}
-          <DataLine label="Project" value={projectPath} mono />
+          {error ? <DataLine label={t("doctor.error")} value={error} /> : null}
+          <DataLine label={t("subagent.roles.projectIndexReview")} value={projectPath} mono />
           <DataLine label="Files" value={`${formatCount(total)} total · ${formatCount(Number(summary.unchangedFiles || 0))} unchanged`} />
           <DataLine label="Hashing" value={`${formatCount(Number(summary.hashesComputed || 0))} computed · ${formatCount(Number(summary.hashesReused || 0))} reused`} />
           {scannerFamilies.length ? <DataLine label="Affected" value={scannerFamilies.join(", ")} /> : null}
@@ -4561,6 +4592,7 @@ function OutfitImportPanel({
   onRequest: () => void;
   onReview: () => void;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   if (!projectPath) {
     return null;
@@ -4570,7 +4602,7 @@ function OutfitImportPanel({
   const ready = Boolean(plan?.readyToApply);
   const hasResult = Boolean(result);
   const tone: "ok" | "warn" | "danger" | "muted" = !hasResult ? "muted" : result?.ok && ready ? "ok" : result?.ok ? "warn" : "danger";
-  const label = !hasResult ? "待检查" : ready ? "可请求" : result?.ok ? "需确认" : "受阻";
+  const label = !hasResult ? t("outfit.statusPending") : ready ? t("outfit.statusRequestable") : result?.ok ? t("outfit.statusNeedsConfirm") : t("outfit.statusBlocked");
   const expected = plan?.expectedAssetPaths || [];
   const dependencyPreflight = result?.dependencyPreflight || plan?.dependencyPreflight;
   const dependencyEntries = dependencyPreflight?.entries || [];
@@ -4580,7 +4612,7 @@ function OutfitImportPanel({
   const skippedInstalledSupportPackages = packageOrder?.skippedInstalledSupportPackages || [];
   const compatibility = dependencyPreflight?.compatibility;
   const dependencySummary = dependencyPreflight
-    ? `${dependencyPreflight.readyForImport ? "ready" : "blocked"} / ${dependencyPreflight.blockingIssueCount || dependencyPreflight.blockingMissingCount || 0} issue(s) / ${
+    ? `${dependencyPreflight.readyForImport ? t("connector.ready") : "blocked"} / ${dependencyPreflight.blockingIssueCount || dependencyPreflight.blockingMissingCount || 0} issue(s) / ${
         dependencyPreflight.detectedCount || visibleDependencyEntries.length
       } detected`
     : "";
@@ -4594,13 +4626,13 @@ function OutfitImportPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <FolderPlus className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">服装导入</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("outfit.title")}</span>
           <Badge tone={tone} className="shrink-0">
             {label}
           </Badge>
           {summary ? (
             <span className="shrink-0 font-mono text-xs text-muted-foreground">
-              pkg {summary.unityPackageCount || 0} 路 prefab {summary.prefabCandidateCount || 0}
+              {t("outfit.summary", { pkg: summary.unityPackageCount || 0, prefab: summary.prefabCandidateCount || 0 })}
             </span>
           ) : null}
         </button>
@@ -4628,19 +4660,19 @@ function OutfitImportPanel({
               className="h-9 shrink-0 px-3 text-xs"
               disabled={loading || (!packagePath.trim() && !result)}
               onClick={onReview}
-              title="后台复查导入方案"
+              title={t("outfit.reviewPlan")}
             >
               <Bot className="h-3.5 w-3.5" />
-              复查
+              {t("outfit.review")}
             </Button>
           </div>
-          {status ? <DataLine label="Status" value={status} /> : null}
-          {plan?.kind ? <DataLine label="Plan" value={plan.kind} /> : null}
+          {status ? <DataLine label={t("connector.status")} value={status} /> : null}
+          {plan?.kind ? <DataLine label={t("encryption.plan")} value={plan.kind} /> : null}
           {dependencySummary ? <DataLine label="Dependency preflight" value={dependencySummary} /> : null}
           {compatibility ? (
             <DataLine
               label="Avatar compatibility"
-              value={`${compatibility.status || "unknown"}${compatibility.message ? ` - ${compatibility.message}` : ""}`}
+              value={`${compatibility.status || t("optimization.unknown")}${compatibility.message ? ` - ${compatibility.message}` : ""}`}
             />
           ) : null}
           {importQueue.length ? (
@@ -4674,14 +4706,14 @@ function OutfitImportPanel({
                     ...(entry.evidence?.packagePathnames || []),
                     ...(entry.evidence?.hints || []),
                   ];
-                  return `${entry.status || "unknown"} ${entry.label || entry.id || "dependency"}${entry.blockingBeforeImport ? " [before import]" : ""}${
+                  return `${entry.status || t("optimization.unknown")} ${entry.label || entry.id || "dependency"}${entry.blockingBeforeImport ? " [before import]" : ""}${
                     evidence.length ? `\n  ${evidence.slice(0, 3).join("\n  ")}` : ""
                   }`;
                 })
                 .join("\n")}
             />
           ) : null}
-          {plan?.targetFolder ? <DataLine label="Target" value={plan.targetFolder} mono /> : null}
+          {plan?.targetFolder ? <DataLine label={t("recovery.target")} value={plan.targetFolder} mono /> : null}
           {plan?.selectedPrefab ? <DataLine label="Prefab" value={plan.selectedPrefab} mono /> : null}
           {expected.length ? <OutputBlock label="Expected assets" value={expected.slice(0, 20).join("\n")} /> : null}
           {plan?.steps?.length ? (
@@ -4712,7 +4744,7 @@ function subAgentRoleLabel(role: string): string {
     case "outfit_import_plan_review":
       return "Outfit plan";
     default:
-      return role || "Worker";
+      return role || i18n.t("subagent.roles.fallback");
   }
 }
 
@@ -4750,13 +4782,14 @@ function SubAgentPanel({
   onAccept: (task: SubAgentTask) => void;
   onCloseInspect: () => void;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(tasks.length > 0 || Boolean(error));
   const running = tasks.filter((task) => task.status === "queued" || task.status === "running" || task.status === "cancelling").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
   const hasActivity = Boolean(error) || tasks.length > 0;
   const statusTone: "ok" | "warn" | "danger" | "muted" = error ? "danger" : failed ? "danger" : running ? "warn" : completed ? "ok" : "muted";
-  const statusLabel = error ? "需处理" : running ? `${running} 运行中` : completed ? `${completed} 完成` : "就绪";
+  const statusLabel = error ? t("subagent.statusNeedsAction") : running ? `${running} 运行中` : completed ? `${completed} 完成` : t("subagent.statusReady");
   const recentTasks = tasks.slice(0, 6);
 
   useEffect(() => {
@@ -4779,7 +4812,7 @@ function SubAgentPanel({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">后台任务</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("agent.subagentTask")}</span>
           <Badge tone={statusTone} className="shrink-0">
             {statusLabel}
           </Badge>
@@ -4788,14 +4821,14 @@ function SubAgentPanel({
       </div>
       {open ? (
         <div className="space-y-3 border-t border-border px-3 py-3">
-          {error ? <DataLine label="Error" value={error} /> : null}
+          {error ? <DataLine label={t("doctor.error")} value={error} /> : null}
           {recentTasks.length ? (
             <div className="grid gap-2">
               {recentTasks.map((task) => (
                 <div key={task.id} className="rounded-lg border border-border bg-background px-3 py-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {task.displayName || "后台任务"} · {subAgentRoleLabel(task.role)}
+                      {task.displayName || t("agent.subagentTask")} · {subAgentRoleLabel(task.role)}
                     </span>
                     <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
                       {task.status}
@@ -4805,18 +4838,18 @@ function SubAgentPanel({
                   <div className="mt-2 flex flex-wrap justify-end gap-2">
                     <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onInspect(task.id)}>
                       <Eye className="h-3.5 w-3.5" />
-                      Inspect
+                      {t("subagent.inspect")}
                     </Button>
                     {task.status === "queued" || task.status === "running" || task.status === "cancelling" ? (
                       <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCancel(task.id)}>
                         <X className="h-3.5 w-3.5" />
-                        Cancel
+                        {t("subagent.cancel")}
                       </Button>
                     ) : null}
                     {task.status === "failed" || task.status === "cancelled" ? (
                       <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onRetry(task.id)}>
                         <RefreshCw className="h-3.5 w-3.5" />
-                        Retry
+                        {t("doctor.retry")}
                       </Button>
                     ) : null}
                     {task.status === "completed" ? (
@@ -4831,7 +4864,7 @@ function SubAgentPanel({
             </div>
           ) : (
             <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-              暂无后台任务。
+              {t("subagent.noTasks")}
             </div>
           )}
           {selected ? (
@@ -4846,10 +4879,10 @@ function SubAgentPanel({
                 </Button>
               </div>
               <DataLine label="Role" value={subAgentRoleLabel(selected.role)} />
-              <DataLine label="Profile" value={selected.toolProfile || "read-only"} />
-              {selected.projectPath ? <DataLine label="Project" value={selected.projectPath} mono /> : null}
+              <DataLine label="Profile" value={selected.toolProfile || t("optimization.readOnly")} />
+              {selected.projectPath ? <DataLine label={t("subagent.roles.projectIndexReview")} value={selected.projectPath} mono /> : null}
               {selected.summary ? <OutputBlock label="Summary" value={selected.summary} /> : null}
-              {selected.error ? <OutputBlock label="Error" value={selected.error} danger /> : null}
+              {selected.error ? <OutputBlock label={t("doctor.error")} value={selected.error} danger /> : null}
               {selected.result !== undefined ? <OutputBlock label="Result" value={formatPayload(selected.result)} /> : null}
             </div>
           ) : null}
@@ -4905,7 +4938,7 @@ function ProviderSetup({
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
-        <FieldLabel label="API 供应商">
+        <FieldLabel label={i18n.t("provider.apiProvider")}>
           <select
             value={provider}
             onChange={(event) => onProviderChange(event.target.value)}
@@ -4918,7 +4951,7 @@ function ProviderSetup({
             <option value="openrouter">OpenRouter</option>
             <option value="ollama">Ollama</option>
             <option value="vertexai">Vertex AI</option>
-            <option value="custom">自定义兼容接口</option>
+            <option value="custom">{i18n.t("provider.customEndpoint")}</option>
           </select>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {capabilities.map((capability) => (
@@ -4928,26 +4961,26 @@ function ProviderSetup({
             ))}
           </div>
         </FieldLabel>
-        <FieldLabel label="访问密钥">
+        <FieldLabel label={i18n.t("provider.apiKey")}>
           {providerNeedsApiKey(provider) ? (
             <input
               value={apiKey}
               onChange={(event) => onApiKeyChange(event.target.value)}
               type="password"
-              placeholder={keySaved ? "已保存密钥，留空即沿用" : "输入供应商 API Key"}
+              placeholder={keySaved ? i18n.t("provider.savedKeyHint") : i18n.t("provider.apiKeyPlaceholder")}
               className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
               autoComplete="off"
             />
           ) : (
             <input
-              value="无需密钥"
+              value={i18n.t("provider.noKeyNeeded")}
               readOnly
               className="h-10 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground outline-none"
             />
           )}
         </FieldLabel>
         {requiresBaseUrl ? (
-          <FieldLabel label="接口地址">
+          <FieldLabel label={i18n.t("provider.baseUrl")}>
             <input
               value={baseUrl}
               onChange={(event) => onBaseUrlChange(event.target.value)}
@@ -4955,7 +4988,7 @@ function ProviderSetup({
             />
           </FieldLabel>
         ) : null}
-        <FieldLabel label="模型">
+        <FieldLabel label={i18n.t("provider.model")}>
           <div className="flex min-w-0 items-center gap-2">
             {hasModelList ? (
               <select
@@ -4965,7 +4998,7 @@ function ProviderSetup({
               >
                 {!models.some((item) => item.id === model) ? (
                   <option value="" disabled>
-                    请选择模型
+                    {i18n.t("provider.selectModel")}
                   </option>
                 ) : null}
                 {models.map((item) => (
@@ -4978,7 +5011,7 @@ function ProviderSetup({
               <input
                 value={model}
                 onChange={(event) => onModelChange(event.target.value)}
-                placeholder="点击右侧刷新拉取模型列表，或手动填写"
+                placeholder={i18n.t("provider.modelPlaceholder")}
                 className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
               />
             )}
@@ -4990,13 +5023,13 @@ function ProviderSetup({
               disabled={loadingModels || saving}
             >
               {loadingModels ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              刷新模型列表
+              {i18n.t("provider.refreshModels")}
             </Button>
           </div>
           {modelsError ? <div className="mt-1.5 text-xs text-destructive/80">{modelsError}</div> : null}
           {providerTestMessage ? <div className="mt-1.5 text-xs text-muted-foreground">{providerTestMessage}</div> : null}
           {hasModelList && !modelsError ? (
-            <div className="mt-1.5 text-xs text-muted-foreground">已拉取 {models.length} 个可用模型</div>
+            <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.fetchedModels", { count: models.length })}</div>
           ) : null}
         </FieldLabel>
       </div>
@@ -5015,7 +5048,7 @@ function ProviderSetup({
         </Button>
         <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          保存
+          {i18n.t("common.save")}
         </Button>
       </div>
     </form>
@@ -5047,6 +5080,7 @@ function ExternalAgentConnectorsPanel({
   onUninstall: (client: ExternalAgentConnectorClient) => void;
   onCopy: (text: string, label: string) => void;
 }) {
+  const { t } = useTranslation();
   const gateway = status?.gateway;
   const codexText = status?.clientConfigs?.codex?.text || "";
   const codexStdioText = status?.clientConfigs?.codexStdio?.text || "";
@@ -5072,30 +5106,30 @@ function ExternalAgentConnectorsPanel({
     {
       client: "codexApp",
       title: "Codex App",
-      mode: "User config",
+      mode: t("connector.userConfig"),
       copyText: codexStdioText,
       copyLabel: "Codex App config",
-      shared: "Shared with Codex CLI",
+      shared: t("connector.sharedWithCli"),
     },
     {
       client: "codexCli",
       title: "Codex CLI",
-      mode: "User config",
+      mode: t("connector.userConfig"),
       copyText: codexStdioText,
       copyLabel: "Codex CLI config",
-      shared: "Shared with Codex App",
+      shared: t("connector.sharedWithApp"),
     },
     {
       client: "claudeCode",
       title: "Claude Code CLI",
-      mode: "Project config",
+      mode: t("connector.projectConfig"),
       copyText: claudeStdioText,
       copyLabel: "Claude Code config",
     },
     {
       client: "claudeCowork",
       title: "Claude Cowork App",
-      mode: "Desktop config",
+      mode: t("connector.desktopConfig"),
       copyText: claudeStdioText,
       copyLabel: "Claude Cowork config",
     },
@@ -5104,30 +5138,30 @@ function ExternalAgentConnectorsPanel({
     <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="flex min-w-0 items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
-        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">Agent Connectors</h2>
+        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("connector.title")}</h2>
         <Badge tone={gateway?.enabled ? "ok" : "muted"} className="shrink-0">
-          {gateway?.enabled ? "Enabled" : "Disabled"}
+          {gateway?.enabled ? t("skills.enabled") : t("connector.disabled")}
         </Badge>
       </div>
 
       <div className="mt-4 grid gap-3">
-        <DataLine label="Endpoint" value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
-        <DataLine label="Token env" value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
-        <DataLine label="Stdio bridge" value={launcherCommand || "-"} mono />
-        <DataLine label="Smoke" value={smokeCommand || "-"} mono />
-        <DataLine label="Tools" value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
-        <DataLine label="Config" value={gateway?.configPath || "-"} />
+        <DataLine label={t("connector.endpoint")} value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
+        <DataLine label={t("connector.tokenEnv")} value={status?.auth?.tokenEnvVar || "VRCFORGE_AGENT_TOKEN"} mono />
+        <DataLine label={t("connector.stdioBridge")} value={launcherCommand || "-"} mono />
+        <DataLine label={t("connector.smoke")} value={smokeCommand || "-"} mono />
+        <DataLine label={t("connector.tools")} value={`${toolCount} read tools / ${writeTargetCount} write-request targets`} />
+        <DataLine label={t("connector.config")} value={gateway?.configPath || "-"} />
       </div>
 
       <div className="mt-5 grid gap-3 md:grid-cols-2">
         <ConnectorToggle
-          label="Gateway"
+          label={t("connector.gateway")}
           checked={Boolean(gateway?.enabled)}
           disabled={loading || !status}
           onChange={onToggleGateway}
         />
         <ConnectorToggle
-          label="Write requests"
+          label={t("connector.writeRequests")}
           checked={Boolean(gateway?.allowWriteRequests)}
           disabled={loading || !status}
           onChange={onToggleWriteRequests}
@@ -5167,23 +5201,23 @@ function ExternalAgentConnectorsPanel({
         </Button>
         <Button type="button" variant="outline" disabled={!codexText} onClick={() => onCopy(codexText, "Codex HTTP config")}>
           <Copy className="h-4 w-4" />
-          Codex HTTP
+          {t("connector.codexHttp")}
         </Button>
         <Button type="button" variant="outline" disabled={!claudeText} onClick={() => onCopy(claudeText, "Claude HTTP config")}>
           <Copy className="h-4 w-4" />
-          Claude HTTP
+          {t("connector.claudeHttp")}
         </Button>
         <Button type="button" variant="danger" disabled={loading || !status} onClick={onRevoke}>
-          Revoke token
+          {t("connector.revokeToken")}
         </Button>
       </div>
 
       {status?.lastCalls?.length ? (
         <div className="mt-5 overflow-hidden rounded-lg border border-border">
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="truncate">Event</span>
-            <span className="truncate">Tool</span>
-            <span className="truncate">Status</span>
+            <span className="truncate">{t("connector.event")}</span>
+            <span className="truncate">{t("proof.tool")}</span>
+            <span className="truncate">{t("connector.status")}</span>
           </div>
           {status.lastCalls.slice(0, 8).map((call, index) => (
             <div
@@ -5232,6 +5266,7 @@ function ConnectorClientRow({
   onUninstall: (client: ExternalAgentConnectorClient) => void;
   onCopy: (text: string, label: string) => void;
 }) {
+  const { t } = useTranslation();
   const installed = Boolean(state?.installed);
   const needsProject = client === "claudeCode" && !selectedProjectPath;
   const installable = state?.installable !== false && !needsProject;
@@ -5240,7 +5275,7 @@ function ConnectorClientRow({
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
   const statusTone = installed ? "ok" : installable ? "muted" : "warn";
-  const statusLabel = installed ? "Installed" : needsProject ? "Needs project" : installable ? "Not installed" : "Needs attention";
+  const statusLabel = installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
   return (
     <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
@@ -5270,7 +5305,7 @@ function ConnectorClientRow({
         </div>
         <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
           <div className="min-w-0 truncate">
-            <span className="mr-2 text-foreground/70">Config</span>
+            <span className="mr-2 text-foreground/70">{t("connector.config")}</span>
             <span className="font-mono">{state?.configPath || "-"}</span>
           </div>
           {state?.cliPath ? (
@@ -5284,9 +5319,9 @@ function ConnectorClientRow({
           {state?.appError ? <div className="break-words text-amber-700 dark:text-amber-300">{state.appError}</div> : null}
           {state?.lastError ? <div className="text-amber-700 dark:text-amber-300">{state.lastError}</div> : null}
           {needsProject ? (
-            <div className="text-amber-700 dark:text-amber-300">Install will check the selected project and return a fix if none is available.</div>
+            <div className="text-amber-700 dark:text-amber-300">{t("connector.needsProjectHint")}</div>
           ) : !installable ? (
-            <div className="text-amber-700 dark:text-amber-300">Install can still run diagnostics and return a repair hint.</div>
+            <div className="text-amber-700 dark:text-amber-300">{t("connector.notInstallableHint")}</div>
           ) : null}
           {action ? (
             <div
@@ -5296,10 +5331,10 @@ function ConnectorClientRow({
               )}
             >
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="font-medium">{action.ok ? "Self-test passed" : "Self-test failed"}</span>
+                <span className="font-medium">{action.ok ? t("connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
                 {handshake?.toolCount !== undefined ? <span>{handshake.toolCount} tools</span> : null}
-                {handshake?.connected ? <span>connected</span> : null}
-                {handshake?.ready ? <span>ready</span> : null}
+                {handshake?.connected ? <span>{t("connector.connected")}</span> : null}
+                {handshake?.ready ? <span>{t("connector.ready")}</span> : null}
               </div>
               {action.error ? <div className="break-words">{action.error}</div> : null}
               {handshake?.warning ? <div className="break-words">{handshake.warning}</div> : null}
@@ -5312,7 +5347,7 @@ function ConnectorClientRow({
       <div className="flex flex-wrap items-start justify-end gap-2">
         <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !copyText} onClick={() => onCopy(copyText, copyLabel)}>
           <Copy className="h-3.5 w-3.5" />
-          Copy
+          {t("connector.copy")}
         </Button>
         <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={installActionDisabled} onClick={() => onInstall(client)}>
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
@@ -5320,7 +5355,7 @@ function ConnectorClientRow({
         </Button>
         <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installed} onClick={() => onUninstall(client)}>
           <Trash2 className="h-3.5 w-3.5" />
-          Remove
+          {t("connector.remove")}
         </Button>
       </div>
     </div>
@@ -5338,6 +5373,7 @@ function ConnectorToggle({
   disabled: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <button
       type="button"
@@ -5350,7 +5386,7 @@ function ConnectorToggle({
     >
       <span className="min-w-0 flex-1 truncate">{label}</span>
       <Badge tone={checked ? "ok" : "muted"} className="h-6 shrink-0 px-2">
-        {checked ? "On" : "Off"}
+        {checked ? t("connector.on") : t("connector.off")}
       </Badge>
     </button>
   );
@@ -5416,17 +5452,17 @@ function ProtectionWorkspace({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <Shield className="h-4 w-4 shrink-0 text-primary" />
-              <h1 className="truncate text-lg font-semibold">Anti-Rip Protection</h1>
+              <h1 className="truncate text-lg font-semibold">{i18n.t("encryption.title")}</h1>
               {activeProfile.recommended ? (
                 <Badge tone="ok" className="shrink-0">
-                  Recommended
+                  {i18n.t("encryption.recommended")}
                 </Badge>
               ) : null}
             </div>
-            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || "No Unity project selected"}</div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || i18n.t("encryption.noUnityProject")}</div>
           </div>
           <Badge tone={requestReady ? "ok" : "warn"} className="shrink-0">
-            {requestReady ? "ready to request" : connectorConfigured ? "needs review" : "private addon required"}
+            {requestReady ? i18n.t("encryption.readyToRequest") : connectorConfigured ? i18n.t("encryption.needsReview") : i18n.t("encryption.privateAddonRequired")}
           </Badge>
           <Badge tone={profileApplyBlocked ? "warn" : "muted"} className="shrink-0">
             {activeProfile.label || profile}
@@ -5455,19 +5491,19 @@ function ProtectionWorkspace({
                   <div className="min-w-0 flex-1 truncate text-sm font-semibold">{card.title || card.label || card.id}</div>
                   {card.recommended ? (
                     <Badge tone="ok" className="shrink-0">
-                      Default
+                      {i18n.t("encryption.default")}
                     </Badge>
                   ) : null}
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">{card.description || "-"}</div>
                 <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
-                  <DataLine label="Protection" value={card.protection || "-"} />
-                  <DataLine label="Device" value={card.deviceFit || "-"} />
-                  <DataLine label="Impact" value={protectionCostLabel(card.cost)} />
+                  <DataLine label={i18n.t("encryption.protection")} value={card.protection || "-"} />
+                  <DataLine label={i18n.t("encryption.device")} value={card.deviceFit || "-"} />
+                  <DataLine label={i18n.t("encryption.impact")} value={protectionCostLabel(card.cost)} />
                 </div>
                 {String(card.applyStatus || "").startsWith("blocked") ? (
                   <Badge tone="warn" className="mt-3">
-                    Proof gate
+                    {i18n.t("encryption.proofGate")}
                   </Badge>
                 ) : null}
               </button>
@@ -5479,7 +5515,7 @@ function ProtectionWorkspace({
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Plan target</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("encryption.planTarget")}</div>
             </div>
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
               <select
@@ -5488,7 +5524,7 @@ function ProtectionWorkspace({
                 disabled={loadingAvatars || avatars.length === 0}
                 className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:text-muted-foreground"
               >
-                <option value="">{loadingAvatars ? "Scanning avatars" : avatars.length ? "Select avatar" : "No scene avatars"}</option>
+                <option value="">{loadingAvatars ? i18n.t("encryption.scanningAvatars") : avatars.length ? i18n.t("encryption.selectAvatar") : i18n.t("encryption.noSceneAvatars")}</option>
                 {avatars.map((avatar, index) => {
                   const value = avatar.avatarPath || "";
                   return (
@@ -5507,7 +5543,7 @@ function ProtectionWorkspace({
               <input
                 value={avatarPath}
                 onChange={(event) => onAvatarPathChange(event.target.value)}
-                placeholder="Avatar scene path"
+                placeholder={i18n.t("encryption.avatarScenePath")}
                 className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               />
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
@@ -5522,7 +5558,7 @@ function ProtectionWorkspace({
                 onChange={(event) => onOwnsAssetsChange(event.target.checked)}
                 className="h-4 w-4 shrink-0 rounded border-border"
               />
-              <span className="min-w-0 truncate">I own or am allowed to edit these avatar assets.</span>
+              <span className="min-w-0 truncate">{i18n.t("encryption.ownsAssetsLabel")}</span>
             </label>
             {avatarMessage ? <div className="mt-2 truncate text-xs text-muted-foreground">{avatarMessage}</div> : null}
             {message ? <div className="mt-2 truncate text-xs text-muted-foreground">{message}</div> : null}
@@ -5531,18 +5567,18 @@ function ProtectionWorkspace({
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <Shield className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Preview</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("encryption.preview")}</div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
-              <OptimizationMetric label="Targets" value={formatOptimizationMetric(planPayload.selectedCandidateCount)} />
-              <OptimizationMetric label="Mode" value={activeProfile.label || profile} />
-              <OptimizationMetric label="Plan" value={String(planPayload.status || "not loaded")} />
-              <OptimizationMetric label="Expected" value={impact} />
+              <OptimizationMetric label={i18n.t("encryption.targets")} value={formatOptimizationMetric(planPayload.selectedCandidateCount)} />
+              <OptimizationMetric label={i18n.t("encryption.mode")} value={activeProfile.label || profile} />
+              <OptimizationMetric label={i18n.t("encryption.plan")} value={String(planPayload.status || i18n.t("encryption.notLoaded"))} />
+              <OptimizationMetric label={i18n.t("encryption.expected")} value={impact} />
             </div>
             {blockingIds.length ? (
               <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
                 {blockingIds.slice(0, 4).map((item) => (
-                  <DataLine key={item} label="Gate" value={protectionGateLabel(item)} />
+                  <DataLine key={item} label={i18n.t("encryption.gate")} value={protectionGateLabel(item)} />
                 ))}
               </div>
             ) : null}
@@ -5555,7 +5591,7 @@ function ProtectionWorkspace({
                 onClick={() => onRequestApply("liltoon")}
               >
                 {requestingFamily === "liltoon" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
-                Request lilToon
+                {i18n.t("encryption.requestLilToon")}
               </Button>
               <Button
                 type="button"
@@ -5565,10 +5601,10 @@ function ProtectionWorkspace({
                 onClick={() => onRequestApply("poiyomi")}
               >
                 {requestingFamily === "poiyomi" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
-                Request Poiyomi
+                {i18n.t("encryption.requestPoiyomi")}
               </Button>
               <Badge tone="muted" className="h-8 shrink-0">
-                approval required
+                {i18n.t("encryption.approvalRequired")}
               </Badge>
             </div>
           </div>
@@ -5577,16 +5613,16 @@ function ProtectionWorkspace({
         <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
           <div className="mb-3 flex min-w-0 items-center gap-2">
             <Gauge className="h-4 w-4 shrink-0 text-primary" />
-            <div className="truncate text-sm font-semibold">Estimated frame impact</div>
+            <div className="truncate text-sm font-semibold">{i18n.t("encryption.estimatedFrameImpact")}</div>
             <Badge tone="muted" className="ml-auto shrink-0">
-              planning estimate
+              {i18n.t("encryption.planningEstimate")}
             </Badge>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] border-separate border-spacing-0 text-left text-xs">
               <thead className="text-muted-foreground">
                 <tr>
-                  <th className="border-b border-border px-3 py-2 font-medium">Avatar size</th>
+                  <th className="border-b border-border px-3 py-2 font-medium">{i18n.t("encryption.avatarSize")}</th>
                   {PROTECTION_PROFILE_FALLBACKS.map((item) => (
                     <th key={item.id} className="border-b border-border px-3 py-2 font-medium">
                       {item.label}
@@ -5687,18 +5723,18 @@ function OptimizationWorkspace({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <Gauge className="h-4 w-4 shrink-0 text-primary" />
-              <h1 className="truncate text-lg font-semibold">Optimization Dashboard</h1>
+              <h1 className="truncate text-lg font-semibold">{i18n.t("optimization.title")}</h1>
               <Badge tone="muted" className="shrink-0">
                 {report?.versionStage || "0.7.2-beta"}
               </Badge>
             </div>
-            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || "No Unity project selected"}</div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || i18n.t("encryption.noUnityProject")}</div>
           </div>
           <Badge tone={report?.readOnly && report?.noProjectWrites ? "ok" : "warn"} className="shrink-0">
-            {report?.readOnly && report?.noProjectWrites ? "read-only" : "needs review"}
+            {report?.readOnly && report?.noProjectWrites ? i18n.t("optimization.readOnly") : i18n.t("encryption.needsReview")}
           </Badge>
           <Badge tone={report?.directApplyExposed ? "danger" : "muted"} className="shrink-0">
-            {report?.directApplyExposed ? "direct apply exposed" : "no direct apply"}
+            {report?.directApplyExposed ? i18n.t("optimization.directApplyExposed") : i18n.t("optimization.noDirectApply")}
           </Badge>
           <Badge tone={optimizerApproval.modeTone} className="shrink-0">
             mode: {permission?.executionMode || "approval"}
@@ -5713,7 +5749,7 @@ function OptimizationWorkspace({
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Target profile</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("optimization.targetProfile")}</div>
               {profile?.label ? (
                 <Badge tone="default" className="ml-auto shrink-0">
                   {profile.label}
@@ -5742,7 +5778,7 @@ function OptimizationWorkspace({
                 disabled={loadingAvatars || avatars.length === 0}
                 className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:text-muted-foreground"
               >
-                <option value="">{loadingAvatars ? "Scanning avatars" : avatars.length ? "Select avatar" : "No scene avatars"}</option>
+                <option value="">{loadingAvatars ? i18n.t("encryption.scanningAvatars") : avatars.length ? i18n.t("encryption.selectAvatar") : i18n.t("encryption.noSceneAvatars")}</option>
                 {avatars.map((avatar, index) => {
                   const value = avatar.avatarPath || "";
                   return (
@@ -5761,7 +5797,7 @@ function OptimizationWorkspace({
               <input
                 value={avatarPath}
                 onChange={(event) => onAvatarPathChange(event.target.value)}
-                placeholder="Avatar scene path"
+                placeholder={i18n.t("encryption.avatarScenePath")}
                 className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               />
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
@@ -5771,17 +5807,17 @@ function OptimizationWorkspace({
             </div>
             {avatarMessage ? <div className="mt-2 truncate text-xs text-muted-foreground">{avatarMessage}</div> : null}
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <OptimizationMetric label="PC rank" value={report?.baseline?.performanceHeadline?.pc?.rank || "unknown"} />
-              <OptimizationMetric label="Quest rank" value={report?.baseline?.performanceHeadline?.quest?.rank || "unknown"} />
-              <OptimizationMetric label="Triangles" value={formatOptimizationMetric(metrics.triangleCount)} />
-              <OptimizationMetric label="Parameter bits" value={formatOptimizationMetric(metrics.expressionParameterBits)} />
+              <OptimizationMetric label={i18n.t("optimization.pcRank")} value={report?.baseline?.performanceHeadline?.pc?.rank || i18n.t("optimization.unknown")} />
+              <OptimizationMetric label={i18n.t("optimization.questRank")} value={report?.baseline?.performanceHeadline?.quest?.rank || i18n.t("optimization.unknown")} />
+              <OptimizationMetric label={i18n.t("optimization.triangles")} value={formatOptimizationMetric(metrics.triangleCount)} />
+              <OptimizationMetric label={i18n.t("optimization.parameterBits")} value={formatOptimizationMetric(metrics.expressionParameterBits)} />
             </div>
           </div>
 
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Top offenders</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("optimization.topOffenders")}</div>
               <Badge tone="muted" className="ml-auto shrink-0">
                 {offenders.length}
               </Badge>
@@ -5801,11 +5837,11 @@ function OptimizationWorkspace({
         </section>
 
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          <OptimizationMetric label="Texture bytes" value={formatOptimizationMetric(metrics.textureMemoryBytes)} />
-          <OptimizationMetric label="Material slots" value={formatOptimizationMetric(metrics.materialSlots)} />
-          <OptimizationMetric label="Skinned meshes" value={formatOptimizationMetric(metrics.skinnedMeshCount)} />
-          <OptimizationMetric label="PhysBones" value={formatOptimizationMetric(metrics.physBones)} />
-          <OptimizationMetric label="Generated residue" value={formatOptimizationMetric(metrics.generatedResidueCount)} />
+          <OptimizationMetric label={i18n.t("optimization.textureBytes")} value={formatOptimizationMetric(metrics.textureMemoryBytes)} />
+          <OptimizationMetric label={i18n.t("optimization.materialSlots")} value={formatOptimizationMetric(metrics.materialSlots)} />
+          <OptimizationMetric label={i18n.t("optimization.skinnedMeshes")} value={formatOptimizationMetric(metrics.skinnedMeshCount)} />
+          <OptimizationMetric label={i18n.t("optimization.physBones")} value={formatOptimizationMetric(metrics.physBones)} />
+          <OptimizationMetric label={i18n.t("optimization.generatedResidue")} value={formatOptimizationMetric(metrics.generatedResidueCount)} />
         </section>
 
         <OptimizationProofReadiness report={report} />
@@ -5821,7 +5857,7 @@ function OptimizationWorkspace({
 
         <section>
           <div className="mb-3 flex min-w-0 items-center gap-2">
-            <h2 className="truncate text-sm font-semibold">Dependency status</h2>
+            <h2 className="truncate text-sm font-semibold">{i18n.t("optimization.dependencyStatus")}</h2>
             <Badge tone="muted" className="shrink-0">
               {dependencies.length}
             </Badge>
@@ -5832,13 +5868,13 @@ function OptimizationWorkspace({
                 <div className="flex min-w-0 items-center gap-2">
                   <div className="min-w-0 flex-1 truncate text-sm font-medium">{item.label || item.id}</div>
                   <Badge tone={dependencyTone(item.status)} className="shrink-0">
-                    {item.status || "unknown"}
+                    {item.status || i18n.t("optimization.unknown")}
                   </Badge>
                 </div>
                 <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
-                  <DataLine label="Package" value={item.matchedPackageId || "-"} />
+                  <DataLine label={i18n.t("subagent.roles.outfitPackageInspection")} value={item.matchedPackageId || "-"} />
                   <DataLine label="Version" value={item.version || "-"} />
-                  <DataLine label="Risk" value={item.riskLevel || "-"} />
+                  <DataLine label={i18n.t("package.tableRisk")} value={item.riskLevel || "-"} />
                 </div>
                 <div className="mt-2 max-h-10 overflow-hidden text-xs text-muted-foreground">{item.recommendedRole || "-"}</div>
                 {item.status !== "installed" && item.packageIds?.length ? (
@@ -5860,7 +5896,7 @@ function OptimizationWorkspace({
 
         <section>
           <div className="mb-3 flex min-w-0 items-center gap-2">
-            <h2 className="truncate text-sm font-semibold">Recommended optimization order</h2>
+            <h2 className="truncate text-sm font-semibold">{i18n.t("optimization.recommendedOrder")}</h2>
             <Badge tone="muted" className="shrink-0">
               {report?.recommendedOrder?.length ?? 0}
             </Badge>
@@ -5874,7 +5910,7 @@ function OptimizationWorkspace({
                     <div className="mt-1 text-xs text-muted-foreground">{card.description}</div>
                   </div>
                   <Badge tone={optimizationRiskTone(card.riskLevel)} className="shrink-0">
-                    {card.riskLevel || "unknown"}
+                    {card.riskLevel || i18n.t("optimization.unknown")}
                   </Badge>
                 </div>
                 <div className="mt-3 flex min-w-0 flex-wrap gap-2">
@@ -5884,11 +5920,11 @@ function OptimizationWorkspace({
                   {card.requestTool ? <Badge tone={optimizerApproval.requestTone}>{optimizerApproval.requestLabel}</Badge> : null}
                 </div>
                 <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
-                  <DataLine label="Benefit" value={card.expectedBenefit || "unknown"} />
-                  <DataLine label="Why" value={card.whyRecommended || "-"} />
+                  <DataLine label="Benefit" value={card.expectedBenefit || i18n.t("optimization.unknown")} />
+                  <DataLine label={i18n.t("doctor.why")} value={card.whyRecommended || "-"} />
                   <DataLine label="Next" value={card.nextSafeAction || "-"} />
-                  {card.requestTool ? <DataLine label="Request" value={card.requestTool} /> : null}
-                  {card.blockedReason ? <DataLine label="Blocked" value={card.blockedReason} /> : null}
+                  {card.requestTool ? <DataLine label={i18n.t("optimization.request")} value={card.requestTool} /> : null}
+                  {card.blockedReason ? <DataLine label={i18n.t("package.labels.blocked")} value={card.blockedReason} /> : null}
                 </div>
                 {isTttOptimizationRequest(card) ? (
                   <textarea
@@ -5904,7 +5940,7 @@ function OptimizationWorkspace({
                     <input
                       value={actionOptions[card.id]?.rendererPath ?? ""}
                       onChange={(event) => onActionOptionChange(card.id, "rendererPath", event.target.value)}
-                      placeholder="Renderer path"
+                      placeholder={i18n.t("optimization.rendererPath")}
                       className="h-8 min-w-0 rounded-md border border-border bg-background px-3 text-xs outline-none focus:border-primary"
                     />
                     <input
@@ -5955,20 +5991,20 @@ function optimizerApprovalBadge(permission?: PermissionState) {
     return {
       modeTone: "danger" as const,
       requestTone: "danger" as const,
-      requestLabel: "explicit approval",
+      requestLabel: i18n.t("optimization.explicitApproval"),
     };
   }
   if (permission?.autoApprove || permission?.executionMode === "auto") {
     return {
       modeTone: "warn" as const,
       requestTone: "warn" as const,
-      requestLabel: "explicit approval",
+      requestLabel: i18n.t("optimization.explicitApproval"),
     };
   }
   return {
     modeTone: "muted" as const,
     requestTone: "muted" as const,
-    requestLabel: "approval required",
+    requestLabel: i18n.t("encryption.approvalRequired"),
   };
 }
 
@@ -5982,6 +6018,7 @@ function OptimizationMetric({ label, value }: { label: string; value: string }) 
 }
 
 function OptimizationProofReadiness({ report }: { report: OptimizationPlannerReport | null }) {
+  const { t } = useTranslation();
   const plans = optimizationRecord(report?.plans);
   const visual = optimizationRecord(plans.visualRegression);
   const rollback = optimizationRecord(plans.rollbackVerify);
@@ -5999,7 +6036,7 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
     {
       id: "visual",
       icon: Eye,
-      title: "Visual proof",
+      title: t("optimization.visualProof"),
       tone: visualShots.length ? ("ok" as const) : ("warn" as const),
       lines: [
         ["Shots", `${visualShots.length}`],
@@ -6010,29 +6047,29 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
     {
       id: "rollback",
       icon: RotateCcw,
-      title: "Rollback proof",
+      title: t("optimization.rollbackProof"),
       tone: rollbackReady ? ("ok" as const) : ("warn" as const),
       lines: [
         ["Project", rollback.projectReadable ? "readable" : "not ready"],
         ["Residue", formatOptimizationMetric(rollback.generatedResidueCount)],
-        ["Checkpoint", rollback.checkpointInfrastructureRequired ? "required" : "unknown"],
+        ["Checkpoint", rollback.checkpointInfrastructureRequired ? "required" : t("optimization.unknown")],
       ],
     },
     {
       id: "parameters",
       icon: Shield,
-      title: "Parameter gates",
+      title: t("optimization.parameterGates"),
       tone: Number(parameterSummary.dangerParameterCount || parameterGates.blockedParameterCount || 0) ? ("warn" as const) : ("ok" as const),
       lines: [
         ["Cases", formatOptimizationMetric(parameterSummary.testCaseCount)],
         ["Blocked", formatOptimizationMetric(parameterGates.blockedParameterCount ?? parameterSummary.dangerParameterCount)],
-        ["Apply", parameterPath.applyBlocked ? "blocked" : "review"],
+        ["Apply", parameterPath.applyBlocked ? "blocked" : t("optimization.review")],
       ],
     },
     {
       id: "ma2bt",
       icon: Sparkles,
-      title: "MA2BT diagnostics",
+      title: t("optimization.ma2btDiagnostics"),
       tone: Number(ma2btSummary.skippedLayerCount || 0) ? ("warn" as const) : ("ok" as const),
       lines: [
         ["Convertible", formatOptimizationMetric(ma2btSummary.convertibleLayerCount)],
@@ -6045,9 +6082,9 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
     <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
       <div className="mb-3 flex min-w-0 items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
-        <h2 className="truncate text-sm font-semibold">Proof readiness</h2>
+        <h2 className="truncate text-sm font-semibold">{t("optimization.proofReadiness")}</h2>
         <Badge tone="muted" className="ml-auto shrink-0">
-          0.9 gates
+          {t("optimization.gates09")}
         </Badge>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -6059,7 +6096,7 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
                 <Icon className="h-4 w-4 shrink-0 text-primary" />
                 <div className="min-w-0 flex-1 truncate text-sm font-medium">{card.title}</div>
                 <Badge tone={card.tone} className="shrink-0">
-                  {card.tone === "ok" ? "ready" : "review"}
+                  {card.tone === "ok" ? t("connector.ready") : t("optimization.review")}
                 </Badge>
               </div>
               <div className="grid gap-1 text-xs text-muted-foreground">
@@ -6092,6 +6129,7 @@ function OptimizationProofViewer({
   onRefresh: () => void;
   onSelectProof: (runId: string) => void;
 }) {
+  const { t } = useTranslation();
   const proof = selectedProof?.proof || proofs[0] || null;
   const visual = optimizationRecord(proof?.visualRegression);
   const screenshots = optimizationRecord(visual.screenshots);
@@ -6105,7 +6143,7 @@ function OptimizationProofViewer({
     <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
       <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
         <History className="h-4 w-4 shrink-0 text-primary" />
-        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">Optimizer proof</h2>
+        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{t("optimization.optimizerProof")}</h2>
         {message ? (
           <Badge tone="muted" className="shrink-0">
             {message}
@@ -6117,7 +6155,7 @@ function OptimizationProofViewer({
       </div>
 
       {!proof ? (
-        <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">No optimizer proof runs.</div>
+        <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">{t("optimization.noProofRuns")}</div>
       ) : (
         <div className="grid gap-4">
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
@@ -6129,10 +6167,10 @@ function OptimizationProofViewer({
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{proof.runId}</span>
               </div>
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                <DataLine label="Tool" value={proof.tool || "-"} />
-                <DataLine label="Checkpoint" value={proof.checkpointId || "-"} mono />
-                <DataLine label="Changed files" value={formatOptimizationMetric(proof.changedFileCount)} />
-                <DataLine label="Rollback" value={proof.rollbackDone ? "done" : "not done"} />
+                <DataLine label={t("proof.tool")} value={proof.tool || "-"} />
+                <DataLine label={t("recovery.checkpoint")} value={proof.checkpointId || "-"} mono />
+                <DataLine label={t("checkpoint.changedFiles")} value={formatOptimizationMetric(proof.changedFileCount)} />
+                <DataLine label={t("optimization.proofMetric.rollback")} value={proof.rollbackDone ? t("proof.rollbackDone") : t("proof.rollbackNotDone")} />
               </div>
             </div>
             <select
@@ -6150,10 +6188,10 @@ function OptimizationProofViewer({
           </div>
 
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <ProofMetricCard title="PC rank" before={pc.rankBefore} after={pc.rankAfter} rollback={pc.rankRollback} />
-            <ProofMetricCard title="Quest rank" before={quest.rankBefore} after={quest.rankAfter} rollback={quest.rankRollback} />
-            <ProofMetricCard title="Parameter bits" before="delta" after={parameters.syncedBitsDelta} rollback={parameters.rollbackMatchesBefore ? "matched" : "review"} />
-            <ProofMetricCard title="Rollback gate" before="severity/gate" after={rollback.matchesBeforeSeverityAndGate ? "matched" : "review"} rollback={rollback.remainingFindingCount ?? "-"} />
+            <ProofMetricCard title={t("optimization.pcRank")} before={pc.rankBefore} after={pc.rankAfter} rollback={pc.rankRollback} />
+            <ProofMetricCard title={t("optimization.questRank")} before={quest.rankBefore} after={quest.rankAfter} rollback={quest.rankRollback} />
+            <ProofMetricCard title={t("optimization.parameterBits")} before="delta" after={parameters.syncedBitsDelta} rollback={parameters.rollbackMatchesBefore ? "matched" : t("optimization.review")} />
+            <ProofMetricCard title="Rollback gate" before="severity/gate" after={rollback.matchesBeforeSeverityAndGate ? "matched" : t("optimization.review")} rollback={rollback.remainingFindingCount ?? "-"} />
           </div>
 
           <div className="grid gap-3 lg:grid-cols-3">
@@ -6167,7 +6205,7 @@ function OptimizationProofViewer({
                     <Eye className="h-4 w-4 shrink-0 text-primary" />
                     <div className="min-w-0 flex-1 truncate text-sm font-medium">{proofStageLabel(stage)}</div>
                     <Badge tone={ok ? "ok" : "warn"} className="shrink-0">
-                      {ok ? "captured" : "missing"}
+                      {ok ? t("optimization.captured") : t("optimization.missing")}
                     </Badge>
                   </div>
                   {imageUrl ? (
@@ -6175,7 +6213,7 @@ function OptimizationProofViewer({
                       <img src={imageUrl} alt={proofStageLabel(stage)} className="h-full w-full object-contain" />
                     </div>
                   ) : (
-                    <div className="grid aspect-square place-items-center rounded-md border border-dashed border-border text-xs text-muted-foreground">No screenshot</div>
+                    <div className="grid aspect-square place-items-center rounded-md border border-dashed border-border text-xs text-muted-foreground">{t("optimization.noScreenshot")}</div>
                   )}
                   <div className="grid gap-1 text-xs text-muted-foreground">
                     <DataLine label="SHA" value={String(entry.sha256 || "-")} mono />
@@ -6185,7 +6223,7 @@ function OptimizationProofViewer({
               );
             })}
           </div>
-          {proof.failedSteps?.length ? <OutputBlock label="Failed steps" value={proof.failedSteps.join("\n")} /> : null}
+          {proof.failedSteps?.length ? <OutputBlock label={t("optimization.failedSteps")} value={proof.failedSteps.join("\n")} /> : null}
         </div>
       )}
     </section>
@@ -6193,13 +6231,14 @@ function OptimizationProofViewer({
 }
 
 function ProofMetricCard({ title, before, after, rollback }: { title: string; before: unknown; after: unknown; rollback: unknown }) {
+  const { t } = useTranslation();
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background p-3">
       <div className="mb-2 truncate text-sm font-medium">{title}</div>
       <div className="grid gap-1 text-xs text-muted-foreground">
-        <DataLine label="Before" value={formatProofValue(before)} />
-        <DataLine label="After" value={formatProofValue(after)} />
-        <DataLine label="Rollback" value={formatProofValue(rollback)} />
+        <DataLine label={t("optimization.proofStages.before")} value={formatProofValue(before)} />
+        <DataLine label={t("optimization.proofMetric.after")} value={formatProofValue(after)} />
+        <DataLine label={t("optimization.proofMetric.rollback")} value={formatProofValue(rollback)} />
       </div>
     </div>
   );
@@ -6281,7 +6320,7 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-              <div className="truncate text-sm font-semibold">Interrupted Writes</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.interruptedWrites")}</div>
               <Badge tone={interruptedRecoveries.length > 0 ? "warn" : "muted"} className="ml-auto shrink-0">
                 {interruptedRecoveries.length}
               </Badge>
@@ -6289,7 +6328,7 @@ function CheckpointWorkspace({
             <div className="max-h-[24vh] space-y-2 overflow-auto pr-1">
               {interruptedRecoveries.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">
-                  No interrupted writes.
+                  {i18n.t("checkpoint.noInterruptedWrites")}
                 </div>
               ) : null}
               {interruptedRecoveries.map((recovery) => {
@@ -6333,7 +6372,7 @@ function CheckpointWorkspace({
                         disabled={Boolean(recoveryBusyId)}
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        Restore
+                        {i18n.t("checkpoint.restore")}
                       </Button>
                       <Button
                         type="button"
@@ -6363,7 +6402,7 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
               <History className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Checkpoints</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.checkpoints")}</div>
               <Badge tone="muted" className="ml-auto shrink-0">
                 {checkpoints.length}
               </Badge>
@@ -6375,7 +6414,7 @@ function CheckpointWorkspace({
             <div className="max-h-[34vh] space-y-2 overflow-auto pr-1">
               {checkpoints.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-                  No pre-write checkpoints yet.
+                  {i18n.t("checkpoint.noCheckpoints")}
                 </div>
               ) : null}
               {checkpoints.map((checkpoint) => (
@@ -6393,7 +6432,7 @@ function CheckpointWorkspace({
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate font-mono text-xs">{checkpoint.id}</span>
                     <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
-                      {checkpoint.status || (checkpoint.ok ? "ready" : "unavailable")}
+                      {checkpoint.status || (checkpoint.ok ? i18n.t("connector.ready") : "unavailable")}
                     </Badge>
                   </div>
                   <div className="truncate text-xs text-muted-foreground">{checkpoint.targetTool || "-"}</div>
@@ -6406,7 +6445,7 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Adjustment Timeline</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.adjustmentTimeline")}</div>
               <Badge tone="muted" className="ml-auto shrink-0">
                 {adjustmentCheckpoints.length}
               </Badge>
@@ -6420,7 +6459,7 @@ function CheckpointWorkspace({
                 disabled={Boolean(adjustmentBusyId) || loading}
               >
                 <Plus className="h-3.5 w-3.5" />
-                Face
+                {i18n.t("checkpoint.face")}
               </Button>
               <Button
                 type="button"
@@ -6430,13 +6469,13 @@ function CheckpointWorkspace({
                 disabled={Boolean(adjustmentBusyId) || loading}
               >
                 <Plus className="h-3.5 w-3.5" />
-                Shader
+                {i18n.t("checkpoint.shader")}
               </Button>
             </div>
             <div className="max-h-[40vh] space-y-2 overflow-auto pr-1">
               {adjustmentCheckpoints.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-                  No adjustment checkpoints yet.
+                  {i18n.t("checkpoint.noAdjustments")}
                 </div>
               ) : null}
               {adjustmentCheckpoints.map((checkpoint) => {
@@ -6505,7 +6544,7 @@ function CheckpointWorkspace({
                         disabled={Boolean(adjustmentBusyId)}
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        Apply
+                        {i18n.t("checkpoint.apply")}
                       </Button>
                       <Button
                         type="button"
@@ -6546,29 +6585,29 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
             <div className="mb-5 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-              <div className="truncate text-sm font-semibold">Recovery Preview</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.recoveryPreview")}</div>
               {recoveryPreview ? (
                 <Badge tone={recoveryPreview.ok ? "warn" : "danger"} className="ml-auto shrink-0">
-                  {recoveryPreview.recovery?.status || (recoveryPreview.ok ? "ready" : "blocked")}
+                  {recoveryPreview.recovery?.status || (recoveryPreview.ok ? i18n.t("connector.ready") : "blocked")}
                 </Badge>
               ) : null}
             </div>
 
             {!recoveryPreview ? (
               <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                Select an interrupted write.
+                {i18n.t("checkpoint.selectInterruptedWrite")}
               </div>
             ) : (
               <div className="grid gap-4">
                 <div className="grid gap-3">
-                  <DataLine label="Recovery" value={recoveryPreview.recovery?.id || "-"} mono />
-                  <DataLine label="Target" value={recoveryPreview.recovery?.targetTool || "-"} />
-                  <DataLine label="Checkpoint" value={recoveryPreview.recovery?.checkpointId || "-"} mono />
-                  <DataLine label="Project" value={recoveryPreview.recovery?.projectRoot || "-"} />
-                  {recoveryPreview.error ? <DataLine label="Error" value={recoveryPreview.error} /> : null}
+                  <DataLine label={i18n.t("recovery.recovery")} value={recoveryPreview.recovery?.id || "-"} mono />
+                  <DataLine label={i18n.t("recovery.target")} value={recoveryPreview.recovery?.targetTool || "-"} />
+                  <DataLine label={i18n.t("recovery.checkpoint")} value={recoveryPreview.recovery?.checkpointId || "-"} mono />
+                  <DataLine label={i18n.t("subagent.roles.projectIndexReview")} value={recoveryPreview.recovery?.projectRoot || "-"} />
+                  {recoveryPreview.error ? <DataLine label={i18n.t("doctor.error")} value={recoveryPreview.error} /> : null}
                 </div>
-                <OutputBlock label="Changed files" value={recoveryChangedFiles.join("\n")} />
-                <OutputBlock label="Working tree" value={recoveryWorkingTreeStatus.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={recoveryChangedFiles.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={recoveryWorkingTreeStatus.join("\n")} />
                 {recoveryMessage ? <div className="text-sm text-muted-foreground">{recoveryMessage}</div> : null}
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
@@ -6601,29 +6640,29 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
             <div className="mb-5 flex items-center gap-2">
               <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Restore Preview</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.restorePreview")}</div>
               {preview ? (
                 <Badge tone={preview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-                  {preview.ok ? "ready" : "blocked"}
+                  {preview.ok ? i18n.t("connector.ready") : "blocked"}
                 </Badge>
               ) : null}
             </div>
 
             {!preview ? (
               <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                Select a checkpoint to inspect the rollback.
+                {i18n.t("checkpoint.selectCheckpoint")}
               </div>
             ) : (
               <div className="grid gap-4">
                 <div className="grid gap-3">
-                  <DataLine label="Checkpoint" value={preview.checkpoint?.id || "-"} mono />
-                  <DataLine label="Target" value={preview.checkpoint?.targetTool || "-"} />
-                  <DataLine label="Project" value={preview.checkpoint?.projectRoot || "-"} />
-                  <DataLine label="Git ref" value={shortRef(preview.checkpoint?.checkpointRef)} mono />
-                  {preview.error ? <DataLine label="Error" value={preview.error} /> : null}
+                  <DataLine label={i18n.t("recovery.checkpoint")} value={preview.checkpoint?.id || "-"} mono />
+                  <DataLine label={i18n.t("recovery.target")} value={preview.checkpoint?.targetTool || "-"} />
+                  <DataLine label={i18n.t("subagent.roles.projectIndexReview")} value={preview.checkpoint?.projectRoot || "-"} />
+                  <DataLine label={i18n.t("recovery.gitRef")} value={shortRef(preview.checkpoint?.checkpointRef)} mono />
+                  {preview.error ? <DataLine label={i18n.t("doctor.error")} value={preview.error} /> : null}
                 </div>
-                <OutputBlock label="Changed files" value={changedFiles.join("\n")} />
-                <OutputBlock label="Working tree" value={workingTreeStatus.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={changedFiles.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={workingTreeStatus.join("\n")} />
                 {message ? <div className="text-sm text-muted-foreground">{message}</div> : null}
                 <div className="flex justify-end">
                   <Button
@@ -6643,30 +6682,30 @@ function CheckpointWorkspace({
           <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
             <div className="mb-5 flex items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">Adjustment Preview</div>
+              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.adjustmentPreview")}</div>
               {adjustmentPreview ? (
                 <Badge tone={adjustmentPreview.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-                  {adjustmentPreview.ok ? "ready" : "blocked"}
+                  {adjustmentPreview.ok ? i18n.t("connector.ready") : "blocked"}
                 </Badge>
               ) : null}
             </div>
 
             {!adjustmentPreview ? (
               <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                Select a face or shader checkpoint.
+                {i18n.t("checkpoint.selectFaceShader")}
               </div>
             ) : (
               <div className="grid gap-4">
                 <div className="grid gap-3">
                   <DataLine label="Adjustment" value={adjustmentPreview.adjustmentCheckpoint?.label || "-"} />
                   <DataLine label="Kind" value={adjustmentPreview.adjustmentCheckpoint?.kind || "-"} />
-                  <DataLine label="Checkpoint" value={adjustmentPreview.checkpoint?.id || "-"} mono />
-                  <DataLine label="Project" value={adjustmentPreview.checkpoint?.projectRoot || "-"} />
-                  <DataLine label="Git ref" value={shortRef(adjustmentPreview.checkpoint?.checkpointRef)} mono />
-                  {adjustmentPreview.error ? <DataLine label="Error" value={adjustmentPreview.error} /> : null}
+                  <DataLine label={i18n.t("recovery.checkpoint")} value={adjustmentPreview.checkpoint?.id || "-"} mono />
+                  <DataLine label={i18n.t("subagent.roles.projectIndexReview")} value={adjustmentPreview.checkpoint?.projectRoot || "-"} />
+                  <DataLine label={i18n.t("recovery.gitRef")} value={shortRef(adjustmentPreview.checkpoint?.checkpointRef)} mono />
+                  {adjustmentPreview.error ? <DataLine label={i18n.t("doctor.error")} value={adjustmentPreview.error} /> : null}
                 </div>
-                <OutputBlock label="Changed files" value={adjustmentChangedFiles.join("\n")} />
-                <OutputBlock label="Working tree" value={adjustmentWorkingTreeStatus.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.changedFiles")} value={adjustmentChangedFiles.join("\n")} />
+                <OutputBlock label={i18n.t("checkpoint.workingTree")} value={adjustmentWorkingTreeStatus.join("\n")} />
                 {adjustmentMessage ? <div className="text-sm text-muted-foreground">{adjustmentMessage}</div> : null}
                 <div className="flex justify-end">
                   <Button
@@ -6787,12 +6826,12 @@ function SkillsWorkspace({
         <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
           <div className="mb-4 flex items-center gap-2">
             <Wrench className="h-4 w-4 shrink-0 text-primary" />
-            <div className="truncate text-sm font-semibold">Skills</div>
+            <div className="truncate text-sm font-semibold">{i18n.t("skills.title")}</div>
             <Badge tone="muted" className="ml-auto shrink-0">
               {skillCount}
             </Badge>
             <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCheck} disabled={saving}>
-              Check
+              {i18n.t("skills.check")}
             </Button>
           </div>
           <div className="relative mb-3">
@@ -6800,13 +6839,13 @@ function SkillsWorkspace({
             <input
               value={skillQuery}
               onChange={(event) => setSkillQuery(event.target.value)}
-              placeholder="搜索能力…"
+              placeholder={i18n.t("skills.searchPlaceholder")}
               className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
             />
           </div>
           <div className="max-h-[calc(100vh-230px)] space-y-2 overflow-auto pr-1">
             {groupedSkills.length === 0 ? (
-              <div className="px-3 py-4 text-xs text-muted-foreground">没有匹配的能力。</div>
+              <div className="px-3 py-4 text-xs text-muted-foreground">{i18n.t("skills.noMatch")}</div>
             ) : null}
             {groupedSkills.map((group) => {
               const collapsed = Boolean(collapsedGroups[group.domain]) && !query;
@@ -6856,14 +6895,14 @@ function SkillsWorkspace({
         <div className="grid min-w-0 gap-6">
         <form onSubmit={onSave} className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
           <div className="mb-5 flex items-center gap-2">
-            <div className="truncate text-sm font-semibold">{editable ? "User Skill" : "Read Only Skill"}</div>
+            <div className="truncate text-sm font-semibold">{editable ? i18n.t("skills.userSkill") : i18n.t("skills.readOnlySkill")}</div>
             <Badge tone={checkTone} className="ml-auto shrink-0">
               {selectedCheck?.status || draft.permissionMode || "instruction_only"}
             </Badge>
           </div>
           <div className="grid gap-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="Name">
+              <FieldLabel label={i18n.t("skillForm.name")}>
                 <input
                   value={draft.name || ""}
                   onChange={(event) => onDraftChange({ ...draft, name: event.target.value })}
@@ -6871,7 +6910,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Title">
+              <FieldLabel label={i18n.t("skillForm.titleField")}>
                 <input
                   value={draft.title || ""}
                   onChange={(event) => onDraftChange({ ...draft, title: event.target.value })}
@@ -6881,7 +6920,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-4">
-              <FieldLabel label="Category">
+              <FieldLabel label={i18n.t("skillForm.categoryField")}>
                 <input
                   value={draft.category || ""}
                   onChange={(event) => onDraftChange({ ...draft, category: event.target.value })}
@@ -6889,7 +6928,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Type">
+              <FieldLabel label={i18n.t("skillForm.type")}>
                 <input
                   value={draft.skillType || "package"}
                   onChange={(event) => onDraftChange({ ...draft, skillType: event.target.value })}
@@ -6897,7 +6936,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Permission">
+              <FieldLabel label={i18n.t("skillForm.permission")}>
                 <select
                   value={draft.permissionMode || "instruction_only"}
                   onChange={(event) => onDraftChange({ ...draft, permissionMode: event.target.value })}
@@ -6911,7 +6950,7 @@ function SkillsWorkspace({
                   <option value="advanced_power_mode">advanced_power_mode</option>
                 </select>
               </FieldLabel>
-              <FieldLabel label="Risk">
+              <FieldLabel label={i18n.t("package.tableRisk")}>
                 <select
                   value={draft.riskLevel || "low"}
                   onChange={(event) => onDraftChange({ ...draft, riskLevel: event.target.value })}
@@ -6933,7 +6972,7 @@ function SkillsWorkspace({
                   onChange={(event) => onDraftChange({ ...draft, enabled: event.target.checked })}
                   disabled={!editable}
                 />
-                <span className="truncate">Enabled</span>
+                <span className="truncate">{i18n.t("skills.enabled")}</span>
               </label>
               <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
                 <input
@@ -6942,7 +6981,7 @@ function SkillsWorkspace({
                   onChange={(event) => onDraftChange({ ...draft, userInvocable: event.target.checked })}
                   disabled={!editable}
                 />
-                <span className="truncate">Slash callable</span>
+                <span className="truncate">{i18n.t("skills.slashCallable")}</span>
               </label>
               <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
                 <input
@@ -6951,10 +6990,10 @@ function SkillsWorkspace({
                   onChange={(event) => onDraftChange({ ...draft, disableModelInvocation: event.target.checked })}
                   disabled={!editable}
                 />
-                <span className="truncate">Manual only</span>
+                <span className="truncate">{i18n.t("skills.manualOnly")}</span>
               </label>
             </div>
-            <FieldLabel label="When To Use">
+            <FieldLabel label={i18n.t("skillForm.whenToUse")}>
               <textarea
                 value={draft.whenToUse || ""}
                 onChange={(event) => onDraftChange({ ...draft, whenToUse: event.target.value })}
@@ -6962,7 +7001,7 @@ function SkillsWorkspace({
                 className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
               />
             </FieldLabel>
-            <FieldLabel label="Description">
+            <FieldLabel label={i18n.t("skillForm.description")}>
               <textarea
                 value={draft.description || ""}
                 onChange={(event) => onDraftChange({ ...draft, description: event.target.value })}
@@ -6971,7 +7010,7 @@ function SkillsWorkspace({
               />
             </FieldLabel>
             <div className="grid gap-4 md:grid-cols-3">
-              <FieldLabel label="Allowed Tools">
+              <FieldLabel label={i18n.t("skillForm.allowedTools")}>
                 <input
                   value={(draft.allowedTools || draft.tools || []).join(", ")}
                   onChange={(event) => {
@@ -6982,7 +7021,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Disallowed Tools">
+              <FieldLabel label={i18n.t("skillForm.disallowedTools")}>
                 <input
                   value={(draft.disallowedTools || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, disallowedTools: splitList(event.target.value) })}
@@ -6990,7 +7029,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Entrypoint">
+              <FieldLabel label={i18n.t("skillForm.entrypoint")}>
                 <input
                   value={draft.entrypointTool || ""}
                   onChange={(event) => onDraftChange({ ...draft, entrypointTool: event.target.value })}
@@ -7000,7 +7039,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="Argument Hint">
+              <FieldLabel label={i18n.t("skillForm.argumentHint")}>
                 <input
                   value={draft.argumentHint || ""}
                   onChange={(event) => onDraftChange({ ...draft, argumentHint: event.target.value })}
@@ -7008,7 +7047,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Test Command">
+              <FieldLabel label={i18n.t("skillForm.testCommand")}>
                 <input
                   value={draft.testCommand || ""}
                   onChange={(event) => onDraftChange({ ...draft, testCommand: event.target.value })}
@@ -7018,7 +7057,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="Inputs">
+              <FieldLabel label={i18n.t("skillForm.inputs")}>
                 <textarea
                   value={(draft.inputs || []).join("\n")}
                   onChange={(event) => onDraftChange({ ...draft, inputs: splitLines(event.target.value) })}
@@ -7026,7 +7065,7 @@ function SkillsWorkspace({
                   className="min-h-24 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Outputs">
+              <FieldLabel label={i18n.t("skillForm.outputs")}>
                 <textarea
                   value={(draft.outputs || []).join("\n")}
                   onChange={(event) => onDraftChange({ ...draft, outputs: splitLines(event.target.value) })}
@@ -7036,7 +7075,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="Side Effects">
+              <FieldLabel label={i18n.t("skillForm.sideEffects")}>
                 <input
                   value={draft.sideEffects || ""}
                   onChange={(event) => onDraftChange({ ...draft, sideEffects: event.target.value })}
@@ -7044,7 +7083,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Backup Restore">
+              <FieldLabel label={i18n.t("skillForm.backupRestore")}>
                 <input
                   value={draft.backupRestore || ""}
                   onChange={(event) => onDraftChange({ ...draft, backupRestore: event.target.value })}
@@ -7054,7 +7093,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
-              <FieldLabel label="Requires Env">
+              <FieldLabel label={i18n.t("skillForm.requiresEnv")}>
                 <input
                   value={(draft.requiresEnv || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, requiresEnv: splitList(event.target.value) })}
@@ -7062,7 +7101,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Requires Binaries">
+              <FieldLabel label={i18n.t("skillForm.requiresBinaries")}>
                 <input
                   value={(draft.requiresBinaries || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, requiresBinaries: splitList(event.target.value) })}
@@ -7070,7 +7109,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Supported OS">
+              <FieldLabel label={i18n.t("skillForm.supportedOs")}>
                 <input
                   value={(draft.supportedOs || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, supportedOs: splitList(event.target.value) })}
@@ -7080,7 +7119,7 @@ function SkillsWorkspace({
               </FieldLabel>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <FieldLabel label="Support Files">
+              <FieldLabel label={i18n.t("skillForm.supportFiles")}>
                 <input
                   value={(draft.supportFiles || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, supportFiles: splitList(event.target.value) })}
@@ -7088,7 +7127,7 @@ function SkillsWorkspace({
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 />
               </FieldLabel>
-              <FieldLabel label="Tags">
+              <FieldLabel label={i18n.t("skillForm.tags")}>
                 <input
                   value={(draft.tags || []).join(", ")}
                   onChange={(event) => onDraftChange({ ...draft, tags: splitList(event.target.value) })}
@@ -7097,7 +7136,7 @@ function SkillsWorkspace({
                 />
               </FieldLabel>
             </div>
-            <FieldLabel label="Instructions">
+            <FieldLabel label={i18n.t("skillForm.instructions")}>
               <textarea
                 value={draft.instructions || ""}
                 onChange={(event) => onDraftChange({ ...draft, instructions: event.target.value })}
@@ -7117,11 +7156,11 @@ function SkillsWorkspace({
           </div>
           <div className="mt-5 flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={onNew} disabled={saving}>
-              New
+              {i18n.t("skills.new")}
             </Button>
             {userSkillSelected ? (
               <Button type="button" variant="danger" onClick={onDelete} disabled={saving}>
-                Delete
+                {i18n.t("skills.delete")}
               </Button>
             ) : null}
             <Button type="submit" disabled={!editable || saving || !draft.name}>
@@ -7216,7 +7255,7 @@ function SkillPackageManagerPanel({
     try {
       const payload = await onPreflight(packagePath.trim());
       setPreflight(payload);
-      setLocalMessage("Preflight complete");
+      setLocalMessage(i18n.t("package.messages.preflightComplete"));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -7229,7 +7268,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onImport(packagePath.trim());
-      setLocalMessage("Package imported");
+      setLocalMessage(i18n.t("package.messages.packageImported"));
       setPreflight(null);
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -7244,7 +7283,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onExport(exportSkillName.trim(), exportPath.trim(), releaseExport, privateKeyPath || undefined);
-      setLocalMessage(releaseExport ? "Release package exported" : "Dev package exported");
+      setLocalMessage(releaseExport ? i18n.t("package.messages.releaseExported") : i18n.t("package.messages.devExported"));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -7258,7 +7297,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onSetEnabled(skillPackageIdValue, enabled);
-      setLocalMessage(enabled ? "Package enabled" : "Package disabled");
+      setLocalMessage(enabled ? i18n.t("package.messages.packageEnabled") : i18n.t("package.messages.packageDisabled"));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -7274,7 +7313,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onUninstall(skillPackageIdValue);
-      setLocalMessage("Package uninstalled");
+      setLocalMessage(i18n.t("package.messages.packageUninstalled"));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -7287,7 +7326,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onSetSafeMode(enabled, governanceReason.trim() || undefined);
-      setLocalMessage(enabled ? "Safe Mode enabled" : "Safe Mode disabled");
+      setLocalMessage(enabled ? i18n.t("package.messages.safeModeEnabled") : i18n.t("package.labels.safeModeDisabled"));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -7304,7 +7343,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onTrustSigner(fingerprint, governanceReason.trim() || undefined);
-      setLocalMessage("Signer trusted");
+      setLocalMessage(i18n.t("package.messages.signerTrusted"));
       setSignerFingerprint("");
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -7322,7 +7361,7 @@ function SkillPackageManagerPanel({
     setLocalError("");
     try {
       await onRevokeSigner(fingerprint, governanceReason.trim() || undefined);
-      setLocalMessage("Signer revoked");
+      setLocalMessage(i18n.t("package.messages.signerRevoked"));
       setSignerFingerprint("");
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -7345,7 +7384,7 @@ function SkillPackageManagerPanel({
         packageSha256: packageSha256 || undefined,
         reason: governanceReason.trim() || undefined,
       });
-      setLocalMessage("Package blocked");
+      setLocalMessage(i18n.t("package.messages.packageBlocked"));
       setBlockPackageId("");
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -7359,7 +7398,7 @@ function SkillPackageManagerPanel({
     <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
       <div className="mb-5 flex min-w-0 items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
-        <div className="min-w-0 flex-1 truncate text-sm font-semibold">.vsk Package Manager</div>
+        <div className="min-w-0 flex-1 truncate text-sm font-semibold">{i18n.t("package.title")}</div>
         <Badge tone="muted" className="shrink-0">
           {packages.length}
         </Badge>
@@ -7370,23 +7409,23 @@ function SkillPackageManagerPanel({
 
       <div className="grid gap-4">
         <div className="grid gap-3">
-          <DataLine label="Store" value={packageStore || "-"} />
+          <DataLine label={i18n.t("package.store")} value={packageStore || "-"} />
           {displayMessage ? <Badge tone="ok" className="w-fit">{displayMessage}</Badge> : null}
           {displayError ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{displayError}</div> : null}
         </div>
 
         <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-medium">Governance</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{i18n.t("package.governance")}</span>
             <Badge tone={safeModeEnabled ? "warn" : "muted"} className="shrink-0">
-              {safeModeEnabled ? "Safe Mode" : "Standard"}
+              {safeModeEnabled ? i18n.t("package.safeMode") : i18n.t("package.standard")}
             </Badge>
             <Badge tone="muted" className="shrink-0">
               {audit.length} audit
             </Badge>
           </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-            <FieldLabel label="Reason">
+            <FieldLabel label={i18n.t("package.reason")}>
               <input
                 value={governanceReason}
                 onChange={(event) => setGovernanceReason(event.target.value)}
@@ -7401,11 +7440,11 @@ function SkillPackageManagerPanel({
               onClick={() => void runSetSafeMode(!safeModeEnabled)}
             >
               {packageActionId === "safe-mode" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
-              {safeModeEnabled ? "Disable Safe Mode" : "Enable Safe Mode"}
+              {safeModeEnabled ? i18n.t("package.disableSafeMode") : i18n.t("package.enableSafeMode")}
             </Button>
           </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
-            <FieldLabel label="Signer Fingerprint">
+            <FieldLabel label={i18n.t("package.signerFingerprint")}>
               <input
                 value={signerFingerprint}
                 onChange={(event) => setSignerFingerprint(event.target.value)}
@@ -7414,15 +7453,15 @@ function SkillPackageManagerPanel({
             </FieldLabel>
             <Button type="button" variant="outline" className="self-end" disabled={loading || !signerFingerprint.trim()} onClick={() => void runTrustSigner()}>
               <Check className="h-4 w-4" />
-              Trust
+              {i18n.t("package.trust")}
             </Button>
             <Button type="button" variant="danger" className="self-end" disabled={loading || !signerFingerprint.trim()} onClick={() => void runRevokeSigner()}>
               <X className="h-4 w-4" />
-              Revoke
+              {i18n.t("package.revoke")}
             </Button>
           </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-            <FieldLabel label="Package Id">
+            <FieldLabel label={i18n.t("package.packageId")}>
               <input
                 value={blockPackageId}
                 onChange={(event) => setBlockPackageId(event.target.value)}
@@ -7431,14 +7470,14 @@ function SkillPackageManagerPanel({
             </FieldLabel>
             <Button type="button" variant="danger" className="self-end" disabled={loading || !blockPackageId.trim()} onClick={() => void runBlockPackage()}>
               <EyeOff className="h-4 w-4" />
-              Block
+              {i18n.t("package.block")}
             </Button>
           </div>
           {auditTail.length ? (
             <div className="grid gap-1 border-t border-border pt-3 text-xs text-muted-foreground">
               {auditTail.map((item, index) => (
-                <div key={`${String(item.event || "audit")}-${index}`} className="flex min-w-0 gap-2">
-                  <span className="shrink-0 font-mono">{String(item.event || "audit")}</span>
+                <div key={`${String(item.event || i18n.t("package.audit"))}-${index}`} className="flex min-w-0 gap-2">
+                  <span className="shrink-0 font-mono">{String(item.event || i18n.t("package.audit"))}</span>
                   <span className="min-w-0 truncate">{String(item.skill_id || item.signer_fingerprint || item.package_id || item.reason || "")}</span>
                 </div>
               ))}
@@ -7447,7 +7486,7 @@ function SkillPackageManagerPanel({
         </div>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
-          <FieldLabel label="Package Path">
+          <FieldLabel label={i18n.t("package.packagePath")}>
             <input
               value={packagePath}
               onChange={(event) => setPackagePath(event.target.value)}
@@ -7456,7 +7495,7 @@ function SkillPackageManagerPanel({
           </FieldLabel>
           <Button type="button" variant="outline" className="self-end" disabled={loading || !packagePath.trim()} onClick={() => void runPreflight()}>
             <Eye className="h-4 w-4" />
-            Preflight
+            {i18n.t("package.preflight")}
           </Button>
           <Button type="button" className="self-end" disabled={loading || !packagePath.trim()} onClick={() => void runImport()}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -7476,11 +7515,11 @@ function SkillPackageManagerPanel({
             </div>
             <div className="grid gap-2 md:grid-cols-3">
               <DataLine label="Version" value={String(preview.version || "-")} />
-              <DataLine label="Risk" value={skillPackageRisk(preview)} />
+              <DataLine label={i18n.t("package.tableRisk")} value={skillPackageRisk(preview)} />
               <DataLine label="Signer" value={skillPackageSigner(preview)} mono />
             </div>
             <OutputBlock label="Permissions" value={skillPackagePermissions(preview).join("\n")} />
-            {preview.governance ? <OutputBlock label="Governance" value={formatPayload(preview.governance)} /> : null}
+            {preview.governance ? <OutputBlock label={i18n.t("package.governance")} value={formatPayload(preview.governance)} /> : null}
             {preview.dryRun ? <OutputBlock label="Dry Run" value={formatPayload(preview.dryRun)} /> : null}
             {preview.manifest ? <OutputBlock label="Manifest" value={formatPayload(preview.manifest)} /> : null}
           </div>
@@ -7488,14 +7527,14 @@ function SkillPackageManagerPanel({
 
         <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <FieldLabel label="Skill Name">
+            <FieldLabel label={i18n.t("package.skillName")}>
               <input
                 value={exportSkillName}
                 onChange={(event) => setExportSkillName(event.target.value)}
                 className="h-10 w-full rounded-md border border-border bg-card px-3 text-sm outline-none focus:border-primary"
               />
             </FieldLabel>
-            <FieldLabel label="Output Path">
+            <FieldLabel label={i18n.t("package.outputPath")}>
               <input
                 value={exportPath}
                 onChange={(event) => setExportPath(event.target.value)}
@@ -7504,7 +7543,7 @@ function SkillPackageManagerPanel({
             </FieldLabel>
           </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-            <FieldLabel label="Private Key Path">
+            <FieldLabel label={i18n.t("package.privateKeyPath")}>
               <input
                 value={exportPrivateKeyPath}
                 onChange={(event) => setExportPrivateKeyPath(event.target.value)}
@@ -7513,7 +7552,7 @@ function SkillPackageManagerPanel({
             </FieldLabel>
             <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-border px-3 text-sm text-muted-foreground">
               <input type="checkbox" checked={releaseExport} onChange={(event) => setReleaseExport(event.target.checked)} />
-              <span className="truncate">Signed release</span>
+              <span className="truncate">{i18n.t("skills.signedRelease")}</span>
             </label>
           </div>
           <div className="flex justify-end">
@@ -7524,20 +7563,20 @@ function SkillPackageManagerPanel({
               onClick={() => void runExport()}
             >
               <Copy className="h-4 w-4" />
-              Export
+              {i18n.t("package.export")}
             </Button>
           </div>
         </div>
 
         <div className="overflow-hidden rounded-lg border border-border">
           <div className="grid grid-cols-[minmax(0,1fr)_76px_150px_minmax(300px,390px)] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="truncate">Package</span>
-            <span className="truncate">Risk</span>
-            <span className="truncate">Status</span>
-            <span className="truncate">Actions</span>
+            <span className="truncate">{i18n.t("subagent.roles.outfitPackageInspection")}</span>
+            <span className="truncate">{i18n.t("package.tableRisk")}</span>
+            <span className="truncate">{i18n.t("connector.status")}</span>
+            <span className="truncate">{i18n.t("package.tableActions")}</span>
           </div>
           {packages.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-muted-foreground">No installed .vsk packages.</div>
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">{i18n.t("package.noPackages")}</div>
           ) : null}
           {packages.map((pkg, index) => {
             const id = skillPackageId(pkg);
@@ -7566,7 +7605,7 @@ function SkillPackageManagerPanel({
                     onClick={() => void runSetEnabled(id, !enabled)}
                   >
                     {packageActionId === id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : enabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    {enabled ? "Disable" : "Enable"}
+                    {enabled ? i18n.t("package.disable") : i18n.t("package.enable")}
                   </Button>
                   <Button
                     type="button"
@@ -7576,7 +7615,7 @@ function SkillPackageManagerPanel({
                     onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
                   >
                     <Check className="h-3.5 w-3.5" />
-                    Trust
+                    {i18n.t("package.trust")}
                   </Button>
                   <Button
                     type="button"
@@ -7586,7 +7625,7 @@ function SkillPackageManagerPanel({
                     onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
                   >
                     <X className="h-3.5 w-3.5" />
-                    Revoke
+                    {i18n.t("package.revoke")}
                   </Button>
                   <Button
                     type="button"
@@ -7596,7 +7635,7 @@ function SkillPackageManagerPanel({
                     onClick={() => void runBlockPackage(pkg)}
                   >
                     <EyeOff className="h-3.5 w-3.5" />
-                    Block
+                    {i18n.t("package.block")}
                   </Button>
                   <Button
                     type="button"
@@ -7606,7 +7645,7 @@ function SkillPackageManagerPanel({
                     onClick={() => void runUninstall(id)}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    Uninstall
+                    {i18n.t("package.uninstall")}
                   </Button>
                 </div>
               </div>
@@ -7768,6 +7807,7 @@ function DoctorWorkspace({
   onExportSupportBundle: () => void;
   onCopy: () => void;
 }) {
+  const { t } = useTranslation();
   const summary = report?.summary;
   const checks = report?.checks ?? [];
   const suggestedFixes = checks.filter((check) => check.status !== "ok" && (check.fixCommand || check.howToFix)).slice(0, 8);
@@ -7779,7 +7819,7 @@ function DoctorWorkspace({
           <div className="flex min-w-0 items-center gap-3">
             <Shield className="h-4 w-4 shrink-0 text-primary" />
             <div className="min-w-0 flex-1">
-              <h1 className="truncate text-lg font-semibold">Startup Doctor</h1>
+              <h1 className="truncate text-lg font-semibold">{t("doctor.title")}</h1>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="truncate">{report?.version || "runtime"}</span>
                 {report?.scope ? <span className="truncate">{report.scope}</span> : null}
@@ -7787,14 +7827,14 @@ function DoctorWorkspace({
               </div>
             </div>
             <Badge tone={report?.ok ? "ok" : "warn"} className="shrink-0">
-              {report?.ok ? "Ready" : "Needs attention"}
+              {report?.ok ? t("doctor.ready") : t("connector.needsAttention")}
             </Badge>
           </div>
           <div className="mt-5 grid gap-3 sm:grid-cols-4">
-            <DoctorSummaryTile label="OK" value={summary?.okCount ?? 0} tone="ok" />
-            <DoctorSummaryTile label="Warning" value={summary?.warningCount ?? 0} tone="warn" />
-            <DoctorSummaryTile label="Error" value={summary?.errorCount ?? 0} tone="danger" />
-            <DoctorSummaryTile label="Unknown" value={summary?.unknownCount ?? 0} tone="muted" />
+            <DoctorSummaryTile label={t("doctor.ok")} value={summary?.okCount ?? 0} tone="ok" />
+            <DoctorSummaryTile label={t("doctor.warning")} value={summary?.warningCount ?? 0} tone="warn" />
+            <DoctorSummaryTile label={t("doctor.error")} value={summary?.errorCount ?? 0} tone="danger" />
+            <DoctorSummaryTile label={t("doctor.unknown")} value={summary?.unknownCount ?? 0} tone="muted" />
           </div>
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             {message ? (
@@ -7804,7 +7844,7 @@ function DoctorWorkspace({
             ) : null}
             <Button type="button" variant="outline" onClick={onOpenSettings}>
               <Settings className="h-4 w-4" />
-              Settings
+              {t("doctor.settings")}
             </Button>
             <Button type="button" variant="outline" onClick={onExportSupportBundle} disabled={exportingSupportBundle}>
               {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -7812,7 +7852,7 @@ function DoctorWorkspace({
             </Button>
             <Button type="button" variant="outline" onClick={onCopy} disabled={!report}>
               <Copy className="h-4 w-4" />
-              Copy
+              {t("connector.copy")}
             </Button>
             <Button type="button" onClick={onRefresh} disabled={loading}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -7825,7 +7865,7 @@ function DoctorWorkspace({
           <section className="rounded-xl border border-border bg-card p-5 shadow-panel">
             <div className="mb-4 flex min-w-0 items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-              <h2 className="truncate text-sm font-semibold">Suggested fixes</h2>
+              <h2 className="truncate text-sm font-semibold">{t("doctor.suggestedFixes")}</h2>
               <Badge tone="warn" className="ml-auto shrink-0">
                 {suggestedFixes.length}
               </Badge>
@@ -7849,7 +7889,7 @@ function DoctorWorkspace({
         <div className="grid gap-6">
           {checks.length === 0 ? (
             <div className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground shadow-panel">
-              {loading ? "正在运行诊断…" : "暂无诊断结果。"}
+              {loading ? t("doctor.running") : t("doctor.noResults")}
             </div>
           ) : null}
           {groupedChecks.map((group) => (
@@ -7937,6 +7977,7 @@ function DoctorCheckRow({
   repairingUnityBridge: boolean;
   onRepairUnityBridge: () => void;
 }) {
+  const { t } = useTranslation();
   const openByDefault = check.status === "error" || check.status === "warning";
   const [open, setOpen] = useState(openByDefault);
   const tone = doctorTone(check.status);
@@ -7960,10 +8001,10 @@ function DoctorCheckRow({
       </button>
       {open ? (
         <div className="grid gap-3 border-t border-border px-4 py-4">
-          <DataLine label="What failed" value={check.whatFailed || (check.status === "ok" ? "-" : check.message)} />
-          <DataLine label="Why" value={check.whyItMatters || "-"} />
-          <DataLine label="How to fix" value={check.howToFix || "-"} />
-          {check.fixCommand ? <DataLine label="Fix" value={check.fixCommand} /> : null}
+          <DataLine label={t("doctor.whatFailed")} value={check.whatFailed || (check.status === "ok" ? "-" : check.message)} />
+          <DataLine label={t("doctor.why")} value={check.whyItMatters || "-"} />
+          <DataLine label={t("doctor.howToFix")} value={check.howToFix || "-"} />
+          {check.fixCommand ? <DataLine label={t("doctor.fix")} value={check.fixCommand} /> : null}
           {canRepairUnityBridge ? (
             <div className="flex justify-end">
               <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={onRepairUnityBridge} disabled={repairingUnityBridge}>
@@ -7972,8 +8013,8 @@ function DoctorCheckRow({
               </Button>
             </div>
           ) : null}
-          <DataLine label="Message" value={check.message || "-"} />
-          {check.detail !== undefined ? <OutputBlock label="Detail" value={formatPayload(check.detail)} /> : null}
+          <DataLine label={t("doctor.message")} value={check.message || "-"} />
+          {check.detail !== undefined ? <OutputBlock label={t("doctor.detail")} value={formatPayload(check.detail)} /> : null}
         </div>
       ) : null}
     </div>
@@ -8007,6 +8048,7 @@ function doctorStatusLabel(status: string): string {
 }
 
 function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; onOpenSettings?: () => void }) {
+  const { t } = useTranslation();
   if (item.type === "user") {
     return (
       <div className="flex justify-end">
@@ -8026,13 +8068,13 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
   }
 
   if (item.type === "result") {
-    return <ShellResultCard title={item.error === "rejected" ? "已驳回" : "执行结果"} result={item.result} error={item.error} />;
+    return <ShellResultCard title={item.error === "rejected" ? t("agent.rejected") : t("agent.executionResult")} result={item.result} error={item.error} />;
   }
 
   if (item.type === "compact") {
     return (
       <div className="rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
-        <div className="mb-2 text-xs font-medium text-muted-foreground">已压缩的历史</div>
+        <div className="mb-2 text-xs font-medium text-muted-foreground">{t("agent.compactedHistory")}</div>
         <pre className="app-scrollbar max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
       </div>
     );
@@ -8046,14 +8088,14 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
           <div className="flex min-w-0 items-center gap-2">
             <Bot className="h-4 w-4 shrink-0 text-primary" />
             <span className="min-w-0 flex-1 truncate font-medium">
-              {task.displayName || "后台任务"} · {subAgentRoleLabel(task.role)}
+              {task.displayName || t("agent.subagentTask")} · {subAgentRoleLabel(task.role)}
             </span>
             <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
               {task.status}
             </Badge>
           </div>
           <p className="whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
-            {task.summary || task.error || task.task || "No summary was returned."}
+            {task.summary || task.error || task.task || t("agent.noSummaryReturned")}
           </p>
           {task.result !== undefined ? <OutputBlock label="Result" value={formatPayload(task.result)} /> : null}
         </div>
@@ -8078,14 +8120,14 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
       <div className="flex justify-start">
         <div className="max-w-[85%] space-y-3 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
           <p className="text-muted-foreground">
-            这句话我还没办法直接理解——当前在用本地关键词规划，只认识「日志、截图、表情、材质、健康检查」这类固定指令。
+            {t("agent.keywordPlannerHint1")}
           </p>
           <p className="text-muted-foreground">
-            在设置里绑定模型供应商后，就能用自然语言交流并自动规划工具调用；如果已绑定密钥，说明 AI 规划还没启用，重启核心或检查供应商配置即可。
+            {t("agent.keywordPlannerHint2")}
           </p>
           <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenSettings?.()}>
             <Settings className="mr-1 h-3.5 w-3.5" />
-            打开设置
+            {t("agent.openSettings")}
           </Button>
         </div>
       </div>
@@ -8101,14 +8143,14 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
             <p className="mt-2 flex items-center gap-1.5 text-xs text-primary">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
               <span>
-                我接下来会{displayStep(nextStep)}
+                {t("agent.willDoNext", { step: displayStep(nextStep) })}
                 {response.plan.skillTool ? `：${response.plan.skillTool}` : ""}
               </span>
             </p>
           ) : null}
           <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
             <span>{response.plan.plannerLabel || displayPlanner(response.plan.planner)}</span>
-            {item.elapsedSeconds ? <span>· 已运行 {formatDuration(item.elapsedSeconds)}</span> : null}
+            {item.elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(item.elapsedSeconds) })}</span> : null}
           </div>
         </div>
 
@@ -8125,13 +8167,13 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
             statusTone={shell.result ? (shell.result.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
             statusLabel={
               shell.result
-                ? `退出码 ${shell.result.exitCode} · ${formatDuration(shell.result.durationSeconds)}`
+                ? t("shell.exitCodeDuration", { code: shell.result.exitCode, time: formatDuration(shell.result.durationSeconds) })
                 : awaitingApproval
-                  ? "等待确认"
-                  : `风险 ${shell.classification.risk}`
+                  ? t("shell.awaitConfirmation")
+                  : t("shell.riskLevel", { level: shell.classification.risk })
             }
           >
-            <DataLine label="目录" value={shell.classification.cwd} />
+            <DataLine label={t("approval.directory")} value={shell.classification.cwd} />
             <div className="overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
               <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
             </div>
@@ -8146,32 +8188,32 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
             ) : null}
             {shell.result ? (
               <>
-                <DataLine label="耗时" value={formatDuration(shell.result.durationSeconds)} />
-                <OutputBlock label="输出" value={shell.result.stdout} />
-                {shell.result.stderr ? <OutputBlock label="错误输出" value={shell.result.stderr} danger /> : null}
+                <DataLine label={t("shell.elapsed")} value={formatDuration(shell.result.durationSeconds)} />
+                <OutputBlock label={t("shell.output")} value={shell.result.stdout} />
+                {shell.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shell.result.stderr} danger /> : null}
               </>
             ) : null}
           </RunRow>
         ) : null}
 
         {skill ? (
-          <RunRow icon="skill" title={skill.tool || "能力调用"} statusTone={skillTone(skill)} statusLabel={displaySkillStatus(skill.status)}>
-            <DataLine label="工具" value={skill.tool || "-"} mono />
-            {skill.category ? <DataLine label="类别" value={skill.category} /> : null}
-            {skill.error ? <DataLine label="错误" value={skill.error} /> : null}
-            {skill.result !== undefined ? <OutputBlock label="数据" value={formatPayload(skill.result)} /> : null}
+          <RunRow icon="skill" title={skill.tool || t("skills.skillCall")} statusTone={skillTone(skill)} statusLabel={displaySkillStatus(skill.status)}>
+            <DataLine label={t("skills.tool")} value={skill.tool || "-"} mono />
+            {skill.category ? <DataLine label={t("skills.category")} value={skill.category} /> : null}
+            {skill.error ? <DataLine label={t("skills.error")} value={skill.error} /> : null}
+            {skill.result !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(skill.result)} /> : null}
           </RunRow>
         ) : null}
 
         {awaitingApproval ? (
           <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span>等待确认 — 请在下方输入框上方的审批区处理</span>
+            <span>{t("approval.awaitingInline")}</span>
           </div>
         ) : null}
         {shell?.error ? (
-          <RunRow icon="shell" title="执行错误" statusTone="danger" statusLabel="失败">
-            <DataLine label="错误" value={shell.error} />
+          <RunRow icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")}>
+            <DataLine label={t("skills.error")} value={shell.error} />
           </RunRow>
         ) : null}
       </div>
@@ -8188,6 +8230,7 @@ function ReasoningTracePanel({
   fallbackLabel: string;
   elapsedSeconds?: number;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const items = (trace?.items || []).filter((item) => (item.text || "").trim() || item.opaque);
   if (!items.length) {
@@ -8224,7 +8267,7 @@ function ReasoningTracePanel({
           {items.map((item, index) => (
             <OutputBlock
               key={`${item.title || item.kind || "reasoning"}-${index}`}
-              label={item.title || item.kind || "Reasoning"}
+              label={item.title || item.kind || t("thinking.reasoning")}
               value={item.text || (item.opaque ? "Opaque reasoning item retained by provider response." : "")}
             />
           ))}
@@ -8303,28 +8346,29 @@ function ApprovalCard({
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-panel">
       <div className="flex min-w-0 items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-        <div className="truncate text-sm font-semibold">待确认</div>
+        <div className="truncate text-sm font-semibold">{t("header.pendingApprovals")}</div>
         <Badge tone="warn" className="ml-auto shrink-0">
           {approval.riskLevel || "high"}
         </Badge>
       </div>
       <div className="mt-4 grid gap-3">
-        <DataLine label="命令" value={approval.preview?.command || "-"} mono />
-        <DataLine label="目录" value={approval.preview?.cwd || "-"} />
-        <DataLine label="原因" value={approval.reason || "-"} />
+        <DataLine label={t("approval.command")} value={approval.preview?.command || "-"} mono />
+        <DataLine label={t("approval.directory")} value={approval.preview?.cwd || "-"} />
+        <DataLine label={t("approval.reason")} value={approval.reason || "-"} />
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="outline" disabled={loading} onClick={() => onReject(approval.id)}>
           <X className="h-4 w-4" />
-          驳回
+          {t("approval.reject")}
         </Button>
         <Button variant="primary" disabled={loading} onClick={() => onApprove(approval.id)}>
           <Check className="h-4 w-4" />
-          同意执行
+          {t("approval.approve")}
         </Button>
       </div>
     </section>
@@ -8332,6 +8376,7 @@ function ApprovalCard({
 }
 
 function ShellResultCard({ title, result, error }: { title: string; result?: AgentShellResult; error?: string }) {
+  const { t } = useTranslation();
   return (
     <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
       <div className="mb-3 flex min-w-0 items-center gap-2">
@@ -8339,16 +8384,16 @@ function ShellResultCard({ title, result, error }: { title: string; result?: Age
         <div className="truncate text-sm font-semibold">{title}</div>
         {result ? (
           <Badge tone={result.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-            退出码 {result.exitCode}
+            {t("shell.exitCode", { code: result.exitCode })}
           </Badge>
         ) : null}
       </div>
-      {error ? <DataLine label="错误" value={error} /> : null}
+      {error ? <DataLine label={t("skills.error")} value={error} /> : null}
       {result ? (
         <div className="grid gap-3">
-          <DataLine label="耗时" value={`${result.durationSeconds}s`} />
-          <OutputBlock label="输出" value={result.stdout} />
-          {result.stderr ? <OutputBlock label="错误输出" value={result.stderr} danger /> : null}
+          <DataLine label={t("shell.elapsed")} value={`${result.durationSeconds}s`} />
+          <OutputBlock label={t("shell.output")} value={result.stdout} />
+          {result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={result.stderr} danger /> : null}
         </div>
       ) : null}
     </section>
@@ -8391,13 +8436,14 @@ function SidebarSection({
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <section className="mt-8 min-w-0 max-md:hidden">
       {onToggleCollapse ? (
         <button
           type="button"
           onClick={onToggleCollapse}
-          title={collapsed ? "展开" : "折叠"}
+          title={collapsed ? t("common.expand") : t("common.collapse")}
           className="group mb-3 flex w-full items-center gap-1 px-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
         >
           <span className="truncate">{title}</span>
@@ -8484,7 +8530,7 @@ function SidebarProject({
       {onOpenMenu ? (
         <button
           type="button"
-          title="项目菜单"
+          title={i18n.t("project.menu")}
           onClick={onOpenMenu}
           className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-background hover:text-foreground group-hover:opacity-100"
         >
@@ -8494,7 +8540,7 @@ function SidebarProject({
       {onToggleCollapse ? (
         <button
           type="button"
-          title={collapsed ? "展开对话" : "折叠对话"}
+          title={collapsed ? i18n.t("project.expandChats") : i18n.t("project.collapseChats")}
           onClick={(event) => {
             event.stopPropagation();
             onToggleCollapse();
@@ -8538,6 +8584,7 @@ function SidebarChat({
   onRenameChange?: (value: string) => void;
   onRenameCommit?: (cancel?: boolean) => void;
 }) {
+  const { t } = useTranslation();
   if (renaming) {
     return (
       <div className={cn("flex h-9 w-full min-w-0 items-center rounded-md bg-muted px-2", indent ? "pl-9" : "")}>
@@ -8577,7 +8624,7 @@ function SidebarChat({
       <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
         <button
           type="button"
-          title={pinned ? "取消置顶" : "置顶"}
+          title={pinned ? t("contextMenu.unpinChat") : "置顶"}
           onClick={(event) => {
             event.stopPropagation();
             onTogglePin?.();
@@ -8588,7 +8635,7 @@ function SidebarChat({
         </button>
         <button
           type="button"
-          title="永久删除"
+          title={t("contextMenu.permanentDelete")}
           onClick={(event) => {
             event.stopPropagation();
             onDelete?.();
@@ -8611,19 +8658,19 @@ function sortChatsByPin(list: ChatThread[]): ChatThread[] {
 }
 
 const SKILL_DOMAIN_RULES: Array<{ label: string; pattern: RegExp }> = [
-  { label: "Roslyn 高级", pattern: /roslyn/i },
-  { label: "捏脸与表情", pattern: /blendshape|face|expression/i },
-  { label: "材质与外观", pattern: /material|shader|texture/i },
-  { label: "衣柜与 FX", pattern: /clothing|outfit|wardrobe|gesture|\bfx\b|fx_/i },
-  { label: "参数优化", pattern: /parameter|param_/i },
-  { label: "截图与视觉", pattern: /screenshot|capture|scene_view|vision|game_view/i },
-  { label: "包管理", pattern: /package|vpm|addon|modular/i },
-  { label: "审批与备份", pattern: /approval|approve|backup|restore|rollback/i },
-  { label: "Shell 与调试", pattern: /shell|command|console|debug/i },
-  { label: "诊断与状态", pattern: /\blog|health|diagno|status|check/i },
-  { label: "Avatar 扫描", pattern: /scan|avatar|inventory|control|animation|toggle/i },
+  { label: i18n.t("skills.domains.roslyn"), pattern: /roslyn/i },
+  { label: i18n.t("skills.domains.face"), pattern: /blendshape|face|expression/i },
+  { label: i18n.t("skills.domains.material"), pattern: /material|shader|texture/i },
+  { label: i18n.t("skills.domains.clothing"), pattern: /clothing|outfit|wardrobe|gesture|\bfx\b|fx_/i },
+  { label: i18n.t("skills.domains.parameter"), pattern: /parameter|param_/i },
+  { label: i18n.t("skills.domains.screenshot"), pattern: /screenshot|capture|scene_view|vision|game_view/i },
+  { label: i18n.t("skills.domains.package"), pattern: /package|vpm|addon|modular/i },
+  { label: i18n.t("skills.domains.approval"), pattern: /approval|approve|backup|restore|rollback/i },
+  { label: i18n.t("skills.domains.shell"), pattern: /shell|command|console|debug/i },
+  { label: i18n.t("skills.domains.diagnostics"), pattern: /\blog|health|diagno|status|check/i },
+  { label: i18n.t("skills.domains.avatarScan"), pattern: /scan|avatar|inventory|control|animation|toggle/i },
 ];
-const SKILL_DOMAIN_FALLBACK = "其他";
+const SKILL_DOMAIN_FALLBACK = "skills.domainFallback";
 const SKILL_DOMAIN_ORDER = [...SKILL_DOMAIN_RULES.map((rule) => rule.label), SKILL_DOMAIN_FALLBACK];
 
 function skillDomain(skill: AgentSkill): string {
@@ -8691,7 +8738,7 @@ function formatProofValue(value: unknown): string {
     return "-";
   }
   if (typeof value === "boolean") {
-    return value ? "yes" : "no";
+    return value ? i18n.t("proof.yes") : i18n.t("proof.no");
   }
   if (typeof value === "number") {
     return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -8737,7 +8784,7 @@ function groupProtectionBenchmarks(rows: AvatarEncryptionBenchmarkRow[]): Array<
   const groups: Array<{ scale: string; triangles: number; byProfile: Record<string, AvatarEncryptionBenchmarkRow> }> = [];
   for (const row of rows) {
     const triangles = Number(row.triangles || 0);
-    const scale = row.avatarScale || (triangles ? `${Math.round(triangles / 10000)}万面` : "unknown");
+    const scale = row.avatarScale || (triangles ? `${Math.round(triangles / 10000)}万面` : i18n.t("optimization.unknown"));
     let group = groups.find((item) => item.scale === scale);
     if (!group) {
       group = { scale, triangles, byProfile: {} };
@@ -8976,20 +9023,20 @@ function providerCapabilities(provider: string): Array<{ label: string; tone: "o
   const paid = provider !== "ollama";
   const local = provider === "ollama";
   const capabilities: Array<{ label: string; tone: "ok" | "warn" | "danger" | "muted" | "default" }> = [
-    { label: "text", tone: "muted" },
-    { label: "structured JSON", tone: "muted" },
+    { label: i18n.t("providerCapability.text"), tone: "muted" },
+    { label: i18n.t("providerCapability.structuredJson"), tone: "muted" },
   ];
   if (["gemini", "openai", "openrouter", "vertexai"].includes(provider)) {
-    capabilities.push({ label: "vision", tone: "muted" });
+    capabilities.push({ label: i18n.t("providerCapability.vision"), tone: "muted" });
   }
   if (local) {
-    capabilities.push({ label: "local", tone: "ok" }, { label: "offline", tone: "ok" }, { label: "free/local", tone: "ok" });
+    capabilities.push({ label: i18n.t("providerCapability.local"), tone: "ok" }, { label: i18n.t("providerCapability.offline"), tone: "ok" }, { label: i18n.t("providerCapability.freeLocal"), tone: "ok" });
   }
   if (paid) {
-    capabilities.push({ label: "paid API", tone: "warn" });
+    capabilities.push({ label: i18n.t("providerCapability.paidApi"), tone: "warn" });
   }
   if (["gemini", "anthropic", "openai", "openrouter", "vertexai"].includes(provider)) {
-    capabilities.push({ label: "long context", tone: "muted" });
+    capabilities.push({ label: i18n.t("providerCapability.longContext"), tone: "muted" });
   }
   return capabilities;
 }
@@ -9067,22 +9114,22 @@ function splitLines(value: string): string[] {
 
 function displayPlanner(planner: string): string {
   if (planner === "deterministic-local") {
-    return "本地规划";
+    return i18n.t("planner.local");
   }
   if (planner === "llm") {
-    return "AI 规划";
+    return i18n.t("planner.ai");
   }
-  return planner || "规划";
+  return planner || i18n.t("planner.fallback");
 }
 
 function displayStep(step: string): string {
   const labels: Record<string, string> = {
-    classify_shell: "检查命令风险",
-    execute_shell: "执行命令",
-    call_skill: "调用能力",
-    request_approval: "等待确认",
-    await_user_instruction: "等待输入",
-    done: "完成",
+    classify_shell: i18n.t("step.classifyShell"),
+    execute_shell: i18n.t("step.executeShell"),
+    call_skill: i18n.t("step.callSkill"),
+    request_approval: i18n.t("shell.awaitConfirmation"),
+    await_user_instruction: i18n.t("step.awaitUserInstruction"),
+    done: i18n.t("step.done"),
   };
   return labels[step] || step;
 }
@@ -9104,10 +9151,10 @@ function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" 
 
 function displaySkillStatus(status: string): string {
   const labels: Record<string, string> = {
-    executed: "已运行",
-    loaded: "已加载",
-    failed: "失败",
-    blocked: "已阻止",
+    executed: i18n.t("agent.executed"),
+    loaded: i18n.t("skillStatus.loaded"),
+    failed: i18n.t("skillStatus.failed"),
+    blocked: i18n.t("skillStatus.blocked"),
   };
   return labels[status] || status || "-";
 }
@@ -9176,16 +9223,16 @@ function quoteLines(text: string): string {
 function formatDuration(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   if (seconds < 60) {
-    return `${seconds}秒`;
+    return i18n.t("format.seconds", { n: seconds });
   }
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   if (minutes < 60) {
-    return rest > 0 ? `${minutes}分${rest}秒` : `${minutes}分钟`;
+    return rest > 0 ? i18n.t("format.minutesSeconds", { m: minutes, s: rest }) : i18n.t("format.minutes", { n: minutes });
   }
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
-  return restMinutes > 0 ? `${hours}小时${restMinutes}分` : `${hours}小时`;
+  return restMinutes > 0 ? i18n.t("format.hoursMinutes", { h: hours, m: restMinutes }) : i18n.t("format.hours", { n: hours });
 }
 
 const HISTORY_ENTRY_MAX_CHARS = 2000;
@@ -9222,7 +9269,7 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
     } else if (item.type === "subagent") {
       const task = item.task;
       const text = [
-        `后台任务 ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
+        `${i18n.t("subagent.taskLabel")} ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
         task.summary || task.error || task.task || "",
       ]
         .filter(Boolean)
@@ -9238,16 +9285,16 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
 
 function buildCompactSummary(items: ConversationItem[]): string {
   const entries = buildChatHistory(items).map(
-    (entry) => `${entry.role === "user" ? "用户" : "助手"}: ${clipText(entry.text.replace(/\s+/g, " ").trim(), COMPACT_ENTRY_MAX_CHARS)}`,
+    (entry) => `${entry.role === "user" ? i18n.t("compact.user") : i18n.t("compact.assistant")}: ${clipText(entry.text.replace(/\s+/g, " ").trim(), COMPACT_ENTRY_MAX_CHARS)}`,
   );
   let lines = entries;
   if (entries.length > COMPACT_HEAD_ENTRIES + COMPACT_TAIL_ENTRIES) {
     const omitted = entries.length - COMPACT_HEAD_ENTRIES - COMPACT_TAIL_ENTRIES;
     lines = [
       ...entries.slice(0, COMPACT_HEAD_ENTRIES),
-      `（中间已省略 ${omitted} 条消息）`,
+      i18n.t("compact.omitted", { count: omitted }),
       ...entries.slice(entries.length - COMPACT_TAIL_ENTRIES),
     ];
   }
-  return `（历史压缩摘要，共 ${entries.length} 条消息）\n${lines.join("\n")}`;
+  return `${i18n.t("compact.summary", { count: entries.length })}\n${lines.join("\n")}`;
 }
