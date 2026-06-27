@@ -47,6 +47,8 @@ APPLY_RECOVERY_EXEMPT_WRITE_TARGETS = {
     "vrcforge_restore_checkpoint",
     "vrcforge_resolve_interrupted_apply_recovery",
 }
+CHECKPOINT_ARCHIVE_BYTES_PER_MB = 1024 * 1024
+CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT = 1024 * 1024
 ROLLBACK_FRAMEWORK_PACKAGES = {
     "modular_avatar": {
         "label": "Modular Avatar",
@@ -81,6 +83,7 @@ class AgentGatewayConfig:
     approval_timeout_seconds: int = 600
     execution_mode: str = "approval"
     roslyn_risk_acknowledged: bool = False
+    checkpoint_archive_max_size_mb: int = 0
 
 
 @dataclass
@@ -1439,6 +1442,7 @@ class AgentGateway:
                 "approval_timeout_seconds": 600,
                 "execution_mode": "approval",
                 "roslyn_risk_acknowledged": False,
+                "checkpoint_archive_max_size_mb": 0,
             }
             for key, value in defaults.items():
                 if key not in raw:
@@ -1455,6 +1459,9 @@ class AgentGateway:
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
                 execution_mode=normalize_execution_mode(raw.get("execution_mode")),
                 roslyn_risk_acknowledged=bool(raw.get("roslyn_risk_acknowledged", False)),
+                checkpoint_archive_max_size_mb=normalize_checkpoint_archive_max_size_mb(
+                    raw.get("checkpoint_archive_max_size_mb")
+                ),
             )
             if changed:
                 self.save_config(config)
@@ -1472,6 +1479,9 @@ class AgentGateway:
             "approval_timeout_seconds": int(config.approval_timeout_seconds),
             "execution_mode": normalize_execution_mode(config.execution_mode),
             "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
+            "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
+                config.checkpoint_archive_max_size_mb
+            ),
         }
         atomic_write_json(self.config_path, payload)
 
@@ -2396,6 +2406,90 @@ class AgentGateway:
         entries = entries[:limit]
         return {"ok": True, "checkpoints": entries, "count": len(entries)}
 
+    def checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        archives = self._checkpoint_archive_files()
+        total_bytes = sum(item["sizeBytes"] for item in archives)
+        return {
+            "ok": True,
+            "schema": "vrcforge.checkpoint_archive_storage.v1",
+            "directory": str(self.checkpoint_store_dir),
+            "sizeBytes": total_bytes,
+            "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
+            "archiveCount": len(archives),
+            "maxSizeMb": normalize_checkpoint_archive_max_size_mb(config.checkpoint_archive_max_size_mb),
+        }
+
+    def prune_checkpoint_archives(
+        self,
+        max_size_mb: int | None = None,
+        *,
+        protected_checkpoint_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        config = self.ensure_config()
+        normalized_max = normalize_checkpoint_archive_max_size_mb(
+            config.checkpoint_archive_max_size_mb if max_size_mb is None else max_size_mb
+        )
+        archives = self._checkpoint_archive_files()
+        total_bytes = sum(item["sizeBytes"] for item in archives)
+        protected_ids = set(protected_checkpoint_ids or set())
+        protected_ids.update(self._protected_checkpoint_archive_ids())
+        if archives:
+            newest = max(archives, key=lambda item: item["modifiedAt"])
+            protected_ids.add(newest["checkpointId"])
+        if normalized_max <= 0:
+            return {
+                **self.checkpoint_archive_usage(config),
+                "maxSizeMb": normalized_max,
+                "limitEnabled": False,
+                "deletedCount": 0,
+                "deletedBytes": 0,
+                "protectedCount": len(protected_ids),
+            }
+
+        target_bytes = normalized_max * CHECKPOINT_ARCHIVE_BYTES_PER_MB
+        deleted: list[dict[str, Any]] = []
+        remaining_bytes = total_bytes
+        for archive in sorted(archives, key=lambda item: item["modifiedAt"]):
+            if remaining_bytes <= target_bytes:
+                break
+            if archive["checkpointId"] in protected_ids:
+                continue
+            path = archive["path"]
+            try:
+                path.unlink()
+            except OSError as exc:
+                self.append_audit(
+                    {
+                        "event": "checkpoint_archive_prune_failed",
+                        "path": str(path),
+                        "error": str(exc),
+                    }
+                )
+                continue
+            deleted.append({"path": str(path), "checkpointId": archive["checkpointId"], "sizeBytes": archive["sizeBytes"]})
+            remaining_bytes -= archive["sizeBytes"]
+            self._remove_empty_checkpoint_archive_parents(path.parent)
+
+        summary = {
+            "ok": True,
+            "schema": "vrcforge.checkpoint_archive_prune.v1",
+            "directory": str(self.checkpoint_store_dir),
+            "maxSizeMb": normalized_max,
+            "limitEnabled": True,
+            "initialBytes": total_bytes,
+            "remainingBytes": max(0, remaining_bytes),
+            "remainingMb": round(max(0, remaining_bytes) / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
+            "archiveCount": len(self._checkpoint_archive_files()),
+            "deletedCount": len(deleted),
+            "deletedBytes": sum(item["sizeBytes"] for item in deleted),
+            "protectedCount": len(protected_ids),
+            "deleted": deleted[:20],
+        }
+        if deleted:
+            self.append_audit({"event": "checkpoint_archives_pruned", **summary})
+        return summary
+
     def list_interrupted_apply_recoveries(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         include_resolved = bool(params.get("includeResolved") or params.get("include_resolved"))
@@ -2916,6 +3010,7 @@ class AgentGateway:
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
     def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
@@ -2976,6 +3071,7 @@ class AgentGateway:
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
     def _create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -3696,6 +3792,52 @@ class AgentGateway:
         with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._maybe_record_adjustment_checkpoint(record)
+
+    def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
+        root = self.checkpoint_store_dir
+        if not root.is_dir():
+            return []
+        archives: list[dict[str, Any]] = []
+        for path in root.rglob("*.zip"):
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            archives.append(
+                {
+                    "path": path,
+                    "checkpointId": path.stem,
+                    "sizeBytes": stat.st_size,
+                    "modifiedAt": stat.st_mtime,
+                }
+            )
+        return archives
+
+    def _protected_checkpoint_archive_ids(self) -> set[str]:
+        protected: set[str] = set()
+        for recovery in self._active_apply_recoveries():
+            checkpoint_id = str(recovery.get("checkpointId") or recovery.get("checkpoint_id") or "").strip()
+            if checkpoint_id:
+                protected.add(checkpoint_id)
+        return protected
+
+    def _remove_empty_checkpoint_archive_parents(self, start: Path) -> None:
+        root = self.checkpoint_store_dir.resolve()
+        current = start
+        while True:
+            try:
+                resolved = current.resolve()
+            except OSError:
+                break
+            if resolved == root or root not in resolved.parents:
+                break
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
     def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
         if not self.checkpoint_log_path.exists():
@@ -6210,6 +6352,16 @@ def normalize_execution_mode(value: Any) -> str:
     if mode in {"auto", "auto_approve", "auto_approval", "autoapprove"}:
         return "auto"
     return "approval"
+
+
+def normalize_checkpoint_archive_max_size_mb(value: Any) -> int:
+    try:
+        amount = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    if amount <= 0:
+        return 0
+    return min(amount, CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT)
 
 
 def summarize_params(value: Any) -> dict[str, Any]:

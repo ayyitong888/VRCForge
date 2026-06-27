@@ -255,6 +255,14 @@ function formatConnectorActionMessage(client: ExternalAgentConnectorClient, acti
   return `${label} ${verb}`;
 }
 
+function formatStorageSize(bytes?: number) {
+  const value = typeof bytes === "number" && Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 type ConversationItem =
   | { id: string; type: "user"; text: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number }
@@ -555,6 +563,7 @@ export default function App() {
   const [connectorStatus, setConnectorStatus] = useState<ExternalAgentConnectorStatus | null>(null);
   const [loadingConnectors, setLoadingConnectors] = useState(false);
   const [connectorMessage, setConnectorMessage] = useState("");
+  const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("0");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const chatsLoadedRef = useRef(false);
@@ -718,6 +727,11 @@ export default function App() {
   useEffect(() => {
     chatsRef.current = chats;
   }, [chats]);
+
+  useEffect(() => {
+    const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
+    setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "0");
+  }, [connectorStatus?.gateway?.checkpointArchiveMaxSizeMb]);
 
   useEffect(() => {
     try {
@@ -2401,20 +2415,36 @@ export default function App() {
     }
   }
 
-  async function updateGatewaySettings(request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean }) {
+  async function updateGatewaySettings(request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean; checkpointArchiveMaxSizeMb?: number }) {
     setLoadingConnectors(true);
     setConnectorMessage("");
     setError("");
     try {
       const payload = await updateExternalAgentGateway(endpoint, request);
       setConnectorStatus(payload);
-      setConnectorMessage(request.revokeToken ? "Token revoked" : "Gateway updated");
+      setConnectorMessage(
+        request.revokeToken
+          ? "Token revoked"
+          : request.checkpointArchiveMaxSizeMb !== undefined
+            ? t("settings.checkpointArchiveUpdated")
+            : "Gateway updated",
+      );
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingConnectors(false);
     }
+  }
+
+  async function saveCheckpointArchiveLimit() {
+    const trimmed = checkpointArchiveLimitInput.trim();
+    const parsed = Number(trimmed || "0");
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setError(t("settings.checkpointArchiveLimitInvalid"));
+      return;
+    }
+    await updateGatewaySettings({ checkpointArchiveMaxSizeMb: Math.round(parsed) });
   }
 
   async function runConnectorAction(client: ExternalAgentConnectorClient, action: "install" | "uninstall") {
@@ -3559,6 +3589,16 @@ export default function App() {
                     </div>
                     {diagnosticsStatus?.logsDir ? <div className="mt-3 truncate text-xs text-muted-foreground/70">{diagnosticsStatus.logsDir}</div> : null}
                   </div>
+                </section>
+
+                <section className="mt-12">
+                  <CheckpointStoragePanel
+                    status={connectorStatus}
+                    loading={loadingConnectors}
+                    limitInput={checkpointArchiveLimitInput}
+                    onLimitInputChange={setCheckpointArchiveLimitInput}
+                    onSaveLimit={() => void saveCheckpointArchiveLimit()}
+                  />
                 </section>
 
                 <section className="mt-12">
@@ -5053,6 +5093,71 @@ function ProviderSetup({
         </Button>
       </div>
     </form>
+  );
+}
+
+function CheckpointStoragePanel({
+  status,
+  loading,
+  limitInput,
+  onLimitInputChange,
+  onSaveLimit,
+}: {
+  status: ExternalAgentConnectorStatus | null;
+  loading: boolean;
+  limitInput: string;
+  onLimitInputChange: (value: string) => void;
+  onSaveLimit: () => void;
+}) {
+  const { t } = useTranslation();
+  const usage = status?.gateway?.checkpointArchiveUsage;
+  const prune = status?.gateway?.checkpointArchivePrune;
+  const maxSizeMb = status?.gateway?.checkpointArchiveMaxSizeMb ?? usage?.maxSizeMb ?? 0;
+  const usageText = `${formatStorageSize(usage?.sizeBytes)} / ${maxSizeMb > 0 ? `${formatCount(maxSizeMb)} MB` : t("settings.unlimited")}`;
+  return (
+    <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+      <div className="flex min-w-0 items-center gap-2">
+        <Archive className="h-4 w-4 shrink-0 text-primary" />
+        <h2 className="min-w-0 flex-1 truncate text-base font-semibold">{t("settings.storage")}</h2>
+        <Badge tone={maxSizeMb > 0 ? "ok" : "muted"} className="shrink-0">
+          {maxSizeMb > 0 ? t("settings.limitOn") : t("settings.unlimited")}
+        </Badge>
+      </div>
+
+      <div className="mt-4 grid gap-3">
+        <DataLine label={t("settings.checkpointArchiveUsage")} value={usageText} />
+        <DataLine label={t("settings.checkpointArchiveCount")} value={formatCount(usage?.archiveCount)} />
+        <DataLine label={t("settings.checkpointArchiveDirectory")} value={usage?.directory || "-"} />
+      </div>
+
+      <div className="mt-5 flex min-w-0 flex-wrap items-end gap-3">
+        <label className="min-w-48 flex-1 text-sm">
+          <span className="mb-1 block font-medium">{t("settings.checkpointArchiveLimit")}</span>
+          <input
+            type="number"
+            min={0}
+            step={256}
+            value={limitInput}
+            onChange={(event) => onLimitInputChange(event.target.value)}
+            disabled={loading || !status}
+            className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
+          />
+        </label>
+        <Button type="button" disabled={loading || !status} onClick={onSaveLimit}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {t("common.save")}
+        </Button>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">{t("settings.checkpointArchiveLimitHint")}</div>
+      {prune ? (
+        <div className="mt-3 text-xs text-muted-foreground">
+          {t("settings.checkpointArchivePruned", {
+            count: prune.deletedCount ?? 0,
+            size: formatStorageSize(prune.deletedBytes),
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

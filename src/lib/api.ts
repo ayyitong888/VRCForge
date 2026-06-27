@@ -546,6 +546,30 @@ export type ExternalAgentConnectorStatus = {
     mcpUrl?: string;
     restUrl?: string;
     pendingApprovalCount?: number;
+    checkpointArchiveMaxSizeMb?: number;
+    checkpointArchiveUsage?: {
+      ok?: boolean;
+      schema?: string;
+      directory?: string;
+      sizeBytes?: number;
+      sizeMb?: number;
+      archiveCount?: number;
+      maxSizeMb?: number;
+    };
+    checkpointArchivePrune?: {
+      ok?: boolean;
+      schema?: string;
+      directory?: string;
+      maxSizeMb?: number;
+      limitEnabled?: boolean;
+      initialBytes?: number;
+      remainingBytes?: number;
+      remainingMb?: number;
+      archiveCount?: number;
+      deletedCount?: number;
+      deletedBytes?: number;
+      protectedCount?: number;
+    };
   };
   clients?: Record<
     "codexApp" | "codexCli" | "claudeCode" | "claudeCowork",
@@ -784,7 +808,7 @@ export async function fetchExternalAgentConnectors(endpoint: string, projectPath
 
 export async function updateExternalAgentGateway(
   endpoint: string,
-  request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean },
+  request: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean; checkpointArchiveMaxSizeMb?: number },
 ): Promise<ExternalAgentConnectorStatus> {
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/gateway`, {
     method: "POST",

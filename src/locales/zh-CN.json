@@ -47,7 +47,18 @@
     "onboardingDesc": "重新打开首次启动的三步引导（连接核心 / 绑定模型 / 选择项目）。",
     "providerDesc": "连接供应商后点击「刷新模型列表」，即可从该账号可用的模型中选择。",
     "language": "显示语言",
-    "languageDesc": "切换桌面界面的显示语言。此设置不影响智能体通信与工具接口。"
+    "languageDesc": "切换桌面界面的显示语言。此设置不影响智能体通信与工具接口。",
+    "storage": "存储",
+    "checkpointArchiveUsage": "Checkpoint 归档",
+    "checkpointArchiveCount": "归档数量",
+    "checkpointArchiveDirectory": "目录",
+    "checkpointArchiveLimit": "Checkpoint 归档最大大小（MB）",
+    "checkpointArchiveLimitHint": "0 表示不限制。设置上限后，VRCForge 会清理最旧的 checkpoint ZIP 归档，并保留正在恢复中的 checkpoint。",
+    "checkpointArchiveUpdated": "Checkpoint 存储已更新",
+    "checkpointArchiveLimitInvalid": "Checkpoint 归档上限必须是 0 或正数。",
+    "checkpointArchivePruned": "已清理 {{count}} 个归档，释放 {{size}}。",
+    "unlimited": "不限制",
+    "limitOn": "已限制"
   },
   "onboarding": {
     "welcome": "欢迎使用 VRCForge",

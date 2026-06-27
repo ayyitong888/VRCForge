@@ -1229,6 +1229,60 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn(original_token.lower(), serialized)
 
+    def test_external_agent_gateway_checkpoint_archive_limit_prunes_old_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            archive_dir = gateway.checkpoint_store_dir / "project"
+            archive_dir.mkdir(parents=True)
+            base_time = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+            paths: list[Path] = []
+            for index in range(3):
+                path = archive_dir / f"ckpt_{index}.zip"
+                path.write_bytes(b"x" * 700_000)
+                os.utime(path, (base_time + index, base_time + index))
+                paths.append(path)
+
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post("/api/app/external-agent/gateway", json={"checkpointArchiveMaxSizeMb": 1})
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+            payload = response.json()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(payload["gateway"]["checkpointArchiveMaxSizeMb"], 1)
+            self.assertEqual(payload["gateway"]["checkpointArchivePrune"]["deletedCount"], 2)
+            self.assertFalse(paths[0].exists())
+            self.assertFalse(paths[1].exists())
+            self.assertTrue(paths[2].exists())
+            self.assertLessEqual(payload["gateway"]["checkpointArchiveUsage"]["sizeBytes"], 1_048_576)
+
+    def test_external_agent_gateway_checkpoint_archive_limit_zero_keeps_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            archive_dir = gateway.checkpoint_store_dir / "project"
+            archive_dir.mkdir(parents=True)
+            archive_path = archive_dir / "ckpt_keep.zip"
+            archive_path.write_bytes(b"x" * 700_000)
+
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post("/api/app/external-agent/gateway", json={"checkpointArchiveMaxSizeMb": 0})
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+            payload = response.json()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(payload["gateway"]["checkpointArchiveMaxSizeMb"], 0)
+            self.assertEqual(payload["gateway"]["checkpointArchivePrune"]["deletedCount"], 0)
+            self.assertTrue(archive_path.exists())
+
     def test_skill_package_import_projects_skill_and_export_endpoint_builds_vsk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

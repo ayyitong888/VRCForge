@@ -47,7 +47,18 @@
     "onboardingDesc": "初回セットアップの3ステップガイドを再表示（コア接続 / モデル設定 / プロジェクト選択）。",
     "providerDesc": "プロバイダー接続後「モデルリスト更新」をクリックして、利用可能なモデルから選択できます。",
     "language": "表示言語",
-    "languageDesc": "デスクトップUIの表示言語を切り替えます。エージェント通信やツールインターフェースには影響しません。"
+    "languageDesc": "デスクトップUIの表示言語を切り替えます。エージェント通信やツールインターフェースには影響しません。",
+    "storage": "ストレージ",
+    "checkpointArchiveUsage": "Checkpoint アーカイブ",
+    "checkpointArchiveCount": "アーカイブ数",
+    "checkpointArchiveDirectory": "ディレクトリ",
+    "checkpointArchiveLimit": "Checkpoint アーカイブ最大サイズ（MB）",
+    "checkpointArchiveLimitHint": "0 は無制限です。上限を設定すると、VRCForge は古い checkpoint ZIP アーカイブから削除し、復旧中の checkpoint は保持します。",
+    "checkpointArchiveUpdated": "Checkpoint ストレージを更新しました",
+    "checkpointArchiveLimitInvalid": "Checkpoint アーカイブ上限は 0 または正の数にしてください。",
+    "checkpointArchivePruned": "{{count}} 件のアーカイブを削除し、{{size}} を解放しました。",
+    "unlimited": "無制限",
+    "limitOn": "上限あり"
   },
   "onboarding": {
     "welcome": "VRCForge へようこそ",

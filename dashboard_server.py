@@ -724,6 +724,7 @@ class ExternalAgentGatewayUpdateRequest(BaseModel):
     enabled: bool | None = None
     allow_write_requests: bool | None = Field(default=None, alias="allowWriteRequests")
     revoke_token: bool = Field(default=False, alias="revokeToken")
+    checkpoint_archive_max_size_mb: int | None = Field(default=None, alias="checkpointArchiveMaxSizeMb")
 
     model_config = {"populate_by_name": True}
 
@@ -2498,6 +2499,8 @@ def external_agent_status_sync(project_path: str | None = None) -> dict[str, Any
             "mcpUrl": health.get("mcpUrl"),
             "restUrl": health.get("restUrl"),
             "pendingApprovalCount": health.get("pendingApprovalCount"),
+            "checkpointArchiveMaxSizeMb": int(config.checkpoint_archive_max_size_mb),
+            "checkpointArchiveUsage": AGENT_GATEWAY.checkpoint_archive_usage(config),
         },
         "advertisedTools": [
             {"name": tool.get("name"), "category": tool.get("category"), "write": bool(tool.get("write"))}
@@ -2519,11 +2522,20 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
         config.enabled = bool(params.get("enabled"))
     if params.get("allowWriteRequests") is not None or params.get("allow_write_requests") is not None:
         config.allow_write_requests = bool(params.get("allowWriteRequests", params.get("allow_write_requests")))
+    checkpoint_limit = params.get("checkpointArchiveMaxSizeMb", params.get("checkpoint_archive_max_size_mb"))
+    prune_summary: dict[str, Any] | None = None
+    if checkpoint_limit is not None:
+        config.checkpoint_archive_max_size_mb = int(checkpoint_limit)
     if params.get("revokeToken") is True or params.get("revoke_token") is True:
         config.token = secrets.token_urlsafe(32)
         config.approval_token = secrets.token_urlsafe(32)
     AGENT_GATEWAY.save_config(config)
-    return external_agent_status_sync()
+    if checkpoint_limit is not None:
+        prune_summary = AGENT_GATEWAY.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
+    status = external_agent_status_sync()
+    if prune_summary:
+        status["gateway"]["checkpointArchivePrune"] = prune_summary
+    return status
 
 
 def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:

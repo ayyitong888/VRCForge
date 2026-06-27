@@ -47,7 +47,18 @@
     "onboardingDesc": "Reopen the three-step first-run guide (connect core / bind model / select project).",
     "providerDesc": "After connecting a provider, click \"Refresh model list\" to select from available models.",
     "language": "Display Language",
-    "languageDesc": "Switch the desktop UI language. This does not affect agent communication or tool interfaces."
+    "languageDesc": "Switch the desktop UI language. This does not affect agent communication or tool interfaces.",
+    "storage": "Storage",
+    "checkpointArchiveUsage": "Checkpoint archives",
+    "checkpointArchiveCount": "Archive count",
+    "checkpointArchiveDirectory": "Directory",
+    "checkpointArchiveLimit": "Max checkpoint archive size (MB)",
+    "checkpointArchiveLimitHint": "0 means unlimited. When a limit is set, VRCForge prunes the oldest checkpoint archive ZIPs and keeps active recovery checkpoints.",
+    "checkpointArchiveUpdated": "Checkpoint storage updated",
+    "checkpointArchiveLimitInvalid": "Checkpoint archive limit must be 0 or a positive number.",
+    "checkpointArchivePruned": "Pruned {{count}} archive(s), freed {{size}}.",
+    "unlimited": "Unlimited",
+    "limitOn": "Limit on"
   },
   "onboarding": {
     "welcome": "Welcome to VRCForge",

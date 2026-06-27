@@ -47,7 +47,18 @@
     "onboardingDesc": "重新打開首次啟動的三步引導（連接核心 / 綁定模型 / 選擇專案）。",
     "providerDesc": "連接供應商後點擊「刷新模型列表」，即可從該帳號可用的模型中選擇。",
     "language": "顯示語言",
-    "languageDesc": "切換桌面介面的顯示語言。此設定不影響智能體通訊與工具介面。"
+    "languageDesc": "切換桌面介面的顯示語言。此設定不影響智能體通訊與工具介面。",
+    "storage": "儲存空間",
+    "checkpointArchiveUsage": "Checkpoint 封存",
+    "checkpointArchiveCount": "封存數量",
+    "checkpointArchiveDirectory": "目錄",
+    "checkpointArchiveLimit": "Checkpoint 封存最大大小（MB）",
+    "checkpointArchiveLimitHint": "0 表示不限制。設定上限後，VRCForge 會清理最舊的 checkpoint ZIP 封存，並保留正在復原中的 checkpoint。",
+    "checkpointArchiveUpdated": "Checkpoint 儲存設定已更新",
+    "checkpointArchiveLimitInvalid": "Checkpoint 封存上限必須是 0 或正數。",
+    "checkpointArchivePruned": "已清理 {{count}} 個封存，釋放 {{size}}。",
+    "unlimited": "不限制",
+    "limitOn": "已限制"
   },
   "onboarding": {
     "welcome": "歡迎使用 VRCForge",
