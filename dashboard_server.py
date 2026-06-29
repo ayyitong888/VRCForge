@@ -1759,6 +1759,55 @@ def chat_transcripts_path() -> Path:
     return AGENT_GATEWAY.user_constraints_path.parent / "chat-transcripts.json"
 
 
+def chat_project_index_path() -> Path:
+    return AGENT_GATEWAY.user_constraints_path.parent / "chat-projects.json"
+
+
+def resolve_chat_project_root(project_path: str) -> Path | None:
+    raw = str(project_path or "").strip()
+    if not raw:
+        return None
+    try:
+        root = Path(raw).expanduser()
+    except (OSError, ValueError):
+        return None
+    if not root.is_absolute():
+        return None
+    try:
+        if not root.exists() or not root.is_dir():
+            return None
+        return root.resolve()
+    except OSError:
+        return None
+
+
+def project_chat_transcripts_path(project_path: str) -> Path | None:
+    root = resolve_chat_project_root(project_path)
+    if root is None:
+        return None
+    return root / ".vrcforge" / "chat-transcripts.json"
+
+
+def normalize_chat_project_key(project_path: str) -> str:
+    root = resolve_chat_project_root(project_path)
+    if root is None:
+        return ""
+    return str(root).replace("/", "\\").lower()
+
+
+def load_chat_project_index_paths() -> list[str]:
+    path = chat_project_index_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    return [str(item) for item in payload.get("projectPaths", []) if isinstance(item, str) and item.strip()]
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1770,9 +1819,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-@app.get("/api/app/chats")
-def read_chat_transcripts() -> dict[str, Any]:
-    path = chat_transcripts_path()
+def load_chat_transcript_file(path: Path) -> list[dict[str, Any]]:
     chats: list[dict[str, Any]] = []
     if path.exists():
         try:
@@ -1781,21 +1828,83 @@ def read_chat_transcripts() -> dict[str, Any]:
                 chats = [item for item in payload["chats"] if isinstance(item, dict)]
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=f"无法读取会话记录: {exc}") from exc
-    return {"ok": True, "path": str(path), "exists": path.exists(), "chats": chats, "count": len(chats)}
+    return chats
+
+
+@app.get("/api/app/chats")
+def read_chat_transcripts(request: Request) -> dict[str, Any]:
+    app_path = chat_transcripts_path()
+    chats: list[dict[str, Any]] = load_chat_transcript_file(app_path)
+    sources: list[dict[str, Any]] = [{"scope": "app", "path": str(app_path), "exists": app_path.exists()}]
+    seen_ids = {str(item.get("id") or "") for item in chats if str(item.get("id") or "")}
+    for project_path in request.query_params.getlist("projectPath"):
+        path = project_chat_transcripts_path(project_path)
+        if path is None:
+            continue
+        added = 0
+        for chat in load_chat_transcript_file(path):
+            chat_id = str(chat.get("id") or "")
+            if chat_id and chat_id in seen_ids:
+                continue
+            if not str(chat.get("projectPath") or "").strip():
+                chat = {**chat, "projectPath": str(resolve_chat_project_root(project_path) or project_path)}
+            chats.append(chat)
+            if chat_id:
+                seen_ids.add(chat_id)
+            added += 1
+        sources.append({"scope": "project", "projectPath": project_path, "path": str(path), "exists": path.exists(), "count": added})
+    return {"ok": True, "path": str(app_path), "exists": app_path.exists(), "chats": chats, "count": len(chats), "sources": sources}
 
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    path = chat_transcripts_path()
     chats = request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS]
-    serialized = json.dumps({"version": 1, "chats": chats}, ensure_ascii=False)
-    if len(serialized.encode("utf-8")) > CHAT_TRANSCRIPTS_MAX_BYTES:
+    app_chats: list[dict[str, Any]] = []
+    project_groups: dict[str, dict[str, Any]] = {}
+    for chat in chats:
+        project_path = str(chat.get("projectPath") or "").strip()
+        project_key = normalize_chat_project_key(project_path)
+        project_file = project_chat_transcripts_path(project_path) if project_key else None
+        if project_key and project_file is not None:
+            group = project_groups.setdefault(project_key, {"path": project_file, "projectPath": str(resolve_chat_project_root(project_path) or project_path), "chats": []})
+            group["chats"].append(chat)
+        else:
+            app_chats.append(chat)
+    serialized = json.dumps({"version": 1, "chats": app_chats}, ensure_ascii=False)
+    total_bytes = len(serialized.encode("utf-8"))
+    project_serialized: list[tuple[Path, str, int]] = []
+    for group in project_groups.values():
+        payload = json.dumps({"version": 1, "scope": "project", "chats": group["chats"]}, ensure_ascii=False)
+        total_bytes += len(payload.encode("utf-8"))
+        project_serialized.append((group["path"], payload, len(group["chats"])))
+    if total_bytes > CHAT_TRANSCRIPTS_MAX_BYTES:
         raise HTTPException(status_code=413, detail="会话记录超过 16MB 上限，请删除旧会话后重试。")
+    app_path = chat_transcripts_path()
+    stale_project_files: list[Path] = []
+    current_project_keys = set(project_groups.keys())
+    for project_path in load_chat_project_index_paths():
+        project_key = normalize_chat_project_key(project_path)
+        project_file = project_chat_transcripts_path(project_path)
+        if project_key and project_key not in current_project_keys and project_file is not None:
+            stale_project_files.append(project_file)
     try:
-        atomic_write_text(path, serialized)
+        atomic_write_text(app_path, serialized)
+        for path, payload, _count in project_serialized:
+            atomic_write_text(path, payload)
+        for path in stale_project_files:
+            if path.exists():
+                path.unlink()
+                parent = path.parent
+                if parent.name == ".vrcforge" and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+        atomic_write_json(
+            chat_project_index_path(),
+            {"version": 1, "projectPaths": [str(group["projectPath"]) for group in project_groups.values()]},
+        )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
-    return {"ok": True, "path": str(path), "count": len(chats)}
+    project_paths = [{"path": str(path), "count": count} for path, _payload, count in project_serialized]
+    return {"ok": True, "path": str(app_path), "count": len(chats), "appCount": len(app_chats), "projectPaths": project_paths}
 
 
 PROJECT_PREFS_MAX_PATHS = 64

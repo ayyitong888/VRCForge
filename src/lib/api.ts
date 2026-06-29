@@ -1026,13 +1026,24 @@ export type StoredChats<T> = {
   exists: boolean;
   chats: T[];
   count: number;
+  sources?: Array<Record<string, unknown>>;
 };
 
-export async function fetchChats<T>(endpoint: string): Promise<StoredChats<T>> {
-  return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats`);
+export async function fetchChats<T>(endpoint: string, projectPaths: string[] = []): Promise<StoredChats<T>> {
+  const params = new URLSearchParams();
+  for (const projectPath of projectPaths) {
+    if (projectPath.trim()) {
+      params.append("projectPath", projectPath);
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats${suffix}`);
 }
 
-export async function saveChats<T>(endpoint: string, chats: T[]): Promise<{ ok: boolean; path: string; count: number }> {
+export async function saveChats<T>(
+  endpoint: string,
+  chats: T[],
+): Promise<{ ok: boolean; path: string; count: number; appCount?: number; projectPaths?: Array<Record<string, unknown>> }> {
   return requestJson(`${endpoint}/api/app/chats`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

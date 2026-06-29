@@ -13,7 +13,10 @@
 
 Unicode true
 !include LogicLib.nsh
+!include nsDialogs.nsh
 !include "MUI2.nsh"
+Var ClearUserDataCheckbox
+Var ClearUserData
 
 Name "VRCForge ${VERSION} x64 Web Installer"
 OutFile "${OUTFILE}"
@@ -38,6 +41,7 @@ BrandingText "VRCForge ${VERSION}"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
+Page custom un.UserDataOptionsPage un.UserDataOptionsLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
@@ -49,12 +53,44 @@ LangString WelcomeText ${LANG_SIMPCHINESE} "VRCForge 是面向 VRChat 创作者�
 LangString WelcomeText ${LANG_ENGLISH} "VRCForge is a local AI workbench for VRChat creators.$\r$\n$\r$\nThis is a small web installer: it downloads the full payload during installation, so please stay online.$\r$\n$\r$\nClick Next to continue."
 LangString RunText ${LANG_SIMPCHINESE} "安装完成后启动 VRCForge"
 LangString RunText ${LANG_ENGLISH} "Launch VRCForge after install"
+LangString ClearUserDataText ${LANG_SIMPCHINESE} "默认仅卸载程序文件，并保留设置、对话、检查点和项目历史。"
+LangString ClearUserDataText ${LANG_ENGLISH} "By default, setup removes only program files and keeps settings, chats, checkpoints, and project history."
+LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "清除用户数据和历史对话"
+LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Clear user data and chat history"
+LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。用户数据仍保留在 $LOCALAPPDATA\VRCForge\agentic-app。"
+LangString UninstallKeptUserData ${LANG_ENGLISH} "VRCForge program files were removed. User data remains in $LOCALAPPDATA\VRCForge\agentic-app."
+LangString UninstallClearedUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件、用户数据和已知项目中的历史对话已移除。"
+LangString UninstallClearedUserData ${LANG_ENGLISH} "VRCForge program files, user data, and known project chat history were removed."
 
 !macro StopVRCForgeProcesses
   nsExec::ExecToLog 'taskkill /F /IM VRCForge.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM vrcforge_backend.exe /T'
   Sleep 800
 !macroend
+
+Function un.UserDataOptionsPage
+  IfSilent 0 +2
+    Abort
+  nsDialogs::Create 1018
+  Pop $0
+  ${NSD_CreateLabel} 0 0 100% 32u "$(ClearUserDataText)"
+  Pop $1
+  ${NSD_CreateCheckbox} 0 44u 100% 12u "$(ClearUserDataCheckboxText)"
+  Pop $ClearUserDataCheckbox
+  ${NSD_SetState} $ClearUserDataCheckbox ${BST_UNCHECKED}
+  nsDialogs::Show
+FunctionEnd
+
+Function un.UserDataOptionsLeave
+  ${NSD_GetState} $ClearUserDataCheckbox $ClearUserData
+FunctionEnd
+
+Function un.ClearUserDataIfRequested
+  ${If} $ClearUserData == ${BST_CHECKED}
+    DetailPrint "Clearing VRCForge user data and known project chat history..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; $$root = Join-Path $$env:LOCALAPPDATA ''VRCForge\agentic-app''; $$projects = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase); function AddProject($$p) { if ($$p -and [System.IO.Path]::IsPathRooted([string]$$p)) { [void]$$projects.Add([string]$$p) } }; $$idx = Join-Path $$root ''chat-projects.json''; if (Test-Path -LiteralPath $$idx) { $$j = Get-Content -LiteralPath $$idx -Raw | ConvertFrom-Json; foreach ($$p in @($$j.projectPaths)) { AddProject $$p } }; $$prefs = Join-Path $$root ''custom-projects.json''; if (Test-Path -LiteralPath $$prefs) { $$j = Get-Content -LiteralPath $$prefs -Raw | ConvertFrom-Json; foreach ($$p in @($$j.customPaths + $$j.hiddenPaths)) { AddProject $$p } }; $$legacy = Join-Path $$root ''chat-transcripts.json''; if (Test-Path -LiteralPath $$legacy) { $$j = Get-Content -LiteralPath $$legacy -Raw | ConvertFrom-Json; foreach ($$c in @($$j.chats)) { AddProject $$c.projectPath } }; foreach ($$p in $$projects) { $$file = Join-Path $$p ''.vrcforge\chat-transcripts.json''; Remove-Item -LiteralPath $$file -Force; $$dir = Join-Path $$p ''.vrcforge''; if ((Test-Path -LiteralPath $$dir) -and -not (Get-ChildItem -LiteralPath $$dir -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $$dir -Force } }; Remove-Item -LiteralPath $$root -Recurse -Force"'
+  ${EndIf}
+FunctionEnd
 
 Section "Install"
   SetRegView 64
@@ -120,5 +156,10 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\VRCForge"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge"
-  MessageBox MB_OK "VRCForge program files were removed. User data remains in $LOCALAPPDATA\VRCForge\agentic-app."
+  Call un.ClearUserDataIfRequested
+  ${If} $ClearUserData == ${BST_CHECKED}
+    MessageBox MB_OK "$(UninstallClearedUserData)"
+  ${Else}
+    MessageBox MB_OK "$(UninstallKeptUserData)"
+  ${EndIf}
 SectionEnd

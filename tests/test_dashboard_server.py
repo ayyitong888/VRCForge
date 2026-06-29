@@ -122,6 +122,43 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("unityStatus", message["payload"])
                 self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
 
+    def test_chat_transcripts_split_temporary_and_project_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            chats = [
+                {"id": "temp-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "temporary"}]},
+                {"id": "project-chat", "projectPath": str(project), "items": [{"id": "u2", "type": "user", "text": "project"}]},
+            ]
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/chats", json={"chats": chats})
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["appCount"], 1)
+                self.assertEqual(len(payload["projectPaths"]), 1)
+
+                app_path = Path(payload["path"])
+                project_path = project / ".vrcforge" / "chat-transcripts.json"
+                index_path = app_path.parent / "chat-projects.json"
+                self.assertTrue(app_path.is_file())
+                self.assertTrue(project_path.is_file())
+                self.assertTrue(index_path.is_file())
+                self.assertEqual(json.loads(app_path.read_text(encoding="utf-8"))["chats"][0]["id"], "temp-chat")
+                self.assertEqual(json.loads(project_path.read_text(encoding="utf-8"))["chats"][0]["id"], "project-chat")
+                self.assertIn(str(project.resolve()), json.loads(index_path.read_text(encoding="utf-8"))["projectPaths"])
+
+                read_response = client.get("/api/app/chats", params=[("projectPath", str(project))])
+                self.assertEqual(read_response.status_code, 200)
+                self.assertEqual({chat["id"] for chat in read_response.json()["chats"]}, {"temp-chat", "project-chat"})
+
+                response = client.post("/api/app/chats", json={"chats": [chats[0]]})
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(project_path.exists())
+                read_response = client.get("/api/app/chats", params=[("projectPath", str(project))])
+                self.assertEqual(read_response.status_code, 200)
+                self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
+
     def test_project_prefs_accepts_only_unity_project_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4996,6 +5033,16 @@ namespace VRCForge.Editor
         self.assertIn("$PROGRAMFILES64\\VRCForge", offline_nsis)
         self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", offline_nsis)
         self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", web_nsis)
+        self.assertIn("nsDialogs.nsh", offline_nsis)
+        self.assertIn("nsDialogs.nsh", web_nsis)
+        self.assertIn("清除用户数据和历史对话", offline_nsis)
+        self.assertIn("Clear user data and chat history", web_nsis)
+        self.assertIn("chat-projects.json", offline_nsis)
+        self.assertIn("chat-projects.json", web_nsis)
+        self.assertIn(".vrcforge\\chat-transcripts.json", offline_nsis)
+        self.assertIn(".vrcforge\\chat-transcripts.json", web_nsis)
+        self.assertIn("Call un.ClearUserDataIfRequested", offline_nsis)
+        self.assertIn("Call un.ClearUserDataIfRequested", web_nsis)
 
     def test_coplaydev_mcp_distribution_notes_are_present(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

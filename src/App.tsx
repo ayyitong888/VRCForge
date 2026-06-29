@@ -456,6 +456,7 @@ export default function App() {
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
   const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
+  const [projectPrefsReady, setProjectPrefsReady] = useState(false);
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
@@ -755,9 +756,12 @@ export default function App() {
     }
     projectPrefsLoadedRef.current = true;
     void fetchProjectPrefs(endpoint)
-      .then(setProjectPrefs)
+      .then((prefs) => {
+        setProjectPrefs(prefs);
+        setProjectPrefsReady(true);
+      })
       .catch(() => {
-        projectPrefsLoadedRef.current = false;
+        setProjectPrefsReady(true);
       });
   }, [runtimeConnected, endpoint]);
 
@@ -790,13 +794,19 @@ export default function App() {
   }, [projectItems]);
 
   useEffect(() => {
-    if (!runtimeConnected || chatsLoadedRef.current) {
+    if (!runtimeConnected || chatsLoadedRef.current || !projectPrefsReady) {
       return;
     }
     chatsLoadedRef.current = true;
     void (async () => {
       try {
-        const payload = await fetchChats<unknown>(endpoint);
+        const projectPaths = Array.from(
+          new Set([
+            ...projectItems.map((project) => projectKey(project)).filter(Boolean),
+            ...projectPrefs.customPaths.filter(Boolean),
+          ]),
+        );
+        const payload = await fetchChats<unknown>(endpoint, projectPaths);
         const restored = (payload.chats || []).filter(isStoredChat).map((chat) => ({
           id: chat.id,
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
@@ -815,7 +825,7 @@ export default function App() {
         chatsLoadedRef.current = false;
       }
     })();
-  }, [runtimeConnected, endpoint]);
+  }, [runtimeConnected, endpoint, projectItems, projectPrefs.customPaths, projectPrefsReady]);
 
   useEffect(() => {
     if (!chatsLoadedRef.current || !runtimeConnected) {
