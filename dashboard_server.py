@@ -11896,6 +11896,209 @@ def ensure_animator_state_sync(params: dict[str, Any], preview: bool = False) ->
     return payload
 
 
+def _copy_if_present(source: dict[str, Any], target: dict[str, Any], *keys: str, out: str | None = None) -> None:
+    for key in keys:
+        if key in source:
+            target[out or key] = source[key]
+            return
+
+
+def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = None) -> dict[str, Any]:
+    params = params or {}
+    request: dict[str, Any] = {}
+    for key in (
+        "action",
+        "avatarPath",
+        "clipPath",
+        "bindingPath",
+        "objectPath",
+        "componentType",
+        "propertyName",
+        "constantFloat",
+        "keys",
+        "parameterName",
+        "newName",
+        "orderNames",
+        "valueType",
+        "defaultValue",
+        "saved",
+        "networkSynced",
+        "menuPath",
+        "controlName",
+        "controlIndex",
+        "controlType",
+        "controlFloat",
+        "value",
+        "iconAssetPath",
+        "subMenuAssetPath",
+        "createSubMenu",
+        "subParameters",
+        "assetDir",
+        "controllerPath",
+        "fxControllerPath",
+        "layerName",
+        "stateName",
+        "destinationStateName",
+        "transitionIndex",
+        "hasExitTime",
+        "exitTime",
+        "duration",
+        "canTransitionToSelf",
+        "conditions",
+        "parameterType",
+        "conditionMode",
+        "threshold",
+        "writeDefaults",
+        "motionClipPath",
+        "speed",
+        "viewPosition",
+        "lipSync",
+        "visemeSkinnedMeshPath",
+        "visemeBlendShapes",
+        "expressionParametersPath",
+        "expressionsMenuPath",
+        "baseAnimationLayers",
+        "specialAnimationLayers",
+        "eyeLookEnabled",
+    ):
+        _copy_if_present(params, request, key)
+    aliases = {
+        "avatarPath": ("avatar_path",),
+        "clipPath": ("clip_path",),
+        "bindingPath": ("binding_path",),
+        "componentType": ("component_type",),
+        "propertyName": ("property_name",),
+        "constantFloat": ("constant_float",),
+        "parameterName": ("parameter_name",),
+        "newName": ("new_name",),
+        "orderNames": ("order_names",),
+        "valueType": ("value_type",),
+        "defaultValue": ("default_value",),
+        "networkSynced": ("network_synced",),
+        "menuPath": ("menu_path",),
+        "controlName": ("control_name",),
+        "controlIndex": ("control_index",),
+        "controlType": ("control_type",),
+        "controlFloat": ("control_float", "control_value"),
+        "iconAssetPath": ("icon_asset_path",),
+        "subMenuAssetPath": ("sub_menu_asset_path",),
+        "createSubMenu": ("create_sub_menu",),
+        "subParameters": ("sub_parameters",),
+        "assetDir": ("asset_dir",),
+        "controllerPath": ("controller_path",),
+        "fxControllerPath": ("fx_controller_path",),
+        "layerName": ("layer_name",),
+        "stateName": ("state_name",),
+        "destinationStateName": ("destination_state_name",),
+        "transitionIndex": ("transition_index",),
+        "hasExitTime": ("has_exit_time",),
+        "exitTime": ("exit_time",),
+        "canTransitionToSelf": ("can_transition_to_self",),
+        "parameterType": ("parameter_type",),
+        "conditionMode": ("condition_mode",),
+        "writeDefaults": ("write_defaults",),
+        "motionClipPath": ("motion_clip_path",),
+        "viewPosition": ("view_position",),
+        "visemeSkinnedMeshPath": ("viseme_skinned_mesh_path",),
+        "visemeBlendShapes": ("viseme_blend_shapes",),
+        "expressionParametersPath": ("expression_parameters_path",),
+        "expressionsMenuPath": ("expressions_menu_path",),
+        "baseAnimationLayers": ("base_animation_layers",),
+        "specialAnimationLayers": ("special_animation_layers",),
+        "eyeLookEnabled": ("eye_look_enabled",),
+    }
+    for canonical, alias_keys in aliases.items():
+        if canonical not in request:
+            _copy_if_present(params, request, *alias_keys, out=canonical)
+    if preview is not None:
+        request["preview"] = preview
+    elif "preview" in params:
+        request["preview"] = bool(params.get("preview"))
+    return request
+
+
+def read_avatar_descriptor_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params)
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_read_avatar_descriptor", request)),
+        "read avatar descriptor",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def write_avatar_descriptor_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params, preview=preview)
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_write_avatar_descriptor", request)),
+        "write avatar descriptor",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def write_animation_curve_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params, preview=preview)
+    if not request.get("clipPath"):
+        return {"ok": False, "error": "clipPath is required."}
+    if not request.get("propertyName"):
+        return {"ok": False, "error": "propertyName is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_write_animation_curve", request)),
+        "write animation curve",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def manage_expression_parameters_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params, preview=preview)
+    if not request.get("action"):
+        return {"ok": False, "error": "action is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_expression_parameters", request)),
+        "manage expression parameters",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def manage_expression_menu_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params, preview=preview)
+    if not request.get("action"):
+        return {"ok": False, "error": "action is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_expression_menu", request)),
+        "manage expression menu",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def manage_fx_animator_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    params = params or {}
+    request = _avatar_primitive_request(params, preview=preview)
+    if not request.get("action"):
+        return {"ok": False, "error": "action is required."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_fx_animator", request)),
+        "manage FX animator",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
 def _validate_create_wardrobe_request(request: dict[str, Any]) -> dict[str, Any] | None:
     if not request["parameterName"]:
         return {"ok": False, "error": "parameterName is required for wardrobe creation."}
@@ -16266,6 +16469,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_parameter", "Preview creating or updating an avatar expression parameter without writing.", "plan/preview", lambda params: ensure_expression_parameter_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_expression_menu_control", "Preview creating or updating an expression menu control without writing.", "plan/preview", lambda params: ensure_expression_menu_control_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_read_avatar_descriptor", "Read VRCAvatarDescriptor viewpoint, lip sync, visemes, expression assets, playable layers, and eye-look summary.", "read/debug", read_avatar_descriptor_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_write_avatar_descriptor", "Preview changing selected VRCAvatarDescriptor fields without writing.", "plan/preview", lambda params: write_avatar_descriptor_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_write_animation_curve", "Preview creating, replacing, or deleting one AnimationClip curve binding without writing.", "plan/preview", lambda params: write_animation_curve_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_parameters", "Preview deleting, renaming, reordering, or updating existing expression parameters without writing.", "plan/preview", lambda params: manage_expression_parameters_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_menu", "Preview expression menu control create/update/delete/reorder without writing.", "plan/preview", lambda params: manage_expression_menu_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview FX AnimatorController layer/state/transition create/update/delete without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_create_safe_backup", "Create a safe backup snapshot of avatar assets and open scenes.", "plan/preview", create_safe_backup_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
@@ -16422,6 +16631,36 @@ def register_agent_gateway_tools() -> None:
         "Create or update an FX animator layer/state/transition through VRCForge.",
         "high",
         lambda params: ensure_animator_state_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_write_avatar_descriptor",
+        "Update selected VRCAvatarDescriptor fields through VRCForge.",
+        "high",
+        lambda params: write_avatar_descriptor_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_write_animation_curve",
+        "Create, replace, or delete one AnimationClip curve binding through VRCForge.",
+        "high",
+        lambda params: write_animation_curve_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_manage_expression_parameters",
+        "Delete, rename, reorder, or update existing expression parameters through VRCForge.",
+        "high",
+        lambda params: manage_expression_parameters_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_manage_expression_menu",
+        "Create, update, delete, or reorder expression menu controls through VRCForge.",
+        "high",
+        lambda params: manage_expression_menu_sync(params, preview=False),
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_manage_fx_animator",
+        "Create, update, or delete FX AnimatorController layers, states, and Any-State transitions through VRCForge.",
+        "high",
+        lambda params: manage_fx_animator_sync(params, preview=False),
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_outfit",

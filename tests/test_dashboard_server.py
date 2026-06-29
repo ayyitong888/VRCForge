@@ -2389,6 +2389,91 @@ class DashboardServerTests(unittest.TestCase):
         })
         self.assertFalse(missing_target["ok"])
 
+    def test_avatar_primitive_crud_source_exists(self) -> None:
+        editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
+        source = (editor_dir / "UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8")
+        for tool_name in (
+            "vrc_read_avatar_descriptor",
+            "vrc_write_avatar_descriptor",
+            "vrc_write_animation_curve",
+            "vrc_manage_expression_parameters",
+            "vrc_manage_expression_menu",
+            "vrc_manage_fx_animator",
+        ):
+            self.assertIn(f'name: "{tool_name}"', source)
+        self.assertIn("Undo.RegisterCompleteObjectUndo", source)
+        self.assertIn("AnimationUtility.SetEditorCurve", source)
+        self.assertIn("VRCAvatarDescriptor", source)
+        self.assertIn("VRCExpressionsMenu", source)
+        self.assertIn("AnimatorController", source)
+
+    def test_avatar_primitive_tools_registered_with_safe_exposure(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest", headers=headers).json()
+
+        tool_names = {tool["name"] for tool in payload["tools"]}
+        write_targets = {item["name"] for item in payload["writeTargets"]}
+        authoring_skill = next(skill for skill in payload["skills"] if skill["name"] == "avatar-authoring-primitives")
+        allowed_tools = set(authoring_skill["allowedTools"])
+        for name in (
+            "vrcforge_read_avatar_descriptor",
+            "vrcforge_preview_write_avatar_descriptor",
+            "vrcforge_preview_write_animation_curve",
+            "vrcforge_preview_manage_expression_parameters",
+            "vrcforge_preview_manage_expression_menu",
+            "vrcforge_preview_manage_fx_animator",
+        ):
+            self.assertIn(name, tool_names)
+            self.assertNotIn(name, write_targets)
+            self.assertIn(name, allowed_tools)
+        for name in (
+            "vrcforge_write_avatar_descriptor",
+            "vrcforge_write_animation_curve",
+            "vrcforge_manage_expression_parameters",
+            "vrcforge_manage_expression_menu",
+            "vrcforge_manage_fx_animator",
+        ):
+            self.assertIn(name, write_targets)
+            self.assertNotIn(name, tool_names)
+            self.assertIn(name, allowed_tools)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_avatar_primitive_wrappers_forward_to_unity_tools(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "preview": True}},
+        )
+
+        calls = [
+            (dashboard_server.read_avatar_descriptor_sync, {"avatar_path": "Avatar"}, "vrc_read_avatar_descriptor"),
+            (lambda params: dashboard_server.write_avatar_descriptor_sync(params, preview=True), {"avatar_path": "Avatar", "view_position": {"x": 0, "y": 1.5, "z": 0}}, "vrc_write_avatar_descriptor"),
+            (lambda params: dashboard_server.write_animation_curve_sync(params, preview=True), {"clip_path": "Assets/Test.anim", "binding_path": "Hat", "component_type": "GameObject", "property_name": "m_IsActive", "constant_float": 1}, "vrc_write_animation_curve"),
+            (lambda params: dashboard_server.manage_expression_parameters_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "parameter_name": "Old"}, "vrc_manage_expression_parameters"),
+            (lambda params: dashboard_server.manage_expression_menu_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "control_name": "Old"}, "vrc_manage_expression_menu"),
+            (lambda params: dashboard_server.manage_fx_animator_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete_state", "layer_name": "FX", "state_name": "Old"}, "vrc_manage_fx_animator"),
+        ]
+
+        for func, params, expected_tool in calls:
+            mock_invoke.reset_mock()
+            result = func(params)
+            self.assertTrue(result["ok"])
+            _settings, tool_name, forwarded = mock_invoke.call_args.args
+            self.assertEqual(tool_name, expected_tool)
+            if expected_tool != "vrc_read_avatar_descriptor":
+                self.assertTrue(forwarded["preview"])
+
+        _, _tool_name, curve_params = mock_invoke.call_args.args
+        self.assertIn("action", curve_params)
+
     def test_manage_wardrobe_request_parses_actions_values_and_flags(self) -> None:
         request = dashboard_server.build_manage_wardrobe_request(
             {
