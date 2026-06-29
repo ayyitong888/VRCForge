@@ -41,7 +41,7 @@ BrandingText "VRCForge ${VERSION}"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
-Page custom un.UserDataOptionsPage un.UserDataOptionsLeave
+UninstPage custom un.UserDataOptionsPage un.UserDataOptionsLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
