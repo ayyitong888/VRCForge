@@ -61,6 +61,8 @@
     "checkpointArchivePruned": "Pruned {{count}} archive(s), freed {{size}}.",
     "checkpointArchiveOpenFolder": "Open folder",
     "checkpointArchiveOpenFolderDesktopOnly": "Open folder is available in the desktop app.",
+    "checkpointArchivePickFolder": "Choose...",
+    "checkpointArchivePickFolderDesktopOnly": "Folder picker is available in the desktop app.",
     "checkpointArchiveListTitle": "Stored archives",
     "checkpointArchiveNoArchives": "No checkpoint archives yet.",
     "checkpointArchiveSelectAll": "Select all",

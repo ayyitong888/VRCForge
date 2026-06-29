@@ -2472,9 +2472,24 @@ export default function App() {
       if (!isTauriRuntime()) {
         throw new Error("Open folder is available in the desktop app.");
       }
-      await invoke("open_folder", { path: targetPath });
+      await invoke("open_local_folder", { path: targetPath });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function pickCheckpointArchiveDirectory(currentPath: string) {
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("Folder picker is available in the desktop app.");
+      }
+      const selected = await invoke<string | null>("select_folder", {
+        initialPath: currentPath || undefined,
+      });
+      return selected || "";
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return "";
     }
   }
 
@@ -3647,6 +3662,7 @@ export default function App() {
                     onLimitInputChange={setCheckpointArchiveLimitInput}
                     onSaveLimit={() => void saveCheckpointArchiveLimit()}
                     onOpenFolder={(targetPath) => void openCheckpointArchiveFolder(targetPath)}
+                    onPickDirectory={pickCheckpointArchiveDirectory}
                     onDeleteSelected={(ids) => void deleteCheckpointArchives(ids)}
                     onRelocate={(directory) => void relocateCheckpointArchives(directory)}
                   />
@@ -5155,6 +5171,7 @@ function CheckpointStoragePanel({
   onLimitInputChange,
   onSaveLimit,
   onOpenFolder,
+  onPickDirectory,
   onDeleteSelected,
   onRelocate,
 }: {
@@ -5165,6 +5182,7 @@ function CheckpointStoragePanel({
   onLimitInputChange: (value: string) => void;
   onSaveLimit: () => void;
   onOpenFolder: (targetPath: string) => void;
+  onPickDirectory: (currentPath: string) => Promise<string>;
   onDeleteSelected: (ids: string[]) => void;
   onRelocate: (directory: string) => void;
 }) {
@@ -5226,6 +5244,12 @@ function CheckpointStoragePanel({
     const ids = selectableIds.filter((id) => selected.has(id));
     if (ids.length) {
       onDeleteSelected(ids);
+    }
+  };
+  const pickDirectory = async () => {
+    const selectedPath = await onPickDirectory(relocateInput || directory);
+    if (selectedPath) {
+      setRelocateInput(selectedPath);
     }
   };
   const disabled = loading || !status;
@@ -5361,6 +5385,16 @@ function CheckpointStoragePanel({
               placeholder="D:\\VRCForge\\checkpoint-archives"
               className="h-10 min-w-48 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
             />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={disabled || !isDesktop}
+              title={!isDesktop ? t("settings.checkpointArchivePickFolderDesktopOnly") : undefined}
+              onClick={() => void pickDirectory()}
+            >
+              <FolderOpen className="h-4 w-4 shrink-0" />
+              {t("settings.checkpointArchivePickFolder")}
+            </Button>
             <Button
               type="button"
               variant="outline"

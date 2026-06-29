@@ -177,7 +177,21 @@ fn ensure_agent_notes_file() -> String {
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     let folder = validate_project_folder_to_open(&path)?;
+    open_folder_in_shell(folder)
+}
 
+#[tauri::command]
+fn open_local_folder(path: String) -> Result<(), String> {
+    let folder = validate_local_folder_to_open(&path)?;
+    open_folder_in_shell(folder)
+}
+
+#[tauri::command]
+fn select_folder(initial_path: Option<String>) -> Result<Option<String>, String> {
+    select_folder_dialog(initial_path.as_deref())
+}
+
+fn open_folder_in_shell(folder: PathBuf) -> Result<(), String> {
     #[cfg(windows)]
     {
         let mut command = Command::new("explorer.exe");
@@ -204,6 +218,77 @@ fn open_folder(path: String) -> Result<(), String> {
     }
 }
 
+fn validate_local_folder_to_open(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Folder path is empty.".to_string());
+    }
+    let folder = PathBuf::from(trimmed);
+    if !folder.is_absolute() {
+        return Err(format!("Folder must be an absolute path: {trimmed}"));
+    }
+    let folder = fs::canonicalize(&folder)
+        .map_err(|error| format!("Folder does not exist: {} ({error})", folder.display()))?;
+    if !folder.is_dir() {
+        return Err(format!("Folder does not exist: {}", folder.display()));
+    }
+    Ok(folder)
+}
+
+fn select_folder_dialog(initial_path: Option<&str>) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let mut script = String::from(
+            r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select checkpoint archive directory'
+$dialog.ShowNewFolderButton = $true
+"#,
+        );
+        if let Some(path) = initial_path {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                let escaped = trimmed.replace('\'', "''");
+                script.push_str(&format!("$dialog.SelectedPath = '{}'\n", escaped));
+            }
+        }
+        script.push_str(
+            r#"
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  Write-Output $dialog.SelectedPath
+}
+"#,
+        );
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-STA", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|error| format!("unable to open folder picker: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "folder picker failed".to_string()
+            } else {
+                stderr
+            });
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if selected.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(selected))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = initial_path;
+        Err("Folder picker is only available on Windows desktop builds.".to_string())
+    }
+}
+
 fn validate_project_folder_to_open(path: &str) -> Result<PathBuf, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -211,7 +296,9 @@ fn validate_project_folder_to_open(path: &str) -> Result<PathBuf, String> {
     }
     let folder = PathBuf::from(trimmed);
     if !folder.is_absolute() {
-        return Err(format!("Project folder must be an absolute path: {trimmed}"));
+        return Err(format!(
+            "Project folder must be an absolute path: {trimmed}"
+        ));
     }
     let folder = fs::canonicalize(&folder)
         .map_err(|error| format!("Folder does not exist: {} ({error})", folder.display()))?;
@@ -222,10 +309,7 @@ fn validate_project_folder_to_open(path: &str) -> Result<PathBuf, String> {
         && folder.join("Packages").is_dir()
         && folder.join("ProjectSettings").is_dir())
     {
-        return Err(format!(
-            "Not a Unity project root: {}",
-            folder.display()
-        ));
+        return Err(format!("Not a Unity project root: {}", folder.display()));
     }
     Ok(folder)
 }
@@ -465,7 +549,9 @@ fn main() {
             start_backend,
             stop_backend,
             ensure_agent_notes_file,
-            open_folder
+            open_folder,
+            open_local_folder,
+            select_folder
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -488,7 +574,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         parse_http_status_ok, prepare_runtime_files, try_ensure_agent_notes_file,
-        validate_project_folder_to_open,
+        validate_local_folder_to_open, validate_project_folder_to_open,
     };
     use std::{
         env, fs,
@@ -586,11 +672,27 @@ mod tests {
         let project = base.join("unity-project");
         fs::create_dir_all(project.join("Assets")).expect("Assets directory should be created");
         fs::create_dir_all(project.join("Packages")).expect("Packages directory should be created");
-        fs::create_dir_all(project.join("ProjectSettings")).expect("ProjectSettings directory should be created");
+        fs::create_dir_all(project.join("ProjectSettings"))
+            .expect("ProjectSettings directory should be created");
 
         let resolved = validate_project_folder_to_open(&project.display().to_string())
             .expect("Unity project root should be accepted");
         assert!(resolved.ends_with("unity-project"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn local_folder_validation_accepts_non_project_directory() {
+        let base = test_dir("local-folder-validation");
+        let folder = base.join("archives");
+        fs::create_dir_all(&folder).expect("archive directory should be created");
+
+        let resolved = validate_local_folder_to_open(&folder.display().to_string())
+            .expect("non-project archive directory should be accepted");
+
+        assert_eq!(resolved, folder.canonicalize().unwrap());
+        assert!(validate_local_folder_to_open("").is_err());
+        assert!(validate_local_folder_to_open("relative\\archives").is_err());
         let _ = fs::remove_dir_all(base);
     }
 }

@@ -61,6 +61,8 @@
     "checkpointArchivePruned": "已清理 {{count}} 個封存，釋放 {{size}}。",
     "checkpointArchiveOpenFolder": "開啟資料夾",
     "checkpointArchiveOpenFolderDesktopOnly": "開啟資料夾僅在桌面版可用。",
+    "checkpointArchivePickFolder": "選擇...",
+    "checkpointArchivePickFolderDesktopOnly": "選擇資料夾僅在桌面版可用。",
     "checkpointArchiveListTitle": "已存封存",
     "checkpointArchiveNoArchives": "尚無 checkpoint 封存。",
     "checkpointArchiveSelectAll": "全選",

@@ -61,6 +61,8 @@
     "checkpointArchivePruned": "{{count}} 件のアーカイブを削除し、{{size}} を解放しました。",
     "checkpointArchiveOpenFolder": "フォルダを開く",
     "checkpointArchiveOpenFolderDesktopOnly": "フォルダを開く操作はデスクトップ版でのみ利用できます。",
+    "checkpointArchivePickFolder": "選択...",
+    "checkpointArchivePickFolderDesktopOnly": "フォルダ選択はデスクトップ版でのみ利用できます。",
     "checkpointArchiveListTitle": "保存済みアーカイブ",
     "checkpointArchiveNoArchives": "checkpoint アーカイブはまだありません。",
     "checkpointArchiveSelectAll": "すべて選択",

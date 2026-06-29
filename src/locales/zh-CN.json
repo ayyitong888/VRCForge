@@ -61,6 +61,8 @@
     "checkpointArchivePruned": "已清理 {{count}} 个归档，释放 {{size}}。",
     "checkpointArchiveOpenFolder": "打开文件夹",
     "checkpointArchiveOpenFolderDesktopOnly": "打开文件夹仅在桌面端可用。",
+    "checkpointArchivePickFolder": "选择...",
+    "checkpointArchivePickFolderDesktopOnly": "选择文件夹仅在桌面端可用。",
     "checkpointArchiveListTitle": "已存归档",
     "checkpointArchiveNoArchives": "暂无 checkpoint 归档。",
     "checkpointArchiveSelectAll": "全选",
