@@ -125,6 +125,27 @@ try {
   assert(lowRiskTurn.json.shell.status === "executed", "Low-risk shell commands should execute directly.");
   assert(lowRiskTurn.json.shell.classification.risk === "low", "Directory listing should be low-risk.");
 
+  const attachmentTurn = await postJson(`${endpoint}/api/app/agent/message`, {
+    message: "read the attached smoke note",
+    attachments: [
+      {
+        id: "smoke-att-1",
+        name: "smoke-note.txt",
+        type: "text/plain",
+        size: 12,
+        text: "hello smoke",
+        payloadKind: "text",
+      },
+    ],
+  });
+  assert(attachmentTurn.status === 200, "Agent runtime should accept bounded file/image attachment payloads.");
+  assert(attachmentTurn.json.attachments?.[0]?.payloadKind === "text", "Attachment payload kind should be preserved.");
+  assert(attachmentTurn.json.attachments?.[0]?.text === "hello smoke", "Text attachment payload should be preserved.");
+
+  const workspaceDiff = await requestJson(`${endpoint}/api/app/workspace/diff?root=${encodeURIComponent(root)}&includePatch=true`, "GET");
+  assert(workspaceDiff.status === 200, "Workspace diff endpoint should be available.");
+  assert(typeof workspaceDiff.json.patch === "string", "Workspace diff review payload should include a patch string.");
+
   const unityStatusTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "检查 Unity MCP 状态",
   });

@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Archive,
   Bot,
+  Camera,
   Check,
   ChevronDown,
   ChevronRight,
@@ -10,15 +11,25 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileText,
   Folder,
   FolderOpen,
   FolderPlus,
   Gauge,
+  GitBranch,
   History,
+  ListChecks,
   Loader2,
   MessageSquare,
   MoreHorizontal,
+  Monitor,
   Moon,
+  MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Paperclip,
   Pencil,
   Pin,
   Plus,
@@ -29,6 +40,7 @@ import {
   Settings,
   Shield,
   Sparkles,
+  Square,
   Sun,
   TerminalSquare,
   Trash2,
@@ -84,6 +96,7 @@ import {
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
+  WorkspaceDiffSummary,
   approveAgentApproval,
   checkSkills,
   compactAgentHistory,
@@ -99,6 +112,7 @@ import {
   createAdjustmentCheckpoint,
   deleteAdjustmentCheckpoint,
   fetchBootstrap,
+  fetchWorkspaceDiff,
   fetchDiagnostics,
   fetchDoctor,
   fetchExternalAgentConnectors,
@@ -264,8 +278,8 @@ function formatStorageSize(bytes?: number) {
 }
 
 type ConversationItem =
-  | { id: string; type: "user"; text: string }
-  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number }
+  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[] }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
   | { id: string; type: "compact"; text: string }
@@ -284,6 +298,70 @@ type ChatThread = {
   items: ConversationItem[];
 };
 
+type ChatAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  dataUrl?: string;
+  text?: string;
+  payloadKind?: "data_url" | "text" | "metadata";
+  truncated?: boolean;
+  error?: string;
+};
+
+type ComposerActionId = "attach" | "screenshot" | "annotation" | "browser" | "desktop";
+
+type ComposerAction = {
+  id: ComposerActionId;
+  label: string;
+  description: string;
+  disabled?: boolean;
+  disabledReason?: string;
+};
+
+type ComposerSlashCommand = {
+  name: string;
+  title: string;
+  action?: ComposerAction;
+};
+
+type QueuedTurn = {
+  id: string;
+  text: string;
+  attachments: ChatAttachment[];
+  providerLabel: string;
+  model: string;
+};
+
+type CurrentTurn = {
+  text: string;
+  startedAt: number;
+  providerLabel: string;
+  model: string;
+};
+
+type ProviderSnapshot = {
+  provider: string;
+  providerLabel: string;
+  model: string;
+};
+
+type ContextUsage = {
+  used: number;
+  limit: number;
+  ratio: number;
+  label: string;
+  warning: boolean;
+};
+
+type RuntimeScheduleItem = {
+  id: string;
+  status: "running" | "queued" | "approval" | "cancelling";
+  title: string;
+  meta: string;
+};
+
 type ProjectUiPrefs = {
   pinnedPaths: string[];
   aliases: Record<string, string>;
@@ -295,6 +373,15 @@ const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
 const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
 const PROJECT_UI_PREFS_KEY = "vrcforge_project_ui_prefs";
 const THEME_STORAGE_KEY = "vrcforge_theme";
+const LEFT_SIDEBAR_COLLAPSED_KEY = "vrcforge_left_sidebar_collapsed";
+const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
+const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
+const CONTEXT_AUTO_COMPACT_RATIO = 0.92;
+const MAX_QUEUED_TURNS = 8;
+const MAX_ATTACHMENTS_PER_TURN = 8;
+const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
@@ -438,6 +525,29 @@ export default function App() {
   const [activeChatId, setActiveChatId] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(LEFT_SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(RIGHT_SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [rightRuntimeSectionsCollapsed, setRightRuntimeSectionsCollapsed] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = window.localStorage.getItem(RIGHT_RUNTIME_SECTION_COLLAPSED_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
   const [renamingChatId, setRenamingChatId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
@@ -499,6 +609,12 @@ export default function App() {
   const [outfitImportStatus, setOutfitImportStatus] = useState("");
   const [loadingOutfitImportPlan, setLoadingOutfitImportPlan] = useState(false);
   const [requestingOutfitImport, setRequestingOutfitImport] = useState(false);
+  const [workspaceDiff, setWorkspaceDiff] = useState<WorkspaceDiffSummary | null>(null);
+  const [loadingWorkspaceDiff, setLoadingWorkspaceDiff] = useState(false);
+  const [workspaceDiffError, setWorkspaceDiffError] = useState("");
+  const [workspaceDiffReviewOpen, setWorkspaceDiffReviewOpen] = useState(false);
+  const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
+  const [runtimeNotice, setRuntimeNotice] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
@@ -508,8 +624,10 @@ export default function App() {
       return {};
     }
   });
-  const [queued, setQueued] = useState<string[]>([]);
-  const [currentTurn, setCurrentTurn] = useState<{ text: string; startedAt: number } | null>(null);
+  const [queued, setQueued] = useState<QueuedTurn[]>([]);
+  const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
+  const [stopRequested, setStopRequested] = useState(false);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [apiProvider, setApiProvider] = useState("gemini");
   const [apiKey, setApiKey] = useState("");
@@ -570,8 +688,10 @@ export default function App() {
   const chatsLoadedRef = useRef(false);
   const projectPrefsLoadedRef = useRef(false);
   const chatsRef = useRef<ChatThread[]>([]);
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<QueuedTurn[]>([]);
   const sendingRef = useRef(false);
+  const stopRequestedRef = useRef(false);
+  const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -604,7 +724,7 @@ export default function App() {
       list.push({ name: skill.name, title: skill.title || skill.description || "" });
     }
     return list;
-  }, [skills]);
+  }, [skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
@@ -614,6 +734,56 @@ export default function App() {
       ? t("agent.modeLabel.skillsReady", { count: vrcForgeToolsCount })
       : t("agent.modeLabel.basicMode");
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
+  const savedProvider = apiConfig?.provider || apiProvider;
+  const savedProviderLabel = apiConfig?.providerLabel || providerDisplayName(savedProvider);
+  const savedModel = apiConfig?.model || apiModel || defaultModelForProvider(savedProvider);
+  const providerConfigured = runtimeConnected && Boolean(apiConfig) && (!apiConfig?.apiKeyRequired || Boolean(apiConfig?.apiKeyPresent));
+  const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
+  const chatAvailable = providerConfigured || externalAgentConnected;
+  const chatDisabledReason = !runtimeConnected
+    ? t("agent.modeLabel.notConnected")
+    : !chatAvailable
+      ? `${savedProviderLabel} API key is not configured. Open Settings or connect an external agent.`
+      : "";
+  const composerActions = useMemo<ComposerAction[]>(
+    () => [
+      { id: "attach", label: "Attach file", description: "Add images or project files to this turn." },
+      {
+        id: "screenshot",
+        label: "Screenshot",
+        description: "Capture a visible app or Unity state through a connected capture skill.",
+        disabled: !runtimeConnected || !vrcForgeSkillsReady,
+        disabledReason: runtimeConnected
+          ? "Screenshot capture needs the VRCForge Unity/capture skill online."
+          : "Start the VRCForge runtime before using screenshot capture.",
+      },
+      {
+        id: "annotation",
+        label: "Annotation",
+        description: "Attach a screen note or review marker.",
+        disabled: true,
+        disabledReason: "Annotation capture is not connected in this build yet.",
+      },
+      {
+        id: "browser",
+        label: "Browser",
+        description: "Open the local workspace browser panel.",
+      },
+      {
+        id: "desktop",
+        label: "Desktop Rescue",
+        description: "Explicitly start Desktop Rescue / Computer Use.",
+        disabled: true,
+        disabledReason: "Desktop Rescue / Computer Use must be installed and enabled before it can run.",
+      },
+    ],
+    [runtimeConnected, vrcForgeSkillsReady],
+  );
+  const providerSnapshot: ProviderSnapshot = {
+    provider: savedProvider,
+    providerLabel: savedProviderLabel,
+    model: savedModel,
+  };
 
   const hiddenPathSet = useMemo(
     () => new Set(projectPrefs.hiddenPaths.map(normalizeProjectPathKey)),
@@ -641,6 +811,7 @@ export default function App() {
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
+  const contextUsage = useMemo(() => buildContextUsage(conversation, input), [conversation, input]);
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
     const parentSession = activeChat?.sessionId || "";
@@ -651,10 +822,51 @@ export default function App() {
       return sameSession || sameProject || (!parentSession && !projectKeyValue);
     });
   }, [activeChat?.projectPath, activeChat?.sessionId, activeProjectPath, subAgentTasks]);
+  const runtimeSchedule = useMemo<RuntimeScheduleItem[]>(() => {
+    const items: RuntimeScheduleItem[] = [];
+    if (currentTurn) {
+      items.push({
+        id: "current-turn",
+        status: stopRequested ? "cancelling" : "running",
+        title: currentTurn.text || "Attachments",
+        meta: `${currentTurn.providerLabel} / ${currentTurn.model}`,
+      });
+    }
+    queued.forEach((turn, index) => {
+      items.push({
+        id: `queued-${turn.id}`,
+        status: "queued",
+        title: turn.text || "Attachments",
+        meta: `Queue ${index + 1} · ${turn.providerLabel} / ${turn.model}`,
+      });
+    });
+    pendingApprovalItems.forEach((approval) => {
+      items.push({
+        id: `approval-${approval.id}`,
+        status: "approval",
+        title: approval.targetTool || approval.preview?.command || "Approval",
+        meta: approval.reason || approval.riskLevel || "waiting for review",
+      });
+    });
+    activeSubAgentTasks
+      .filter((task) => ["queued", "running", "cancelling"].includes(task.status))
+      .forEach((task) => {
+        items.push({
+          id: `subagent-${task.id}`,
+          status: task.status === "cancelling" ? "cancelling" : task.status === "queued" ? "queued" : "running",
+          title: task.displayName || subAgentRoleLabel(task.role),
+          meta: task.task || task.status,
+        });
+      });
+    return items;
+  }, [activeSubAgentTasks, currentTurn, pendingApprovalItems, queued, stopRequested]);
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
+  const workspaceGridColumns = `${leftSidebarCollapsed ? "56px" : "280px"} minmax(0,1fr) ${rightSidebarCollapsed ? "0px" : "320px"}`;
+  const workspaceDiffFiles = workspaceDiff?.files ?? [];
+  const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
   const projectPromptTitle = activeProjectPath && activeProjectName ? `想在 ${activeProjectName} 里改什么？` : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
@@ -749,6 +961,30 @@ export default function App() {
       // Project display preferences are best-effort local UI state.
     }
   }, [projectUiPrefs]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(leftSidebarCollapsed));
+    } catch {
+      // Sidebar width is best-effort local UI state.
+    }
+  }, [leftSidebarCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RIGHT_SIDEBAR_COLLAPSED_KEY, String(rightSidebarCollapsed));
+    } catch {
+      // Sidebar width is best-effort local UI state.
+    }
+  }, [rightSidebarCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RIGHT_RUNTIME_SECTION_COLLAPSED_KEY, JSON.stringify(rightRuntimeSectionsCollapsed));
+    } catch {
+      // Runtime section layout is best-effort local UI state.
+    }
+  }, [rightRuntimeSectionsCollapsed]);
 
   useEffect(() => {
     if (!runtimeConnected || projectPrefsLoadedRef.current) {
@@ -920,6 +1156,25 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
+  useEffect(() => {
+    if (!runtimeConnected) {
+      setWorkspaceDiff(null);
+      setWorkspaceDiffError("");
+      return;
+    }
+    void refreshWorkspaceDiff(false);
+  }, [runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (!runtimeConnected || rightSidebarCollapsed) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshWorkspaceDiff(false);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [runtimeConnected, endpoint, activeProjectPath, rightSidebarCollapsed]);
+
   async function startRuntime(): Promise<string | null> {
     if (runtimeStartingRef.current) {
       return endpoint;
@@ -969,6 +1224,47 @@ export default function App() {
     } catch {
       // Keep the current UI usable; explicit retry remains available.
     }
+  }
+
+  async function refreshWorkspaceDiff(showLoading = true, includePatch = workspaceDiffReviewOpen) {
+    if (!runtimeConnected) {
+      return;
+    }
+    if (showLoading) {
+      setLoadingWorkspaceDiff(true);
+    }
+    if (includePatch) {
+      setLoadingWorkspaceDiffPatch(true);
+    }
+    try {
+      let payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
+      if (!payload.ok && payload.status === "not_git" && activeProjectPath) {
+        const projectDiffError = payload.error || "Selected project is not a git repository.";
+        payload = await fetchWorkspaceDiff(endpoint, "", includePatch);
+        setRuntimeNotice(`Selected project is not a git repository; showing VRCForge app diff. ${projectDiffError}`);
+      }
+      setWorkspaceDiff(payload);
+      setWorkspaceDiffError(payload.ok ? "" : payload.error || "Diff unavailable.");
+    } catch (cause) {
+      setWorkspaceDiffError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (showLoading) {
+        setLoadingWorkspaceDiff(false);
+      }
+      if (includePatch) {
+        setLoadingWorkspaceDiffPatch(false);
+      }
+    }
+  }
+
+  function toggleWorkspaceDiffReview() {
+    setWorkspaceDiffReviewOpen((open) => {
+      const next = !open;
+      if (next && runtimeConnected && !workspaceDiff?.patch) {
+        void refreshWorkspaceDiff(false, true);
+      }
+      return next;
+    });
   }
 
   async function refreshWithRetry(target = endpoint) {
@@ -1029,6 +1325,41 @@ export default function App() {
     updateChat(chatId, (chat) => ({ ...chat, items: [...chat.items, item] }));
   }
 
+  function toggleRightRuntimeSection(section: string) {
+    setRightRuntimeSectionsCollapsed((current) => ({ ...current, [section]: !current[section] }));
+  }
+
+  function runExplicitWorkspaceAction(actionId: ComposerActionId) {
+    const action = composerActions.find((item) => item.id === actionId);
+    setRightSidebarCollapsed(false);
+    setRuntimeNotice("");
+    if (!action) {
+      return;
+    }
+    if (action.disabled) {
+      const reason = action.disabledReason || `${action.label} is not available.`;
+      setRuntimeNotice(reason);
+      setError(reason);
+      return;
+    }
+    if (actionId === "browser") {
+      setRuntimeNotice("Browser context is shown in the runtime sidebar. In-app browser control is available from the explicit Browser skill surface.");
+      return;
+    }
+    if (actionId === "screenshot") {
+      setInput((value) => (value.trim() ? `${value.trim()}\n/vrcforge_capture_screenshot ` : "/vrcforge_capture_screenshot "));
+      setRuntimeNotice("Screenshot skill selected. Review the slash command and send it to run capture.");
+      return;
+    }
+    if (actionId === "annotation") {
+      setRuntimeNotice("Annotation entry selected, but annotation capture is not connected in this build.");
+      return;
+    }
+    if (actionId === "desktop") {
+      setRuntimeNotice("Desktop Rescue / Computer Use is explicit-only and currently disabled because the skill is not connected.");
+    }
+  }
+
   function ensureActiveChat(): string {
     if (activeChat) {
       return activeChat.id;
@@ -1079,29 +1410,53 @@ export default function App() {
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
     const message = input.trim();
-    if (!message) {
+    if (!message && attachments.length === 0) {
       return;
     }
     setError("");
+    if (!chatAvailable) {
+      setError(chatDisabledReason || "Connect a provider or external agent before sending.");
+      return;
+    }
     if (message === "/compact" || message.startsWith("/compact ")) {
       void compactChat();
       setInput("");
       return;
     }
+    const turn: QueuedTurn = {
+      id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      text: message,
+      attachments,
+      providerLabel: providerSnapshot.providerLabel,
+      model: providerSnapshot.model,
+    };
     setInput("");
+    setAttachments([]);
     if (sendingRef.current) {
-      // 正在执行时继续输入：进入队列，当前任务结束后按顺序自动发送（引导对话）。
-      queueRef.current.push(message);
+      // Running turns queue follow-up messages in FIFO order.
+      if (queueRef.current.length >= MAX_QUEUED_TURNS) {
+        setError(`Queue is full (${MAX_QUEUED_TURNS}). Wait for the running turn or press Stop.`);
+        setInput(message);
+        setAttachments(turn.attachments);
+        return;
+      }
+      queueRef.current.push(turn);
       setQueued([...queueRef.current]);
       return;
     }
     const chatId = ensureActiveChat();
     sendingRef.current = true;
     setSending(true);
+    setStopRequested(false);
+    stopRequestedRef.current = false;
     try {
-      let next: string | undefined = message;
+      let next: QueuedTurn | undefined = turn;
       while (next !== undefined) {
         await runSingleTurn(chatId, next);
+        if (stopRequestedRef.current) {
+          queueRef.current = [];
+          break;
+        }
         next = queueRef.current.shift();
         setQueued([...queueRef.current]);
       }
@@ -1110,16 +1465,21 @@ export default function App() {
       setQueued([]);
       sendingRef.current = false;
       setSending(false);
+      setStopRequested(false);
+      stopRequestedRef.current = false;
     }
   }
 
-  async function runSingleTurn(chatId: string, message: string) {
+  async function runSingleTurn(chatId: string, turn: QueuedTurn) {
     const chat = chatsRef.current.find((item) => item.id === chatId);
     const chatSessionId = chat?.sessionId || "";
     const chatAgentName = chat?.agentName || "desktop-agent";
     const history = chat && chat.items.length > 0 ? buildChatHistory(chat.items) : [];
     const startedAt = Date.now();
-    setCurrentTurn({ text: message, startedAt });
+    const messageForModel = appendAttachmentSummary(turn.text, turn.attachments);
+    const abortController = new AbortController();
+    activeTurnAbortRef.current = abortController;
+    setCurrentTurn({ text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -1129,18 +1489,25 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: message };
+      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments };
+      const message = turn.text;
       updateChat(chatId, (current) => ({
         ...current,
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
         items: [...current.items, userItem],
       }));
-      const response = await sendAgentMessage(targetEndpoint, message, chatSessionId || undefined, history, chatAgentName);
+      const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
+        signal: abortController.signal,
+        attachments: serializeChatAttachments(turn.attachments),
+      });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
         ...current,
         sessionId: response.sessionId || response.session_id || current.sessionId,
-        items: [...current.items, { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds }],
+        items: [
+          ...current.items,
+          { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model },
+        ],
       }));
       await refresh(targetEndpoint);
     } catch (cause) {
@@ -1148,8 +1515,40 @@ export default function App() {
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       setError(text);
     } finally {
+      if (activeTurnAbortRef.current === abortController) {
+        activeTurnAbortRef.current = null;
+      }
       setCurrentTurn(null);
     }
+  }
+
+  function stopCurrentRun() {
+    stopRequestedRef.current = true;
+    setStopRequested(true);
+    queueRef.current = [];
+    setQueued([]);
+    activeTurnAbortRef.current?.abort();
+  }
+
+  async function addComposerFiles(files: FileList | null) {
+    if (!files || files.length === 0) {
+      return;
+    }
+    const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TURN - attachments.length);
+    if (remaining === 0) {
+      setError(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN}).`);
+      return;
+    }
+    const selected = Array.from(files).slice(0, remaining);
+    const nextAttachments = await Promise.all(selected.map(readChatAttachment));
+    setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
+    if (files.length > remaining) {
+      setError(`Only ${MAX_ATTACHMENTS_PER_TURN} attachments can be sent in one turn.`);
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
   async function approveShell(approvalId: string) {
@@ -3077,20 +3476,33 @@ export default function App() {
 
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
-      <div className="grid h-screen grid-cols-[64px_minmax(0,1fr)] md:grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-2 py-4 md:px-4 max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden">
-          <div className="flex h-10 items-center justify-center gap-3 px-2 md:justify-start">
-            <Bot className="h-5 w-5 shrink-0 text-primary" />
-            <div className="hidden truncate text-base font-semibold md:block">VRCForge</div>
+      <div className="grid h-screen" style={{ gridTemplateColumns: workspaceGridColumns }}>
+        <aside
+          className={cn(
+            "sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border/80 bg-sidebar px-2 py-3 transition-[width] max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden",
+            leftSidebarCollapsed ? "items-stretch [&_nav_button]:justify-center [&_nav_button]:px-0 [&_nav_span]:hidden" : "md:px-3",
+          )}
+        >
+          <div className={cn("flex h-9 items-center gap-2 px-2", leftSidebarCollapsed ? "justify-center" : "justify-between")}>
+            <Bot className="h-4 w-4 shrink-0 text-primary" />
+            {leftSidebarCollapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">VRCForge</div>}
+            <button
+              type="button"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => setLeftSidebarCollapsed((value) => !value)}
+              title={leftSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {leftSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </button>
           </div>
 
-          <nav className="mt-5 space-y-1">
+          <nav className="mt-4 space-y-0.5">
             <button
               onClick={newTemporaryChat}
               aria-label={t("sidebar.tempChat")}
               title={t("sidebar.tempChat")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "chat" && !activeProjectPath && !activeChat
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3106,7 +3518,7 @@ export default function App() {
                 setProjectModalError("");
                 setShowProjectModal(true);
               }}
-              className="flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <FolderPlus className="h-4 w-4 shrink-0" />
               <span className="truncate">{t("sidebar.newProject")}</span>
@@ -3116,7 +3528,7 @@ export default function App() {
               aria-label={t("sidebar.doctor")}
               title={t("sidebar.doctor")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "doctor"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3130,7 +3542,7 @@ export default function App() {
               aria-label={t("sidebar.optimization")}
               title={t("sidebar.optimization")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "optimization"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3144,7 +3556,7 @@ export default function App() {
               aria-label={t("encryption.protection")}
               title={t("encryption.protection")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "protection"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3158,7 +3570,7 @@ export default function App() {
               aria-label={t("sidebar.skills")}
               title={t("sidebar.skills")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "skills"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3172,7 +3584,7 @@ export default function App() {
               aria-label={t("checkpoint.checkpoints")}
               title={t("checkpoint.checkpoints")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center gap-3 rounded-md px-3 text-left text-sm transition-colors",
+                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
                 activeView === "checkpoints"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -3183,7 +3595,7 @@ export default function App() {
             </button>
           </nav>
 
-          <SidebarSection title={t("sidebar.projects")}>
+          {leftSidebarCollapsed ? null : <SidebarSection title={t("sidebar.projects")}>
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
@@ -3242,9 +3654,9 @@ export default function App() {
             ) : (
               <SidebarProject name={emptyProjectState?.name || t("agent.emptyProjectState.noUnityProject")} meta={emptyProjectState?.meta} active />
             )}
-          </SidebarSection>
+          </SidebarSection>}
 
-          <SidebarSection
+          {leftSidebarCollapsed ? null : <SidebarSection
             title={t("sidebar.chats")}
             collapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
             onToggleCollapse={() => toggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}
@@ -3272,7 +3684,7 @@ export default function App() {
             ) : (
               <div className="px-3 py-1 text-xs text-muted-foreground/70">{t("sidebar.noTempChats")}</div>
             )}
-          </SidebarSection>
+          </SidebarSection>}
 
           <div className="mt-auto">
             <button
@@ -3280,20 +3692,20 @@ export default function App() {
               aria-label={t("sidebar.settings")}
               title={t("sidebar.settings")}
               className={cn(
-                "flex h-10 w-full min-w-0 items-center justify-center gap-3 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-3",
+                "flex h-9 w-full min-w-0 items-center justify-center gap-2.5 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-2.5",
                 activeView === "settings"
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
               )}
             >
               <Settings className="h-4 w-4 shrink-0" />
-              <span className="hidden truncate md:inline">{t("sidebar.settings")}</span>
+              {leftSidebarCollapsed ? null : <span className="hidden truncate md:inline">{t("sidebar.settings")}</span>}
             </button>
           </div>
         </aside>
 
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
-          <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3 md:px-6">
+          <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : t("sidebar.tempChat")}</span>
               <span className="text-muted-foreground">/</span>
@@ -3324,6 +3736,28 @@ export default function App() {
               ) : null}
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
+              <div className="hidden items-center gap-1 rounded-md border border-border bg-card px-1 py-0.5 md:flex">
+                <RuntimeToolButton
+                  icon={<Camera className="h-4 w-4" />}
+                  label="Screenshot"
+                  onClick={() => runExplicitWorkspaceAction("screenshot")}
+                />
+                <RuntimeToolButton
+                  icon={<Pencil className="h-4 w-4" />}
+                  label="Annotation"
+                  onClick={() => runExplicitWorkspaceAction("annotation")}
+                />
+                <RuntimeToolButton
+                  icon={<Globe className="h-4 w-4" />}
+                  label="Browser"
+                  onClick={() => runExplicitWorkspaceAction("browser")}
+                />
+              </div>
+              <RuntimeToolButton
+                icon={rightSidebarCollapsed ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
+                label={rightSidebarCollapsed ? "Show runtime sidebar" : "Hide runtime sidebar"}
+                onClick={() => setRightSidebarCollapsed((value) => !value)}
+              />
               <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
@@ -3332,7 +3766,7 @@ export default function App() {
 
           {showDoctorStartupPrompt ? (
             <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-              <div className="flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                <div className="flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-panel dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <div className="font-medium">
@@ -3734,41 +4168,9 @@ export default function App() {
               </div>
             </div>
           ) : conversation.length === 0 ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-              <div className="w-full max-w-4xl">
+            <div className="flex min-h-0 flex-1 items-center justify-center p-5 md:p-8">
+              <div className="w-full max-w-3xl">
                 {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
-                <ProjectIndexPanel
-                  projectPath={activeProjectPath}
-                  projectName={activeProjectName}
-                  result={normalizeProjectPathKey(projectIndexProject) === normalizeProjectPathKey(activeProjectPath) ? projectIndex : null}
-                  loading={loadingProjectIndex}
-                  error={projectIndexError}
-                  onScan={() => void scanActiveProjectIndex(activeProjectPath)}
-                  onReview={() => void startSubAgentTask("project_index_review")}
-                />
-                <OutfitImportPanel
-                  projectPath={activeProjectPath}
-                  packagePath={outfitPackagePath}
-                  result={outfitImportPlan}
-                  status={outfitImportStatus}
-                  loading={loadingOutfitImportPlan}
-                  requesting={requestingOutfitImport}
-                  onPackagePathChange={setOutfitPackagePath}
-                  onPlan={() => void planActiveOutfitImport()}
-                  onRequest={() => void requestActiveOutfitImport()}
-                  onReview={() => void startSubAgentTask("outfit_import_plan_review")}
-                />
-                <SubAgentPanel
-                  tasks={activeSubAgentTasks}
-                  loading={loadingSubAgents}
-                  error={subAgentError}
-                  selected={selectedSubAgent}
-                  onInspect={(taskId) => void inspectSubAgentTask(taskId)}
-                  onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-                  onRetry={(taskId) => void retrySubAgentTask(taskId)}
-                  onAccept={acceptSubAgentSummary}
-                  onCloseInspect={() => setSelectedSubAgent(null)}
-                />
                 <Composer
                   input={input}
                   setInput={setInput}
@@ -3777,8 +4179,19 @@ export default function App() {
                   statusLabel={agentModeLabel}
                   projectLabel={activeProjectPath ? activeProjectName : ""}
                   onSubmit={submitMessage}
+                  onStop={stopCurrentRun}
                   onSwitchMode={switchMode}
                   commands={slashCommands}
+                  actions={composerActions}
+                  onAction={runExplicitWorkspaceAction}
+                  disabledReason={chatDisabledReason}
+                  attachments={attachments}
+                  onAttachFiles={(files) => void addComposerFiles(files)}
+                  onRemoveAttachment={removeAttachment}
+                  contextUsage={contextUsage}
+                  stopRequested={stopRequested}
+                  providerLabel={providerSnapshot.providerLabel}
+                  model={providerSnapshot.model}
                   projects={projectItems.map((project) => ({
                     key: projectKey(project),
                     name: project.name || shortPath(project.path || ""),
@@ -3791,80 +4204,34 @@ export default function App() {
           ) : (
             <>
               <div
-                className="min-h-0 flex-1 overflow-auto px-6 py-8"
+                className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8"
                 onMouseUp={handleConversationMouseUp}
                 onScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
               >
-                <div className="mx-auto max-w-4xl space-y-5">
-                  <ProjectIndexPanel
-                    projectPath={activeProjectPath}
-                    projectName={activeProjectName}
-                    result={normalizeProjectPathKey(projectIndexProject) === normalizeProjectPathKey(activeProjectPath) ? projectIndex : null}
-                    loading={loadingProjectIndex}
-                    error={projectIndexError}
-                    onScan={() => void scanActiveProjectIndex(activeProjectPath)}
-                    onReview={() => void startSubAgentTask("project_index_review")}
-                  />
-                  <OutfitImportPanel
-                    projectPath={activeProjectPath}
-                    packagePath={outfitPackagePath}
-                    result={outfitImportPlan}
-                    status={outfitImportStatus}
-                    loading={loadingOutfitImportPlan}
-                    requesting={requestingOutfitImport}
-                    onPackagePathChange={setOutfitPackagePath}
-                    onPlan={() => void planActiveOutfitImport()}
-                    onRequest={() => void requestActiveOutfitImport()}
-                    onReview={() => void startSubAgentTask("outfit_import_plan_review")}
-                  />
-                  <SubAgentPanel
-                    tasks={activeSubAgentTasks}
-                    loading={loadingSubAgents}
-                    error={subAgentError}
-                    selected={selectedSubAgent}
-                    onInspect={(taskId) => void inspectSubAgentTask(taskId)}
-                    onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-                    onRetry={(taskId) => void retrySubAgentTask(taskId)}
-                    onAccept={acceptSubAgentSummary}
-                    onCloseInspect={() => setSelectedSubAgent(null)}
-                  />
+                <div className="mx-auto max-w-3xl space-y-7">
                   {conversation.map((item) => (
                     <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
                   ))}
                   {sending && currentTurn ? (
-                    <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} provider={apiProvider} model={apiModel} />
+                    <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} provider={currentTurn.providerLabel} model={currentTurn.model} />
                   ) : null}
-                  {queued.map((text, index) => (
-                    <div key={`queued-${index}`} className="flex justify-end opacity-60">
-                      <div className="max-w-[78%] rounded-2xl bg-primary/80 px-4 py-3 text-sm text-primary-foreground">
+                  {queued.map((turn, index) => (
+                    <div key={turn.id} className="flex justify-end opacity-65">
+                      <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
                         <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
                           <Loader2 className="h-3 w-3 animate-spin" />
-                          {t("chat.queued")}
+                          {t("chat.queued")} {index + 1}
                         </div>
-                        <p className="whitespace-pre-wrap break-words">{text}</p>
+                        <p className="whitespace-pre-wrap break-words">{turn.text || "Attachments"}</p>
+                        {turn.attachments.length ? <AttachmentStrip attachments={turn.attachments} compact /> : null}
                       </div>
                     </div>
                   ))}
                   <div ref={conversationEndRef} />
                 </div>
               </div>
-              {pendingApprovalItems.length > 0 ? (
-                <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
-                  <div className="mx-auto max-w-4xl space-y-3">
-                    {pendingApprovalItems.map((approval) => (
-                      <ApprovalCard
-                        key={approval.id}
-                        approval={approval}
-                        loading={loading}
-                        onApprove={approveShell}
-                        onReject={rejectShell}
-                      />
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              <div className="shrink-0 border-t border-border bg-workspace/95 px-6 py-4">
-                <div className="mx-auto max-w-4xl">
+              <div className="shrink-0 border-t border-border/80 bg-workspace/95 px-4 py-3 md:px-6 md:py-4">
+                <div className="mx-auto max-w-3xl">
                   <Composer
                     input={input}
                     setInput={setInput}
@@ -3873,9 +4240,20 @@ export default function App() {
                     statusLabel={agentModeLabel}
                     projectLabel={activeProjectPath ? activeProjectName : ""}
                     onSubmit={submitMessage}
+                    onStop={stopCurrentRun}
                     onSwitchMode={switchMode}
                     commands={slashCommands}
+                    actions={composerActions}
+                    onAction={runExplicitWorkspaceAction}
                     compact
+                    disabledReason={chatDisabledReason}
+                    attachments={attachments}
+                    onAttachFiles={(files) => void addComposerFiles(files)}
+                    onRemoveAttachment={removeAttachment}
+                    contextUsage={contextUsage}
+                    stopRequested={stopRequested}
+                    providerLabel={providerSnapshot.providerLabel}
+                    model={providerSnapshot.model}
                     projects={projectItems.map((project) => ({
                       key: projectKey(project),
                       name: project.name || shortPath(project.path || ""),
@@ -3903,6 +4281,276 @@ export default function App() {
             </div>
           ) : null}
         </section>
+        {rightSidebarCollapsed ? null : (
+          <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
+              <div className="min-w-0 flex-1 truncate text-sm font-semibold">Environment</div>
+              <button
+                type="button"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => void refreshWorkspaceDiff()}
+                title="Refresh diff"
+                disabled={!runtimeConnected || loadingWorkspaceDiff}
+              >
+                <RefreshCw className={cn("h-4 w-4", loadingWorkspaceDiff && "animate-spin")} />
+              </button>
+              <button
+                type="button"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => setRightSidebarCollapsed(true)}
+                title="Hide runtime sidebar"
+              >
+                <PanelRightClose className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              <section className="rounded-lg border border-border bg-card p-3 shadow-panel">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">Runtime</h2>
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    title="Open settings"
+                    onClick={() => void openSettings()}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  <RuntimeInfoRow
+                    icon={<FileText className="h-4 w-4" />}
+                    label="Changes"
+                    value={
+                      loadingWorkspaceDiff
+                        ? "Refreshing"
+                        : workspaceDiffError
+                          ? workspaceDiffError
+                          : workspaceDiff
+                            ? workspaceDiffChanged
+                              ? `${formatCount(workspaceDiff.fileCount)} file${workspaceDiff.fileCount === 1 ? "" : "s"} changed`
+                              : workspaceDiff.status === "clean"
+                                ? "Clean"
+                                : workspaceDiff.status
+                            : runtimeConnected
+                              ? "No diff loaded"
+                              : "Core offline"
+                    }
+                    suffix={
+                      workspaceDiffChanged ? (
+                        <span className="font-mono">
+                          <span className="text-emerald-600">+{formatCount(workspaceDiff?.additions || 0)}</span>{" "}
+                          <span className="text-destructive">-{formatCount(workspaceDiff?.deletions || 0)}</span>
+                        </span>
+                      ) : null
+                    }
+                  />
+                  <RuntimeInfoRow
+                    icon={<Monitor className="h-4 w-4" />}
+                    label="Local"
+                    value={activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : "Temporary chat"}
+                  />
+                  <RuntimeInfoRow
+                    icon={<GitBranch className="h-4 w-4" />}
+                    label={workspaceDiff?.branch || "Branch"}
+                    value={workspaceDiff?.gitRoot ? shortPath(workspaceDiff.gitRoot) : workspaceDiff?.status === "not_git" ? "not a git repo" : "waiting for diff"}
+                  />
+                  <RuntimeInfoRow
+                    icon={<ListChecks className="h-4 w-4" />}
+                    label="Review"
+                    value={pendingApprovals ? `${formatCount(pendingApprovals)} pending approval${pendingApprovals === 1 ? "" : "s"}` : "No pending approvals"}
+                  />
+                </div>
+                <div className="mt-3 border-t border-border pt-3">
+                  <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Browser</div>
+                  <RuntimeInfoRow icon={<Globe className="h-4 w-4" />} label="VRCForge" value="localhost:1420" muted />
+                </div>
+                <div className="mt-3 border-t border-border pt-3">
+                  <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Sources</div>
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    {[providerSnapshot.providerLabel, externalAgentConnected ? "External agent" : "", vrcForgeSkillsReady ? "VRC skills" : "", runtimeConnected ? "Runtime" : ""]
+                      .filter(Boolean)
+                      .slice(0, 7)
+                      .map((source) => (
+                        <span key={source} title={source} className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-background">
+                          <Globe className="h-3.5 w-3.5" />
+                        </span>
+                      ))}
+                  </div>
+                </div>
+                {runtimeNotice ? (
+                  <div className="mt-3 rounded-md border border-border bg-muted/50 px-2 py-2 text-xs text-muted-foreground">
+                    {runtimeNotice}
+                  </div>
+                ) : null}
+              </section>
+
+              <RuntimeSection
+                title="Diff"
+                collapsed={rightRuntimeSectionsCollapsed.diff}
+                onToggle={() => toggleRightRuntimeSection("diff")}
+                count={
+                  <Badge tone={workspaceDiffChanged ? "warn" : "muted"}>
+                    {workspaceDiffChanged ? formatCount(workspaceDiff?.fileCount || 0) : workspaceDiff?.status || "idle"}
+                  </Badge>
+                }
+              >
+                {workspaceDiffFiles.length ? (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
+                      onClick={toggleWorkspaceDiffReview}
+                    >
+                      <span className="truncate">Change review</span>
+                      <span className="shrink-0 text-muted-foreground">
+                        {loadingWorkspaceDiffPatch ? "loading" : workspaceDiffReviewOpen ? "hide" : "open"}
+                      </span>
+                    </button>
+                    <div className="space-y-0.5">
+                      {workspaceDiffFiles.slice(0, 6).map((file) => (
+                        <RuntimeDiffFileRow key={`${file.status}-${file.path}`} file={file} />
+                      ))}
+                      {workspaceDiffFiles.length > 6 ? (
+                        <div className="pt-1 text-xs text-muted-foreground">+{formatCount(workspaceDiffFiles.length - 6)} more files</div>
+                      ) : null}
+                    </div>
+                    {workspaceDiffReviewOpen ? (
+                      <div className="rounded-md border border-border bg-background/80 p-2">
+                        <div className="mb-1 text-xs font-medium text-muted-foreground">Git patch preview</div>
+                        {workspaceDiff?.patch ? (
+                          <pre className="app-scrollbar max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
+                            {workspaceDiff.patch}
+                          </pre>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">
+                            {loadingWorkspaceDiffPatch ? "Loading patch..." : "No tracked patch available. Untracked files are listed above."}
+                          </div>
+                        )}
+                        {workspaceDiff?.patchTruncated ? <div className="mt-1 text-xs text-amber-700">Patch truncated for sidebar review.</div> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    {workspaceDiffError || (runtimeConnected ? "No local changes." : "Core offline.")}
+                  </div>
+                )}
+              </RuntimeSection>
+
+              <RuntimeSection
+                title="Schedule"
+                collapsed={rightRuntimeSectionsCollapsed.schedule}
+                onToggle={() => toggleRightRuntimeSection("schedule")}
+                count={<Badge tone={runtimeSchedule.length ? "warn" : "muted"}>{formatCount(runtimeSchedule.length)}</Badge>}
+              >
+                {runtimeSchedule.length ? (
+                  <div className="space-y-0.5">
+                    {runtimeSchedule.slice(0, 8).map((item) => (
+                      <RuntimeScheduleRow key={item.id} item={item} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">No active work.</div>
+                )}
+              </RuntimeSection>
+
+              <RuntimeSection
+                title="Sub agents"
+                collapsed={rightRuntimeSectionsCollapsed.subagents}
+                onToggle={() => toggleRightRuntimeSection("subagents")}
+                count={<Badge tone={activeSubAgentTasks.length ? "warn" : "muted"}>{formatCount(activeSubAgentTasks.length)}</Badge>}
+              >
+                {activeSubAgentTasks.length ? (
+                  <div className="space-y-1">
+                    {activeSubAgentTasks.slice(0, rightRuntimeSectionsCollapsed.subagents ? 0 : 6).map((task) => {
+                      const runningTask = ["queued", "running", "cancelling"].includes(task.status);
+                      return (
+                        <button
+                          key={task.id}
+                          type="button"
+                          className="grid w-full min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1.5 text-left text-xs transition-colors hover:bg-muted"
+                          onClick={() => void inspectSubAgentTask(task.id)}
+                        >
+                          <span className={cn("block h-3 w-3 rounded-sm", runningTask ? "bg-primary" : task.status === "failed" ? "bg-destructive" : "bg-muted-foreground/50")} />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">{task.displayName || subAgentRoleLabel(task.role)}</span>
+                            <span className="block truncate text-muted-foreground">{task.task || task.status}</span>
+                          </span>
+                          <span className="shrink-0 text-muted-foreground">{task.status}</span>
+                        </button>
+                      );
+                    })}
+                    {activeSubAgentTasks.length > 6 ? (
+                      <div className="px-1 pt-1 text-xs text-muted-foreground">+{formatCount(activeSubAgentTasks.length - 6)} more</div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">No sub agents.</div>
+                )}
+              </RuntimeSection>
+
+              {pendingApprovalItems.length ? (
+                <RuntimeSection
+                  title="Approvals"
+                  collapsed={rightRuntimeSectionsCollapsed.approvals}
+                  onToggle={() => toggleRightRuntimeSection("approvals")}
+                  count={<Badge tone="warn">{pendingApprovalItems.length}</Badge>}
+                >
+                  <div className="space-y-2">
+                    {pendingApprovalItems.slice(0, 3).map((approval) => (
+                      <div key={approval.id} className="rounded-md border border-amber-500/20 bg-amber-500/5 p-2 text-xs">
+                        <div className="truncate font-medium">{approval.targetTool || approval.preview?.command || "Approval"}</div>
+                        <div className="mt-1 truncate text-muted-foreground">{approval.reason || approval.riskLevel || "pending"}</div>
+                        <div className="mt-2 flex gap-2">
+                          <Button className="h-7 px-2 text-xs" disabled={loading} onClick={() => approveShell(approval.id)}>
+                            {t("approval.approve")}
+                          </Button>
+                          <Button variant="outline" className="h-7 px-2 text-xs" disabled={loading} onClick={() => rejectShell(approval.id)}>
+                            {t("approval.reject")}
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
+
+              {activeView === "chat" ? (
+                <RuntimeSection
+                  title="Workspace tools"
+                  collapsed={rightRuntimeSectionsCollapsed.workspaceTools}
+                  onToggle={() => toggleRightRuntimeSection("workspaceTools")}
+                >
+                  <div className="grid gap-2">
+                    <button
+                      type="button"
+                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-2 text-left text-xs transition-colors hover:bg-muted"
+                      onClick={() => void scanActiveProjectIndex(activeProjectPath)}
+                      disabled={!activeProjectPath || loadingProjectIndex}
+                    >
+                      <span className="truncate">Project index</span>
+                      <span className="shrink-0 text-muted-foreground">{loadingProjectIndex ? "scanning" : projectIndex ? "ready" : "scan"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-2 text-left text-xs transition-colors hover:bg-muted"
+                      onClick={() => void planActiveOutfitImport()}
+                      disabled={!activeProjectPath || !outfitPackagePath || loadingOutfitImportPlan}
+                    >
+                      <span className="truncate">Outfit import</span>
+                      <span className="shrink-0 text-muted-foreground">{loadingOutfitImportPlan ? "planning" : outfitImportPlan ? "ready" : "plan"}</span>
+                    </button>
+                  </div>
+                  {projectIndexError || outfitImportStatus || subAgentError ? (
+                    <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                      {projectIndexError || outfitImportStatus || subAgentError}
+                    </div>
+                  ) : null}
+                </RuntimeSection>
+              ) : null}
+            </div>
+          </aside>
+        )}
       </div>
 
       {showOnboarding && !onboardingMinimized
@@ -4427,6 +5075,23 @@ export default function App() {
   );
 }
 
+function composerActionIcon(action: ComposerActionId): ReactNode {
+  switch (action) {
+    case "attach":
+      return <Paperclip className="h-4 w-4" />;
+    case "screenshot":
+      return <Camera className="h-4 w-4" />;
+    case "annotation":
+      return <Pencil className="h-4 w-4" />;
+    case "browser":
+      return <Globe className="h-4 w-4" />;
+    case "desktop":
+      return <MousePointer2 className="h-4 w-4" />;
+    default:
+      return <Plus className="h-4 w-4" />;
+  }
+}
+
 function Composer({
   input,
   setInput,
@@ -4435,9 +5100,20 @@ function Composer({
   statusLabel,
   projectLabel,
   onSubmit,
+  onStop,
   onSwitchMode,
   commands = [],
+  actions = [],
+  onAction,
   compact = false,
+  disabledReason = "",
+  attachments = [],
+  onAttachFiles,
+  onRemoveAttachment,
+  contextUsage,
+  stopRequested = false,
+  providerLabel,
+  model,
   projects = [],
   onBindProject,
   queuedCount = 0,
@@ -4449,9 +5125,20 @@ function Composer({
   statusLabel: string;
   projectLabel: string;
   onSubmit: (event?: FormEvent) => void;
+  onStop?: () => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   commands?: Array<{ name: string; title: string }>;
+  actions?: ComposerAction[];
+  onAction?: (action: ComposerActionId) => void;
   compact?: boolean;
+  disabledReason?: string;
+  attachments?: ChatAttachment[];
+  onAttachFiles?: (files: FileList | null) => void;
+  onRemoveAttachment?: (id: string) => void;
+  contextUsage?: ContextUsage;
+  stopRequested?: boolean;
+  providerLabel?: string;
+  model?: string;
   projects?: Array<{ key: string; name: string }>;
   onBindProject?: (path: string) => void;
   queuedCount?: number;
@@ -4459,12 +5146,23 @@ function Composer({
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [bindMenuOpen, setBindMenuOpen] = useState(false);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
+  const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
+  const commandActions: ComposerSlashCommand[] = actions.map((action) => ({
+    name: action.id === "desktop" ? "desktop-rescue" : action.id,
+    title: action.disabled ? action.disabledReason || action.description : action.description,
+    action,
+  }));
   const slashQuery = input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
-  const slashMatches =
+  const slashMatches: ComposerSlashCommand[] =
     slashQuery !== null
-      ? commands.filter((command) => command.name.toLowerCase().includes(slashQuery)).slice(0, 8)
+      ? [...commands.map((command) => ({ ...command })), ...commandActions].filter((command) => command.name.toLowerCase().includes(slashQuery)).slice(0, 8)
       : [];
+  const visibleActions: ComposerAction[] = actions.length
+    ? actions
+    : [{ id: "attach", label: "Attach file", description: "Add images or project files to this turn." }];
   return (
     <form onSubmit={onSubmit} className="relative rounded-3xl bg-muted/70 shadow-composer">
       {slashMatches.length > 0 ? (
@@ -4473,8 +5171,22 @@ function Composer({
             <button
               key={command.name}
               type="button"
-              className="flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-muted"
-              onClick={() => setInput(`/${command.name} `)}
+              className={cn(
+                "flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-muted",
+                command.action?.disabled ? "opacity-60" : "",
+              )}
+              onClick={() => {
+                if (command.action) {
+                  setInput("");
+                  if (command.action.id === "attach" && !command.action.disabled) {
+                    fileInputRef.current?.click();
+                  } else {
+                    onAction?.(command.action.id);
+                  }
+                  return;
+                }
+                setInput(`/${command.name} `);
+              }}
             >
               <span className="shrink-0 font-mono text-xs text-primary">/{command.name}</span>
               <span className="truncate text-xs text-muted-foreground">{command.title}</span>
@@ -4487,7 +5199,8 @@ function Composer({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-          placeholder={t("chat.inputPlaceholder")}
+          placeholder={disabledReason || t("chat.inputPlaceholder")}
+          disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -4495,8 +5208,67 @@ function Composer({
             }
           }}
         />
+        {attachments.length ? (
+          <div className="mt-3">
+            <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
+          </div>
+        ) : null}
         <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                onAttachFiles?.(event.currentTarget.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+              onClick={() => setActionMenuOpen((open) => !open)}
+              title="Add context"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+            {actionMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setActionMenuOpen(false)} /> : null}
+            {actionMenuOpen ? (
+              <div className="absolute bottom-[96px] left-4 z-30 w-80 rounded-lg border border-border bg-card p-1.5 shadow-panel">
+                {visibleActions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className={cn(
+                      "flex w-full min-w-0 items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
+                      action.disabled ? "cursor-not-allowed opacity-55" : "hover:bg-muted",
+                    )}
+                    onClick={() => {
+                      setActionMenuOpen(false);
+                      if (action.disabled) {
+                        onAction?.(action.id);
+                        return;
+                      }
+                      if (action.id === "attach") {
+                        fileInputRef.current?.click();
+                        return;
+                      }
+                      onAction?.(action.id);
+                    }}
+                    title={action.disabled ? action.disabledReason : action.description}
+                  >
+                    <span className="mt-0.5 shrink-0 text-muted-foreground">{composerActionIcon(action.id)}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">{action.label}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {action.disabled ? action.disabledReason || "Unavailable" : action.description}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <div className="relative">
               <button
                 type="button"
@@ -4540,16 +5312,33 @@ function Composer({
             <Badge tone="muted" className="max-w-[220px] truncate">
               {statusLabel}
             </Badge>
+            {providerLabel || model ? (
+              <Badge tone="muted" className="max-w-[260px] truncate">
+                {providerLabel || "Provider"}{model ? ` · ${model}` : ""}
+              </Badge>
+            ) : null}
+            {contextUsage ? (
+              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[180px] truncate">
+                Context {contextUsage.label}
+              </Badge>
+            ) : null}
             {sending ? (
               <Badge tone="warn" className="max-w-[240px] truncate">
                 <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
-                {t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
+                {stopRequested ? "Stopping" : t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
               </Badge>
             ) : null}
           </div>
-          <Button className="h-10 w-10 rounded-full px-0" disabled={!input.trim()} type="submit">
-            <Send className="h-4 w-4" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {sending ? (
+              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title="Stop">
+                <Square className="h-4 w-4" />
+              </Button>
+            ) : null}
+            <Button className="h-10 min-w-10 rounded-full px-3" disabled={!canSubmit} type="submit" title={sending ? "Queue" : "Send"}>
+              {sending ? <span className="text-xs">Queue</span> : <Send className="h-4 w-4" />}
+            </Button>
+          </div>
         </div>
       </div>
       <div className="relative flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
@@ -4600,6 +5389,50 @@ function Composer({
         ) : null}
       </div>
     </form>
+  );
+}
+
+function AttachmentStrip({
+  attachments,
+  onRemove,
+  compact = false,
+}: {
+  attachments: ChatAttachment[];
+  onRemove?: (id: string) => void;
+  compact?: boolean;
+}) {
+  if (!attachments.length) {
+    return null;
+  }
+  return (
+    <div className={cn("flex min-w-0 flex-wrap gap-2", compact ? "mt-2" : "")}>
+      {attachments.map((attachment) => (
+        <div
+          key={attachment.id}
+          className="flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm"
+          title={`${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+        >
+          {attachment.dataUrl && attachment.type.startsWith("image/") ? (
+            <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
+          ) : (
+            <Archive className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <span className="min-w-0 max-w-[220px] truncate">{attachment.name}</span>
+          <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span>
+          {attachment.truncated ? <span className="shrink-0 text-amber-700">metadata</span> : null}
+          {onRemove ? (
+            <button
+              type="button"
+              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => onRemove(attachment.id)}
+              title="Remove"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -8350,7 +9183,7 @@ function DoctorCheckRow({
   const tone = doctorTone(check.status);
   const canRepairUnityBridge = check.status !== "ok" && Boolean(check.fixable) && (check.actions || []).includes("repair_unity_bridge");
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+    <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -8420,7 +9253,8 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
     return (
       <div className="flex justify-end">
         <div className="max-w-[78%] rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
-          <p className="whitespace-pre-wrap break-words">{item.text}</p>
+          {item.text ? <p className="whitespace-pre-wrap break-words">{item.text}</p> : null}
+          {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
         </div>
       </div>
     );
@@ -8435,7 +9269,27 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
   }
 
   if (item.type === "result") {
-    return <ShellResultCard title={item.error === "rejected" ? t("agent.rejected") : t("agent.executionResult")} result={item.result} error={item.error} />;
+    return (
+      <div className="flex justify-start">
+        <div className="w-full max-w-[85%]">
+          <RunRow
+            icon="shell"
+            title={item.result?.command || (item.error === "rejected" ? t("agent.rejected") : t("agent.executionResult"))}
+            statusTone={item.result ? (item.result.ok ? "ok" : "danger") : "muted"}
+            statusLabel={item.result ? t("shell.exitCode", { code: item.result.exitCode }) : item.error || "result"}
+          >
+            {item.error ? <DataLine label={t("skills.error")} value={item.error} /> : null}
+            {item.result ? (
+              <>
+                <DataLine label={t("shell.elapsed")} value={`${item.result.durationSeconds}s`} />
+                <OutputBlock label={t("shell.output")} value={item.result.stdout} />
+                {item.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={item.result.stderr} danger /> : null}
+              </>
+            ) : null}
+          </RunRow>
+        </div>
+      </div>
+    );
   }
 
   if (item.type === "compact") {
@@ -8485,7 +9339,7 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
   if (localIdle) {
     return (
       <div className="flex justify-start">
-        <div className="max-w-[85%] space-y-3 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+        <div className="max-w-[85%] space-y-2 px-1 text-sm">
           <p className="text-muted-foreground">
             {t("agent.keywordPlannerHint1")}
           </p>
@@ -8503,11 +9357,11 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
 
   return (
     <div className="flex justify-start">
-      <div className="w-full max-w-[85%] space-y-2">
-        <div className="rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+      <div className="w-full max-w-[85%] space-y-1.5">
+        <div className="px-1 text-sm">
           <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.reply || response.plan.summary}</p>
-          {showIntent ? (
-            <p className="mt-2 flex items-center gap-1.5 text-xs text-primary">
+          {false && showIntent ? (
+            <p className="hidden">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
               <span>
                 {t("agent.willDoNext", { step: displayStep(nextStep) })}
@@ -8515,15 +9369,30 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
               </span>
             </p>
           ) : null}
-          <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>{response.plan.plannerLabel || displayPlanner(response.plan.planner)}</span>
+          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+            <span>{item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}{item.model ? ` · ${item.model}` : ""}</span>
             {item.elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(item.elapsedSeconds) })}</span> : null}
           </div>
         </div>
 
+        {showIntent ? (
+          <RunRow
+            icon="plan"
+            title={displayStep(nextStep)}
+            statusTone="muted"
+            statusLabel={response.plan.skillTool ? "tool planned" : response.plan.shellCommand ? "command planned" : "planned"}
+          >
+            <DataLine label="Planner" value={response.plan.plannerLabel || displayPlanner(response.plan.planner)} />
+            {response.plan.skillTool ? <DataLine label="Tool" value={response.plan.skillTool} mono /> : null}
+            {response.plan.skillCategory ? <DataLine label="Category" value={response.plan.skillCategory} /> : null}
+            {response.plan.shellCommand ? <OutputBlock label="Command" value={response.plan.shellCommand} /> : null}
+            {response.plan.expectedResult ? <DataLine label="Expected" value={response.plan.expectedResult} /> : null}
+          </RunRow>
+        ) : null}
+
         <ReasoningTracePanel
           trace={response.reasoning}
-          fallbackLabel={response.plan.plannerLabel || displayPlanner(response.plan.planner)}
+          fallbackLabel={item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}
           elapsedSeconds={item.elapsedSeconds}
         />
 
@@ -8612,7 +9481,7 @@ function ReasoningTracePanel({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+        className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/50"
       >
         {open ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -8620,14 +9489,14 @@ function ReasoningTracePanel({
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         )}
         <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+        <span className="min-w-0 flex-1 truncate text-xs">{title}</span>
         {elapsedSeconds ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{formatDuration(elapsedSeconds)}</span> : null}
         <Badge tone={trace?.redacted ? "warn" : "muted"} className="shrink-0">
           {items.length}
         </Badge>
       </button>
       {open ? (
-        <div className="space-y-3 border-t border-border px-3 py-3">
+        <div className="space-y-2 border-t border-border/70 px-2 py-2">
           <DataLine label="Provider" value={provider} />
           {model ? <DataLine label="Model" value={model} mono /> : null}
           {trace?.source ? <DataLine label="Source" value={trace.source} mono /> : null}
@@ -8635,7 +9504,7 @@ function ReasoningTracePanel({
             <OutputBlock
               key={`${item.title || item.kind || "reasoning"}-${index}`}
               label={item.title || item.kind || t("thinking.reasoning")}
-              value={item.text || (item.opaque ? "Opaque reasoning item retained by provider response." : "")}
+              value={item.opaque ? "Opaque reasoning item retained by provider response." : "Reasoning content is summarized in chat and hidden by default."}
             />
           ))}
         </div>
@@ -8651,20 +9520,20 @@ function RunRow({
   statusLabel,
   children,
 }: {
-  icon: "shell" | "skill";
+  icon: "shell" | "skill" | "plan";
   title: string;
   statusTone: "ok" | "warn" | "danger" | "muted";
   statusLabel: string;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const Icon = icon === "shell" ? TerminalSquare : Wrench;
+  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : ListChecks;
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+    <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+        className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/50"
       >
         {open ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -8672,12 +9541,12 @@ function RunRow({
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         )}
         <Icon className="h-3.5 w-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 flex-1 truncate font-mono text-xs">{title}</span>
+        <span className={cn("min-w-0 flex-1 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{title}</span>
         <Badge tone={statusTone} className="shrink-0">
           {statusLabel}
         </Badge>
       </button>
-      {open ? <div className="space-y-3 border-t border-border px-3 py-3">{children}</div> : null}
+      {open ? <div className="space-y-2 border-t border-border/70 px-2 py-2">{children}</div> : null}
     </div>
   );
 }
@@ -8692,7 +9561,7 @@ function RunningIndicator({ startedAt, text, provider, model }: { startedAt: num
   const status = thinkingStatusForModel(provider, model);
   return (
     <div className="flex justify-start">
-      <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-panel">
+      <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs text-muted-foreground">
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
         <span className="shrink-0 font-medium text-foreground">{status}</span>
         <span className="min-w-0 truncate text-muted-foreground">「{text}」</span>
@@ -8789,6 +9658,106 @@ function DataLine({ label, value, mono = false }: { label: string; value: string
       <div className="truncate text-muted-foreground">{label}</div>
       <div className={cn("min-w-0 break-words font-medium", mono && "font-mono text-xs")}>{value}</div>
     </div>
+  );
+}
+
+function RuntimeToolButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
+    >
+      {icon}
+    </button>
+  );
+}
+
+function RuntimeInfoRow({
+  icon,
+  label,
+  value,
+  suffix,
+  muted = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  suffix?: ReactNode;
+  muted?: boolean;
+}) {
+  return (
+    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 py-1 text-sm">
+      <div className={cn("flex items-center justify-center", muted ? "text-muted-foreground/60" : "text-muted-foreground")}>{icon}</div>
+      <div className="min-w-0">
+        <div className="truncate font-medium">{label}</div>
+        {value ? <div className={cn("truncate text-xs", muted ? "text-muted-foreground/60" : "text-muted-foreground")}>{value}</div> : null}
+      </div>
+      {suffix ? <div className="shrink-0 text-xs">{suffix}</div> : null}
+    </div>
+  );
+}
+
+function RuntimeScheduleRow({ item }: { item: RuntimeScheduleItem }) {
+  const tone =
+    item.status === "approval"
+      ? "border-amber-500 bg-amber-500"
+      : item.status === "cancelling"
+        ? "border-destructive bg-destructive"
+        : item.status === "running"
+          ? "border-primary bg-primary"
+          : "border-muted-foreground bg-transparent";
+  return (
+    <div className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)] gap-2 py-1.5 text-xs">
+      <div className="pt-0.5">
+        <span className={cn("block h-3 w-3 rounded-full border", tone, item.status === "running" && "animate-pulse")} />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-medium text-foreground">{item.title}</div>
+        <div className="truncate text-muted-foreground">{item.meta}</div>
+      </div>
+    </div>
+  );
+}
+
+function RuntimeDiffFileRow({ file }: { file: WorkspaceDiffSummary["files"][number] }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
+      <span className="font-mono text-muted-foreground">{file.status || "M"}</span>
+      <span className="truncate font-mono">{file.path}</span>
+      <span className="shrink-0 font-mono text-muted-foreground">
+        {file.binary ? "bin" : `+${file.additions || 0} -${file.deletions || 0}`}
+      </span>
+    </div>
+  );
+}
+
+function RuntimeSection({
+  title,
+  count,
+  collapsed,
+  onToggle,
+  children,
+}: {
+  title: string;
+  count?: ReactNode;
+  collapsed?: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-b border-border py-3">
+      <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 text-left" onClick={onToggle}>
+        <span className="flex min-w-0 items-center gap-1.5">
+          {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
+          <span className="truncate text-xs font-semibold uppercase text-muted-foreground">{title}</span>
+        </span>
+        {count ? <span className="shrink-0">{count}</span> : null}
+      </button>
+      {collapsed ? null : children}
+    </section>
   );
 }
 
@@ -9367,6 +10336,29 @@ function defaultModelForProvider(provider: string): string {
   }
 }
 
+function providerDisplayName(provider: string): string {
+  switch (provider) {
+    case "anthropic":
+      return "Anthropic";
+    case "deepseek":
+      return "DeepSeek";
+    case "openrouter":
+      return "OpenRouter";
+    case "openai":
+      return "OpenAI";
+    case "ollama":
+      return "Ollama";
+    case "vertexai":
+      return "Vertex AI";
+    case "custom":
+      return "Custom";
+    case "gemini":
+      return "Gemini";
+    default:
+      return provider || "Provider";
+  }
+}
+
 function defaultBaseUrlForProvider(provider: string): string {
   switch (provider) {
     case "openai":
@@ -9611,11 +10603,24 @@ function clipText(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
+function buildContextUsage(items: ConversationItem[], draft: string): ContextUsage {
+  const text = [...buildChatHistory(items).map((entry) => entry.text), draft].join("\n");
+  const used = Math.ceil(text.length / 4);
+  const ratio = Math.min(1, used / CONTEXT_TOKEN_LIMIT_ESTIMATE);
+  return {
+    used,
+    limit: CONTEXT_TOKEN_LIMIT_ESTIMATE,
+    ratio,
+    label: `${Math.round(ratio * 100)}%`,
+    warning: ratio >= CONTEXT_AUTO_COMPACT_RATIO,
+  };
+}
+
 function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
   for (const item of items) {
     if (item.type === "user") {
-      history.push({ role: "user", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
+      history.push({ role: "user", text: clipText(appendAttachmentSummary(item.text, item.attachments || []), HISTORY_ENTRY_MAX_CHARS) });
     } else if (item.type === "agent") {
       const parts = [item.response.plan?.summary || ""];
       const stdout = item.response.result?.stdout || item.response.shell?.result?.stdout || "";
@@ -9648,6 +10653,84 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
     }
   }
   return history;
+}
+
+function appendAttachmentSummary(text: string, attachments: ChatAttachment[]): string {
+  if (!attachments.length) {
+    return text;
+  }
+  const summary = attachments
+    .map((attachment) => {
+      const payload =
+        attachment.payloadKind === "data_url"
+          ? "payload attached"
+          : attachment.payloadKind === "text"
+            ? "text attached"
+            : attachment.truncated
+              ? "metadata only, too large"
+              : "metadata only";
+      return `- ${attachment.name} (${attachment.type || "file"}, ${formatAttachmentSize(attachment.size)}, ${payload})`;
+    })
+    .join("\n");
+  return [text.trim(), `Attachments:\n${summary}`].filter(Boolean).join("\n\n");
+}
+
+function serializeChatAttachments(attachments: ChatAttachment[]) {
+  return attachments.map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+    size: attachment.size,
+    type: attachment.type,
+    dataUrl: attachment.dataUrl,
+    text: attachment.text,
+    payloadKind: attachment.payloadKind || (attachment.dataUrl ? "data_url" : attachment.text ? "text" : "metadata"),
+    truncated: Boolean(attachment.truncated),
+    error: attachment.error || "",
+  }));
+}
+
+function readChatAttachment(file: File): Promise<ChatAttachment> {
+  const base: ChatAttachment = {
+    id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: file.name,
+    size: file.size,
+    type: file.type || "application/octet-stream",
+  };
+  if (file.size > MAX_ATTACHMENT_PAYLOAD_BYTES) {
+    return Promise.resolve({ ...base, payloadKind: "metadata", truncated: true, error: `File exceeds ${formatAttachmentSize(MAX_ATTACHMENT_PAYLOAD_BYTES)} payload limit.` });
+  }
+  if (file.type.startsWith("text/") && file.size <= MAX_TEXT_ATTACHMENT_BYTES) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ ...base, text: typeof reader.result === "string" ? reader.result : "", payloadKind: "text" });
+      reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: "Failed to read text payload." });
+      reader.readAsText(file);
+    });
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({
+        ...base,
+        dataUrl: typeof reader.result === "string" ? reader.result : undefined,
+        payloadKind: typeof reader.result === "string" ? "data_url" : "metadata",
+      });
+    reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: "Failed to read file payload." });
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function buildCompactSummary(items: ConversationItem[]): string {

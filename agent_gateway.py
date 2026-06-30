@@ -222,6 +222,9 @@ ADJUSTMENT_CHECKPOINT_TARGETS = {
 SKILL_PERMISSION_MODES = {"read_only", "preview", "approval_required", "advanced_power_mode", "instruction_only"}
 SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,80}$")
 SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(.*))?\s*$")
+RUNTIME_ATTACHMENT_MAX_ITEMS = 8
+RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
+RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
 
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
@@ -1932,6 +1935,7 @@ class AgentGateway:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
+        attachments = normalize_runtime_attachments(params.get("attachments"))
         if history:
             self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
@@ -1968,6 +1972,8 @@ class AgentGateway:
             "observe": summarize_params(observe),
             "plan": plan,
         }
+        if attachments:
+            turn["attachments"] = attachments
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             turn["reasoning"] = reasoning_trace
         if shell_payload is not None:
@@ -1995,6 +2001,7 @@ class AgentGateway:
                 "sessionId": session_id,
                 "turnId": turn_id,
                 "messageSummary": summarize_text(message),
+                "attachmentCount": len(attachments),
                 "plan": plan,
                 "shellStatus": shell_payload.get("status") if shell_payload else "none",
                 "skillStatus": skill_payload.get("status") if skill_payload else "none",
@@ -2011,6 +2018,8 @@ class AgentGateway:
             "observe": observe,
             "plan": plan,
         }
+        if attachments:
+            payload["attachments"] = attachments
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             payload["reasoning"] = reasoning_trace
         if shell_payload is not None:
@@ -6367,6 +6376,42 @@ def summarize_text(text: str, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1] + "…"
+
+
+def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for raw in ensure_list(value)[:RUNTIME_ATTACHMENT_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            size = int(raw.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        item: dict[str, Any] = {
+            "id": summarize_text(str(raw.get("id") or ""), 120),
+            "name": summarize_text(str(raw.get("name") or "attachment"), 240),
+            "type": summarize_text(str(raw.get("type") or "application/octet-stream"), 120),
+            "size": max(0, size),
+            "payloadKind": summarize_text(str(raw.get("payloadKind") or raw.get("payload_kind") or "metadata"), 32),
+            "truncated": bool(raw.get("truncated")),
+            "error": summarize_text(str(raw.get("error") or ""), 240),
+        }
+        data_url = str(raw.get("dataUrl") or raw.get("data_url") or "")
+        text = str(raw.get("text") or "")
+        if data_url:
+            item["dataUrl"] = data_url[:RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS]
+            item["payloadKind"] = "data_url"
+            if len(data_url) > RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS:
+                item["truncated"] = True
+        elif text:
+            item["text"] = text[:RUNTIME_ATTACHMENT_TEXT_MAX_CHARS]
+            item["payloadKind"] = "text"
+            if len(text) > RUNTIME_ATTACHMENT_TEXT_MAX_CHARS:
+                item["truncated"] = True
+        else:
+            item["payloadKind"] = "metadata"
+        attachments.append(item)
+    return attachments
 
 
 def truncate_text(text: str, limit: int = 12000) -> str:

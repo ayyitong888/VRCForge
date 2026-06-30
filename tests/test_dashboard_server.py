@@ -255,6 +255,65 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("粘贴图片", response.text)
             self.assertIn("选择本地图片", response.text)
 
+    def test_workspace_diff_summary_reads_git_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "VRCForge Test"], cwd=root, check=True, capture_output=True, text=True)
+            tracked = root / "tracked.txt"
+            tracked.write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True, text=True)
+
+            tracked.write_text("one\ntwo\n", encoding="utf-8")
+            (root / "new.txt").write_text("new\n", encoding="utf-8")
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/workspace/diff", params={"root": str(root)})
+                patch_response = client.get("/api/app/workspace/diff", params={"root": str(root), "includePatch": "true"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "vrcforge.workspace_diff.v1")
+        self.assertEqual(payload["status"], "changed")
+        self.assertGreaterEqual(payload["fileCount"], 2)
+        self.assertGreaterEqual(payload["additions"], 1)
+        self.assertTrue(any("tracked.txt" in item["path"] for item in payload["files"]))
+        self.assertTrue(any("new.txt" in item["path"] for item in payload["files"]))
+        self.assertEqual(payload.get("patch", ""), "")
+
+        self.assertEqual(patch_response.status_code, 200)
+        patch_payload = patch_response.json()
+        self.assertIn("tracked.txt", patch_payload.get("patch", ""))
+        self.assertFalse(patch_payload.get("patchTruncated", False))
+
+    def test_agent_runtime_message_preserves_bounded_attachments(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/message",
+                json={
+                    "message": "read the attached note",
+                    "attachments": [
+                        {
+                            "id": "att-1",
+                            "name": "note.txt",
+                            "type": "text/plain",
+                            "size": 11,
+                            "text": "hello world",
+                            "payloadKind": "text",
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["attachments"][0]["name"], "note.txt")
+        self.assertEqual(payload["attachments"][0]["payloadKind"], "text")
+        self.assertEqual(payload["attachments"][0]["text"], "hello world")
+
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         with TestClient(dashboard_server.app) as client:

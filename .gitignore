@@ -18,6 +18,7 @@ src-tauri/gen/
 config.json
 agent_gateway.json
 app-session-token
+chat-projects.json
 chat-transcripts.json
 .__wtest
 docs/*

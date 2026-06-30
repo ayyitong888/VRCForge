@@ -187,6 +187,45 @@ export type AgentCheckpointPreview = {
   error?: string;
 };
 
+export type WorkspaceDiffFile = {
+  status: string;
+  path: string;
+  raw: string;
+  additions?: number;
+  deletions?: number;
+  binary?: boolean;
+};
+
+export type WorkspaceDiffSummary = {
+  ok: boolean;
+  schema: string;
+  requestedRoot?: string;
+  gitRoot?: string;
+  branch?: string;
+  status: "changed" | "clean" | "not_git" | "missing" | "error" | string;
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  files: WorkspaceDiffFile[];
+  statusLines: string[];
+  shortstat?: string;
+  patch?: string;
+  patchTruncated?: boolean;
+  error?: string;
+};
+
+export type AgentMessageAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  dataUrl?: string;
+  text?: string;
+  payloadKind?: "data_url" | "text" | "metadata" | string;
+  truncated?: boolean;
+  error?: string;
+};
+
 export type InterruptedApplyRecovery = {
   id: string;
   schema?: string;
@@ -306,6 +345,7 @@ export type AgentRuntimeResponse = {
     nextStep?: string;
   };
   reasoning?: AgentReasoningTrace;
+  attachments?: AgentMessageAttachment[];
   shell?: {
     ok: boolean;
     status: "executed" | "pending_approval" | "rejected" | string;
@@ -439,6 +479,17 @@ export function setAppSessionToken(token: string) {
 
 export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
   return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
+}
+
+export async function fetchWorkspaceDiff(endpoint: string, root = "", includePatch = false): Promise<WorkspaceDiffSummary> {
+  const url = new URL(`${endpoint}/api/app/workspace/diff`);
+  if (root.trim()) {
+    url.searchParams.set("root", root.trim());
+  }
+  if (includePatch) {
+    url.searchParams.set("includePatch", "true");
+  }
+  return requestJson<WorkspaceDiffSummary>(url.toString());
 }
 
 export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
@@ -1738,15 +1789,18 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[] } = {},
 ): Promise<AgentRuntimeResponse> {
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: options.signal,
     body: JSON.stringify({
       agent_name: agentName || "desktop-agent",
       session_id: sessionId || null,
       message,
       history: history ?? [],
+      attachments: options.attachments ?? [],
     }),
   });
 }
@@ -1959,6 +2013,9 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     response = await fetch(url, { ...init, headers, signal: init.signal ?? controller.signal });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "AbortError") {
+      if (init.signal?.aborted) {
+        throw new ApiError("Request cancelled.", 0);
+      }
       throw new ApiError(`Request timed out after ${timeoutMs / 1000}s`, 0);
     }
     throw new ApiError(
