@@ -116,6 +116,17 @@ class UserConstraintsSnapshot:
 
 
 RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
+# 有界 agentic 循环每轮的最大步数——这是「安全兜底」而非主要终止条件。
+# 真正的终止靠模型/规划自决：拿到终止答复、发起写入审批、命中重复动作即停。
+# 这个上限只在模型抽风、停不下来时兜底。对标主流 agent CLI 的做法：
+#   - Codex CLI：每轮工具调用默认不设上限，靠模型给出最终消息自然结束（单轮可达
+#     数十次工具调用）；只有可选的 --max-turns 限制对话轮数。
+#   - OpenCode(sst)：`steps` 字段不配则不限，一直迭代到模型自己停或用户打断。
+#   - OpenClaw：可配的 max-iterations 兜底，社区推荐 15-20（多数任务 <10 步即完成），
+#     复杂研究类 25-30，并配合「到顶就向用户求助」而不是静默中止。
+# 取 25：落在 OpenClaw 复杂任务区间，远高于常见任务步数，又不至于无界烧 token/刷审批。
+# 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
+RUNTIME_AGENT_MAX_STEPS = 25
 RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_agent_message",
     "vrcforge_execute_shell",
@@ -1940,46 +1951,179 @@ class AgentGateway:
             self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
         self.llm_reasoning_trace = {}
-        plan = self._plan_agent_turn(message, params, observe, history)
-        reasoning_trace = ensure_dict(self.llm_reasoning_trace)
 
+        # --- Bounded agentic loop ------------------------------------------------
+        # 真正的多步循环：每步规划一个动作 → 执行 → 把结果回灌 loop_state → 再规划，
+        # 直到拿到终止答复 / 发起写入审批 / 命中步数上限。读类技能直接执行；写类意图
+        # 路由到 call_tool，由既有审批/检查点/回滚模型负责安全——循环只负责「提议」，
+        # 不绕过审批直接落地（遵守 AGENTS 非协商项）。
+        param_command = str(params.get("shell_command") or params.get("shellCommand") or "").strip()
+        loop_state: list[dict[str, Any]] = []
+        steps: list[dict[str, Any]] = []
+        seen_actions: set[tuple[str, str]] = set()
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
-        command = str(params.get("shell_command") or params.get("shellCommand") or plan.get("shellCommand") or "").strip()
-        if command:
-            shell_payload = self.execute_shell(
+        write_payload: dict[str, Any] | None = None
+        approval_id = ""
+        first_plan: dict[str, Any] | None = None
+        last_plan: dict[str, Any] = {}
+        iterations = 0
+        cap_reached = False
+
+        for step_index in range(RUNTIME_AGENT_MAX_STEPS):
+            plan = self._plan_agent_turn(message, params, observe, history, loop_state=loop_state)
+            iterations += 1
+            last_plan = plan
+            if first_plan is None:
+                first_plan = plan
+
+            # 仅首步采用调用方直接给的 shell 命令，避免后续步骤反复重放同一条命令。
+            command = param_command if step_index == 0 else ""
+            if not command:
+                command = str(plan.get("shellCommand") or "").strip()
+
+            if command:
+                action_kind = "shell"
+                action_key = ("shell", command)
+            elif plan.get("writeNeeded") and plan.get("writeTool"):
+                action_kind = "write"
+                action_key = (
+                    "write",
+                    json.dumps(plan.get("writeParams"), ensure_ascii=False, sort_keys=True, default=str),
+                )
+            elif plan.get("skillNeeded") and plan.get("skillTool"):
+                action_kind = "skill"
+                action_key = (
+                    "skill",
+                    f"{plan.get('skillTool')}::"
+                    + json.dumps(plan.get("skillParams"), ensure_ascii=False, sort_keys=True, default=str),
+                )
+            else:
+                # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
+                break
+
+            # 防重复：同一动作本轮已经跑过 → 停，避免死循环。
+            if action_key in seen_actions:
+                break
+            seen_actions.add(action_key)
+
+            step_tool = ""
+            if action_kind == "shell":
+                step_tool = "shell"
+                step_payload = self.execute_shell(
+                    {
+                        "command": command,
+                        "cwd": params.get("cwd"),
+                        "workspace_root": params.get("workspace_root") or params.get("workspaceRoot"),
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "reason": plan.get("summary") or "Agent shell step",
+                    },
+                    agent_name=agent_name,
+                )
+                shell_payload = step_payload
+                loop_state.append(
+                    {
+                        "tool": "shell",
+                        "kind": "shell",
+                        "status": step_payload.get("status"),
+                        "result": summarize_shell_result(step_payload.get("result"))
+                        if step_payload.get("result")
+                        else None,
+                    }
+                )
+            elif action_kind == "write":
+                step_tool = str(plan.get("writeTool") or "")
+                step_payload = self._execute_write_request(
+                    step_tool, ensure_dict(plan.get("writeParams")), agent_name
+                )
+                write_payload = step_payload
+                loop_state.append(
+                    {
+                        "tool": step_tool,
+                        "kind": "write",
+                        "status": step_payload.get("status"),
+                        "result": step_payload.get("result"),
+                    }
+                )
+            else:  # skill
+                step_tool = str(plan.get("skillTool") or "")
+                step_payload = self._execute_runtime_skill(
+                    step_tool, ensure_dict(plan.get("skillParams")), agent_name
+                )
+                skill_payload = step_payload
+                loop_state.append(
+                    {
+                        "tool": step_tool,
+                        "kind": "skill",
+                        "status": step_payload.get("status"),
+                        "result": step_payload.get("result"),
+                    }
+                )
+
+            steps.append(
                 {
-                    "command": command,
-                    "cwd": params.get("cwd"),
-                    "workspace_root": params.get("workspace_root") or params.get("workspaceRoot"),
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "reason": plan.get("summary") or "Agent shell step",
-                },
-                agent_name=agent_name,
+                    "index": step_index,
+                    "kind": action_kind,
+                    "tool": step_tool,
+                    "summary": plan.get("summary") or "",
+                    "status": step_payload.get("status") or "",
+                }
             )
-        elif plan.get("skillNeeded") and plan.get("skillTool"):
-            skill_payload = self._execute_runtime_skill(
-                str(plan.get("skillTool") or ""),
-                ensure_dict(plan.get("skillParams")),
-                agent_name=agent_name,
+
+            step_approval = str(
+                step_payload.get("approval_id") or step_payload.get("approvalId") or ""
+            ).strip()
+            if step_approval:
+                approval_id = approval_id or step_approval
+                break  # 进入审批等待 → 本轮收尾。
+            if action_kind == "write":
+                break  # 写入提议是本轮的终点（等审批/检查点/回滚）。
+            if not plan.get("continueLoop"):
+                break
+            if str(plan.get("nextStep") or "") == "done":
+                break
+        else:
+            # 跑满 RUNTIME_AGENT_MAX_STEPS 都没自然终止 → 命中安全兜底上限。
+            # 对标 OpenCode 的「到顶强制总结」/ OpenClaw 的「到顶向用户求助」：
+            # 不静默收尾，下面在 reply 里诚实告知「到步数上限、先汇报、可继续」。
+            cap_reached = True
+
+        reasoning_trace = ensure_dict(self.llm_reasoning_trace)
+        first_plan = first_plan or {}
+        # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
+        top_plan = first_plan if iterations <= 1 else self._summarize_loop_plan(
+            message, first_plan, last_plan, steps
+        )
+        if cap_reached and isinstance(top_plan, dict):
+            top_plan["stepLimitReached"] = True
+            top_plan["nextStep"] = "paused"
+            base_reply = str(top_plan.get("reply") or "").rstrip()
+            notice = (
+                f"（已到本轮 {RUNTIME_AGENT_MAX_STEPS} 步上限，先停下来汇报：上面是这一轮做到的部分。"
+                "需要的话再说一声，我接着往下做。）"
             )
+            top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
 
         turn = {
             "id": turn_id,
             "createdAt": now,
             "message": message,
             "observe": summarize_params(observe),
-            "plan": plan,
+            "plan": top_plan,
         }
         if attachments:
             turn["attachments"] = attachments
+        if steps:
+            turn["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             turn["reasoning"] = reasoning_trace
         if shell_payload is not None:
             turn["shell"] = shell_payload
         if skill_payload is not None:
             turn["skill"] = skill_payload
+        if write_payload is not None:
+            turn["write"] = write_payload
 
         with self._lock:
             session = self._runtime_sessions.setdefault(
@@ -2002,10 +2146,12 @@ class AgentGateway:
                 "turnId": turn_id,
                 "messageSummary": summarize_text(message),
                 "attachmentCount": len(attachments),
-                "plan": plan,
+                "plan": top_plan,
+                "stepCount": len(steps),
                 "shellStatus": shell_payload.get("status") if shell_payload else "none",
                 "skillStatus": skill_payload.get("status") if skill_payload else "none",
                 "skillTool": skill_payload.get("tool") if skill_payload else "",
+                "writeStatus": write_payload.get("status") if write_payload else "none",
             }
         )
 
@@ -2016,22 +2162,106 @@ class AgentGateway:
             "turn_id": turn_id,
             "turnId": turn_id,
             "observe": observe,
-            "plan": plan,
+            "plan": top_plan,
         }
         if attachments:
             payload["attachments"] = attachments
+        if steps:
+            payload["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             payload["reasoning"] = reasoning_trace
         if shell_payload is not None:
             payload["shell"] = shell_payload
-            if shell_payload.get("approval_id"):
-                payload["approval_id"] = shell_payload["approval_id"]
-                payload["approvalId"] = shell_payload["approval_id"]
-            if shell_payload.get("result"):
-                payload["result"] = shell_payload["result"]
         if skill_payload is not None:
             payload["skill"] = skill_payload
+        if write_payload is not None:
+            payload["write"] = write_payload
+        if approval_id:
+            payload["approval_id"] = approval_id
+            payload["approvalId"] = approval_id
+        # 结果回显：优先写入结果，其次 shell 结果（保持既有契约）。
+        if write_payload is not None and write_payload.get("result") is not None:
+            payload["result"] = write_payload["result"]
+        elif shell_payload is not None and shell_payload.get("result"):
+            payload["result"] = shell_payload["result"]
         return payload
+
+    def _execute_write_request(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """Route an avatar/Unity write through the supervised tool path.
+
+        The loop never auto-applies writes: it calls the registered write tool via
+        `call_tool`, which (on a machine with the Unity MCP bridge) creates the
+        pre-write checkpoint and the approval record. We surface the approval id so
+        the turn can stop and wait. With no bridge connected (e.g. the CI sandbox),
+        the handler raises and we report that honestly instead of pretending.
+        """
+        if not tool_name:
+            return {"ok": False, "status": "blocked", "tool": "", "error": "No write tool was resolved."}
+        try:
+            outcome = self.call_tool(tool_name, params, agent_name=agent_name)
+        except AgentGatewayError as exc:
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "tool": tool_name,
+                "paramsSummary": summarize_params(params),
+                "error": str(exc),
+            }
+        outcome = ensure_dict(outcome)
+        approval = extract_approval_id(outcome)
+        if approval:
+            status = "approval_pending"
+        elif outcome.get("ok"):
+            status = "executed"
+        else:
+            status = "failed"
+        payload: dict[str, Any] = {
+            "ok": bool(outcome.get("ok")),
+            "status": status,
+            "tool": tool_name,
+            "paramsSummary": summarize_params(params),
+            "result": outcome.get("result"),
+        }
+        if approval:
+            payload["approval_id"] = approval
+            payload["approvalId"] = approval
+        if outcome.get("error"):
+            payload["error"] = outcome["error"]
+        return payload
+
+    def _summarize_loop_plan(
+        self,
+        message: str,
+        first_plan: dict[str, Any],
+        last_plan: dict[str, Any],
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Synthesize the top-level plan for a multi-step turn.
+
+        The user-facing fields (reply/summary/planner/nextStep) come from the final
+        plan — the turn's actual outcome (e.g. "I proposed adding the object on the
+        only model"). The per-action flags are reset to False because each concrete
+        tool action lives in `steps`; leaving them set would invite a re-fire.
+        """
+        plan = dict(last_plan or {})
+        plan["shellNeeded"] = False
+        plan["shellCommand"] = ""
+        plan["skillNeeded"] = False
+        plan["skillTool"] = ""
+        plan["writeNeeded"] = False
+        plan["multiStep"] = True
+        plan["stepCount"] = len(steps)
+        plan["steps"] = steps
+        if not plan.get("planner"):
+            plan["planner"] = first_plan.get("planner") or "deterministic-local"
+        if not plan.get("reply"):
+            plan["reply"] = last_plan.get("reply") or last_plan.get("summary") or ""
+        return plan
 
     def _restore_runtime_session(self, session_id: str, history: list[dict[str, Any]], now: str) -> int:
         """Rebuild an in-memory session from a client-supplied transcript (history replay).
@@ -5506,19 +5736,70 @@ class AgentGateway:
         params: dict[str, Any],
         observe: dict[str, Any],
         history: list[dict[str, Any]] | None = None,
+        loop_state: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        local_plan = self._local_plan_agent_turn(message, params, observe)
-        # 关键词命中（明确的技能/命令意图）直接走确定性路径：快、稳定、可测试。
-        if local_plan.get("shellNeeded") or local_plan.get("skillNeeded"):
+        loop_state = loop_state or []
+        local_plan = self._local_plan_agent_turn(message, params, observe, loop_state)
+        # 关键词命中（明确的技能/命令/写入意图）直接走确定性路径：快、稳定、可测试。
+        if (
+            local_plan.get("shellNeeded")
+            or local_plan.get("skillNeeded")
+            or local_plan.get("writeNeeded")
+        ):
             return local_plan
-        # 本地规划没认出意图时，尝试 LLM 规划；失败则回退本地结果。
-        llm_plan = self._llm_plan_agent_turn(message, observe, history or [])
+        # 确定性兜底已经给出明确的终止答复（例如「多个模型让用户选」「没找到模型」），
+        # 这是确定结论，不交给 LLM 再编一遍。
+        if local_plan.get("deterministicTerminal"):
+            return local_plan
+        # 本地规划没认出意图时，尝试 LLM 规划。
+        llm_plan = self._llm_plan_agent_turn(message, observe, history or [], loop_state)
         if llm_plan is not None:
             return llm_plan
-        return local_plan
+        # 走到这里：确定性兜底没认出意图，LLM 也没产出可执行规划。
+        # 注意——生产里 llm_plan_fn 始终挂着 wrapper：没连 Provider / API Key 缺失 /
+        # provider 报错时，wrapper 会 raise，被 _llm_plan_agent_turn 吞掉返回 None。
+        # 所以这里不能只在 `llm_plan_fn is None` 时才诚实，否则会退回那个看似
+        # 「已规划」却什么都没干的空兜底（正是 A5 要砍的「做了做了」假象）。
+        # 统一走诚实终止：明确告知「这条没法自动规划」。
+        return self._disconnected_local_plan(local_plan)
 
-    def _local_plan_agent_turn(self, message: str, params: dict[str, Any], observe: dict[str, Any]) -> dict[str, Any]:
+    def _disconnected_local_plan(self, local_plan: dict[str, Any]) -> dict[str, Any]:
+        plan = dict(local_plan)
+        plan.update(
+            {
+                "summary": "No actionable plan: deterministic fallback missed and the model planner produced nothing.",
+                "reply": (
+                    "这条我没法自动规划——通常是还没接上可用的模型 Provider"
+                    "（或 API Key 没配 / provider 暂时不可用）。"
+                    "你可以在设置里连一个供应商；或者给我更明确的指令——"
+                    "比如「检查 Unity 状态」「列出模型」「往模型里加个对象」，我就能直接动手。"
+                ),
+                "planner": "deterministic-local",
+                "plannerLabel": "",
+                "deterministicTerminal": True,
+                "providerConnected": False,
+                "continueLoop": False,
+                "nextStep": "done",
+            }
+        )
+        return plan
+
+    def _local_plan_agent_turn(
+        self,
+        message: str,
+        params: dict[str, Any],
+        observe: dict[str, Any],
+        loop_state: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        loop_state = loop_state or []
+        constraints_applied = bool(observe.get("userConstraints", {}).get("enabled"))
         command = extract_shell_command_candidate(message, params)
+        # 写入意图（往模型里加对象/新建/创建）优先：先扫描→单模型自动选中→发起写入审批，
+        # 而不是反问「加到哪个模型上」或只回一句「做了做了」。
+        if not command:
+            write_plan = self._plan_write_intent(message, params, loop_state, constraints_applied)
+            if write_plan is not None:
+                return write_plan
         skill_route = self._match_runtime_skill(message, params) if not command else None
         summary = "Observed runtime state and prepared the next action."
         if command:
@@ -5527,12 +5808,12 @@ class AgentGateway:
             summary = f"Prepared {skill_route['tool']} skill call."
         elif "health" in message.lower() or "健康" in message:
             summary = "Observed runtime health. No shell step is required."
-        return {
+        plan = {
             "summary": summary,
             "reply": "",
             "planner": "deterministic-local",
             "plannerLabel": "",
-            "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
+            "userConstraintsApplied": constraints_applied,
             "shellNeeded": bool(command),
             "shellCommand": command,
             "skillNeeded": bool(skill_route),
@@ -5540,8 +5821,154 @@ class AgentGateway:
             "skillCategory": skill_route.get("category") if skill_route else "",
             "skillParams": skill_route.get("params") if skill_route else {},
             "skillReason": skill_route.get("reason") if skill_route else "",
+            "writeNeeded": False,
+            "writeTool": "",
+            "writeParams": {},
+            # 单次读技能/命令即可满足请求时，turn 到此完成，不再无谓地多跑一圈。
+            "continueLoop": False,
             "expectedResult": "Shell output will be returned inline." if command else "Runtime observation is available.",
             "nextStep": "classify_shell" if command else "call_skill" if skill_route else "await_user_instruction",
+        }
+        return plan
+
+    # ------------------------------------------------------------------
+    # 写入意图：扫描 → 单模型自动解析 → 发起写入审批
+    # ------------------------------------------------------------------
+
+    def _plan_write_intent(
+        self,
+        message: str,
+        params: dict[str, Any],
+        loop_state: list[dict[str, Any]],
+        constraints_applied: bool,
+    ) -> dict[str, Any] | None:
+        intent = detect_avatar_write_intent(message)
+        if not intent:
+            return None
+
+        def _base(**overrides: Any) -> dict[str, Any]:
+            plan = {
+                "summary": "",
+                "reply": "",
+                "planner": "deterministic-local",
+                "plannerLabel": "",
+                "userConstraintsApplied": constraints_applied,
+                "shellNeeded": False,
+                "shellCommand": "",
+                "skillNeeded": False,
+                "skillTool": "",
+                "skillCategory": "",
+                "skillParams": {},
+                "writeNeeded": False,
+                "writeTool": "",
+                "writeParams": {},
+                "writeIntent": intent.get("kind"),
+                "continueLoop": False,
+                "expectedResult": "",
+                "nextStep": "await_user_instruction",
+            }
+            plan.update(overrides)
+            return plan
+
+        # 1) 用户已显式给出目标模型/对象路径 → 直接发起写入审批。
+        explicit_target = str(
+            params.get("avatar_path")
+            or params.get("avatarPath")
+            or intent.get("target")
+            or ""
+        ).strip()
+
+        # 2) 否则从 loop_state 里找已扫描到的模型列表。
+        scanned = self._avatars_from_loop_state(loop_state)
+        already_scanned = scanned is not None
+
+        if not explicit_target and not already_scanned:
+            # 先扫描：调用只读的 vrcforge_list_avatars，结果回灌后再决定下一步。
+            route = self._runtime_skill_route(
+                "vrcforge_list_avatars", dict(params), "avatar write intent: scan first"
+            )
+            return _base(
+                summary="Scanning the open project for avatars before the requested write.",
+                reply="先扫描一下当前工程里有哪些模型，再决定往哪个上面加。",
+                skillNeeded=True,
+                skillTool=route.get("tool") or "vrcforge_list_avatars",
+                skillCategory=route.get("category") or "",
+                skillParams=route.get("params") or {},
+                skillReason="avatar write intent: scan first",
+                continueLoop=True,
+                expectedResult="Avatar list will be returned and re-planned against.",
+                nextStep="call_skill",
+            )
+
+        target = explicit_target
+        if not target and already_scanned:
+            avatars = scanned or []
+            if len(avatars) == 0:
+                return _base(
+                    summary="No avatar was found in the open project.",
+                    reply="扫了一圈，当前工程里没有可写入的模型。请先在 Unity 里打开带模型的场景，或告诉我模型路径。",
+                    deterministicTerminal=True,
+                    nextStep="done",
+                )
+            if len(avatars) > 1:
+                listed = "\n".join(f"- {path}" for path in avatars[:12])
+                return _base(
+                    summary="Multiple avatars found; need the user to choose one.",
+                    reply=f"工程里有多个模型，告诉我加到哪个上面：\n{listed}",
+                    deterministicTerminal=True,
+                    nextStep="done",
+                )
+            # 恰好一个模型 → 自动选中，不反问。
+            target = avatars[0]
+
+        write_params = self._build_avatar_write_params(intent, target, params)
+        return _base(
+            summary=f"Prepared a supervised Unity write on {target}.",
+            reply=(
+                f"工程里只有 {target} 这一个模型，直接选它。"
+                f"我来发起一个加对象的写入请求，走审批/检查点后再真正落地。"
+            ),
+            writeNeeded=True,
+            writeTool="vrcforge_unity_mcp_write",
+            writeParams=write_params,
+            resolvedAvatar=target,
+            continueLoop=False,
+            expectedResult="A supervised write approval will be created.",
+            nextStep="request_write",
+        )
+
+    def _avatars_from_loop_state(self, loop_state: list[dict[str, Any]]) -> list[str] | None:
+        """Return avatar paths from the most recent list_avatars step, or None if not scanned yet."""
+        for step in reversed(loop_state):
+            if not isinstance(step, dict):
+                continue
+            if str(step.get("tool") or "") != "vrcforge_list_avatars":
+                continue
+            if step.get("status") not in (None, "executed", "ok"):
+                # 扫描失败：当作「已尝试但拿不到」，避免无限重扫。
+                return []
+            return extract_avatar_paths(step.get("result"))
+        return None
+
+    def _build_avatar_write_params(
+        self,
+        intent: dict[str, Any],
+        target: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        object_name = str(intent.get("objectName") or "GameObject").strip() or "GameObject"
+        # NOTE(codex/live): 真实 Unity MCP 的「建对象」工具名需在装了 bridge 的机器上确认，
+        # 这里给出结构化请求，写入仍走 vrcforge_unity_mcp_write 的审批/检查点。
+        return {
+            "tool": str(params.get("unity_mcp_tool") or params.get("mcpTool") or "manage_gameobject"),
+            "arguments": {
+                "action": "create",
+                "name": object_name,
+                "parent": target,
+            },
+            "writeIntent": intent.get("kind"),
+            "targetAvatar": target,
+            "confirmUnityMcpToolName": True,
         }
 
     def _llm_plan_agent_turn(
@@ -5549,12 +5976,13 @@ class AgentGateway:
         message: str,
         observe: dict[str, Any],
         history: list[dict[str, Any]],
+        loop_state: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         plan_fn = self.llm_plan_fn
         if plan_fn is None:
             return None
         try:
-            prompt = self._build_llm_plan_prompt(message, history)
+            prompt = self._build_llm_plan_prompt(message, history, loop_state or [])
             raw_response = plan_fn(prompt)
             payload = parse_llm_plan_response(raw_response)
         except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
@@ -5581,6 +6009,11 @@ class AgentGateway:
             "skillCategory": "",
             "skillParams": {},
             "skillReason": "",
+            "writeNeeded": False,
+            "writeTool": "",
+            "writeParams": {},
+            # 工具型动作执行后，把结果回灌给 LLM 再决定下一步（真正的多步循环）。
+            "continueLoop": False,
             "expectedResult": "",
         }
 
@@ -5596,6 +6029,7 @@ class AgentGateway:
                     "skillCategory": route.get("category") or "",
                     "skillParams": route.get("params") or {},
                     "skillReason": "llm planner",
+                    "continueLoop": True,
                     "expectedResult": "Skill output will be returned inline.",
                     "nextStep": "call_skill",
                 }
@@ -5605,6 +6039,7 @@ class AgentGateway:
                 "summary": summary or "Prepared a shell step for the requested task.",
                 "shellNeeded": True,
                 "shellCommand": shell_command,
+                "continueLoop": True,
                 "expectedResult": "Shell output will be returned inline.",
                 "nextStep": "classify_shell",
             }
@@ -5619,7 +6054,12 @@ class AgentGateway:
             "nextStep": "done",
         }
 
-    def _build_llm_plan_prompt(self, message: str, history: list[dict[str, Any]]) -> str:
+    def _build_llm_plan_prompt(
+        self,
+        message: str,
+        history: list[dict[str, Any]],
+        loop_state: list[dict[str, Any]] | None = None,
+    ) -> str:
         tool_lines: list[str] = []
         for tool in self._tools.values():
             flags = []
@@ -5636,17 +6076,41 @@ class AgentGateway:
             if text:
                 history_lines.append(f"{role}: {text}")
         history_block = "\n".join(history_lines) if history_lines else "（无）"
+        step_lines: list[str] = []
+        for index, step in enumerate(loop_state or [], start=1):
+            if not isinstance(step, dict):
+                continue
+            label = str(step.get("tool") or step.get("kind") or "step")
+            status = str(step.get("status") or "")
+            result_text = summarize_text(json.dumps(step.get("result"), ensure_ascii=False, default=str), 600) if step.get("result") is not None else ""
+            line = f"{index}. {label}"
+            if status:
+                line += f"（{status}）"
+            if result_text:
+                line += f" → {result_text}"
+            step_lines.append(line)
+        steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
         return (
             "你是 VRCForge 桌面智能体的规划器，负责把用户的中文/英文请求转换成下一步动作。\n"
+            "这是一个多步循环：你每次只产出一个动作；工具执行后结果会回灌给你，由你决定下一步，"
+            "直到信息足够后再用 reply 收尾。\n"
             "可选动作：\n"
             '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
             '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
-            '3. 直接回答（闲聊、解释、当前信息已足够）：{"action": "reply", "reply": "<中文回答>"}\n'
+            '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<中文回答>"}\n'
             "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
-            "写操作类工具会进入审批流程，可以放心规划；拿不准时选 reply 并说明你需要什么信息。\n"
+            "写操作类工具会进入审批流程，可以放心规划；"
+            "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
+            # 自纠回环（对标 Codex/OpenClaw 的 tool-error recovery）：失败要读错误、修正后重试或换路，绝不假装成功。
+            "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
+            "先读懂错误原因；能靠改参数解决就用『不同的参数』重试（不要原样重复同一个调用），"
+            "换个工具或思路能绕过就绕过；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
+            "绝不能在没真正做完时假装已完成（严禁「做了做了」式的虚假收尾）；"
+            "拿不准时选 reply 并说明你需要什么信息。\n"
             "reply 字段是直接展示给用户的对话内容：用第一人称中文，自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」），不要复述 JSON 或工具名。\n\n"
             f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
             f"最近对话：\n{history_block}\n\n"
+            f"本轮已执行步骤+结果：\n{steps_block}\n\n"
             f"用户最新消息：{message}"
         )
 
@@ -6544,6 +7008,107 @@ def extract_shell_command_candidate(message: str, params: dict[str, Any]) -> str
     if "列目录" in stripped or "文件列表" in stripped or lowered in {"ls", "dir"}:
         return "Get-ChildItem"
     return ""
+
+
+_WRITE_INTENT_CN_VERB = re.compile(r"加个|加一个|加上|添加|新建|新增|创建|建个|建一个|挂个|挂一个|放个|增加")
+_WRITE_INTENT_EN_VERB = re.compile(r"\b(add|create|new|insert|spawn|make)\b")
+_WRITE_INTENT_EN_NOUN = re.compile(r"\b(game ?object|objects?|obj|empty|child)\b")
+_WRITE_INTENT_CN_NOUN = ("对象", "物体", "节点")
+_OBJECT_NAME_RE = re.compile(
+    r"(?:叫做|叫作|叫|名为|命名为|named|name[d]?|called)\s*[\"'“”‘’]?([A-Za-z0-9_\-一-鿿]+)"
+)
+
+
+def detect_avatar_write_intent(message: str) -> dict[str, Any] | None:
+    """Detect a 'create/add a scene object on a model' write intent.
+
+    Returns a structured intent dict, or None for read/other intents. Kept narrow
+    on purpose: it must NOT hijack read requests ("检查状态"/"list ...") or the
+    outfit/wardrobe workflows. The win is that this routes the request into the
+    scan→single-model-resolve→supervised-write loop instead of a chat reply.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    has_object_noun = bool(_WRITE_INTENT_EN_NOUN.search(lowered)) or any(
+        noun in text for noun in _WRITE_INTENT_CN_NOUN
+    )
+    has_verb = bool(_WRITE_INTENT_EN_VERB.search(lowered)) or bool(_WRITE_INTENT_CN_VERB.search(text))
+    explicit_phrase = bool(re.search(r"new\s*obj(ect)?", lowered))
+    if not (explicit_phrase or (has_verb and has_object_noun)):
+        return None
+    name_match = _OBJECT_NAME_RE.search(text)
+    return {
+        "kind": "add_object",
+        "objectName": name_match.group(1) if name_match else "GameObject",
+        "target": "",
+    }
+
+
+def extract_avatar_paths(result: Any) -> list[str]:
+    """Pull avatar paths out of a (possibly nested) vrcforge_list_avatars result."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        path = str(value or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            found.append(path)
+
+    def _visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("avatars", "avatarList") and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            _add(
+                                item.get("avatarPath")
+                                or item.get("avatar_path")
+                                or item.get("path")
+                                or item.get("name")
+                            )
+                        elif isinstance(item, str):
+                            _add(item)
+                elif key in ("avatarPaths", "avatar_paths") and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            _add(item)
+                else:
+                    _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(result)
+    return found
+
+
+def extract_approval_id(obj: Any) -> str:
+    """Recursively search a tool result for an approval id (approval_id/approvalId)."""
+    found = ""
+
+    def _visit(node: Any) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if found:
+                    return
+                if key in ("approval_id", "approvalId") and str(value or "").strip():
+                    found = str(value).strip()
+                    return
+                _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                if found:
+                    return
+                _visit(item)
+
+    _visit(obj)
+    return found
 
 
 def has_any(lowered_text: str, original_text: str, needles: list[str]) -> bool:
