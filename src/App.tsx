@@ -746,38 +746,18 @@ export default function App() {
       ? `${savedProviderLabel} API key is not configured. Open Settings or connect an external agent.`
       : "";
   const composerActions = useMemo<ComposerAction[]>(
-    () => [
-      { id: "attach", label: "Attach file", description: "Add images or project files to this turn." },
-      {
-        id: "screenshot",
-        label: "Screenshot",
-        description: "Capture a visible app or Unity state through a connected capture skill.",
-        disabled: !runtimeConnected || !vrcForgeSkillsReady,
-        disabledReason: runtimeConnected
-          ? "Screenshot capture needs the VRCForge Unity/capture skill online."
-          : "Start the VRCForge runtime before using screenshot capture.",
-      },
-      {
-        id: "annotation",
-        label: "Annotation",
-        description: "Attach a screen note or review marker.",
-        disabled: true,
-        disabledReason: "Annotation capture is not connected in this build yet.",
-      },
-      {
-        id: "browser",
-        label: "Browser",
-        description: "Open the local workspace browser panel.",
-      },
-      {
-        id: "desktop",
-        label: "Desktop Rescue",
-        description: "Explicitly start Desktop Rescue / Computer Use.",
-        disabled: true,
-        disabledReason: "Desktop Rescue / Computer Use must be installed and enabled before it can run.",
-      },
-    ],
-    [runtimeConnected, vrcForgeSkillsReady],
+    () => {
+      const actions: ComposerAction[] = [{ id: "attach", label: "Attach file", description: "Add images or project files to this turn." }];
+      if (vrcForgeSkillsReady) {
+        actions.push({
+          id: "screenshot",
+          label: "Capture Unity view",
+          description: "Attach a current Unity/avatar screenshot to this turn.",
+        });
+      }
+      return actions;
+    },
+    [vrcForgeSkillsReady],
   );
   const providerSnapshot: ProviderSnapshot = {
     provider: savedProvider,
@@ -867,8 +847,38 @@ export default function App() {
   const workspaceGridColumns = `${leftSidebarCollapsed ? "56px" : "280px"} minmax(0,1fr) ${rightSidebarCollapsed ? "0px" : "320px"}`;
   const workspaceDiffFiles = workspaceDiff?.files ?? [];
   const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
+  const backendComponent = healthComponents.backend;
+  const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
+  const unityToolsComponent = healthComponents.vrcForgeUnityTools;
+  const providerComponent = healthComponents.providerConfigPresent;
+  const workspaceProjectLabel = activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : "Temporary chat";
+  const unityBridgeLabel = !runtimeConnected
+    ? "Core offline"
+    : unityBridgeComponent?.status === "ok"
+      ? "Unity bridge online"
+      : unityBridgeComponent?.message || "Unity not connected";
+  const unityToolsLabel = vrcForgeSkillsReady
+    ? `${formatCount(vrcForgeToolsCount)} VRC tools`
+    : unityToolsComponent?.message || (runtimeConnected ? "Avatar tools not ready" : "Core offline");
+  const providerCompactLabel = `${providerSnapshot.providerLabel}${providerSnapshot.model ? ` / ${providerSnapshot.model}` : ""}`;
+  const reviewSummaryLabel = pendingApprovals
+    ? `${formatCount(pendingApprovals)} pending approval${pendingApprovals === 1 ? "" : "s"}`
+    : "No pending approvals";
+  const changeSummaryLabel = loadingWorkspaceDiff
+    ? "Refreshing"
+    : workspaceDiffError
+      ? "Diff unavailable"
+      : workspaceDiff
+        ? workspaceDiffChanged
+          ? `${formatCount(workspaceDiff.fileCount)} changed`
+          : workspaceDiff.status === "clean"
+            ? "Clean"
+            : workspaceDiff.status
+        : runtimeConnected
+          ? "Not loaded"
+          : "Core offline";
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
-  const projectPromptTitle = activeProjectPath && activeProjectName ? `想在 ${activeProjectName} 里改什么？` : t("chat.promptTitleDefault");
+  const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
       return null;
@@ -1239,9 +1249,8 @@ export default function App() {
     try {
       let payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
       if (!payload.ok && payload.status === "not_git" && activeProjectPath) {
-        const projectDiffError = payload.error || "Selected project is not a git repository.";
         payload = await fetchWorkspaceDiff(endpoint, "", includePatch);
-        setRuntimeNotice(`Selected project is not a git repository; showing VRCForge app diff. ${projectDiffError}`);
+        setRuntimeNotice("Selected Unity project is not a Git repository; showing VRCForge app code changes.");
       }
       setWorkspaceDiff(payload);
       setWorkspaceDiffError(payload.ok ? "" : payload.error || "Diff unavailable.");
@@ -3736,23 +3745,6 @@ export default function App() {
               ) : null}
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
-              <div className="hidden items-center gap-1 rounded-md border border-border bg-card px-1 py-0.5 md:flex">
-                <RuntimeToolButton
-                  icon={<Camera className="h-4 w-4" />}
-                  label="Screenshot"
-                  onClick={() => runExplicitWorkspaceAction("screenshot")}
-                />
-                <RuntimeToolButton
-                  icon={<Pencil className="h-4 w-4" />}
-                  label="Annotation"
-                  onClick={() => runExplicitWorkspaceAction("annotation")}
-                />
-                <RuntimeToolButton
-                  icon={<Globe className="h-4 w-4" />}
-                  label="Browser"
-                  onClick={() => runExplicitWorkspaceAction("browser")}
-                />
-              </div>
               <RuntimeToolButton
                 icon={rightSidebarCollapsed ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
                 label={rightSidebarCollapsed ? "Show runtime sidebar" : "Hide runtime sidebar"}
@@ -4284,12 +4276,12 @@ export default function App() {
         {rightSidebarCollapsed ? null : (
           <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold">Environment</div>
+              <div className="min-w-0 flex-1 truncate text-sm font-semibold">Workspace</div>
               <button
                 type="button"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => void refreshWorkspaceDiff()}
-                title="Refresh diff"
+                title="Refresh workspace status"
                 disabled={!runtimeConnected || loadingWorkspaceDiff}
               >
                 <RefreshCw className={cn("h-4 w-4", loadingWorkspaceDiff && "animate-spin")} />
@@ -4304,36 +4296,59 @@ export default function App() {
               </button>
             </div>
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
-              <section className="rounded-lg border border-border bg-card p-3 shadow-panel">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">Runtime</h2>
-                  <button
-                    type="button"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    title="Open settings"
-                    onClick={() => void openSettings()}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </button>
+              <section className="border-b border-border pb-3">
+                <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">Project status</h2>
+                  {hasEnvironmentAttention || hasStartupIssue ? (
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md border border-amber-300/70 px-2 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-50 dark:border-amber-900/50 dark:text-amber-300 dark:hover:bg-amber-950/30"
+                      onClick={() => void openDoctor()}
+                    >
+                      Doctor
+                    </button>
+                  ) : null}
                 </div>
                 <div className="space-y-1">
+                  <RuntimeInfoRow
+                    icon={<Folder className="h-4 w-4" />}
+                    label="Project"
+                    value={workspaceProjectLabel}
+                  />
+                  <RuntimeInfoRow
+                    icon={<Bot className="h-4 w-4" />}
+                    label="Core"
+                    value={runtimeConnected ? backendComponent?.message || "Online" : "Offline"}
+                    suffix={backendComponent ? <StatusDot status={backendComponent.status} /> : null}
+                  />
+                  <RuntimeInfoRow
+                    icon={<Monitor className="h-4 w-4" />}
+                    label="Unity"
+                    value={unityBridgeLabel}
+                    suffix={unityBridgeComponent ? <StatusDot status={unityBridgeComponent.status} /> : null}
+                  />
+                  <RuntimeInfoRow
+                    icon={<Wrench className="h-4 w-4" />}
+                    label="Avatar tools"
+                    value={unityToolsLabel}
+                    suffix={unityToolsComponent ? <StatusDot status={unityToolsComponent.status} /> : null}
+                  />
+                  <RuntimeInfoRow
+                    icon={<Sparkles className="h-4 w-4" />}
+                    label="Agent"
+                    value={providerCompactLabel}
+                    suffix={providerComponent ? <StatusDot status={providerComponent.status} /> : null}
+                  />
+                  <RuntimeInfoRow
+                    icon={<ListChecks className="h-4 w-4" />}
+                    label="Review"
+                    value={reviewSummaryLabel}
+                  />
                   <RuntimeInfoRow
                     icon={<FileText className="h-4 w-4" />}
                     label="Changes"
                     value={
-                      loadingWorkspaceDiff
-                        ? "Refreshing"
-                        : workspaceDiffError
-                          ? workspaceDiffError
-                          : workspaceDiff
-                            ? workspaceDiffChanged
-                              ? `${formatCount(workspaceDiff.fileCount)} file${workspaceDiff.fileCount === 1 ? "" : "s"} changed`
-                              : workspaceDiff.status === "clean"
-                                ? "Clean"
-                                : workspaceDiff.status
-                            : runtimeConnected
-                              ? "No diff loaded"
-                              : "Core offline"
+                      changeSummaryLabel
                     }
                     suffix={
                       workspaceDiffChanged ? (
@@ -4344,38 +4359,6 @@ export default function App() {
                       ) : null
                     }
                   />
-                  <RuntimeInfoRow
-                    icon={<Monitor className="h-4 w-4" />}
-                    label="Local"
-                    value={activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : "Temporary chat"}
-                  />
-                  <RuntimeInfoRow
-                    icon={<GitBranch className="h-4 w-4" />}
-                    label={workspaceDiff?.branch || "Branch"}
-                    value={workspaceDiff?.gitRoot ? shortPath(workspaceDiff.gitRoot) : workspaceDiff?.status === "not_git" ? "not a git repo" : "waiting for diff"}
-                  />
-                  <RuntimeInfoRow
-                    icon={<ListChecks className="h-4 w-4" />}
-                    label="Review"
-                    value={pendingApprovals ? `${formatCount(pendingApprovals)} pending approval${pendingApprovals === 1 ? "" : "s"}` : "No pending approvals"}
-                  />
-                </div>
-                <div className="mt-3 border-t border-border pt-3">
-                  <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Browser</div>
-                  <RuntimeInfoRow icon={<Globe className="h-4 w-4" />} label="VRCForge" value="localhost:1420" muted />
-                </div>
-                <div className="mt-3 border-t border-border pt-3">
-                  <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Sources</div>
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    {[providerSnapshot.providerLabel, externalAgentConnected ? "External agent" : "", vrcForgeSkillsReady ? "VRC skills" : "", runtimeConnected ? "Runtime" : ""]
-                      .filter(Boolean)
-                      .slice(0, 7)
-                      .map((source) => (
-                        <span key={source} title={source} className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-background">
-                          <Globe className="h-3.5 w-3.5" />
-                        </span>
-                      ))}
-                  </div>
                 </div>
                 {runtimeNotice ? (
                   <div className="mt-3 rounded-md border border-border bg-muted/50 px-2 py-2 text-xs text-muted-foreground">
@@ -4384,16 +4367,17 @@ export default function App() {
                 ) : null}
               </section>
 
-              <RuntimeSection
-                title="Diff"
-                collapsed={rightRuntimeSectionsCollapsed.diff}
-                onToggle={() => toggleRightRuntimeSection("diff")}
-                count={
-                  <Badge tone={workspaceDiffChanged ? "warn" : "muted"}>
-                    {workspaceDiffChanged ? formatCount(workspaceDiff?.fileCount || 0) : workspaceDiff?.status || "idle"}
-                  </Badge>
-                }
-              >
+              {workspaceDiffFiles.length || workspaceDiffError ? (
+                <RuntimeSection
+                  title="Changes"
+                  collapsed={rightRuntimeSectionsCollapsed.diff}
+                  onToggle={() => toggleRightRuntimeSection("diff")}
+                  count={
+                    <Badge tone={workspaceDiffChanged ? "warn" : "muted"}>
+                      {workspaceDiffChanged ? formatCount(workspaceDiff?.fileCount || 0) : workspaceDiff?.status || "idle"}
+                    </Badge>
+                  }
+                >
                 {workspaceDiffFiles.length ? (
                   <div className="space-y-2">
                     <button
@@ -4435,32 +4419,31 @@ export default function App() {
                     {workspaceDiffError || (runtimeConnected ? "No local changes." : "Core offline.")}
                   </div>
                 )}
-              </RuntimeSection>
+                </RuntimeSection>
+              ) : null}
 
-              <RuntimeSection
-                title="Schedule"
-                collapsed={rightRuntimeSectionsCollapsed.schedule}
-                onToggle={() => toggleRightRuntimeSection("schedule")}
-                count={<Badge tone={runtimeSchedule.length ? "warn" : "muted"}>{formatCount(runtimeSchedule.length)}</Badge>}
-              >
-                {runtimeSchedule.length ? (
+              {runtimeSchedule.length ? (
+                <RuntimeSection
+                  title="Queue"
+                  collapsed={rightRuntimeSectionsCollapsed.schedule}
+                  onToggle={() => toggleRightRuntimeSection("schedule")}
+                  count={<Badge tone="warn">{formatCount(runtimeSchedule.length)}</Badge>}
+                >
                   <div className="space-y-0.5">
                     {runtimeSchedule.slice(0, 8).map((item) => (
                       <RuntimeScheduleRow key={item.id} item={item} />
                     ))}
                   </div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">No active work.</div>
-                )}
-              </RuntimeSection>
+                </RuntimeSection>
+              ) : null}
 
-              <RuntimeSection
-                title="Sub agents"
-                collapsed={rightRuntimeSectionsCollapsed.subagents}
-                onToggle={() => toggleRightRuntimeSection("subagents")}
-                count={<Badge tone={activeSubAgentTasks.length ? "warn" : "muted"}>{formatCount(activeSubAgentTasks.length)}</Badge>}
-              >
-                {activeSubAgentTasks.length ? (
+              {activeSubAgentTasks.length ? (
+                <RuntimeSection
+                  title="Sub agents"
+                  collapsed={rightRuntimeSectionsCollapsed.subagents}
+                  onToggle={() => toggleRightRuntimeSection("subagents")}
+                  count={<Badge tone="warn">{formatCount(activeSubAgentTasks.length)}</Badge>}
+                >
                   <div className="space-y-1">
                     {activeSubAgentTasks.slice(0, rightRuntimeSectionsCollapsed.subagents ? 0 : 6).map((task) => {
                       const runningTask = ["queued", "running", "cancelling"].includes(task.status);
@@ -4484,10 +4467,8 @@ export default function App() {
                       <div className="px-1 pt-1 text-xs text-muted-foreground">+{formatCount(activeSubAgentTasks.length - 6)} more</div>
                     ) : null}
                   </div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">No sub agents.</div>
-                )}
-              </RuntimeSection>
+                </RuntimeSection>
+              ) : null}
 
               {pendingApprovalItems.length ? (
                 <RuntimeSection
@@ -4515,39 +4496,6 @@ export default function App() {
                 </RuntimeSection>
               ) : null}
 
-              {activeView === "chat" ? (
-                <RuntimeSection
-                  title="Workspace tools"
-                  collapsed={rightRuntimeSectionsCollapsed.workspaceTools}
-                  onToggle={() => toggleRightRuntimeSection("workspaceTools")}
-                >
-                  <div className="grid gap-2">
-                    <button
-                      type="button"
-                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-2 text-left text-xs transition-colors hover:bg-muted"
-                      onClick={() => void scanActiveProjectIndex(activeProjectPath)}
-                      disabled={!activeProjectPath || loadingProjectIndex}
-                    >
-                      <span className="truncate">Project index</span>
-                      <span className="shrink-0 text-muted-foreground">{loadingProjectIndex ? "scanning" : projectIndex ? "ready" : "scan"}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-2 text-left text-xs transition-colors hover:bg-muted"
-                      onClick={() => void planActiveOutfitImport()}
-                      disabled={!activeProjectPath || !outfitPackagePath || loadingOutfitImportPlan}
-                    >
-                      <span className="truncate">Outfit import</span>
-                      <span className="shrink-0 text-muted-foreground">{loadingOutfitImportPlan ? "planning" : outfitImportPlan ? "ready" : "plan"}</span>
-                    </button>
-                  </div>
-                  {projectIndexError || outfitImportStatus || subAgentError ? (
-                    <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                      {projectIndexError || outfitImportStatus || subAgentError}
-                    </div>
-                  ) : null}
-                </RuntimeSection>
-              ) : null}
             </div>
           </aside>
         )}
@@ -9672,6 +9620,23 @@ function RuntimeToolButton({ icon, label, onClick }: { icon: ReactNode; label: s
     >
       {icon}
     </button>
+  );
+}
+
+function StatusDot({ status }: { status: "ok" | "warning" | "error" | "unknown" | string }) {
+  return (
+    <span
+      className={cn(
+        "block h-2.5 w-2.5 rounded-full",
+        status === "ok"
+          ? "bg-emerald-500"
+          : status === "warning"
+            ? "bg-amber-500"
+            : status === "error"
+              ? "bg-destructive"
+              : "bg-muted-foreground/40",
+      )}
+    />
   );
 }
 
