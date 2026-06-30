@@ -1789,7 +1789,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[] } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
@@ -1801,6 +1801,7 @@ export async function sendAgentMessage(
       message,
       history: history ?? [],
       attachments: options.attachments ?? [],
+      projectPath: options.projectPath || undefined,
     }),
   });
 }

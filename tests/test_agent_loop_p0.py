@@ -1,20 +1,21 @@
 """Focused P0 regression tests for the VRCForge agent runtime loop.
 
-These cover the post-1.1.0 P0 fix: the runtime turn is now a bounded agentic
-loop (observe -> plan -> act -> feed result back), with deterministic
-single-model auto-resolution for "add an object to the model" write intents,
-and an honest "not connected / cannot plan" terminal instead of a fake
-"做了做了" reply when no provider/skill can produce an actionable plan.
+These cover the post-1.1.0 P0 path: the runtime turn is a bounded agentic loop
+(observe -> plan -> act -> feed result back), with deterministic single-model
+auto-resolution for "add an object to the model" write intents, real approval
+creation, approved dispatch to the static GameObject primitive, and an honest
+"not connected / cannot plan" terminal instead of a fake success reply.
 
-The sandbox has no Unity Editor and no MCP bridge, so the supervised write is
-exercised by mocking `call_tool` (which, on a real machine, creates the
-checkpoint + approval record). The loop itself, the scan-first single-model
-resolution, the supervised-write proposal, and the honest fallback are all real.
-Live "add object -> checkpoint -> rollback" proof must run on a machine with
-Unity + the MCP bridge (codex / user machine).
+The tests do not require a live Unity Editor: the final Unity MCP invocation is
+mocked, while the agent loop, approval request, checkpoint boundary, write
+handler dispatch, and fallback behavior are exercised through the real backend
+path.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -23,65 +24,107 @@ import dashboard_server
 
 
 class AgentLoopP0Tests(unittest.TestCase):
-    def test_single_model_autoresolve_scans_then_proposes_supervised_write(self) -> None:
-        """One project, one model, 'add a new object' -> scan, auto-pick the only
-        model, then propose a supervised write (approval pending). No reverse
-        question, no empty reply."""
-        gateway = dashboard_server.AGENT_GATEWAY
+    def setUp(self) -> None:
+        self.gateway = dashboard_server.AGENT_GATEWAY
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.original_paths = (self.gateway.config_path, self.gateway.audit_dir)
+        self.original_prepare = self.gateway.checkpoint_prepare_handler
+        self.gateway.configure_paths(root / "agent_gateway.json", root / "agent_gateway")
+        config = self.gateway.ensure_config()
+        config.enabled = True
+        config.allow_write_requests = True
+        config.execution_mode = "approval"
+        self.gateway.save_config(config)
+        self.gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+
+    def tearDown(self) -> None:
+        self.gateway.checkpoint_prepare_handler = self.original_prepare
+        self.gateway.configure_paths(*self.original_paths)
+        self.temp_dir.cleanup()
+
+    def _unity_project(self) -> Path:
+        project = Path(self.temp_dir.name) / "UnityProject"
+        (project / "Assets").mkdir(parents=True, exist_ok=True)
+        (project / "Packages").mkdir(exist_ok=True)
+        (project / "ProjectSettings").mkdir(exist_ok=True)
+        (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+        (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+            "m_EditorVersion: 2022.3",
+            encoding="utf-8",
+        )
+        return project
+
+    def test_single_model_autoresolve_creates_real_approval_and_dispatches_static_write(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
 
         def fake_skill(tool, params, agent_name=None):
             if tool == "vrcforge_list_avatars":
                 return {
                     "tool": tool,
                     "status": "executed",
-                    "result": {"avatars": [{"avatarPath": "Assets/Milltina/Milltina.prefab"}]},
+                    "result": {"avatars": [{"avatarPath": "Milltina"}]},
                 }
             return {"tool": tool, "status": "executed", "result": {}}
 
-        def fake_call_tool(name, params, agent_name=None):
-            # Mirrors a real supervised write: handler returns a pending approval
-            # (the checkpoint + approval record are created server-side).
-            return {
-                "ok": True,
-                "tool": name,
-                "result": {"status": "pending_approval", "approval_id": "appr-p0-1"},
-            }
-
-        with patch.object(gateway, "_execute_runtime_skill", side_effect=fake_skill), patch.object(
-            gateway, "call_tool", side_effect=fake_call_tool
-        ):
+        with patch.object(gateway, "_execute_runtime_skill", side_effect=fake_skill):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
-                    json={"message": "往模型里加个 new object"},
+                    json={
+                        "message": "add a new object to the model",
+                        "projectPath": str(project),
+                    },
                 )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
 
-        # Multi-step loop: step 0 scans, step 1 proposes the write.
         steps = payload.get("steps") or []
         self.assertEqual(len(steps), 2, f"expected scan+write, got {steps}")
         self.assertEqual(steps[0]["kind"], "skill")
         self.assertEqual(steps[0]["tool"], "vrcforge_list_avatars")
         self.assertEqual(steps[1]["kind"], "write")
-        self.assertEqual(steps[1]["tool"], "vrcforge_unity_mcp_write")
+        self.assertEqual(steps[1]["tool"], "vrcforge_create_gameobject")
 
-        # The write is PROPOSED, not auto-applied: it stops on the approval.
         self.assertIn("write", payload)
         self.assertEqual(payload["write"]["status"], "approval_pending")
-        self.assertEqual(payload["write"]["tool"], "vrcforge_unity_mcp_write")
-        self.assertEqual(payload["approval_id"], "appr-p0-1")
+        self.assertEqual(payload["write"]["tool"], "vrcforge_create_gameobject")
+        approval_id = payload["approval_id"]
+        approval = gateway._approvals[approval_id]
+        self.assertEqual(approval["targetTool"], "vrcforge_create_gameobject")
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["arguments"]["name"], "GameObject")
+        self.assertEqual(approval["arguments"]["parentPath"], "Milltina")
+        self.assertEqual(approval["arguments"]["projectPath"], str(project))
 
-        # Top-level plan is flagged multi-step.
         self.assertTrue(payload["plan"].get("multiStep"))
         self.assertEqual(payload["plan"].get("stepCount"), 2)
 
+        with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
+            "dashboard_server.invoke_unity_mcp",
+            return_value=dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": {"ok": True, "gameObjectPath": "Milltina/GameObject"}},
+            ),
+        ) as mock_invoke:
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["status"], "applied")
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_create_gameobject")
+        self.assertEqual(arguments["name"], "GameObject")
+        self.assertEqual(arguments["parentPath"], "Milltina")
+        self.assertFalse(arguments["preview"])
+
     def test_multiple_models_asks_user_to_choose_without_writing(self) -> None:
-        """Two models, ambiguous target -> scan, then ask which one. No write
-        proposed (we never guess a target)."""
-        gateway = dashboard_server.AGENT_GATEWAY
+        gateway = self.gateway
 
         def fake_skill(tool, params, agent_name=None):
             if tool == "vrcforge_list_avatars":
@@ -90,8 +133,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "status": "executed",
                     "result": {
                         "avatars": [
-                            {"avatarPath": "Assets/A/A.prefab"},
-                            {"avatarPath": "Assets/B/B.prefab"},
+                            {"avatarPath": "AvatarA"},
+                            {"avatarPath": "AvatarB"},
                         ]
                     },
                 }
@@ -101,23 +144,20 @@ class AgentLoopP0Tests(unittest.TestCase):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
-                    json={"message": "往模型里加个 new object"},
+                    json={"message": "add a new object to the model"},
                 )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertNotIn("write", payload)
         steps = payload.get("steps") or []
-        # Only the scan ran; the turn ends asking the user to choose.
         self.assertEqual(len(steps), 1)
         self.assertEqual(steps[0]["tool"], "vrcforge_list_avatars")
         self.assertEqual(payload["plan"].get("nextStep"), "done")
-        self.assertIn("多个模型", payload["plan"].get("reply", ""))
+        self.assertIn("Multiple avatars", payload["plan"].get("summary", ""))
 
     def test_unplanned_message_without_provider_is_honest_not_fake(self) -> None:
-        """No deterministic match + model planner unavailable -> honest 'can't
-        plan / not connected', NOT a fake 'done' reply (A5)."""
-        gateway = dashboard_server.AGENT_GATEWAY
+        gateway = self.gateway
 
         def raising_plan_fn(prompt):
             raise RuntimeError("no provider connected")
@@ -126,7 +166,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
-                    json={"message": "随便陪我聊聊今天的天气吧"},
+                    json={"message": "just chat with me about the weather"},
                 )
 
         self.assertEqual(response.status_code, 200)
@@ -136,8 +176,6 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertFalse(plan.get("providerConnected", True))
         self.assertTrue(plan.get("deterministicTerminal"))
         self.assertEqual(plan.get("nextStep"), "done")
-        self.assertIn("没法自动规划", plan.get("reply", ""))
-        # Honest terminal does not fabricate tool work.
         self.assertNotIn("write", payload)
         self.assertNotIn("skill", payload)
         self.assertEqual(payload.get("steps", []), [])

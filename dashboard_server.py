@@ -689,6 +689,8 @@ class AgentRuntimeMessageRequest(BaseModel):
     skill_params: dict[str, Any] = Field(default_factory=dict)
     cwd: str | None = None
     workspace_root: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
     history: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -1514,6 +1516,8 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "skill_params": runtime_request.skill_params,
             "cwd": runtime_request.cwd,
             "workspace_root": runtime_request.workspace_root,
+            "projectPath": runtime_request.project_path,
+            "projectRoot": runtime_request.project_root,
             "history": runtime_request.history,
         },
         agent_name=runtime_request.agent_name,
@@ -4208,6 +4212,8 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
                 "skill_params": runtime_request.skill_params,
                 "cwd": runtime_request.cwd,
                 "workspace_root": runtime_request.workspace_root,
+                "projectPath": runtime_request.project_path,
+                "projectRoot": runtime_request.project_root,
             },
             agent_name=runtime_request.agent_name,
         )

@@ -2194,16 +2194,36 @@ class AgentGateway:
     ) -> dict[str, Any]:
         """Route an avatar/Unity write through the supervised tool path.
 
-        The loop never auto-applies writes: it calls the registered write tool via
-        `call_tool`, which (on a machine with the Unity MCP bridge) creates the
-        pre-write checkpoint and the approval record. We surface the approval id so
-        the turn can stop and wait. With no bridge connected (e.g. the CI sandbox),
-        the handler raises and we report that honestly instead of pretending.
+        The loop never auto-applies writes: write handlers are converted into an
+        approval request, and approved execution later creates the pre-write
+        checkpoint and calls the registered handler. We surface the approval id so
+        the turn can stop and wait. Direct tools remain supported for legacy
+        request wrappers, but write-handler ids must not be sent through
+        `call_tool` because they are not direct tools.
         """
         if not tool_name:
             return {"ok": False, "status": "blocked", "tool": "", "error": "No write tool was resolved."}
         try:
-            outcome = self.call_tool(tool_name, params, agent_name=agent_name)
+            if tool_name in self._write_handlers:
+                outcome = self.create_apply_request(
+                    {
+                        "target_tool": tool_name,
+                        "arguments": params,
+                        "reason": f"Agent proposed supervised write: {tool_name}",
+                        "agent_name": agent_name,
+                        "requires_explicit_approval": True,
+                        "disable_auto_approval": True,
+                        "explicit_approval_reason": (
+                            "Agent-proposed Unity/project write requires explicit user approval."
+                        ),
+                        "preview": {
+                            "summary": f"Agent proposed {tool_name}.",
+                            "paramsSummary": summarize_params(params),
+                        },
+                    }
+                )
+            else:
+                outcome = self.call_tool(tool_name, params, agent_name=agent_name)
         except AgentGatewayError as exc:
             return {
                 "ok": False,
@@ -2214,6 +2234,11 @@ class AgentGateway:
             }
         outcome = ensure_dict(outcome)
         approval = extract_approval_id(outcome)
+        if not approval:
+            approval_record = ensure_dict(outcome.get("approval"))
+            if not approval_record:
+                approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
+            approval = str(approval_record.get("id") or "").strip()
         if approval:
             status = "approval_pending"
         elif outcome.get("ok"):
@@ -2225,7 +2250,7 @@ class AgentGateway:
             "status": status,
             "tool": tool_name,
             "paramsSummary": summarize_params(params),
-            "result": outcome.get("result"),
+            "result": outcome.get("result") if "result" in outcome else outcome,
         }
         if approval:
             payload["approval_id"] = approval
@@ -5929,7 +5954,7 @@ class AgentGateway:
                 f"我来发起一个加对象的写入请求，走审批/检查点后再真正落地。"
             ),
             writeNeeded=True,
-            writeTool="vrcforge_unity_mcp_write",
+            writeTool="vrcforge_create_gameobject",
             writeParams=write_params,
             resolvedAvatar=target,
             continueLoop=False,
@@ -5957,19 +5982,28 @@ class AgentGateway:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         object_name = str(intent.get("objectName") or "GameObject").strip() or "GameObject"
-        # NOTE(codex/live): 真实 Unity MCP 的「建对象」工具名需在装了 bridge 的机器上确认，
-        # 这里给出结构化请求，写入仍走 vrcforge_unity_mcp_write 的审批/检查点。
-        return {
-            "tool": str(params.get("unity_mcp_tool") or params.get("mcpTool") or "manage_gameobject"),
-            "arguments": {
-                "action": "create",
-                "name": object_name,
-                "parent": target,
-            },
+        # Use the concrete static GameObject primitive. Approved execution maps
+        # this to Unity MCP `vrc_create_gameobject`; no dynamic C#/Roslyn path is involved.
+        request = {
+            "name": object_name,
+            "parentPath": target,
+            "preview": False,
             "writeIntent": intent.get("kind"),
             "targetAvatar": target,
-            "confirmUnityMcpToolName": True,
         }
+        for key in (
+            "projectPath",
+            "project_path",
+            "projectRoot",
+            "project_root",
+            "unityHost",
+            "unity_host",
+            "unityPort",
+            "unity_port",
+        ):
+            if params.get(key) not in (None, ""):
+                request[key] = params.get(key)
+        return request
 
     def _llm_plan_agent_turn(
         self,

@@ -1508,6 +1508,7 @@ export default function App() {
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         attachments: serializeChatAttachments(turn.attachments),
+        projectPath: chat?.projectPath || activeProjectPath || undefined,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
