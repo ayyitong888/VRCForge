@@ -328,6 +328,8 @@ export type AgentRuntimeResponse = {
   sessionId: string;
   turn_id: string;
   turnId: string;
+  approval_id?: string;
+  approvalId?: string;
   observe: Record<string, unknown>;
   plan: {
     summary: string;
@@ -346,6 +348,16 @@ export type AgentRuntimeResponse = {
   };
   reasoning?: AgentReasoningTrace;
   attachments?: AgentMessageAttachment[];
+  write?: {
+    ok?: boolean;
+    status?: string;
+    tool?: string;
+    approval_id?: string;
+    approvalId?: string;
+    paramsSummary?: Record<string, unknown>;
+    result?: unknown;
+    error?: string;
+  };
   shell?: {
     ok: boolean;
     status: "executed" | "pending_approval" | "rejected" | string;
@@ -1823,6 +1835,7 @@ export async function approveAgentApproval(
 ): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
     method: "POST",
+    timeoutMs: 180000,
   });
 }
 
@@ -1832,6 +1845,7 @@ export async function rejectAgentApproval(
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
     method: "POST",
+    timeoutMs: 60000,
   });
 }
 
@@ -2001,17 +2015,20 @@ export async function previewAdjustmentCheckpoint(
   });
 }
 
-async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+type JsonRequestInit = RequestInit & { timeoutMs?: number };
+
+async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<T> {
   const controller = new AbortController();
-  const timeoutMs = 30000;
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = init.timeoutMs ?? 30000;
+  const timeout = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
   const headers = new Headers(init.headers);
   if (appSessionToken && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${appSessionToken}`);
   }
   let response: Response;
   try {
-    response = await fetch(url, { ...init, headers, signal: init.signal ?? controller.signal });
+    const { timeoutMs: _timeoutMs, ...fetchInit } = init;
+    response = await fetch(url, { ...fetchInit, headers, signal: init.signal ?? controller.signal });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "AbortError") {
       if (init.signal?.aborted) {
@@ -2025,7 +2042,9 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
       cause instanceof Error ? cause.message : String(cause),
     );
   } finally {
-    window.clearTimeout(timeout);
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout);
+    }
   }
   const text = await response.text();
   let payload: unknown = {};

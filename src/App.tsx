@@ -355,11 +355,18 @@ type ContextUsage = {
   warning: boolean;
 };
 
+type ApprovalActionState = "approve" | "reject";
+
 type RuntimeScheduleItem = {
   id: string;
-  status: "running" | "queued" | "approval" | "cancelling";
+  status: "running" | "queued" | "cancelling";
   title: string;
   meta: string;
+};
+
+type RuntimeFileReference = {
+  path: string;
+  source: string;
 };
 
 type ProjectUiPrefs = {
@@ -382,6 +389,7 @@ const MAX_ATTACHMENTS_PER_TURN = 8;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
+const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
@@ -548,6 +556,7 @@ export default function App() {
       return {};
     }
   });
+  const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
   const [renamingChatId, setRenamingChatId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
@@ -791,7 +800,7 @@ export default function App() {
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
-  const contextUsage = useMemo(() => buildContextUsage(conversation, input), [conversation, input]);
+  const contextUsage = useMemo(() => buildContextUsage(conversation, input, attachments), [attachments, conversation, input]);
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
     const parentSession = activeChat?.sessionId || "";
@@ -820,14 +829,6 @@ export default function App() {
         meta: `Queue ${index + 1} · ${turn.providerLabel} / ${turn.model}`,
       });
     });
-    pendingApprovalItems.forEach((approval) => {
-      items.push({
-        id: `approval-${approval.id}`,
-        status: "approval",
-        title: approval.targetTool || approval.preview?.command || "Approval",
-        meta: approval.reason || approval.riskLevel || "waiting for review",
-      });
-    });
     activeSubAgentTasks
       .filter((task) => ["queued", "running", "cancelling"].includes(task.status))
       .forEach((task) => {
@@ -837,15 +838,16 @@ export default function App() {
           title: task.displayName || subAgentRoleLabel(task.role),
           meta: task.task || task.status,
         });
-      });
+    });
     return items;
-  }, [activeSubAgentTasks, currentTurn, pendingApprovalItems, queued, stopRequested]);
+  }, [activeSubAgentTasks, currentTurn, queued, stopRequested]);
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const workspaceGridColumns = `${leftSidebarCollapsed ? "56px" : "280px"} minmax(0,1fr) ${rightSidebarCollapsed ? "0px" : "320px"}`;
   const workspaceDiffFiles = workspaceDiff?.files ?? [];
+  const runtimeFileReferences = useMemo(() => buildRuntimeFileReferences(conversation, workspaceDiffFiles), [conversation, workspaceDiffFiles]);
   const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
   const backendComponent = healthComponents.backend;
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
@@ -1334,6 +1336,30 @@ export default function App() {
     updateChat(chatId, (chat) => ({ ...chat, items: [...chat.items, item] }));
   }
 
+  function pendingApprovalForResponse(response: AgentRuntimeResponse): AgentApproval | null {
+    const approvalId = approvalIdFromResponse(response);
+    if (approvalId) {
+      const pending = pendingApprovalItems.find((approval) => approval.id === approvalId);
+      if (pending) {
+        return pending;
+      }
+    }
+    const shellApproval = response.shell?.approval;
+    if (shellApproval?.status === "pending") {
+      return shellApproval;
+    }
+    return null;
+  }
+
+  function modifyApprovalInComposer(approval: AgentApproval) {
+    const target = approval.targetTool || approval.preview?.command || "this approval";
+    setInput((current) => {
+      const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
+      return `${prefix}修改这次审批：${target}\n`;
+    });
+    setRuntimeNotice("Approval kept pending. Edit the request in the composer, then send it as a follow-up.");
+  }
+
   function toggleRightRuntimeSection(section: string) {
     setRightRuntimeSectionsCollapsed((current) => ({ ...current, [section]: !current[section] }));
   }
@@ -1487,6 +1513,7 @@ export default function App() {
     const startedAt = Date.now();
     const messageForModel = appendAttachmentSummary(turn.text, turn.attachments);
     const abortController = new AbortController();
+    let userItemId = "";
     activeTurnAbortRef.current = abortController;
     setCurrentTurn({ text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
     try {
@@ -1499,6 +1526,7 @@ export default function App() {
         targetEndpoint = readyEndpoint;
       }
       const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments };
+      userItemId = userItem.id;
       const message = turn.text;
       updateChat(chatId, (current) => ({
         ...current,
@@ -1522,6 +1550,13 @@ export default function App() {
       await refresh(targetEndpoint);
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
+      if (userItemId && text.toLowerCase().includes("cancel")) {
+        updateChat(chatId, (current) => ({
+          ...current,
+          sessionId: "",
+          items: current.items.filter((item) => item.id !== userItemId),
+        }));
+      }
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       setError(text);
     } finally {
@@ -1562,7 +1597,7 @@ export default function App() {
   }
 
   async function approveShell(approvalId: string) {
-    setLoading(true);
+    setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
     setError("");
     try {
       const payload = await approveAgentApproval(endpoint, approvalId);
@@ -1593,12 +1628,16 @@ export default function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      setApprovalActions((current) => {
+        const next = { ...current };
+        delete next[approvalId];
+        return next;
+      });
     }
   }
 
   async function rejectShell(approvalId: string) {
-    setLoading(true);
+    setApprovalActions((current) => ({ ...current, [approvalId]: "reject" }));
     setError("");
     try {
       await rejectAgentApproval(endpoint, approvalId);
@@ -1614,7 +1653,11 @@ export default function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      setApprovalActions((current) => {
+        const next = { ...current };
+        delete next[approvalId];
+        return next;
+      });
     }
   }
 
@@ -1807,20 +1850,25 @@ export default function App() {
   }
 
   function addSelectionToComposer(text: string) {
-    const quoted = quoteLines(text);
-    setInput((current) => (current.trim() ? `${current.trimEnd()}\n\n${quoted}\n` : `${quoted}\n`));
+    if (attachments.length >= MAX_ATTACHMENTS_PER_TURN) {
+      setError(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN}).`);
+      clearSelectionMenu();
+      return;
+    }
+    setAttachments((current) => [...current, selectedTextAttachment(text)].slice(0, MAX_ATTACHMENTS_PER_TURN));
     clearSelectionMenu();
   }
 
   function askInNewSession(text: string) {
-    // 基于选中内容开新会话提问——后续多 agent 的入口。
     const projectPath = activeChat?.projectPath ?? activeProjectPath;
+    // 基于选中内容开新会话提问——后续多 agent 的入口。
     const id = `chat-${Date.now()}`;
     const agentName = pickSubAgentName();
     setChats((list) => [{ id, sessionId: "", title: agentName, projectPath, agentName, items: [] }, ...list]);
     setActiveChatId(id);
     setActiveView("chat");
-    setInput(`${quoteLines(text)}\n`);
+    setAttachments([selectedTextAttachment(text)]);
+    setInput("");
     clearSelectionMenu();
   }
 
@@ -4202,9 +4250,21 @@ export default function App() {
                 onScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
               >
                 <div className="mx-auto max-w-3xl space-y-7">
-                  {conversation.map((item) => (
-                    <ConversationCard key={item.id} item={item} onOpenSettings={() => void openSettings()} />
-                  ))}
+                  {conversation.map((item) => {
+                    const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
+                    return (
+                      <ConversationCard
+                        key={item.id}
+                        item={item}
+                        approval={approval}
+                        approvalAction={approval ? approvalActions[approval.id] : undefined}
+                        onApprove={approveShell}
+                        onReject={rejectShell}
+                        onModifyApproval={modifyApprovalInComposer}
+                        onOpenSettings={() => void openSettings()}
+                      />
+                    );
+                  })}
                   {sending && currentTurn ? (
                     <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} provider={currentTurn.providerLabel} model={currentTurn.model} />
                   ) : null}
@@ -4366,7 +4426,27 @@ export default function App() {
                     {runtimeNotice}
                   </div>
                 ) : null}
+                {pendingApprovalItems.length ? (
+                  <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/5 px-2 py-2 text-xs text-amber-700">
+                    审批按钮已贴在对应对话下面；这里仅保留待处理状态。
+                  </div>
+                ) : null}
               </section>
+
+              {runtimeFileReferences.length ? (
+                <RuntimeSection
+                  title="Files seen"
+                  collapsed={rightRuntimeSectionsCollapsed.files}
+                  onToggle={() => toggleRightRuntimeSection("files")}
+                  count={<Badge tone="muted">{formatCount(runtimeFileReferences.length)}</Badge>}
+                >
+                  <div className="space-y-0.5">
+                    {runtimeFileReferences.map((file) => (
+                      <RuntimeFileReferenceRow key={`${file.source}-${file.path}`} file={file} />
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
 
               {workspaceDiffFiles.length || workspaceDiffError ? (
                 <RuntimeSection
@@ -4467,32 +4547,6 @@ export default function App() {
                     {activeSubAgentTasks.length > 6 ? (
                       <div className="px-1 pt-1 text-xs text-muted-foreground">+{formatCount(activeSubAgentTasks.length - 6)} more</div>
                     ) : null}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {pendingApprovalItems.length ? (
-                <RuntimeSection
-                  title="Approvals"
-                  collapsed={rightRuntimeSectionsCollapsed.approvals}
-                  onToggle={() => toggleRightRuntimeSection("approvals")}
-                  count={<Badge tone="warn">{pendingApprovalItems.length}</Badge>}
-                >
-                  <div className="space-y-2">
-                    {pendingApprovalItems.slice(0, 3).map((approval) => (
-                      <div key={approval.id} className="rounded-md border border-amber-500/20 bg-amber-500/5 p-2 text-xs">
-                        <div className="truncate font-medium">{approval.targetTool || approval.preview?.command || "Approval"}</div>
-                        <div className="mt-1 truncate text-muted-foreground">{approval.reason || approval.riskLevel || "pending"}</div>
-                        <div className="mt-2 flex gap-2">
-                          <Button className="h-7 px-2 text-xs" disabled={loading} onClick={() => approveShell(approval.id)}>
-                            {t("approval.approve")}
-                          </Button>
-                          <Button variant="outline" className="h-7 px-2 text-xs" disabled={loading} onClick={() => rejectShell(approval.id)}>
-                            {t("approval.reject")}
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
                   </div>
                 </RuntimeSection>
               ) : null}
@@ -5267,7 +5321,7 @@ function Composer({
               </Badge>
             ) : null}
             {contextUsage ? (
-              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[180px] truncate">
+              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[260px] truncate">
                 Context {contextUsage.label}
               </Badge>
             ) : null}
@@ -5358,16 +5412,22 @@ function AttachmentStrip({
       {attachments.map((attachment) => (
         <div
           key={attachment.id}
-          className="flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm"
-          title={`${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+          className={cn("flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm", attachment.name === SELECTED_TEXT_ATTACHMENT_NAME && "rounded-full")}
+          title={
+            attachment.name === SELECTED_TEXT_ATTACHMENT_NAME
+              ? (attachment.text || "").replace(/\s+/g, " ").slice(0, 220)
+              : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`
+          }
         >
           {attachment.dataUrl && attachment.type.startsWith("image/") ? (
             <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
+          ) : attachment.name === SELECTED_TEXT_ATTACHMENT_NAME ? (
+            <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
           ) : (
             <Archive className="h-4 w-4 shrink-0 text-muted-foreground" />
           )}
-          <span className="min-w-0 max-w-[220px] truncate">{attachment.name}</span>
-          <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span>
+          <span className="min-w-0 max-w-[220px] truncate">{attachment.name === SELECTED_TEXT_ATTACHMENT_NAME ? "1 个已选文本" : attachment.name}</span>
+          {attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
           {attachment.truncated ? <span className="shrink-0 text-amber-700">metadata</span> : null}
           {onRemove ? (
             <button
@@ -9196,7 +9256,23 @@ function doctorStatusLabel(status: string): string {
   }
 }
 
-function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; onOpenSettings?: () => void }) {
+function ConversationCard({
+  item,
+  approval,
+  approvalAction,
+  onApprove,
+  onReject,
+  onModifyApproval,
+  onOpenSettings,
+}: {
+  item: ConversationItem;
+  approval?: AgentApproval | null;
+  approvalAction?: ApprovalActionState;
+  onApprove?: (approvalId: string) => void;
+  onReject?: (approvalId: string) => void;
+  onModifyApproval?: (approval: AgentApproval) => void;
+  onOpenSettings?: () => void;
+}) {
   const { t } = useTranslation();
   if (item.type === "user") {
     return (
@@ -9390,7 +9466,15 @@ function ConversationCard({ item, onOpenSettings }: { item: ConversationItem; on
           </RunRow>
         ) : null}
 
-        {awaitingApproval ? (
+        {approval ? (
+          <InlineApprovalCard
+            approval={approval}
+            action={approvalAction}
+            onApprove={onApprove}
+            onReject={onReject}
+            onModify={onModifyApproval}
+          />
+        ) : awaitingApproval ? (
           <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span>{t("approval.awaitingInline")}</span>
@@ -9515,6 +9599,64 @@ function RunningIndicator({ startedAt, text, provider, model }: { startedAt: num
         <span className="shrink-0 font-medium text-foreground">{status}</span>
         <span className="min-w-0 truncate text-muted-foreground">「{text}」</span>
         <span className="shrink-0 font-mono text-xs">{formatDuration(seconds)}</span>
+      </div>
+    </div>
+  );
+}
+
+function InlineApprovalCard({
+  approval,
+  action,
+  onApprove,
+  onReject,
+  onModify,
+}: {
+  approval: AgentApproval;
+  action?: ApprovalActionState;
+  onApprove?: (approvalId: string) => void;
+  onReject?: (approvalId: string) => void;
+  onModify?: (approval: AgentApproval) => void;
+}) {
+  const { t } = useTranslation();
+  const busy = Boolean(action);
+  const title = approval.targetTool || approval.preview?.command || "Approval request";
+  const detail = approval.paramsSummary || approval.arguments || approval.preview;
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-sm">
+      <div className="flex min-w-0 items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate font-medium">需要审批</span>
+            <Badge tone="warn" className="shrink-0">
+              {approval.riskLevel || "write"}
+            </Badge>
+          </div>
+          <div className="mt-1 truncate font-mono text-xs text-foreground">{title}</div>
+          {approval.reason ? <div className="mt-1 text-xs text-muted-foreground">{approval.reason}</div> : null}
+        </div>
+      </div>
+      {detail ? (
+        <details className="mt-2 rounded-md border border-amber-500/20 bg-background/70 px-2 py-1.5 text-xs">
+          <summary className="cursor-pointer text-muted-foreground">查看参数</summary>
+          <pre className="app-scrollbar mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+            {formatPayload(detail)}
+          </pre>
+        </details>
+      ) : null}
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onModify?.(approval)}>
+          <Pencil className="h-3.5 w-3.5" />
+          修改
+        </Button>
+        <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onReject?.(approval.id)}>
+          {action === "reject" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+          {action === "reject" ? "驳回中" : t("approval.reject")}
+        </Button>
+        <Button className="h-8 px-3 text-xs" disabled={busy} onClick={() => onApprove?.(approval.id)}>
+          {action === "approve" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+          {action === "approve" ? "执行中" : t("approval.approve")}
+        </Button>
       </div>
     </div>
   );
@@ -9668,9 +9810,7 @@ function RuntimeInfoRow({
 
 function RuntimeScheduleRow({ item }: { item: RuntimeScheduleItem }) {
   const tone =
-    item.status === "approval"
-      ? "border-amber-500 bg-amber-500"
-      : item.status === "cancelling"
+    item.status === "cancelling"
         ? "border-destructive bg-destructive"
         : item.status === "running"
           ? "border-primary bg-primary"
@@ -9696,6 +9836,18 @@ function RuntimeDiffFileRow({ file }: { file: WorkspaceDiffSummary["files"][numb
       <span className="shrink-0 font-mono text-muted-foreground">
         {file.binary ? "bin" : `+${file.additions || 0} -${file.deletions || 0}`}
       </span>
+    </div>
+  );
+}
+
+function RuntimeFileReferenceRow({ file }: { file: RuntimeFileReference }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
+      <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+      <span className="truncate font-mono" title={file.path}>
+        {file.path}
+      </span>
+      <span className="shrink-0 text-muted-foreground">{file.source}</span>
     </div>
   );
 }
@@ -10510,12 +10662,74 @@ function formatProjectIndexPaths(entries: Array<{ path: string; category?: strin
   return lines.join("\n");
 }
 
+function buildRuntimeFileReferences(items: ConversationItem[], diffFiles: WorkspaceDiffSummary["files"]): RuntimeFileReference[] {
+  const seen = new Map<string, RuntimeFileReference>();
+  const add = (path: string, source: string) => {
+    const cleaned = path.trim().replace(/[),.;:\]}]+$/g, "");
+    if (!cleaned || cleaned.length > 260) {
+      return;
+    }
+    const key = cleaned.replace(/\//g, "\\").toLowerCase();
+    if (!seen.has(key)) {
+      seen.set(key, { path: cleaned, source });
+    }
+  };
+  const scan = (value: unknown, source: string) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    const text = typeof value === "string" ? value : formatPayload(value);
+    const pathPattern =
+      /[A-Za-z]:[\\/][^\s"'<>|]+|\b(?:Assets|Packages|ProjectSettings|src|docs|tests|packaging|artifacts)[\\/][^\s"'<>|]+|\b[\w.-]+\.(?:tsx?|py|md|json|ps1|cs|shader|asset|controller|prefab|mat|anim|unity)\b/g;
+    for (const match of text.matchAll(pathPattern)) {
+      add(match[0], source);
+    }
+  };
+
+  for (const item of items.slice(-16)) {
+    if (item.type === "user") {
+      item.attachments?.forEach((attachment) => {
+        if (attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME) {
+          add(attachment.name, "attachment");
+        }
+      });
+    } else if (item.type === "agent") {
+      const responseRecord = asRecord(item.response) || {};
+      scan(responseRecord.steps, "run");
+      scan(item.response.write, "write");
+      scan(item.response.skill, "tool");
+      scan(item.response.shell, "command");
+      scan(item.response.result, "result");
+    } else if (item.type === "result") {
+      scan(item.result, "approval");
+      scan(item.error, "approval");
+    } else if (item.type === "subagent") {
+      scan(item.task, "sub-agent");
+    }
+  }
+  diffFiles.slice(0, 12).forEach((file) => add(file.path, "changes"));
+  return Array.from(seen.values()).slice(-12).reverse();
+}
+
 function isAgentShellResult(value: unknown): value is AgentShellResult {
   if (!value || typeof value !== "object") {
     return false;
   }
   const payload = value as Partial<AgentShellResult>;
   return typeof payload.command === "string" && typeof payload.exitCode === "number";
+}
+
+function approvalIdFromResponse(response: AgentRuntimeResponse): string {
+  return String(
+    response.approval_id ||
+      response.approvalId ||
+      response.write?.approval_id ||
+      response.write?.approvalId ||
+      response.shell?.approval_id ||
+      response.shell?.approvalId ||
+      response.shell?.approval?.id ||
+      "",
+  ).trim();
 }
 
 function shortPath(path: string) {
@@ -10569,15 +10783,16 @@ function clipText(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function buildContextUsage(items: ConversationItem[], draft: string): ContextUsage {
-  const text = [...buildChatHistory(items).map((entry) => entry.text), draft].join("\n");
+function buildContextUsage(items: ConversationItem[], draft: string, attachments: ChatAttachment[] = []): ContextUsage {
+  const text = [...buildChatHistory(items).map((entry) => entry.text), appendAttachmentSummary(draft, attachments)].join("\n");
   const used = Math.ceil(text.length / 4);
   const ratio = Math.min(1, used / CONTEXT_TOKEN_LIMIT_ESTIMATE);
+  const percent = Math.round(ratio * 100);
   return {
     used,
     limit: CONTEXT_TOKEN_LIMIT_ESTIMATE,
     ratio,
-    label: `${Math.round(ratio * 100)}%`,
+    label: `${formatCount(used)} / ${formatCount(CONTEXT_TOKEN_LIMIT_ESTIMATE)} (${percent}%)`,
     warning: ratio >= CONTEXT_AUTO_COMPACT_RATIO,
   };
 }
@@ -10639,6 +10854,18 @@ function appendAttachmentSummary(text: string, attachments: ChatAttachment[]): s
     })
     .join("\n");
   return [text.trim(), `Attachments:\n${summary}`].filter(Boolean).join("\n\n");
+}
+
+function selectedTextAttachment(text: string): ChatAttachment {
+  const normalized = text.trim();
+  return {
+    id: `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: SELECTED_TEXT_ATTACHMENT_NAME,
+    size: new Blob([normalized]).size,
+    type: "text/plain",
+    text: normalized,
+    payloadKind: "text",
+  };
 }
 
 function serializeChatAttachments(attachments: ChatAttachment[]) {
