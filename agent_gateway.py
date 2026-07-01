@@ -2546,6 +2546,9 @@ class AgentGateway:
             or params.get("disable_auto_approval")
             or params.get("disableAutoApproval")
         )
+        execution_mode = normalize_execution_mode(config.execution_mode)
+        full_permission_auto = execution_mode == "roslyn_full_auto"
+        requires_explicit_for_mode = requires_explicit_approval and not full_permission_auto
         explicit_approval_reason = str(
             params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
@@ -2565,19 +2568,29 @@ class AgentGateway:
             preview=preview,
             risk_level=write_handler.risk_level,
             user_constraints=user_constraints,
-            requires_explicit_approval=requires_explicit_approval,
+            requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
         )
-        if self.auto_approval_enabled(config) and not requires_explicit_approval:
+        if full_permission_auto and requires_explicit_approval:
+            self.append_audit(
+                {
+                    "event": "approval_explicit_requirement_overridden_by_full_permission",
+                    "approvalId": approval.get("id"),
+                    "mode": execution_mode,
+                    "reason": explicit_approval_reason,
+                    "targetTool": target_tool,
+                }
+            )
+        if self.auto_approval_enabled(config) and not requires_explicit_for_mode:
             auto_payload = self._auto_execute_approval(approval)
             if auto_payload is not None:
                 return auto_payload
-        if self.auto_approval_enabled(config) and requires_explicit_approval:
+        if self.auto_approval_enabled(config) and requires_explicit_for_mode:
             self.append_audit(
                 {
                     "event": "approval_auto_approval_suppressed",
                     "approvalId": approval.get("id"),
-                    "mode": normalize_execution_mode(config.execution_mode),
+                    "mode": execution_mode,
                     "reason": explicit_approval_reason,
                     "targetTool": target_tool,
                 }
@@ -2588,7 +2601,7 @@ class AgentGateway:
             "approval": approval,
             "message": (
                 "Apply request requires explicit user approval."
-                if requires_explicit_approval
+                if requires_explicit_for_mode
                 else "Apply request is waiting for user approval."
             ),
         }

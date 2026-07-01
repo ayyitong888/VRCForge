@@ -651,6 +651,70 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
         dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
 
 
+def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
+    original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
+    original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+    prepared_roots: list[Path] = []
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    calls: list[dict] = []
+
+    def prepare_checkpoint(root: Path) -> dict:
+        prepared_roots.append(root)
+        return {"ok": True, "projectRoot": str(root)}
+
+    def write_handler(args: dict) -> dict:
+        calls.append(args)
+        return {"ok": True, "value": args.get("value")}
+
+    dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = prepare_checkpoint
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: AgentGatewayConfig(
+            enabled=True,
+            allow_write_requests=True,
+            allow_roslyn_advanced=True,
+            execution_mode="roslyn_full_auto",
+            roslyn_risk_acknowledged=True,
+        ),
+    )
+    try:
+        dashboard_server.AGENT_GATEWAY.register_write_handler(
+            "vrcforge_test_full_permission_write",
+            "Test full permission write.",
+            "critical",
+            write_handler,
+            advanced=True,
+        )
+        payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
+            {
+                "target_tool": "vrcforge_test_full_permission_write",
+                "arguments": {"projectRoot": str(project), "value": "kept"},
+                "preview": {"ok": True},
+                "disableAutoApproval": True,
+                "explicitApprovalReason": "Would require review outside full permission.",
+            }
+        )
+
+        assert payload["ok"] is True
+        assert payload["status"] == "executed"
+        assert payload["autoApproved"] is True
+        assert payload["approval"]["status"] == "applied"
+        assert payload["approval"].get("requiresExplicitApproval") is not True
+        assert payload["approval"].get("autoApprovalBlocked") is not True
+        assert len(calls) == 1
+        assert calls[0]["value"] == "kept"
+        assert prepared_roots == [project.resolve()]
+    finally:
+        dashboard_server.AGENT_GATEWAY._approvals.clear()
+        dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
+        dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
+        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+
+
 def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)

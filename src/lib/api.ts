@@ -122,6 +122,16 @@ export type ApiConfig = {
   apiKeyRequired: boolean;
 };
 
+export type ProviderModelInfo = {
+  id: string;
+  label: string;
+  contextWindow?: number;
+  inputTokenLimit?: number;
+  maxInputTokens?: number;
+  outputTokenLimit?: number;
+  maxOutputTokens?: number;
+};
+
 export type DiagnosticsStatus = {
   ok: boolean;
   schema: string;
@@ -566,7 +576,7 @@ export type ProviderModelList = {
   provider: string;
   providerLabel?: string;
   baseUrl?: string;
-  models: Array<{ id: string; label: string }>;
+  models: ProviderModelInfo[];
   modelCount: number;
   selectedModel?: string;
 };

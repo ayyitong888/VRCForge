@@ -124,7 +124,17 @@
     "slashCompact": "壓縮目前會話歷史，釋放上下文",
     "switchProject": "切換對話綁定的專案",
     "queued": "已排隊 · 當前任務結束後自動發送",
-    "tempChatDesc": "臨時對話同樣擁有完整智能體能力（技能 / Shell / Unity 工具），只是不歸檔到專案下。"
+    "tempChatDesc": "臨時對話同樣擁有完整智能體能力（技能 / Shell / Unity 工具），只是不歸檔到專案下。",
+    "copyMessage": "複製",
+    "editMessage": "編輯",
+    "retryMessage": "重試",
+    "regenerateMessage": "重新生成",
+    "copiedMessage": "已複製訊息",
+    "editingMessage": "已回退到該訊息之前，原文已放回輸入框。",
+    "retryingMessage": "已從該訊息之前重新發送。",
+    "regeneratingMessage": "已從上一條使用者訊息重新生成。",
+    "noPreviousUserMessage": "沒有找到可用於重新生成的上一條使用者訊息。",
+    "cannotActionWhileRunning": "目前任務執行中，請先停止或等它結束後再修改歷史。"
   },
   "agent": {
     "modeLabel": {

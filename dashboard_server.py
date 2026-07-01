@@ -11202,7 +11202,7 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
     )
 
 
-def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
     if provider_requires_api_key(config.provider) and not config.api_key.strip():
         raise RuntimeError(f"{provider_display_name(config.provider)} API key is empty. Enter an API key before loading models.")
 
@@ -11326,7 +11326,7 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
     return str(getattr(message, "content", "") or "")
 
 
-def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
     if not config.base_url.strip():
         raise RuntimeError("Base URL is empty. Enter a provider API endpoint before loading models.")
 
@@ -11344,7 +11344,7 @@ def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str,
     return normalize_provider_model_list(response, provider_display_name(config.provider))
 
 
-def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
     try:
         from google import genai
     except ImportError as exc:
@@ -11359,7 +11359,7 @@ def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, 
     return normalize_provider_model_list(response, "Google AI Studio")
 
 
-def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
     try:
         from google import genai
     except ImportError as exc:
@@ -11392,7 +11392,7 @@ def resolve_vertex_project_location(value: str) -> tuple[str, str]:
     return resolve_vertex_ai_project_location(settings.llm_base_url)
 
 
-def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, str]]:
+def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
     try:
         import anthropic
     except ImportError as exc:
@@ -11415,7 +11415,7 @@ def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, str]]:
     return normalize_provider_model_list(response, "Anthropic")
 
 
-def normalize_provider_model_list(response: Any, provider_label: str) -> list[dict[str, str]]:
+def normalize_provider_model_list(response: Any, provider_label: str) -> list[dict[str, Any]]:
     raw_items: Any = response
     if isinstance(response, dict):
         raw_items = response.get("data") or response.get("models") or []
@@ -11427,7 +11427,7 @@ def normalize_provider_model_list(response: Any, provider_label: str) -> list[di
     except TypeError:
         items = []
 
-    models_by_id: dict[str, dict[str, str]] = {}
+    models_by_id: dict[str, dict[str, Any]] = {}
     for item in items:
         if isinstance(item, dict):
             model_id = item.get("id") or item.get("name")
@@ -11439,12 +11439,70 @@ def normalize_provider_model_list(response: Any, provider_label: str) -> list[di
 
         model_id = str(model_id).strip()
         if model_id:
-            models_by_id.setdefault(model_id, {"id": model_id, "label": model_id})
+            models_by_id.setdefault(model_id, build_provider_model_info(item, model_id))
 
     models = sorted(models_by_id.values(), key=lambda model: model["id"].casefold())
     if not models:
         raise RuntimeError(f"{provider_label} returned no models.")
     return models
+
+
+def read_model_attr(item: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(item, dict) and name in item:
+            return item.get(name)
+        value = getattr(item, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def coerce_positive_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
+    label = str(read_model_attr(item, "label", "display_name", "displayName", "name") or model_id).strip() or model_id
+    info: dict[str, Any] = {"id": model_id, "label": label}
+    field_map = {
+        "contextWindow": (
+            "contextWindow",
+            "context_window",
+            "contextLength",
+            "context_length",
+            "maxContextTokens",
+            "max_context_tokens",
+        ),
+        "inputTokenLimit": (
+            "inputTokenLimit",
+            "input_token_limit",
+            "inputTokenCountLimit",
+            "input_token_count_limit",
+        ),
+        "maxInputTokens": (
+            "maxInputTokens",
+            "max_input_tokens",
+        ),
+        "outputTokenLimit": (
+            "outputTokenLimit",
+            "output_token_limit",
+        ),
+        "maxOutputTokens": (
+            "maxOutputTokens",
+            "max_output_tokens",
+        ),
+    }
+    for out_key, candidates in field_map.items():
+        value = coerce_positive_int(read_model_attr(item, *candidates))
+        if value is not None:
+            info[out_key] = value
+    return info
 
 
 def save_dashboard_api_config(config: DashboardApiConfig) -> None:

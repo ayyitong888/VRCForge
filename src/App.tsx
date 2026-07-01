@@ -93,6 +93,7 @@ import {
   OptimizationPlannerReport,
   OptimizationProofDetail,
   OptimizationProofSummary,
+  ProviderModelInfo,
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
@@ -350,8 +351,11 @@ type ProviderSnapshot = {
 type ContextUsage = {
   used: number;
   limit: number;
+  limitKnown: boolean;
+  source: "provider" | "known" | "estimated";
   ratio: number;
   label: string;
+  title: string;
   warning: boolean;
 };
 
@@ -643,7 +647,7 @@ export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
-  const [modelOptions, setModelOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [modelOptions, setModelOptions] = useState<ProviderModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [testingProvider, setTestingProvider] = useState("");
@@ -800,7 +804,14 @@ export default function App() {
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
-  const contextUsage = useMemo(() => buildContextUsage(conversation, input, attachments), [attachments, conversation, input]);
+  const currentModelInfo = useMemo(
+    () => findProviderModelInfo(modelOptions, providerSnapshot.model),
+    [modelOptions, providerSnapshot.model],
+  );
+  const contextUsage = useMemo(
+    () => buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo),
+    [attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider],
+  );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
     const parentSession = activeChat?.sessionId || "";
@@ -5321,7 +5332,7 @@ function Composer({
               </Badge>
             ) : null}
             {contextUsage ? (
-              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[260px] truncate">
+              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[300px] truncate" title={contextUsage.title}>
                 Context {contextUsage.label}
               </Badge>
             ) : null}
@@ -5883,7 +5894,7 @@ function ProviderSetup({
   baseUrl: string;
   model: string;
   saving: boolean;
-  models: Array<{ id: string; label: string }>;
+  models: ProviderModelInfo[];
   loadingModels: boolean;
   modelsError: string;
   testingProvider: string;
@@ -10789,16 +10800,107 @@ function clipText(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function buildContextUsage(items: ConversationItem[], draft: string, attachments: ChatAttachment[] = []): ContextUsage {
+type ContextLimitResolution = {
+  limit: number;
+  known: boolean;
+  source: ContextUsage["source"];
+};
+
+const KNOWN_MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  "gemini:gemini-2.5-flash": 1_048_576,
+  "gemini:gemini-2.5-pro": 1_048_576,
+  "gemini:gemini-2.5-flash-lite": 1_048_576,
+  "gemini:gemini-3.5-flash": 1_048_576,
+};
+
+function normalizeProviderForContext(provider: string): string {
+  const key = provider.trim().toLowerCase();
+  if (key.includes("gemini") || key.includes("google") || key.includes("vertex")) {
+    return "gemini";
+  }
+  if (key.includes("anthropic") || key.includes("claude")) {
+    return "anthropic";
+  }
+  if (key.includes("deepseek")) {
+    return "deepseek";
+  }
+  if (key.includes("openai")) {
+    return "openai";
+  }
+  return key || "unknown";
+}
+
+function normalizeModelId(model: string): string {
+  const value = model.trim().toLowerCase();
+  const modelsPathIndex = value.lastIndexOf("/models/");
+  if (modelsPathIndex >= 0) {
+    return value.slice(modelsPathIndex + "/models/".length);
+  }
+  return value.replace(/^models\//, "");
+}
+
+function findProviderModelInfo(models: ProviderModelInfo[], model: string): ProviderModelInfo | undefined {
+  const target = normalizeModelId(model);
+  return models.find((item) => normalizeModelId(item.id) === target);
+}
+
+function readProviderModelContextLimit(modelInfo?: ProviderModelInfo): number | null {
+  const candidates = [
+    modelInfo?.inputTokenLimit,
+    modelInfo?.contextWindow,
+    modelInfo?.maxInputTokens,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function contextLimitForProviderModel(provider: string, model: string, modelInfo?: ProviderModelInfo): ContextLimitResolution {
+  const providerLimit = readProviderModelContextLimit(modelInfo);
+  if (providerLimit) {
+    return { limit: providerLimit, known: true, source: "provider" };
+  }
+  const providerKey = normalizeProviderForContext(provider);
+  const modelKey = normalizeModelId(model);
+  const knownLimit = KNOWN_MODEL_CONTEXT_LIMITS[`${providerKey}:${modelKey}`];
+  if (knownLimit) {
+    return { limit: knownLimit, known: true, source: "known" };
+  }
+  return { limit: CONTEXT_TOKEN_LIMIT_ESTIMATE, known: false, source: "estimated" };
+}
+
+function buildContextUsage(
+  items: ConversationItem[],
+  draft: string,
+  attachments: ChatAttachment[] = [],
+  provider = "",
+  model = "",
+  modelInfo?: ProviderModelInfo,
+): ContextUsage {
   const text = [...buildChatHistory(items).map((entry) => entry.text), appendAttachmentSummary(draft, attachments)].join("\n");
   const used = Math.ceil(text.length / 4);
-  const ratio = Math.min(1, used / CONTEXT_TOKEN_LIMIT_ESTIMATE);
+  const contextLimit = contextLimitForProviderModel(provider, model, modelInfo);
+  const limit = contextLimit.limit;
+  const ratio = Math.min(1, used / limit);
   const percent = Math.round(ratio * 100);
+  const limitLabel = `${contextLimit.known ? "" : "~"}${formatCount(limit)}`;
+  const sourceLabel =
+    contextLimit.source === "provider"
+      ? "provider metadata"
+      : contextLimit.source === "known"
+        ? "known model table"
+        : "estimated fallback";
   return {
     used,
-    limit: CONTEXT_TOKEN_LIMIT_ESTIMATE,
+    limit,
+    limitKnown: contextLimit.known,
+    source: contextLimit.source,
     ratio,
-    label: `${formatCount(used)} / ${formatCount(CONTEXT_TOKEN_LIMIT_ESTIMATE)} (${percent}%)`,
+    label: `${formatCount(used)} / ${limitLabel} (${percent}%)`,
+    title: `Context window from ${sourceLabel}: ${formatCount(limit)} input tokens for ${model || provider || "current model"}.`,
     warning: ratio >= CONTEXT_AUTO_COMPACT_RATIO,
   };
 }

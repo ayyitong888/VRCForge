@@ -124,7 +124,17 @@
     "slashCompact": "セッション履歴を圧縮してコンテキストを解放",
     "switchProject": "チャットのプロジェクトを切り替え",
     "queued": "キュー待ち · 現在のタスク完了後に自動送信",
-    "tempChatDesc": "一時チャットでもフルエージェント機能（スキル / Shell / Unity ツール）が使えますが、プロジェクトには保存されません。"
+    "tempChatDesc": "一時チャットでもフルエージェント機能（スキル / Shell / Unity ツール）が使えますが、プロジェクトには保存されません。",
+    "copyMessage": "コピー",
+    "editMessage": "編集",
+    "retryMessage": "再試行",
+    "regenerateMessage": "再生成",
+    "copiedMessage": "メッセージをコピーしました",
+    "editingMessage": "そのメッセージの直前まで戻し、本文を入力欄に戻しました。",
+    "retryingMessage": "そのメッセージの直前から再送信しています。",
+    "regeneratingMessage": "直前のユーザーメッセージから再生成しています。",
+    "noPreviousUserMessage": "再生成に使える直前のユーザーメッセージが見つかりません。",
+    "cannotActionWhileRunning": "タスク実行中です。履歴を変更する前に停止するか完了を待ってください。"
   },
   "agent": {
     "modeLabel": {

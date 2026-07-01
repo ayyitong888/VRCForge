@@ -124,7 +124,17 @@
     "slashCompact": "压缩当前会话历史，释放上下文",
     "switchProject": "切换对话绑定的项目",
     "queued": "已排队 · 当前任务结束后自动发送",
-    "tempChatDesc": "临时对话同样拥有完整智能体能力（技能 / Shell / Unity 工具），只是不归档到项目下。"
+    "tempChatDesc": "临时对话同样拥有完整智能体能力（技能 / Shell / Unity 工具），只是不归档到项目下。",
+    "copyMessage": "复制",
+    "editMessage": "编辑",
+    "retryMessage": "重试",
+    "regenerateMessage": "重生成",
+    "copiedMessage": "已复制消息",
+    "editingMessage": "已回退到该消息之前，原文已放回输入框。",
+    "retryingMessage": "已从该消息之前重新发送。",
+    "regeneratingMessage": "已从上一条用户消息重新生成。",
+    "noPreviousUserMessage": "没有找到可用于重新生成的上一条用户消息。",
+    "cannotActionWhileRunning": "当前任务运行中，先停止或等它结束后再修改历史。"
   },
   "agent": {
     "modeLabel": {

@@ -124,7 +124,17 @@
     "slashCompact": "Compact session history to free up context",
     "switchProject": "Switch project for this chat",
     "queued": "Queued · will send after current task finishes",
-    "tempChatDesc": "Quick chats have full agent capabilities (skills / Shell / Unity tools) but are not archived under a project."
+    "tempChatDesc": "Quick chats have full agent capabilities (skills / Shell / Unity tools) but are not archived under a project.",
+    "copyMessage": "Copy",
+    "editMessage": "Edit",
+    "retryMessage": "Retry",
+    "regenerateMessage": "Regenerate",
+    "copiedMessage": "Message copied",
+    "editingMessage": "Rewound before that message and loaded it into the composer.",
+    "retryingMessage": "Retrying from before that message.",
+    "regeneratingMessage": "Regenerating from the previous user message.",
+    "noPreviousUserMessage": "No previous user message was found for regeneration.",
+    "cannotActionWhileRunning": "A task is running. Stop it or wait before changing history."
   },
   "agent": {
     "modeLabel": {
