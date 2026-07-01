@@ -5409,38 +5409,44 @@ function AttachmentStrip({
   }
   return (
     <div className={cn("flex min-w-0 flex-wrap gap-2", compact ? "mt-2" : "")}>
-      {attachments.map((attachment) => (
-        <div
-          key={attachment.id}
-          className={cn("flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm", attachment.name === SELECTED_TEXT_ATTACHMENT_NAME && "rounded-full")}
-          title={
-            attachment.name === SELECTED_TEXT_ATTACHMENT_NAME
-              ? (attachment.text || "").replace(/\s+/g, " ").slice(0, 220)
-              : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`
-          }
-        >
-          {attachment.dataUrl && attachment.type.startsWith("image/") ? (
-            <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
-          ) : attachment.name === SELECTED_TEXT_ATTACHMENT_NAME ? (
-            <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-          ) : (
-            <Archive className="h-4 w-4 shrink-0 text-muted-foreground" />
-          )}
-          <span className="min-w-0 max-w-[220px] truncate">{attachment.name === SELECTED_TEXT_ATTACHMENT_NAME ? "1 个已选文本" : attachment.name}</span>
-          {attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
-          {attachment.truncated ? <span className="shrink-0 text-amber-700">metadata</span> : null}
-          {onRemove ? (
-            <button
-              type="button"
-              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={() => onRemove(attachment.id)}
-              title="Remove"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-        </div>
-      ))}
+      {attachments.map((attachment) => {
+        const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
+        const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
+        return (
+          <div
+            key={attachment.id}
+            className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText && "rounded-full")}
+            title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+          >
+            {attachment.dataUrl && attachment.type.startsWith("image/") ? (
+              <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
+            ) : isSelectedText ? (
+              <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <Archive className="h-4 w-4 shrink-0 text-muted-foreground" />
+            )}
+            <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? "1 个已选文本" : attachment.name}</span>
+            {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
+            {attachment.truncated ? <span className="shrink-0 text-amber-700">metadata</span> : null}
+            {isSelectedText && selectedPreview ? (
+              <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
+                {selectedPreview}
+                {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
+              </div>
+            ) : null}
+            {onRemove ? (
+              <button
+                type="button"
+                className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => onRemove(attachment.id)}
+                title="Remove"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
