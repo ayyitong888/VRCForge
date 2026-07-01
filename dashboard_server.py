@@ -691,7 +691,12 @@ class AgentRuntimeMessageRequest(BaseModel):
     workspace_root: str | None = None
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    provider: str | None = None
+    provider_label: str | None = Field(default=None, alias="providerLabel")
+    model: str | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
 
 
 class AgentPermissionRequest(BaseModel):
@@ -1518,6 +1523,9 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "workspace_root": runtime_request.workspace_root,
             "projectPath": runtime_request.project_path,
             "projectRoot": runtime_request.project_root,
+            "provider": runtime_request.provider,
+            "providerLabel": runtime_request.provider_label,
+            "model": runtime_request.model,
             "history": runtime_request.history,
         },
         agent_name=runtime_request.agent_name,
@@ -4214,6 +4222,9 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
                 "workspace_root": runtime_request.workspace_root,
                 "projectPath": runtime_request.project_path,
                 "projectRoot": runtime_request.project_root,
+                "provider": runtime_request.provider,
+                "providerLabel": runtime_request.provider_label,
+                "model": runtime_request.model,
             },
             agent_name=runtime_request.agent_name,
         )

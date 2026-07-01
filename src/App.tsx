@@ -43,6 +43,8 @@ import {
   Square,
   Sun,
   TerminalSquare,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Globe,
   Wrench,
@@ -348,6 +350,11 @@ type ProviderSnapshot = {
   model: string;
 };
 
+type ModelOptionsScope = {
+  provider: string;
+  baseUrl: string;
+};
+
 type ContextUsage = {
   used: number;
   limit: number;
@@ -360,6 +367,12 @@ type ContextUsage = {
 };
 
 type ApprovalActionState = "approve" | "reject";
+type MessageFeedback = "up" | "down";
+
+type RunSingleTurnOptions = {
+  baseItems?: ConversationItem[];
+  sessionId?: string;
+};
 
 type RuntimeScheduleItem = {
   id: string;
@@ -561,6 +574,7 @@ export default function App() {
     }
   });
   const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
+  const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
   const [renamingChatId, setRenamingChatId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
@@ -648,6 +662,7 @@ export default function App() {
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
   const [modelOptions, setModelOptions] = useState<ProviderModelInfo[]>([]);
+  const [modelOptionsScope, setModelOptionsScope] = useState<ModelOptionsScope | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [testingProvider, setTestingProvider] = useState("");
@@ -750,6 +765,7 @@ export default function App() {
   const savedProvider = apiConfig?.provider || apiProvider;
   const savedProviderLabel = apiConfig?.providerLabel || providerDisplayName(savedProvider);
   const savedModel = apiConfig?.model || apiModel || defaultModelForProvider(savedProvider);
+  const savedBaseUrl = apiConfig?.base_url || apiBaseUrl;
   const providerConfigured = runtimeConnected && Boolean(apiConfig) && (!apiConfig?.apiKeyRequired || Boolean(apiConfig?.apiKeyPresent));
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
@@ -805,12 +821,18 @@ export default function App() {
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const currentModelInfo = useMemo(
-    () => findProviderModelInfo(modelOptions, providerSnapshot.model),
-    [modelOptions, providerSnapshot.model],
+    () => {
+      const modelScopeMatches =
+        modelOptionsScope &&
+        normalizeProviderForContext(modelOptionsScope.provider) === normalizeProviderForContext(providerSnapshot.provider) &&
+        modelOptionsScope.baseUrl.trim() === savedBaseUrl.trim();
+      return modelScopeMatches ? findProviderModelInfo(modelOptions, providerSnapshot.model) : undefined;
+    },
+    [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
   const contextUsage = useMemo(
-    () => buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo),
-    [attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider],
+    () => (apiConfig ? buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo) : undefined),
+    [apiConfig, attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider],
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
@@ -1103,6 +1125,8 @@ export default function App() {
     setApiProvider(apiConfig.provider || "gemini");
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
+    setModelOptions([]);
+    setModelOptionsScope(null);
   }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model]);
 
   useEffect(() => {
@@ -1364,11 +1388,102 @@ export default function App() {
 
   function modifyApprovalInComposer(approval: AgentApproval) {
     const target = approval.targetTool || approval.preview?.command || "this approval";
+    const detail = approval.paramsSummary || approval.arguments || approval.preview || {};
+    const approvalContext = [
+      `Pending approval: ${approval.id}`,
+      `Target: ${target}`,
+      approval.reason ? `Reason: ${approval.reason}` : "",
+      `Details:\n${formatPayload(detail)}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     setInput((current) => {
       const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
-      return `${prefix}修改这次审批：${target}\n`;
+      return `${prefix}Modify pending approval ${approval.id} (${target}):\n`;
     });
-    setRuntimeNotice("Approval kept pending. Edit the request in the composer, then send it as a follow-up.");
+    setAttachments((current) => [...current, textContextAttachment("Pending approval context", approvalContext)].slice(0, MAX_ATTACHMENTS_PER_TURN));
+    setRuntimeNotice("Approval kept pending. Describe the change in the composer and send it as a follow-up.");
+  }
+
+  function copyConversationItem(item: ConversationItem) {
+    const text = conversationItemText(item);
+    if (!text.trim()) {
+      return;
+    }
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+    setRuntimeNotice("Copied message.");
+  }
+
+  function setConversationFeedback(itemId: string, value: MessageFeedback) {
+    setMessageFeedback((current) => {
+      const next = { ...current };
+      if (next[itemId] === value) {
+        delete next[itemId];
+      } else {
+        next[itemId] = value;
+      }
+      return next;
+    });
+  }
+
+  function editConversationMessage(itemId: string) {
+    const chat = chatsRef.current.find((item) => item.id === activeChatId);
+    if (!chat) {
+      return;
+    }
+    const index = chat.items.findIndex((item) => item.id === itemId);
+    const item = index >= 0 ? chat.items[index] : null;
+    if (!item || item.type !== "user") {
+      return;
+    }
+    setInput(item.text);
+    setAttachments(cloneChatAttachments(item.attachments || []));
+    updateChat(chat.id, (current) => ({
+      ...current,
+      sessionId: "",
+      items: current.items.slice(0, index),
+    }));
+    setRuntimeNotice("Message moved back to the composer. Edit and send to continue from here.");
+  }
+
+  function retryConversationItem(itemId: string) {
+    if (sendingRef.current) {
+      setError("A turn is already running. Stop it or wait before retrying.");
+      return;
+    }
+    const chat = chatsRef.current.find((item) => item.id === activeChatId);
+    if (!chat) {
+      return;
+    }
+    const index = chat.items.findIndex((item) => item.id === itemId);
+    if (index < 0) {
+      return;
+    }
+    let userIndex = chat.items[index].type === "user" ? index : -1;
+    if (userIndex < 0) {
+      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+        if (chat.items[cursor].type === "user") {
+          userIndex = cursor;
+          break;
+        }
+      }
+    }
+    const userItem = userIndex >= 0 ? chat.items[userIndex] : null;
+    if (!userItem || userItem.type !== "user") {
+      setError("No earlier user message found to retry.");
+      return;
+    }
+    const turn: QueuedTurn = {
+      id: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      text: userItem.text,
+      attachments: cloneChatAttachments(userItem.attachments || []),
+      providerLabel: providerSnapshot.providerLabel,
+      model: providerSnapshot.model,
+    };
+    void runTurnNow(chat.id, turn, {
+      baseItems: chat.items.slice(0, userIndex),
+      sessionId: "",
+    });
   }
 
   function toggleRightRuntimeSection(section: string) {
@@ -1516,11 +1631,33 @@ export default function App() {
     }
   }
 
-  async function runSingleTurn(chatId: string, turn: QueuedTurn) {
+  async function runTurnNow(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
+    if (sendingRef.current) {
+      setError("A turn is already running. Stop it or wait before retrying.");
+      return;
+    }
+    sendingRef.current = true;
+    setSending(true);
+    setStopRequested(false);
+    stopRequestedRef.current = false;
+    try {
+      await runSingleTurn(chatId, turn, options);
+    } finally {
+      queueRef.current = [];
+      setQueued([]);
+      sendingRef.current = false;
+      setSending(false);
+      setStopRequested(false);
+      stopRequestedRef.current = false;
+    }
+  }
+
+  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
     const chat = chatsRef.current.find((item) => item.id === chatId);
-    const chatSessionId = chat?.sessionId || "";
+    const baseItems = options?.baseItems ?? chat?.items ?? [];
+    const chatSessionId = options?.sessionId ?? chat?.sessionId ?? "";
     const chatAgentName = chat?.agentName || "desktop-agent";
-    const history = chat && chat.items.length > 0 ? buildChatHistory(chat.items) : [];
+    const history = baseItems.length > 0 ? buildChatHistory(baseItems) : [];
     const startedAt = Date.now();
     const messageForModel = appendAttachmentSummary(turn.text, turn.attachments);
     const abortController = new AbortController();
@@ -1541,13 +1678,17 @@ export default function App() {
       const message = turn.text;
       updateChat(chatId, (current) => ({
         ...current,
-        title: current.title || (message.length > 24 ? `${message.slice(0, 24)}…` : message),
-        items: [...current.items, userItem],
+        sessionId: options?.sessionId ?? current.sessionId,
+        title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+        items: [...(options?.baseItems ?? current.items), userItem],
       }));
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         attachments: serializeChatAttachments(turn.attachments),
         projectPath: chat?.projectPath || activeProjectPath || undefined,
+        provider: providerSnapshot.provider,
+        providerLabel: turn.providerLabel,
+        model: turn.model,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
@@ -3468,6 +3609,7 @@ export default function App() {
     setApiModel(defaultModelForProvider(provider));
     setApiBaseUrl(defaultBaseUrlForProvider(provider));
     setModelOptions([]);
+    setModelOptionsScope(null);
     setModelsError("");
   }
 
@@ -3495,6 +3637,7 @@ export default function App() {
       });
       const models = payload.models || [];
       setModelOptions(models);
+      setModelOptionsScope({ provider: payload.provider || apiProvider, baseUrl: payload.baseUrl || apiBaseUrl.trim() });
       if (models.length === 0) {
         setModelsError(t("provider.noModelsReturned"));
       } else if (!models.some((item) => item.id === apiModel)) {
@@ -3502,6 +3645,7 @@ export default function App() {
       }
     } catch (cause) {
       setModelOptions([]);
+      setModelOptionsScope(null);
       setModelsError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingModels(false);
@@ -4269,10 +4413,16 @@ export default function App() {
                         item={item}
                         approval={approval}
                         approvalAction={approval ? approvalActions[approval.id] : undefined}
+                        feedback={messageFeedback[item.id]}
+                        onCopyItem={copyConversationItem}
+                        onRetryItem={retryConversationItem}
+                        onEditItem={editConversationMessage}
+                        onFeedbackItem={setConversationFeedback}
                         onApprove={approveShell}
                         onReject={rejectShell}
                         onModifyApproval={modifyApprovalInComposer}
                         onOpenSettings={() => void openSettings()}
+                        onOpenDoctor={() => void openDoctor()}
                       />
                     );
                   })}
@@ -9277,26 +9427,46 @@ function ConversationCard({
   item,
   approval,
   approvalAction,
+  feedback,
+  onCopyItem,
+  onRetryItem,
+  onEditItem,
+  onFeedbackItem,
   onApprove,
   onReject,
   onModifyApproval,
   onOpenSettings,
+  onOpenDoctor,
 }: {
   item: ConversationItem;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
+  feedback?: MessageFeedback;
+  onCopyItem?: (item: ConversationItem) => void;
+  onRetryItem?: (itemId: string) => void;
+  onEditItem?: (itemId: string) => void;
+  onFeedbackItem?: (itemId: string, value: MessageFeedback) => void;
   onApprove?: (approvalId: string) => void;
   onReject?: (approvalId: string) => void;
   onModifyApproval?: (approval: AgentApproval) => void;
   onOpenSettings?: () => void;
+  onOpenDoctor?: () => void;
 }) {
   const { t } = useTranslation();
   if (item.type === "user") {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
+      <div className="group flex justify-end">
+        <div className="relative flex max-w-[78%] flex-col items-end">
+          <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
           {item.text ? <p className="whitespace-pre-wrap break-words">{item.text}</p> : null}
           {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
+          </div>
+          <MessageActions
+            align="right"
+            onCopy={() => onCopyItem?.(item)}
+            onRetry={() => onRetryItem?.(item.id)}
+            onEdit={() => onEditItem?.(item.id)}
+          />
         </div>
       </div>
     );
@@ -9304,16 +9474,30 @@ function ConversationCard({
 
   if (item.type === "error") {
     return (
-      <div className="rounded-lg border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
-        <span className="break-words">{item.text}</span>
+      <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
+        <div className="break-words">{item.text}</div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button type="button" variant="outline" className="h-7 px-2 text-xs" onClick={() => onRetryItem?.(item.id)}>
+            <RotateCcw className="h-3.5 w-3.5" />
+            Retry
+          </Button>
+          <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCopyItem?.(item)}>
+            <Copy className="h-3.5 w-3.5" />
+            Copy
+          </Button>
+          <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onOpenDoctor?.()}>
+            <Wrench className="h-3.5 w-3.5" />
+            Doctor
+          </Button>
+        </div>
       </div>
     );
   }
 
   if (item.type === "result") {
     return (
-      <div className="flex justify-start">
-        <div className="w-full max-w-[85%]">
+      <div className="group flex justify-start">
+        <div className="relative w-full max-w-[85%] space-y-1">
           <RunRow
             icon="shell"
             title={item.result?.command || (item.error === "rejected" ? t("agent.rejected") : t("agent.executionResult"))}
@@ -9329,6 +9513,10 @@ function ConversationCard({
               </>
             ) : null}
           </RunRow>
+          <MessageActions
+            onCopy={() => onCopyItem?.(item)}
+            onRetry={() => onRetryItem?.(item.id)}
+          />
         </div>
       </div>
     );
@@ -9336,9 +9524,10 @@ function ConversationCard({
 
   if (item.type === "compact") {
     return (
-      <div className="rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
+      <div className="group relative rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
         <div className="mb-2 text-xs font-medium text-muted-foreground">{t("agent.compactedHistory")}</div>
         <pre className="app-scrollbar max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
+        <MessageActions onCopy={() => onCopyItem?.(item)} />
       </div>
     );
   }
@@ -9346,8 +9535,8 @@ function ConversationCard({
   if (item.type === "subagent") {
     const task = item.task;
     return (
-      <div className="flex justify-start">
-        <div className="w-full max-w-[85%] space-y-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
+      <div className="group flex justify-start">
+        <div className="relative w-full max-w-[85%] space-y-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
           <div className="flex min-w-0 items-center gap-2">
             <Bot className="h-4 w-4 shrink-0 text-primary" />
             <span className="min-w-0 flex-1 truncate font-medium">
@@ -9361,6 +9550,10 @@ function ConversationCard({
             {task.summary || task.error || task.task || t("agent.noSummaryReturned")}
           </p>
           {task.result !== undefined ? <OutputBlock label="Result" value={formatPayload(task.result)} /> : null}
+          <MessageActions
+            onCopy={() => onCopyItem?.(item)}
+            onRetry={() => onRetryItem?.(item.id)}
+          />
         </div>
       </div>
     );
@@ -9380,8 +9573,8 @@ function ConversationCard({
 
   if (localIdle) {
     return (
-      <div className="flex justify-start">
-        <div className="max-w-[85%] space-y-2 px-1 text-sm">
+      <div className="group flex justify-start">
+        <div className="relative max-w-[85%] space-y-2 px-1 text-sm">
           <p className="text-muted-foreground">
             {t("agent.keywordPlannerHint1")}
           </p>
@@ -9392,14 +9585,18 @@ function ConversationCard({
             <Settings className="mr-1 h-3.5 w-3.5" />
             {t("agent.openSettings")}
           </Button>
+          <MessageActions
+            onCopy={() => onCopyItem?.(item)}
+            onRetry={() => onRetryItem?.(item.id)}
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex justify-start">
-      <div className="w-full max-w-[85%] space-y-1.5">
+    <div className="group flex justify-start">
+      <div className="relative w-full max-w-[85%] space-y-1.5">
         <div className="px-1 text-sm">
           <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.reply || response.plan.summary}</p>
           {false && showIntent ? (
@@ -9502,7 +9699,107 @@ function ConversationCard({
             <DataLine label={t("skills.error")} value={shell.error} />
           </RunRow>
         ) : null}
+        <MessageActions
+          onCopy={() => onCopyItem?.(item)}
+          onRetry={() => onRetryItem?.(item.id)}
+          onFeedbackUp={() => onFeedbackItem?.(item.id, "up")}
+          onFeedbackDown={() => onFeedbackItem?.(item.id, "down")}
+          feedback={feedback}
+        />
       </div>
+    </div>
+  );
+}
+
+function MessageActions({
+  align = "left",
+  feedback,
+  onCopy,
+  onRetry,
+  onEdit,
+  onFeedbackUp,
+  onFeedbackDown,
+}: {
+  align?: "left" | "right";
+  feedback?: MessageFeedback;
+  onCopy?: () => void;
+  onRetry?: () => void;
+  onEdit?: () => void;
+  onFeedbackUp?: () => void;
+  onFeedbackDown?: () => void;
+}) {
+  const hasActions = onCopy || onRetry || onEdit || onFeedbackUp || onFeedbackDown;
+  if (!hasActions) {
+    return null;
+  }
+  return (
+    <div
+      className={cn(
+        "pointer-events-none absolute top-full z-20 mt-1 flex items-center gap-1 rounded-md border border-border bg-popover/95 px-1 py-0.5 shadow-panel opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100",
+        align === "right" ? "right-0 justify-end" : "left-0 justify-start",
+      )}
+    >
+      {onCopy ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={onCopy}
+          title="Copy"
+          aria-label="Copy message"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onRetry ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={onRetry}
+          title="Retry"
+          aria-label="Retry from this message"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onEdit ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={onEdit}
+          title="Edit and resend"
+          aria-label="Edit and resend"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onFeedbackUp ? (
+        <button
+          type="button"
+          className={cn(
+            "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
+            feedback === "up" && "bg-muted text-foreground",
+          )}
+          onClick={onFeedbackUp}
+          title="Good response"
+          aria-label="Good response"
+        >
+          <ThumbsUp className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onFeedbackDown ? (
+        <button
+          type="button"
+          className={cn(
+            "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
+            feedback === "down" && "bg-muted text-foreground",
+          )}
+          onClick={onFeedbackDown}
+          title="Bad response"
+          aria-label="Bad response"
+        >
+          <ThumbsDown className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -10807,6 +11104,7 @@ type ContextLimitResolution = {
 };
 
 const KNOWN_MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  "deepseek:deepseek-v4-pro": 1_000_000,
   "gemini:gemini-2.5-flash": 1_048_576,
   "gemini:gemini-2.5-pro": 1_048_576,
   "gemini:gemini-2.5-flash-lite": 1_048_576,
@@ -10974,6 +11272,50 @@ function selectedTextAttachment(text: string): ChatAttachment {
     text: normalized,
     payloadKind: "text",
   };
+}
+
+function textContextAttachment(name: string, text: string): ChatAttachment {
+  const normalized = text.trim();
+  return {
+    id: `context-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name,
+    size: new Blob([normalized]).size,
+    type: "text/plain",
+    text: normalized,
+    payloadKind: "text",
+  };
+}
+
+function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachment[] {
+  return attachments.map((attachment) => ({
+    ...attachment,
+    id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  }));
+}
+
+function conversationItemText(item: ConversationItem): string {
+  if (item.type === "user") {
+    return appendAttachmentSummary(item.text, item.attachments || []);
+  }
+  if (item.type === "agent") {
+    const parts = [
+      item.response.plan?.reply || item.response.plan?.summary || "",
+      item.response.write ? `Write:\n${formatPayload(item.response.write)}` : "",
+      item.response.skill ? `Tool:\n${formatPayload(item.response.skill)}` : "",
+      item.response.shell ? `Command:\n${formatPayload(item.response.shell)}` : "",
+    ];
+    return parts.filter((part) => part.trim()).join("\n\n");
+  }
+  if (item.type === "result") {
+    return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");
+  }
+  if (item.type === "error" || item.type === "compact") {
+    return item.text;
+  }
+  if (item.type === "subagent") {
+    return formatPayload(item.task);
+  }
+  return "";
 }
 
 function serializeChatAttachments(attachments: ChatAttachment[]) {

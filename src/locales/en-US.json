@@ -160,7 +160,7 @@
     "coreDisconnectedSend": "Core disconnected, message not sent.",
     "keywordPlannerHint1": "I can't understand that directly — the current local keyword planner only recognizes fixed commands like logs, screenshots, expressions, materials, and health checks.",
     "keywordPlannerHint2": "After binding a model provider in Settings, you can use natural language and auto-plan tool calls. If a key is already set, AI planning may not be enabled yet — restart the core or check provider config.",
-    "elapsed": "· Running {{time}}"
+    "elapsed": "· Ran {{time}}"
   },
   "approval": {
     "pending": "Pending",

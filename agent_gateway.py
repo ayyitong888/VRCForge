@@ -5832,6 +5832,9 @@ class AgentGateway:
         loop_state = loop_state or []
         constraints_applied = bool(observe.get("userConstraints", {}).get("enabled"))
         command = extract_shell_command_candidate(message, params)
+        meta_plan = self._plan_runtime_meta_question(message, constraints_applied, params)
+        if meta_plan is not None:
+            return meta_plan
         # 写入意图（往模型里加对象/新建/创建）优先：先扫描→单模型自动选中→发起写入审批，
         # 而不是反问「加到哪个模型上」或只回一句「做了做了」。
         if not command:
@@ -5868,6 +5871,96 @@ class AgentGateway:
             "nextStep": "classify_shell" if command else "call_skill" if skill_route else "await_user_instruction",
         }
         return plan
+
+    def _plan_runtime_meta_question(
+        self,
+        message: str,
+        constraints_applied: bool,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        asks_provider_or_model = has_any(
+            lowered,
+            text,
+            [
+                "provider",
+                "model",
+                "which model",
+                "what model",
+                "model name",
+                "provider name",
+                "供应商",
+                "厂商",
+                "模型",
+                "模型名",
+            ],
+        )
+        asks_current_or_previous = has_any(
+            lowered,
+            text,
+            [
+                "used",
+                "using",
+                "this response",
+                "last response",
+                "previous response",
+                "current",
+                "上一条",
+                "上条",
+                "刚才",
+                "这次",
+                "当前",
+                "用了",
+                "使用",
+            ],
+        )
+        asks_catalog = has_any(
+            lowered,
+            text,
+            [
+                "available models",
+                "list models",
+                "model list",
+                "可用模型",
+                "模型列表",
+                "列出模型",
+            ],
+        )
+        if not asks_provider_or_model or not asks_current_or_previous or asks_catalog:
+            return None
+
+        params = params or {}
+        provider_label = str(params.get("providerLabel") or params.get("provider_label") or params.get("provider") or "").strip()
+        model = str(params.get("model") or "").strip()
+        label = f"{provider_label} · {model}" if provider_label and model else provider_label or model or str(self.llm_planner_label or "").strip()
+        if label:
+            reply = f"上一条使用的是 {label}。"
+            summary = "Answered the provider/model follow-up from runtime metadata."
+        else:
+            reply = "当前还没有可确认的模型调用记录。"
+            summary = "No confirmed provider/model metadata is available yet."
+        return {
+            "summary": summary,
+            "reply": reply,
+            "planner": "deterministic-local",
+            "plannerLabel": label,
+            "userConstraintsApplied": constraints_applied,
+            "shellNeeded": False,
+            "shellCommand": "",
+            "skillNeeded": False,
+            "skillTool": "",
+            "skillCategory": "",
+            "skillParams": {},
+            "skillReason": "",
+            "writeNeeded": False,
+            "writeTool": "",
+            "writeParams": {},
+            "deterministicTerminal": True,
+            "continueLoop": False,
+            "expectedResult": "Runtime provider/model metadata is returned inline.",
+            "nextStep": "done",
+        }
 
     # ------------------------------------------------------------------
     # 写入意图：扫描 → 单模型自动解析 → 发起写入审批
@@ -6185,6 +6278,17 @@ class AgentGateway:
         if user_route:
             return user_route
 
+        if "skills" in lowered and (
+            "list" in lowered
+            or "show" in lowered
+            or "available" in lowered
+            or "what" in lowered
+            or "which" in lowered
+            or "列" in text
+            or "鍒" in text
+        ):
+            return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
+
         if has_any(lowered, text, ["roslyn"]) and has_any(lowered, text, ["status", "diagnostic", "状态", "诊断", "检查"]):
             return self._runtime_skill_route("vrcforge_roslyn_status", skill_params, "roslyn status")
         if has_any(lowered, text, ["screenshot", "capture", "截图", "拍照", "截屏"]):
@@ -6194,13 +6298,52 @@ class AgentGateway:
         if has_any(lowered, text, ["skill", "skills", "能力库"]):
             if has_any(lowered, text, ["check", "validate", "validation", "inspect"]):
                 return self._runtime_skill_route("vrcforge_skill_check", skill_params, "skill registry check")
-            return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
+            if has_any(
+                lowered,
+                text,
+                [
+                    "available",
+                    "manifest",
+                    "list",
+                    "show",
+                    "what tools",
+                    "which tools",
+                    "tool list",
+                    "skill list",
+                    "鍒椾竴",
+                    "鍒椾竴涓",
+                    "列出",
+                    "列表",
+                    "有哪些",
+                    "能看到的工具",
+                    "可用工具",
+                    "能力库",
+                ],
+            ):
+                return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
         if has_any(lowered, text, ["tools", "skill", "skills", "工具", "能力", "列表"]) and has_any(
             lowered,
             text,
             ["unity", "mcp", "vrcforge", "工具", "能力"],
         ):
-            return self._runtime_skill_route("vrcforge_unity_tools", skill_params, "unity tool list")
+            if has_any(
+                lowered,
+                text,
+                [
+                    "available",
+                    "list",
+                    "show",
+                    "what tools",
+                    "which tools",
+                    "tool list",
+                    "列出",
+                    "列表",
+                    "有哪些",
+                    "能看到",
+                    "可用工具",
+                ],
+            ):
+                return self._runtime_skill_route("vrcforge_unity_tools", skill_params, "unity tool list")
         if has_any(lowered, text, ["health", "健康"]):
             return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
         if has_any(lowered, text, ["unity", "mcp", "连接", "连上", "实例"]):

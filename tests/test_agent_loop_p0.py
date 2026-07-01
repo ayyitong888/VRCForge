@@ -37,8 +37,10 @@ class AgentLoopP0Tests(unittest.TestCase):
         config.execution_mode = "approval"
         self.gateway.save_config(config)
         self.gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        self.original_planner_label = self.gateway.llm_planner_label
 
     def tearDown(self) -> None:
+        self.gateway.llm_planner_label = self.original_planner_label
         self.gateway.checkpoint_prepare_handler = self.original_prepare
         self.gateway.configure_paths(*self.original_paths)
         self.temp_dir.cleanup()
@@ -179,6 +181,44 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertNotIn("write", payload)
         self.assertNotIn("skill", payload)
         self.assertEqual(payload.get("steps", []), [])
+
+    def test_provider_model_followup_replies_without_tooling(self) -> None:
+        gateway = self.gateway
+        gateway.llm_planner_label = ""
+
+        def raising_plan_fn(prompt):
+            raise AssertionError("meta follow-up should not call the LLM planner")
+
+        with patch.object(gateway, "llm_plan_fn", raising_plan_fn), patch.object(
+            gateway,
+            "_execute_runtime_skill",
+        ) as execute_skill:
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "追问：只回答上一条用了哪个供应商和模型。",
+                        "history": [
+                            {"role": "user", "text": "hello"},
+                            {"role": "agent", "text": "hi"},
+                        ],
+                        "provider": "deepseek",
+                        "providerLabel": "DeepSeek",
+                        "model": "deepseek-v4-pro",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        plan = payload["plan"]
+        self.assertTrue(plan.get("deterministicTerminal"))
+        self.assertEqual(plan.get("nextStep"), "done")
+        self.assertIn("DeepSeek", plan.get("reply", ""))
+        self.assertIn("deepseek-v4-pro", plan.get("reply", ""))
+        self.assertNotIn("write", payload)
+        self.assertNotIn("skill", payload)
+        self.assertEqual(payload.get("steps", []), [])
+        execute_skill.assert_not_called()
 
 
 if __name__ == "__main__":
