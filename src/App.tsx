@@ -772,21 +772,21 @@ export default function App() {
   const chatDisabledReason = !runtimeConnected
     ? t("agent.modeLabel.notConnected")
     : !chatAvailable
-      ? `${savedProviderLabel} API key is not configured. Open Settings or connect an external agent.`
+      ? t("chat.providerNotConfigured", { provider: savedProviderLabel })
       : "";
   const composerActions = useMemo<ComposerAction[]>(
     () => {
-      const actions: ComposerAction[] = [{ id: "attach", label: "Attach file", description: "Add images or project files to this turn." }];
+      const actions: ComposerAction[] = [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
       if (vrcForgeSkillsReady) {
         actions.push({
           id: "screenshot",
-          label: "Capture Unity view",
-          description: "Attach a current Unity/avatar screenshot to this turn.",
+          label: t("composerAction.screenshot"),
+          description: t("composerAction.screenshotDesc"),
         });
       }
       return actions;
     },
-    [vrcForgeSkillsReady],
+    [t, vrcForgeSkillsReady],
   );
   const providerSnapshot: ProviderSnapshot = {
     provider: savedProvider,
@@ -859,7 +859,7 @@ export default function App() {
         id: `queued-${turn.id}`,
         status: "queued",
         title: turn.text || "Attachments",
-        meta: `Queue ${index + 1} · ${turn.providerLabel} / ${turn.model}`,
+        meta: i18n.t("workspace.queueMeta", { index: index + 1, provider: turn.providerLabel, model: turn.model }),
       });
     });
     activeSubAgentTasks
@@ -886,32 +886,51 @@ export default function App() {
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
   const providerComponent = healthComponents.providerConfigPresent;
-  const workspaceProjectLabel = activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : "Temporary chat";
+  const localizeHealthMessage = (message?: string | null) => {
+    const normalized = (message || "").trim();
+    if (!normalized) {
+      return "";
+    }
+    if (normalized === "Backend process is responding.") {
+      return t("workspace.backendResponding");
+    }
+    if (normalized === "Unity MCP bridge online" || normalized === "Unity bridge online") {
+      return t("workspace.unityBridgeOnline");
+    }
+    if (normalized === "Unity MCP bridge is not reachable.") {
+      return t("workspace.unityBridgeNotReachable");
+    }
+    if (normalized === "Unity MCP is connected, but VRCForge Unity tools are missing or incomplete.") {
+      return t("workspace.unityToolsMissing");
+    }
+    return normalized;
+  };
+  const workspaceProjectLabel = activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat");
   const unityBridgeLabel = !runtimeConnected
-    ? "Core offline"
+    ? t("workspace.coreOffline")
     : unityBridgeComponent?.status === "ok"
-      ? "Unity bridge online"
-      : unityBridgeComponent?.message || "Unity not connected";
+      ? t("workspace.unityBridgeOnline")
+      : localizeHealthMessage(unityBridgeComponent?.message) || t("workspace.unityNotConnected");
   const unityToolsLabel = vrcForgeSkillsReady
-    ? `${formatCount(vrcForgeToolsCount)} VRC tools`
-    : unityToolsComponent?.message || (runtimeConnected ? "Avatar tools not ready" : "Core offline");
+    ? t("workspace.vrcTools", { count: formatCount(vrcForgeToolsCount) })
+    : localizeHealthMessage(unityToolsComponent?.message) || (runtimeConnected ? t("workspace.avatarToolsNotReady") : t("workspace.coreOffline"));
   const providerCompactLabel = `${providerSnapshot.providerLabel}${providerSnapshot.model ? ` / ${providerSnapshot.model}` : ""}`;
   const reviewSummaryLabel = pendingApprovals
-    ? `${formatCount(pendingApprovals)} pending approval${pendingApprovals === 1 ? "" : "s"}`
-    : "No pending approvals";
+    ? t("workspace.pendingApprovals", { count: formatCount(pendingApprovals) })
+    : t("workspace.noPendingApprovals");
   const changeSummaryLabel = loadingWorkspaceDiff
-    ? "Refreshing"
+    ? t("workspace.refreshing")
     : workspaceDiffError
-      ? "Diff unavailable"
+      ? t("workspace.diffUnavailable")
       : workspaceDiff
         ? workspaceDiffChanged
-          ? `${formatCount(workspaceDiff.fileCount)} changed`
+          ? t("workspace.changedFiles", { count: formatCount(workspaceDiff.fileCount) })
           : workspaceDiff.status === "clean"
-            ? "Clean"
+            ? t("workspace.clean")
             : workspaceDiff.status
         : runtimeConnected
-          ? "Not loaded"
-          : "Core offline";
+          ? t("workspace.notLoaded")
+          : t("workspace.coreOffline");
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
@@ -1287,10 +1306,10 @@ export default function App() {
       let payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
       if (!payload.ok && payload.status === "not_git" && activeProjectPath) {
         payload = await fetchWorkspaceDiff(endpoint, "", includePatch);
-        setRuntimeNotice("Selected Unity project is not a Git repository; showing VRCForge app code changes.");
+        setRuntimeNotice(t("notice.projectNotGit"));
       }
       setWorkspaceDiff(payload);
-      setWorkspaceDiffError(payload.ok ? "" : payload.error || "Diff unavailable.");
+      setWorkspaceDiffError(payload.ok ? "" : payload.error || t("workspace.diffUnavailable"));
     } catch (cause) {
       setWorkspaceDiffError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1498,26 +1517,26 @@ export default function App() {
       return;
     }
     if (action.disabled) {
-      const reason = action.disabledReason || `${action.label} is not available.`;
+      const reason = action.disabledReason || t("notice.actionUnavailable", { action: action.label });
       setRuntimeNotice(reason);
       setError(reason);
       return;
     }
     if (actionId === "browser") {
-      setRuntimeNotice("Browser context is shown in the runtime sidebar. In-app browser control is available from the explicit Browser skill surface.");
+      setRuntimeNotice(t("notice.browserContext"));
       return;
     }
     if (actionId === "screenshot") {
       setInput((value) => (value.trim() ? `${value.trim()}\n/vrcforge_capture_screenshot ` : "/vrcforge_capture_screenshot "));
-      setRuntimeNotice("Screenshot skill selected. Review the slash command and send it to run capture.");
+      setRuntimeNotice(t("notice.screenshotSelected"));
       return;
     }
     if (actionId === "annotation") {
-      setRuntimeNotice("Annotation entry selected, but annotation capture is not connected in this build.");
+      setRuntimeNotice(t("notice.annotationUnavailable"));
       return;
     }
     if (actionId === "desktop") {
-      setRuntimeNotice("Desktop Rescue / Computer Use is explicit-only and currently disabled because the skill is not connected.");
+      setRuntimeNotice(t("notice.desktopUnavailable"));
     }
   }
 
@@ -1576,7 +1595,7 @@ export default function App() {
     }
     setError("");
     if (!chatAvailable) {
-      setError(chatDisabledReason || "Connect a provider or external agent before sending.");
+      setError(chatDisabledReason || t("chat.connectProviderBeforeSend"));
       return;
     }
     if (message === "/compact" || message.startsWith("/compact ")) {
@@ -1596,7 +1615,7 @@ export default function App() {
     if (sendingRef.current) {
       // Running turns queue follow-up messages in FIFO order.
       if (queueRef.current.length >= MAX_QUEUED_TURNS) {
-        setError(`Queue is full (${MAX_QUEUED_TURNS}). Wait for the running turn or press Stop.`);
+        setError(t("chat.queueFull", { max: MAX_QUEUED_TURNS }));
         setInput(message);
         setAttachments(turn.attachments);
         return;
@@ -3703,7 +3722,7 @@ export default function App() {
               type="button"
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               onClick={() => setLeftSidebarCollapsed((value) => !value)}
-              title={leftSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={leftSidebarCollapsed ? t("sidebar.expandSidebar") : t("sidebar.collapseSidebar")}
             >
               {leftSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>
@@ -3951,7 +3970,7 @@ export default function App() {
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
               <RuntimeToolButton
                 icon={rightSidebarCollapsed ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
-                label={rightSidebarCollapsed ? "Show runtime sidebar" : "Hide runtime sidebar"}
+                label={rightSidebarCollapsed ? t("workspace.showSidebar") : t("workspace.hideSidebar")}
                 onClick={() => setRightSidebarCollapsed((value) => !value)}
               />
               <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
@@ -3970,25 +3989,23 @@ export default function App() {
                   </div>
                   <div className="break-words text-amber-900/80 dark:text-amber-100/80">
                     {hasStartupIssue
-                      ? "Open Doctor to diagnose VRCForge startup, runtime, Unity bridge, provider, gateway, skills, and checkpoint checks."
-                      : `Doctor can review ${healthErrors} error${healthErrors === 1 ? "" : "s"} and ${healthWarnings} warning${
-                          healthWarnings === 1 ? "" : "s"
-                        } across the VRCForge environment.`}
+                      ? t("header.startupIssueDesc")
+                      : t("header.envNeedsAttentionDesc", { errors: healthErrors, warnings: healthWarnings })}
                   </div>
                   {hasStartupIssue ? <div className="break-words text-amber-900/70 dark:text-amber-100/70">{startupIssue}</div> : null}
                 </div>
                 <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={() => void openDoctor()} disabled={loadingDoctor}>
-                  Doctor
+                  {t("sidebar.doctor")}
                 </Button>
                 <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => void retryStartupOrHealth()} disabled={loading}>
-                  {loading ? "Retrying" : t("doctor.retry")}
+                  {loading ? t("doctor.retrying") : t("doctor.retry")}
                 </Button>
                 <Button
                   variant="ghost"
                   className="h-7 shrink-0 px-2 text-xs"
                   onClick={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
                 >
-                  Dismiss
+                  {t("common.dismiss")}
                 </Button>
               </div>
             </div>
@@ -4498,12 +4515,12 @@ export default function App() {
         {rightSidebarCollapsed ? null : (
           <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold">Workspace</div>
+              <div className="min-w-0 flex-1 truncate text-sm font-semibold">{t("workspace.title")}</div>
               <button
                 type="button"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => void refreshWorkspaceDiff()}
-                title="Refresh workspace status"
+                title={t("workspace.refreshStatus")}
                 disabled={!runtimeConnected || loadingWorkspaceDiff}
               >
                 <RefreshCw className={cn("h-4 w-4", loadingWorkspaceDiff && "animate-spin")} />
@@ -4512,7 +4529,7 @@ export default function App() {
                 type="button"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => setRightSidebarCollapsed(true)}
-                title="Hide runtime sidebar"
+                title={t("workspace.hideSidebar")}
               >
                 <PanelRightClose className="h-4 w-4" />
               </button>
@@ -4520,55 +4537,55 @@ export default function App() {
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
               <section className="border-b border-border pb-3">
                 <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">Project status</h2>
+                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.projectStatus")}</h2>
                   {hasEnvironmentAttention || hasStartupIssue ? (
                     <button
                       type="button"
                       className="shrink-0 rounded-md border border-amber-300/70 px-2 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-50 dark:border-amber-900/50 dark:text-amber-300 dark:hover:bg-amber-950/30"
                       onClick={() => void openDoctor()}
                     >
-                      Doctor
+                      {t("sidebar.doctor")}
                     </button>
                   ) : null}
                 </div>
                 <div className="space-y-1">
                   <RuntimeInfoRow
                     icon={<Folder className="h-4 w-4" />}
-                    label="Project"
+                    label={t("workspace.project")}
                     value={workspaceProjectLabel}
                   />
                   <RuntimeInfoRow
                     icon={<Bot className="h-4 w-4" />}
-                    label="Core"
-                    value={runtimeConnected ? backendComponent?.message || "Online" : "Offline"}
+                    label={t("workspace.core")}
+                    value={runtimeConnected ? localizeHealthMessage(backendComponent?.message) || t("workspace.online") : t("workspace.offline")}
                     suffix={backendComponent ? <StatusDot status={backendComponent.status} /> : null}
                   />
                   <RuntimeInfoRow
                     icon={<Monitor className="h-4 w-4" />}
-                    label="Unity"
+                    label={t("workspace.unity")}
                     value={unityBridgeLabel}
                     suffix={unityBridgeComponent ? <StatusDot status={unityBridgeComponent.status} /> : null}
                   />
                   <RuntimeInfoRow
                     icon={<Wrench className="h-4 w-4" />}
-                    label="Avatar tools"
+                    label={t("workspace.avatarTools")}
                     value={unityToolsLabel}
                     suffix={unityToolsComponent ? <StatusDot status={unityToolsComponent.status} /> : null}
                   />
                   <RuntimeInfoRow
                     icon={<Sparkles className="h-4 w-4" />}
-                    label="Agent"
+                    label={t("workspace.agent")}
                     value={providerCompactLabel}
                     suffix={providerComponent ? <StatusDot status={providerComponent.status} /> : null}
                   />
                   <RuntimeInfoRow
                     icon={<ListChecks className="h-4 w-4" />}
-                    label="Review"
+                    label={t("workspace.review")}
                     value={reviewSummaryLabel}
                   />
                   <RuntimeInfoRow
                     icon={<FileText className="h-4 w-4" />}
-                    label="Changes"
+                    label={t("workspace.changes")}
                     value={
                       changeSummaryLabel
                     }
@@ -4589,14 +4606,14 @@ export default function App() {
                 ) : null}
                 {pendingApprovalItems.length ? (
                   <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/5 px-2 py-2 text-xs text-amber-700">
-                    审批按钮已贴在对应对话下面；这里仅保留待处理状态。
+                    {t("workspace.inlineApprovalHint")}
                   </div>
                 ) : null}
               </section>
 
               {runtimeFileReferences.length ? (
                 <RuntimeSection
-                  title="Files seen"
+                  title={t("workspace.filesSeen")}
                   collapsed={rightRuntimeSectionsCollapsed.files}
                   onToggle={() => toggleRightRuntimeSection("files")}
                   count={<Badge tone="muted">{formatCount(runtimeFileReferences.length)}</Badge>}
@@ -4611,7 +4628,7 @@ export default function App() {
 
               {workspaceDiffFiles.length || workspaceDiffError ? (
                 <RuntimeSection
-                  title="Changes"
+                  title={t("workspace.changes")}
                   collapsed={rightRuntimeSectionsCollapsed.diff}
                   onToggle={() => toggleRightRuntimeSection("diff")}
                   count={
@@ -4627,9 +4644,9 @@ export default function App() {
                       className="flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
                       onClick={toggleWorkspaceDiffReview}
                     >
-                      <span className="truncate">Change review</span>
+                      <span className="truncate">{t("workspace.changeReview")}</span>
                       <span className="shrink-0 text-muted-foreground">
-                        {loadingWorkspaceDiffPatch ? "loading" : workspaceDiffReviewOpen ? "hide" : "open"}
+                        {loadingWorkspaceDiffPatch ? t("common.loadingShort") : workspaceDiffReviewOpen ? t("common.hide") : t("common.open")}
                       </span>
                     </button>
                     <div className="space-y-0.5">
@@ -4637,28 +4654,28 @@ export default function App() {
                         <RuntimeDiffFileRow key={`${file.status}-${file.path}`} file={file} />
                       ))}
                       {workspaceDiffFiles.length > 6 ? (
-                        <div className="pt-1 text-xs text-muted-foreground">+{formatCount(workspaceDiffFiles.length - 6)} more files</div>
+                        <div className="pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(workspaceDiffFiles.length - 6) })}</div>
                       ) : null}
                     </div>
                     {workspaceDiffReviewOpen ? (
                       <div className="rounded-md border border-border bg-background/80 p-2">
-                        <div className="mb-1 text-xs font-medium text-muted-foreground">Git patch preview</div>
+                        <div className="mb-1 text-xs font-medium text-muted-foreground">{t("workspace.gitPatchPreview")}</div>
                         {workspaceDiff?.patch ? (
                           <pre className="app-scrollbar max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
                             {workspaceDiff.patch}
                           </pre>
                         ) : (
                           <div className="text-xs text-muted-foreground">
-                            {loadingWorkspaceDiffPatch ? "Loading patch..." : "No tracked patch available. Untracked files are listed above."}
+                            {loadingWorkspaceDiffPatch ? t("workspace.loadingPatch") : t("workspace.noTrackedPatch")}
                           </div>
                         )}
-                        {workspaceDiff?.patchTruncated ? <div className="mt-1 text-xs text-amber-700">Patch truncated for sidebar review.</div> : null}
+                        {workspaceDiff?.patchTruncated ? <div className="mt-1 text-xs text-amber-700">{t("workspace.patchTruncated")}</div> : null}
                       </div>
                     ) : null}
                   </div>
                 ) : (
                   <div className="text-xs text-muted-foreground">
-                    {workspaceDiffError || (runtimeConnected ? "No local changes." : "Core offline.")}
+                    {workspaceDiffError || (runtimeConnected ? t("workspace.noLocalChanges") : t("workspace.coreOffline"))}
                   </div>
                 )}
                 </RuntimeSection>
@@ -4666,7 +4683,7 @@ export default function App() {
 
               {runtimeSchedule.length ? (
                 <RuntimeSection
-                  title="Queue"
+                  title={t("workspace.queue")}
                   collapsed={rightRuntimeSectionsCollapsed.schedule}
                   onToggle={() => toggleRightRuntimeSection("schedule")}
                   count={<Badge tone="warn">{formatCount(runtimeSchedule.length)}</Badge>}
@@ -4681,7 +4698,7 @@ export default function App() {
 
               {activeSubAgentTasks.length ? (
                 <RuntimeSection
-                  title="Sub agents"
+                  title={t("workspace.subAgents")}
                   collapsed={rightRuntimeSectionsCollapsed.subagents}
                   onToggle={() => toggleRightRuntimeSection("subagents")}
                   count={<Badge tone="warn">{formatCount(activeSubAgentTasks.length)}</Badge>}
@@ -4706,7 +4723,7 @@ export default function App() {
                       );
                     })}
                     {activeSubAgentTasks.length > 6 ? (
-                      <div className="px-1 pt-1 text-xs text-muted-foreground">+{formatCount(activeSubAgentTasks.length - 6)} more</div>
+                      <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(activeSubAgentTasks.length - 6) })}</div>
                     ) : null}
                   </div>
                 </RuntimeSection>
@@ -5326,7 +5343,7 @@ function Composer({
       : [];
   const visibleActions: ComposerAction[] = actions.length
     ? actions
-    : [{ id: "attach", label: "Attach file", description: "Add images or project files to this turn." }];
+    : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   return (
     <form onSubmit={onSubmit} className="relative rounded-3xl bg-muted/70 shadow-composer">
       {slashMatches.length > 0 ? (
@@ -5393,7 +5410,7 @@ function Composer({
               type="button"
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
               onClick={() => setActionMenuOpen((open) => !open)}
-              title="Add context"
+              title={t("composerAction.addContext")}
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -5426,7 +5443,7 @@ function Composer({
                     <span className="min-w-0">
                       <span className="block truncate font-medium">{action.label}</span>
                       <span className="block text-xs text-muted-foreground">
-                        {action.disabled ? action.disabledReason || "Unavailable" : action.description}
+                        {action.disabled ? action.disabledReason || t("common.unavailable") : action.description}
                       </span>
                     </span>
                   </button>
@@ -5478,29 +5495,29 @@ function Composer({
             </Badge>
             {providerLabel || model ? (
               <Badge tone="muted" className="max-w-[260px] truncate">
-                {providerLabel || "Provider"}{model ? ` · ${model}` : ""}
+                {providerLabel || t("provider.apiProvider")}{model ? ` · ${model}` : ""}
               </Badge>
             ) : null}
             {contextUsage ? (
               <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[300px] truncate" title={contextUsage.title}>
-                Context {contextUsage.label}
+                {t("chat.contextUsage", { value: contextUsage.label })}
               </Badge>
             ) : null}
             {sending ? (
               <Badge tone="warn" className="max-w-[240px] truncate">
                 <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
-                {stopRequested ? "Stopping" : t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
+                {stopRequested ? t("chat.stopping") : t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
               </Badge>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {sending ? (
-              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title="Stop">
+              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
                 <Square className="h-4 w-4" />
               </Button>
             ) : null}
-            <Button className="h-10 min-w-10 rounded-full px-3" disabled={!canSubmit} type="submit" title={sending ? "Queue" : "Send"}>
-              {sending ? <span className="text-xs">Queue</span> : <Send className="h-4 w-4" />}
+            <Button className="h-10 min-w-10 rounded-full px-3" disabled={!canSubmit} type="submit" title={sending ? t("chat.queue") : t("chat.send")}>
+              {sending ? <span className="text-xs">{t("chat.queue")}</span> : <Send className="h-4 w-4" />}
             </Button>
           </div>
         </div>
@@ -5513,7 +5530,7 @@ function Composer({
           title={t("chat.switchProject")}
         >
           {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
-          <span className="truncate">{projectLabel ? `在 ${projectLabel} 中工作` : t("chat.tempChatHint")}</span>
+          <span className="truncate">{projectLabel ? t("chat.workingInProject", { project: projectLabel }) : t("chat.tempChatHint")}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0" />
         </button>
         {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
@@ -10161,9 +10178,25 @@ function RuntimeFileReferenceRow({ file }: { file: RuntimeFileReference }) {
       <span className="truncate font-mono" title={file.path}>
         {file.path}
       </span>
-      <span className="shrink-0 text-muted-foreground">{file.source}</span>
+      <span className="shrink-0 text-muted-foreground">{runtimeFileSourceLabel(file.source)}</span>
     </div>
   );
+}
+
+function runtimeFileSourceLabel(source: RuntimeFileReference["source"]) {
+  if (source === "changes") {
+    return i18n.t("workspace.fileSourceChanges");
+  }
+  if (source === "message") {
+    return i18n.t("workspace.fileSourceMessage");
+  }
+  if (source === "shell") {
+    return i18n.t("workspace.fileSourceShell");
+  }
+  if (source === "skill") {
+    return i18n.t("workspace.fileSourceSkill");
+  }
+  return i18n.t("workspace.fileSourceDiff");
 }
 
 function RuntimeSection({
@@ -11187,10 +11220,10 @@ function buildContextUsage(
   const limitLabel = `${contextLimit.known ? "" : "~"}${formatCount(limit)}`;
   const sourceLabel =
     contextLimit.source === "provider"
-      ? "provider metadata"
+      ? i18n.t("chat.contextSourceProvider")
       : contextLimit.source === "known"
-        ? "known model table"
-        : "estimated fallback";
+        ? i18n.t("chat.contextSourceKnown")
+        : i18n.t("chat.contextSourceEstimated");
   return {
     used,
     limit,
@@ -11198,7 +11231,11 @@ function buildContextUsage(
     source: contextLimit.source,
     ratio,
     label: `${formatCount(used)} / ${limitLabel} (${percent}%)`,
-    title: `Context window from ${sourceLabel}: ${formatCount(limit)} input tokens for ${model || provider || "current model"}.`,
+    title: i18n.t("chat.contextUsageTitle", {
+      source: sourceLabel,
+      limit: formatCount(limit),
+      model: model || provider || i18n.t("chat.currentModel"),
+    }),
     warning: ratio >= CONTEXT_AUTO_COMPACT_RATIO,
   };
 }
