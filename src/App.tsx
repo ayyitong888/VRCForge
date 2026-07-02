@@ -169,6 +169,7 @@ import {
   requestPackageInstall,
   requestRestoreCheckpoint,
   resolveInterruptedApplyRecovery,
+  refreshProjects,
   selectAdjustmentCheckpoint,
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
@@ -621,6 +622,7 @@ export default function App() {
   const [projectModalError, setProjectModalError] = useState("");
   const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
   const [projectPrefsReady, setProjectPrefsReady] = useState(false);
+  const [loadingProjects, setLoadingProjects] = useState(false);
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
@@ -1392,7 +1394,7 @@ export default function App() {
         setAppSessionToken(result.appSessionToken || result.app_session_token || "");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
-        await refreshWithRetry(targetEndpoint);
+        await refreshWithRetry(targetEndpoint, { refreshProjects: true });
       } else {
         setBackendMessage("dev");
         try {
@@ -1401,7 +1403,7 @@ export default function App() {
         } catch {
           setAppSessionToken("");
         }
-        await refreshWithRetry(targetEndpoint);
+        await refreshWithRetry(targetEndpoint, { refreshProjects: true });
       }
       return targetEndpoint;
     } catch (cause) {
@@ -1415,9 +1417,9 @@ export default function App() {
     }
   }
 
-  async function refresh(target = endpoint) {
+  async function refresh(target = endpoint, options: { refreshProjects?: boolean } = {}) {
     setError("");
-    const payload = await fetchBootstrap(target);
+    const payload = await fetchBootstrap(target, options);
     setBootstrap(payload);
     setStartupIssue("");
   }
@@ -1445,6 +1447,32 @@ export default function App() {
       // Full diagnostics are secondary; bootstrap keeps the chat surface usable.
     } finally {
       healthRefreshInFlightRef.current = false;
+    }
+  }
+
+  async function refreshProjectList(target = endpoint) {
+    if (!runtimeConnected || loadingProjects) {
+      return;
+    }
+    setLoadingProjects(true);
+    try {
+      const projectsPayload = await refreshProjects(target);
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              health: {
+                ...current.health,
+                projects: projectsPayload,
+              },
+            }
+          : current,
+      );
+      setError((current) => (current.toLowerCase().includes("project") ? "" : current));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingProjects(false);
     }
   }
 
@@ -1546,11 +1574,11 @@ export default function App() {
     });
   }
 
-  async function refreshWithRetry(target = endpoint) {
+  async function refreshWithRetry(target = endpoint, options: { refreshProjects?: boolean } = {}) {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 16; attempt += 1) {
       try {
-        await refresh(target);
+        await refresh(target, options);
         return;
       } catch (cause) {
         lastError = cause;
@@ -4167,7 +4195,21 @@ export default function App() {
             </button>
           </nav>
 
-          {leftSidebarCollapsed ? null : <SidebarSection title={t("sidebar.projects")}>
+          {leftSidebarCollapsed ? null : <SidebarSection
+            title={t("sidebar.projects")}
+            action={
+              <button
+                type="button"
+                onClick={() => void refreshProjectList()}
+                disabled={!runtimeConnected || loadingProjects}
+                title={t("workspace.refreshStatus")}
+                aria-label={t("workspace.refreshStatus")}
+                className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
+              </button>
+            }
+          >
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
@@ -10798,30 +10840,35 @@ function SidebarSection({
   children,
   collapsed = false,
   onToggleCollapse,
+  action,
 }: {
   title: string;
   children: ReactNode;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  action?: ReactNode;
 }) {
   const { t } = useTranslation();
   return (
     <section className="mt-8 min-w-0 max-md:hidden">
-      {onToggleCollapse ? (
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          title={collapsed ? t("common.expand") : t("common.collapse")}
-          className="group mb-3 flex w-full items-center gap-1 px-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
-        >
-          <span className="truncate">{title}</span>
-          <span className={cn("shrink-0", collapsed ? "" : "opacity-0 group-hover:opacity-100")}>
-            {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-          </span>
-        </button>
-      ) : (
-        <div className="mb-3 px-2 text-xs font-medium text-muted-foreground">{title}</div>
-      )}
+      <div className="mb-3 flex min-w-0 items-center gap-1 px-2">
+        {onToggleCollapse ? (
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            title={collapsed ? t("common.expand") : t("common.collapse")}
+            className="group flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+          >
+            <span className="truncate">{title}</span>
+            <span className={cn("shrink-0", collapsed ? "" : "opacity-0 group-hover:opacity-100")}>
+              {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            </span>
+          </button>
+        ) : (
+          <div className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">{title}</div>
+        )}
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
       {collapsed ? null : <div className="space-y-1">{children}</div>}
     </section>
   );

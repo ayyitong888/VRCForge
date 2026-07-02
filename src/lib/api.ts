@@ -549,6 +549,26 @@ export type UnityMcpRepairResult = {
   after?: Record<string, unknown>;
 };
 
+export type ProjectSnapshot = {
+  selectedProjectPath?: string;
+  unityEditorPath?: string;
+  projects?: Array<{ name?: string; path?: string; editorVersion?: string; unityVersion?: string; sources?: string[] }>;
+  scan?: {
+    status?: string;
+    cached?: boolean;
+    refreshing?: boolean;
+    updatedAt?: string;
+    startedAt?: string;
+    durationMs?: number;
+    error?: string;
+    addedCount?: number;
+    removedCount?: number;
+    projectCount?: number;
+    addedProjects?: Array<{ name?: string; path?: string; source?: string }>;
+    removedProjects?: Array<{ name?: string; path?: string; source?: string }>;
+  };
+};
+
 export type AppBootstrap = {
   ok: boolean;
   app: {
@@ -563,10 +583,7 @@ export type AppBootstrap = {
     portableMode: boolean;
     components: Record<string, HealthComponent>;
     projectRoot?: string;
-    projects?: {
-      selectedProjectPath?: string;
-      projects?: Array<{ name?: string; path?: string; editorVersion?: string; unityVersion?: string; sources?: string[] }>;
-    };
+    projects?: ProjectSnapshot;
   };
   agentManifest: AgentManifest;
   apiConfig?: ApiConfig;
@@ -604,12 +621,20 @@ export function setAppSessionToken(token: string) {
   appSessionToken = token.trim();
 }
 
-export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
-  return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
+export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
+  const url = new URL(`${endpoint}/api/app/bootstrap`);
+  if (options.refreshProjects) {
+    url.searchParams.set("refreshProjects", "true");
+  }
+  return requestJson<AppBootstrap>(url.toString());
 }
 
 export async function fetchAppHealth(endpoint: string): Promise<AppHealth> {
   return requestJson<AppHealth>(`${endpoint}/api/health`, { timeoutMs: 20000 });
+}
+
+export async function refreshProjects(endpoint: string): Promise<ProjectSnapshot> {
+  return requestJson<ProjectSnapshot>(`${endpoint}/api/projects/refresh`, { method: "POST", timeoutMs: 30000 });
 }
 
 export async function fetchAppSession(endpoint: string): Promise<AppSessionHandshake> {

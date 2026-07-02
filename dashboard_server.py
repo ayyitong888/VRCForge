@@ -1394,7 +1394,6 @@ async def on_startup() -> None:
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
         STATUS_MONITOR_TASK = asyncio.create_task(status_monitor_loop())
     load_project_snapshot_cache()
-    schedule_project_snapshot_refresh()
 
     await emit_log_async(
         "info",
@@ -1503,7 +1502,7 @@ def build_full_health_payload() -> dict[str, Any]:
         },
         "state": serialize_dashboard_state(),
         "apiConfig": serialize_api_config(include_secret=False),
-        "projects": project_snapshot_payload(use_cache=True, refresh_async=True),
+        "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
@@ -1538,7 +1537,11 @@ def read_app_session_challenge(request: Request, nonce: str = "") -> dict[str, A
 
 
 @app.get("/api/app/bootstrap")
-def read_agentic_app_bootstrap() -> dict[str, Any]:
+def read_agentic_app_bootstrap(refreshProjects: bool = False) -> dict[str, Any]:  # noqa: N803 - query param is camelCase for the app API.
+    return build_agentic_app_bootstrap_payload(refresh_projects=refreshProjects)
+
+
+def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> dict[str, Any]:
     return {
         "ok": True,
         "app": {
@@ -1548,7 +1551,7 @@ def read_agentic_app_bootstrap() -> dict[str, Any]:
             "browserRequired": False,
             "legacyDashboardDebugOnly": True,
         },
-        "health": build_bootstrap_app_health(),
+        "health": build_bootstrap_app_health(refresh_projects=refresh_projects),
         "apiConfig": serialize_app_api_config(),
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
@@ -2558,7 +2561,7 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         atomic_write_json(path, {"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths})
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
-    await EVENT_BUS.broadcast("projects", await asyncio.to_thread(project_snapshot_payload))
+    await EVENT_BUS.broadcast("projects", project_snapshot_payload(use_cache=True, refresh_async=False))
     return {"ok": True, "path": str(path), "customPaths": custom_paths, "hiddenPaths": hidden_paths}
 
 
@@ -3717,11 +3720,11 @@ def build_agentic_app_health() -> dict[str, Any]:
     return payload
 
 
-def build_bootstrap_app_health() -> dict[str, Any]:
+def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, Any]:
     api_config = serialize_app_api_config()
     agent_health = safe_agent_health()
     unity_status = CURRENT_UNITY_STATUS
-    projects = project_snapshot_payload(use_cache=True, refresh_async=True)
+    projects = bootstrap_project_snapshot_payload() if refresh_projects else project_snapshot_payload(use_cache=True, refresh_async=False)
     dashboard_index = DASHBOARD_DIR / "index.html"
     components: dict[str, dict[str, Any]] = {
         "backend": health_component(
@@ -4015,7 +4018,7 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         },
     }
     try:
-        bootstrap = read_agentic_app_bootstrap()
+        bootstrap = build_agentic_app_bootstrap_payload(refresh_projects=False)
     except Exception as exc:  # noqa: BLE001
         bootstrap = {"ok": False, "error": str(exc)}
     try:
@@ -4853,7 +4856,7 @@ async def dashboard_socket(websocket: WebSocket) -> None:
 
 @app.get("/api/projects")
 def read_projects() -> dict[str, Any]:
-    return project_snapshot_payload(use_cache=True, refresh_async=True)
+    return project_snapshot_payload(use_cache=True, refresh_async=False)
 
 
 @app.post("/api/projects/refresh")
@@ -5038,7 +5041,7 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
         "projectPath": project_path,
         "output": output,
     }
-    await EVENT_BUS.broadcast("projects", await asyncio.to_thread(project_snapshot_payload))
+    await EVENT_BUS.broadcast("projects", project_snapshot_payload(use_cache=True, refresh_async=False))
     await emit_log_async("success", "project", "VRCForge installed into Unity project.", {"projectPath": project_path})
     return payload
 
@@ -11526,7 +11529,7 @@ def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, An
             "apiConfig": api_config,
             "effective": build_effective_model_summary(),
         },
-        "projects": project_snapshot_payload(use_cache=True, refresh_async=True),
+        "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
         "unityStatus": status,
     }
 
@@ -11780,10 +11783,14 @@ def schedule_project_snapshot_refresh(*, force: bool = False) -> bool:
     return True
 
 
-def cached_project_snapshot_payload(*, refresh_async: bool = True) -> dict[str, Any]:
+def bootstrap_project_snapshot_payload() -> dict[str, Any]:
+    return cached_project_snapshot_payload(refresh_async=True, force_refresh=True)
+
+
+def cached_project_snapshot_payload(*, refresh_async: bool = True, force_refresh: bool = False) -> dict[str, Any]:
     load_project_snapshot_cache()
     if refresh_async:
-        schedule_project_snapshot_refresh()
+        schedule_project_snapshot_refresh(force=force_refresh)
     with PROJECT_SNAPSHOT_CACHE_LOCK:
         cached = copy.deepcopy(PROJECT_SNAPSHOT_CACHE) if PROJECT_SNAPSHOT_CACHE is not None else None
         refreshing = PROJECT_SNAPSHOT_REFRESHING
