@@ -11,6 +11,10 @@ namespace MCPForUnity.Editor.Services
 {
     public class ToolDiscoveryService : IToolDiscoveryService
     {
+        private static readonly HashSet<string> VrcForgeDisabledToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "execute_code",
+        };
         private Dictionary<string, ToolMetadata> _cachedTools;
 
 
@@ -45,6 +49,12 @@ namespace MCPForUnity.Editor.Services
                 var metadata = ExtractToolMetadata(type, toolAttr);
                 if (metadata != null)
                 {
+                    if (VrcForgeDisabledToolNames.Contains(metadata.Name))
+                    {
+                        McpLog.Warn($"Tool '{metadata.Name}' is disabled in the VRCForge distribution; use VRCForge static tools instead.");
+                        continue;
+                    }
+
                     if (_cachedTools.ContainsKey(metadata.Name))
                     {
                         McpLog.Warn($"Duplicate tool name '{metadata.Name}' from {type.FullName}; overwriting previous registration.");

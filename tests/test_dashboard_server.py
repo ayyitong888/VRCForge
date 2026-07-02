@@ -2266,6 +2266,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
 
+    def test_vrcforge_distribution_disables_third_party_execute_code_tool(self) -> None:
+        discovery_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Services/ToolDiscoveryService.cs").read_text(encoding="utf-8-sig")
+        execute_code_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Tools/ExecuteCode.cs").read_text(encoding="utf-8-sig")
+
+        self.assertIn("VrcForgeDisabledToolNames", discovery_source)
+        self.assertIn('"execute_code"', discovery_source)
+        self.assertIn("is disabled in the VRCForge distribution", discovery_source)
+        self.assertIn("continue;", discovery_source)
+        self.assertIn('[McpForUnityTool("execute_code", AutoRegister = false', execute_code_source)
+
     def test_safe_backup_restore_source_constrains_manifest_paths(self) -> None:
         source = Path("Assets/VRCForge/Editor/PrefabTools.cs").read_text(encoding="utf-8-sig")
 
