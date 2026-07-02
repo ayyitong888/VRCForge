@@ -2278,13 +2278,36 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_safe_backup_restore_source_constrains_manifest_paths(self) -> None:
         source = Path("Assets/VRCForge/Editor/PrefabTools.cs").read_text(encoding="utf-8-sig")
+        create_source = Path("Assets/VRCForge/Editor/ConsoleTools.cs").read_text(encoding="utf-8-sig")
 
         self.assertIn("TryNormalizeManifestRelativePath", source)
         self.assertIn("ResolveContainedPath", source)
         self.assertIn("Path.GetFullPath", source)
         self.assertIn("Manifest path must be relative", source)
         self.assertIn("Manifest path is not a safe relative path", source)
+        self.assertIn("ResolveManagedProjectPath", source)
+        self.assertIn("ResolveManagedProjectPath", create_source)
+        self.assertIn("Library/VRCForge/Backups", create_source)
         self.assertNotIn("Path.Combine(backupPath, backupRelativePath)", source)
+
+    def test_unity_scan_outputs_use_managed_project_path_guard(self) -> None:
+        editor_dir = Path("Assets/VRCForge/Editor")
+        guard_source = (editor_dir / "VRCForgeOutputPathGuard.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("ResolveManagedProjectOutputPath", guard_source)
+        self.assertIn("Assets/VRCForge", guard_source)
+        for filename in (
+            "GameObjectTools.cs",
+            "ComponentTools.cs",
+            "AssetTools.cs",
+            "ShaderMaterialScanner.cs",
+            "BlendshapeExporter.cs",
+            "AvatarParameterScanner.cs",
+            "AvatarControlScanner.cs",
+            "WardrobeScanner.cs",
+            "AvatarPerformanceTool.cs",
+        ):
+            source = (editor_dir / filename).read_text(encoding="utf-8-sig")
+            self.assertIn("VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath", source)
 
     def test_wardrobe_scanner_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -2383,7 +2406,9 @@ class DashboardServerTests(unittest.TestCase):
 
                 self.assertEqual(result["wardrobeCount"], 0)
                 self.assertEqual(result["wardrobes"], [])
-                self.assertFalse(stale_path.exists())
+                self.assertTrue(stale_path.exists())
+                saved = json.loads(stale_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["wardrobeCount"], 0)
             finally:
                 dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_artifacts_dir
 
@@ -3115,6 +3140,76 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn(str(script_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertEqual(reloaded, [project.resolve()])
+
+    def test_archive_checkpoint_rejects_mutable_archive_path_outside_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "existing.txt").write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
+                {"id": "approval-test", "targetTool": "vrcforge_test_archive_write"},
+                {"projectRoot": str(project)},
+            )
+            self.assertIsNotNone(checkpoint)
+            self.assertTrue(checkpoint["ok"])
+
+            external_zip = root / "outside.zip"
+            with zipfile.ZipFile(external_zip, "w") as archive:
+                archive.writestr("Assets/existing.txt", "outside")
+            records = [json.loads(line) for line in gateway.checkpoint_log_path.read_text(encoding="utf-8").splitlines()]
+            records[-1]["archivePath"] = str(external_zip)
+            gateway.checkpoint_log_path.write_text(
+                "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+
+            self.assertFalse(preview["ok"])
+            self.assertIn("outside configured storage", preview["error"])
+            self.assertFalse(restored["ok"])
+            self.assertEqual((project / "Assets" / "existing.txt").read_text(encoding="utf-8"), "before")
+
+    def test_local_state_checkpoint_rejects_mutable_archive_path_outside_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            skill_dir = gateway.user_skills_dir / "avatar-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("before", encoding="utf-8")
+
+            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
+                {"id": "approval-local", "targetTool": "vrcforge_import_skill_package"},
+                {},
+            )
+            self.assertIsNotNone(checkpoint)
+            self.assertTrue(checkpoint["ok"])
+
+            external_zip = root / "outside-local.zip"
+            with zipfile.ZipFile(external_zip, "w") as archive:
+                archive.writestr("skills/avatar-review/SKILL.md", "outside")
+            records = [json.loads(line) for line in gateway.checkpoint_log_path.read_text(encoding="utf-8").splitlines()]
+            records[-1]["archivePath"] = str(external_zip)
+            gateway.checkpoint_log_path.write_text(
+                "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+
+            self.assertFalse(preview["ok"])
+            self.assertIn("outside configured storage", preview["error"])
+            self.assertFalse(restored["ok"])
+            self.assertEqual((skill_dir / "SKILL.md").read_text(encoding="utf-8"), "before")
 
     def test_checkpoint_rollback_coverage_audit_tracks_ma_vrcf_ndmf_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6587,6 +6682,7 @@ namespace VRCForge.Editor
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_scan_avatar_controls")
         self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
+        self.assertEqual(params["outputPath"], "")
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -6608,8 +6704,9 @@ namespace VRCForge.Editor
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["stats"]["boolCount"], 2)
-        _settings, tool_name, _params = mock_invoke_unity_mcp.call_args.args
+        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_scan_avatar_parameters")
+        self.assertEqual(params["outputPath"], "")
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")

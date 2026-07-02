@@ -49,12 +49,13 @@ namespace VRCForge.Editor
             try
             {
                 var payload = BuildPayload(parameters.avatarPath ?? "");
-                var requestedPath = string.IsNullOrWhiteSpace(parameters.outputPath)
-                    ? DefaultOutputPath
-                    : parameters.outputPath;
-                var absolutePath = WritePayload(requestedPath, payload, parameters.refreshAssets ?? true);
-                payload.outputPath = ToAssetRelativePath(absolutePath);
-                payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
+                var requestedPath = parameters.outputPath ?? "";
+                if (!string.IsNullOrWhiteSpace(requestedPath))
+                {
+                    var absolutePath = WritePayload(requestedPath, payload, parameters.refreshAssets ?? true);
+                    payload.outputPath = ToAssetRelativePath(absolutePath);
+                    payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
+                }
 
                 return new SuccessResponse(
                     $"Scanned {payload.summary.materialCount} material slot(s) from {payload.summary.rendererCount} renderer(s).",
@@ -337,26 +338,12 @@ namespace VRCForge.Editor
 
         private static string ResolveToAbsolutePath(string requestedPath)
         {
-            if (Path.IsPathRooted(requestedPath))
-            {
-                return requestedPath.Replace("\\", "/");
-            }
-
-            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName
-                ?? throw new InvalidOperationException("Cannot determine Unity project root.");
-
-            return Path.Combine(projectRoot, requestedPath).Replace("\\", "/");
+            return VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath(requestedPath, "Material scan");
         }
 
         private static string ToAssetRelativePath(string absolutePath)
         {
-            var dataPath = Application.dataPath.Replace("\\", "/");
-            if (absolutePath.StartsWith(dataPath, StringComparison.OrdinalIgnoreCase))
-            {
-                return "Assets" + absolutePath.Substring(dataPath.Length);
-            }
-
-            return absolutePath.Replace("\\", "/");
+            return VRCForgeOutputPathGuard.ToAssetRelativePath(absolutePath);
         }
     }
 

@@ -4156,7 +4156,7 @@ class AgentGateway:
 
     def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         checkpoint_id = str(record["id"])
-        project_key = hashlib.sha256(normalize_filesystem_path(str(project_root)).encode("utf-8")).hexdigest()[:16]
+        project_key = self._checkpoint_project_key(project_root)
         archive_dir = self.checkpoint_store_dir / project_key
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
@@ -4293,17 +4293,70 @@ class AgentGateway:
         self.append_audit({"event": "checkpoint_created", "checkpoint": record})
         return record
 
+    def _checkpoint_project_key(self, project_root: Path) -> str:
+        return hashlib.sha256(normalize_filesystem_path(str(project_root)).encode("utf-8")).hexdigest()[:16]
+
+    def _resolve_checkpoint_archive_path(self, checkpoint: dict[str, Any], expected_strategy: str) -> Path:
+        strategy = str(checkpoint.get("strategy") or "")
+        if strategy != expected_strategy:
+            raise ValueError("Checkpoint strategy does not match archive type.")
+        checkpoint_id = str(checkpoint.get("id") or "").strip()
+        if not checkpoint_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", checkpoint_id) or checkpoint_id in {".", ".."}:
+            raise ValueError("Checkpoint id is invalid.")
+        raw_archive = str(checkpoint.get("archivePath") or "").strip()
+        if not raw_archive:
+            raise ValueError("Checkpoint archive path is missing.")
+
+        archive_path = Path(raw_archive).resolve()
+        store_root = self.checkpoint_store_dir.resolve()
+        if not is_path_within(archive_path, store_root):
+            raise ValueError("Checkpoint archive is outside configured storage.")
+        if archive_path.name != f"{checkpoint_id}.zip":
+            raise ValueError("Checkpoint archive filename does not match checkpoint id.")
+
+        if expected_strategy == "archive":
+            project_root_text = str(checkpoint.get("projectRoot") or "").strip()
+            if not project_root_text:
+                raise ValueError("Checkpoint project root is missing.")
+            expected_parent = (store_root / self._checkpoint_project_key(Path(project_root_text).resolve())).resolve()
+            if archive_path.parent != expected_parent:
+                raise ValueError("Checkpoint archive does not match the recorded project root.")
+        elif expected_strategy == "local_state_archive":
+            expected_parent = (store_root / "local-state").resolve()
+            if archive_path.parent != expected_parent:
+                raise ValueError("Local state archive is outside its managed storage folder.")
+        return archive_path
+
+    def _normalize_project_archive_member(self, name: str, allowed_roots: set[str]) -> str:
+        text = str(name or "").replace("\\", "/")
+        member = PurePosixPath(text)
+        parts = member.parts
+        if (
+            len(parts) < 2
+            or member.is_absolute()
+            or Path(str(name)).is_absolute()
+            or looks_like_absolute_path(text)
+            or parts[0] not in allowed_roots
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError(f"Unsafe archive member: {name}")
+        return member.as_posix()
+
     def _preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
-        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        allowed = set(UNITY_PROJECT_CHECKPOINT_SCOPE)
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
-                archived = {
-                    info.filename: (info.file_size, info.CRC)
-                    for info in archive.infolist()
-                    if not info.is_dir()
-                }
+                archived: dict[str, tuple[int, int]] = {}
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    name = self._normalize_project_archive_member(info.filename, allowed)
+                    if name in archived:
+                        raise ValueError(f"Duplicate archive member: {name}")
+                    archived[name] = (info.file_size, info.CRC)
             current: dict[str, tuple[int, int]] = {}
             for name in pathspecs:
                 root = project_root / name
@@ -4333,7 +4386,7 @@ class AgentGateway:
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
     def _preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
                 archived = {
@@ -4360,19 +4413,20 @@ class AgentGateway:
 
     def _restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
-        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-        allowed = {"Assets", "Packages", "ProjectSettings"}
+        allowed = set(UNITY_PROJECT_CHECKPOINT_SCOPE)
         if not pathspecs or any(name not in allowed for name in pathspecs):
             return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint pathspecs are unsafe."}
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
                 members = [info for info in archive.infolist() if not info.is_dir()]
-                archived = {info.filename: info for info in members}
+                archived: dict[str, zipfile.ZipInfo] = {}
                 for info in members:
-                    parts = Path(info.filename).parts
-                    if not parts or parts[0] not in allowed or ".." in parts or Path(info.filename).is_absolute():
-                        raise ValueError(f"Unsafe archive member: {info.filename}")
+                    name = self._normalize_project_archive_member(info.filename, allowed)
+                    if name in archived:
+                        raise ValueError(f"Duplicate archive member: {name}")
+                    archived[name] = info
                 current: dict[str, Path] = {}
                 for name in pathspecs:
                     target = (project_root / name).resolve()
@@ -4390,7 +4444,9 @@ class AgentGateway:
 
                 restored: list[str] = []
                 for relative, info in archived.items():
-                    target = project_root / Path(relative)
+                    target = (project_root / Path(*PurePosixPath(relative).parts)).resolve()
+                    if not is_path_within(target, project_root):
+                        raise ValueError(f"Unsafe restore target: {target}")
                     needs_restore = not target.is_file() or target.stat().st_size != info.file_size
                     if not needs_restore:
                         crc = 0
@@ -4429,7 +4485,7 @@ class AgentGateway:
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
 
     def _restore_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        archive_path = Path(str(checkpoint["archivePath"])).resolve()
+        archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
         roots = self._local_state_checkpoint_roots()
         state_roots = {
             str(item.get("id") or ""): ensure_dict(item)
@@ -4892,8 +4948,11 @@ class AgentGateway:
         if not checkpoint.get("ok"):
             return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
         if checkpoint.get("strategy") == "local_state_archive":
-            archive_path = Path(str(checkpoint.get("archivePath") or ""))
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            try:
+                archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
+            except ValueError as exc:
+                return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint metadata is invalid: {exc}"}
             if not archive_path.is_file() or not pathspecs:
                 return {"ok": False, "checkpoint": checkpoint, "error": "Local state checkpoint metadata is incomplete."}
             try:
@@ -4907,14 +4966,21 @@ class AgentGateway:
                 return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint is unreadable: {exc}"}
             return {"ok": True}
         if checkpoint.get("strategy") == "archive":
-            archive_path = Path(str(checkpoint.get("archivePath") or ""))
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            try:
+                archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
+            except ValueError as exc:
+                return {"ok": False, "checkpoint": checkpoint, "error": f"Archive checkpoint metadata is invalid: {exc}"}
             if not archive_path.is_file() or not pathspecs:
                 return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint metadata is incomplete."}
             try:
                 with zipfile.ZipFile(archive_path, "r") as archive:
                     if archive.testzip() is not None:
                         raise ValueError("archive CRC validation failed")
+                    allowed = set(UNITY_PROJECT_CHECKPOINT_SCOPE)
+                    for info in archive.infolist():
+                        if not info.is_dir():
+                            self._normalize_project_archive_member(info.filename, allowed)
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "checkpoint": checkpoint, "error": f"Archive checkpoint is unreadable: {exc}"}
             return {"ok": True}

@@ -352,13 +352,11 @@ namespace VRCForge.Editor
 
         private static string ResolveProjectPath(string requestedPath, string projectRoot)
         {
-            var path = string.IsNullOrWhiteSpace(requestedPath) ? DefaultBackupRoot : requestedPath;
-            if (Path.IsPathRooted(path))
-            {
-                return NormalizeFullPath(path);
-            }
-
-            return NormalizeFullPath(Path.Combine(projectRoot, path));
+            return VRCForgeOutputPathGuard.ResolveManagedProjectPath(
+                requestedPath,
+                DefaultBackupRoot,
+                DefaultBackupRoot,
+                "Safe backup root");
         }
 
         private static string ComputeSha256(string fullPath)

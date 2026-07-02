@@ -263,9 +263,7 @@ namespace VRCForge.Editor
                 return string.Empty;
             }
 
-            var fullPath = Path.IsPathRooted(trimmed)
-                ? trimmed
-                : Path.GetFullPath(Path.Combine(Application.dataPath, "..", trimmed));
+            var fullPath = VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath(trimmed, "Avatar performance scan");
             Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? ".");
             File.WriteAllText(fullPath, payload.ToString(Formatting.Indented), new UTF8Encoding(false));
             return fullPath.Replace("\\", "/");
@@ -526,9 +524,7 @@ namespace VRCForge.Editor
                 return string.Empty;
             }
 
-            var fullPath = Path.IsPathRooted(trimmed)
-                ? trimmed
-                : Path.GetFullPath(Path.Combine(Application.dataPath, "..", trimmed));
+            var fullPath = VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath(trimmed, "Thry avatar performance scan");
             Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? ".");
             File.WriteAllText(fullPath, payload.ToString(Formatting.Indented), new UTF8Encoding(false));
             return fullPath.Replace("\\", "/");

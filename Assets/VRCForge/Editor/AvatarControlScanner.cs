@@ -412,14 +412,7 @@ namespace VRCForge.Editor
 
         private static string ResolveToAbsolutePath(string requestedPath)
         {
-            if (Path.IsPathRooted(requestedPath))
-            {
-                return requestedPath.Replace("\\", "/");
-            }
-
-            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName
-                ?? throw new InvalidOperationException("Cannot determine Unity project root.");
-            return Path.Combine(projectRoot, requestedPath).Replace("\\", "/");
+            return VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath(requestedPath, "Avatar control scan");
         }
 
         private static float ToFloat(object value)

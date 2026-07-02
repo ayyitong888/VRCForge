@@ -222,32 +222,12 @@ namespace VRCForge.Editor
 
         private static string ResolveToAbsolutePath(string requestedPath)
         {
-            if (Path.IsPathRooted(requestedPath))
-            {
-                return requestedPath.Replace("\\", "/");
-            }
-
-            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName
-                ?? throw new InvalidOperationException("Cannot determine Unity project root.");
-
-            if (requestedPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(requestedPath, "Assets", StringComparison.OrdinalIgnoreCase))
-            {
-                return Path.Combine(projectRoot, requestedPath).Replace("\\", "/");
-            }
-
-            return Path.Combine(projectRoot, requestedPath).Replace("\\", "/");
+            return VRCForgeOutputPathGuard.ResolveManagedProjectOutputPath(requestedPath, "Blendshape export");
         }
 
         private static string ToAssetRelativePath(string absolutePath)
         {
-            var dataPath = Application.dataPath.Replace("\\", "/");
-            if (absolutePath.StartsWith(dataPath, StringComparison.OrdinalIgnoreCase))
-            {
-                return "Assets" + absolutePath.Substring(dataPath.Length);
-            }
-
-            return absolutePath.Replace("\\", "/");
+            return VRCForgeOutputPathGuard.ToAssetRelativePath(absolutePath);
         }
 
         private static string GetTransformPath(Transform transform)

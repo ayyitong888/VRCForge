@@ -24,7 +24,7 @@ import zipfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any, Callable, Literal
 
@@ -6676,15 +6676,20 @@ def request_avatar_encryption_apply_sync(
         }
 
     avatar_path = str(plan.get("avatarPath") or request.avatar_path or "").strip()
+    project_path = normalize_path_string(request.project_path or "")
+    try:
+        output_folder = normalize_avatar_encryption_output_folder(request.output_folder, project_path)
+    except AgentGatewayError as exc:
+        return {"ok": False, "status": "blocked", "error": str(exc), "preview": preview}
     profile = ensure_dict(plan.get("profile"))
     apply_arguments = {
         "avatarPath": avatar_path,
-        "projectPath": request.project_path or "",
+        "projectPath": project_path,
         "profile": str(profile.get("id") or AVATAR_ENCRYPTION_RECOMMENDED_PROFILE),
         "protectionProfile": str(profile.get("id") or AVATAR_ENCRYPTION_RECOMMENDED_PROFILE),
         "targetShaderFamily": family,
         "targets": write_targets,
-        "outputFolder": request.output_folder,
+        "outputFolder": output_folder,
         "platform": str(ensure_dict(plan.get("platform")).get("id") or request.target_platform or request.platform or "pc"),
         "targetPlatform": str(ensure_dict(plan.get("platform")).get("id") or request.target_platform or request.platform or "pc"),
         "connectorContract": "private-addon-rest-v1",
@@ -6753,11 +6758,17 @@ def request_avatar_encryption_remove_sync(params: dict[str, Any], agent_name: st
             "error": "addon.private_module_not_configured",
             "connector": addon_status["connector"],
         }
+    project_path = normalize_path_string(request.project_path or "")
+    try:
+        output_folder = normalize_avatar_encryption_output_folder(request.output_folder, project_path)
+        manifest_path = normalize_avatar_encryption_manifest_path(request.manifest_path, project_path)
+    except AgentGatewayError as exc:
+        return {"ok": False, "status": "blocked", "error": str(exc), "connector": addon_status["connector"]}
     arguments = {
         "avatarPath": request.avatar_path or "",
-        "projectPath": request.project_path or "",
-        "manifestPath": request.manifest_path or "",
-        "outputFolder": request.output_folder,
+        "projectPath": project_path,
+        "manifestPath": manifest_path,
+        "outputFolder": output_folder,
         "deleteGeneratedAssets": bool(request.delete_generated_assets),
         "preview": bool(request.preview_unity_write),
         "confirmRemove": True,
@@ -6774,8 +6785,8 @@ def request_avatar_encryption_remove_sync(params: dict[str, Any], agent_name: st
         "requiresExplicitApproval": True,
         "checkpointRequired": True,
         "avatarPath": request.avatar_path or "",
-        "manifestPath": request.manifest_path or "",
-        "outputFolder": request.output_folder,
+        "manifestPath": manifest_path,
+        "outputFolder": output_folder,
         "deleteGeneratedAssets": bool(request.delete_generated_assets),
         "rollback": {
             "checkpointRestoreTool": "vrcforge_restore_checkpoint",
@@ -7060,6 +7071,79 @@ def avatar_encryption_proof_requirements() -> list[str]:
         "Remove operation restores the original avatar state.",
         "Support bundles redact secrets and private project details.",
     ]
+
+
+AVATAR_ENCRYPTION_OUTPUT_ROOT = "Assets/VRCForgeGenerated/AvatarEncryption"
+
+
+def _safe_unity_asset_relative_path(value: str, *, label: str) -> str:
+    text = str(value or "").replace("\\", "/").strip().strip("/")
+    path = PurePosixPath(text)
+    parts = path.parts
+    if (
+        not parts
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in parts)
+        or parts[0] != "Assets"
+    ):
+        raise AgentGatewayError(f"{label} must be a safe Unity asset-relative path under Assets/.", status_code=400)
+    return path.as_posix()
+
+
+def _normalize_avatar_encryption_managed_asset_path(
+    value: str,
+    *,
+    project_path: str,
+    label: str,
+    default_value: str = "",
+) -> str:
+    raw = str(value or default_value or "").strip()
+    if not raw:
+        raise AgentGatewayError(f"{label} is required.", status_code=400)
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        project_text = str(project_path or "").strip()
+        if not project_text:
+            raise AgentGatewayError(f"{label} absolute paths require projectPath.", status_code=400)
+        project_root = Path(project_text)
+        if not project_root.is_absolute():
+            raise AgentGatewayError(f"{label} absolute paths require an absolute projectPath.", status_code=400)
+        try:
+            relative = candidate.resolve().relative_to(project_root.resolve()).as_posix()
+        except ValueError as exc:
+            raise AgentGatewayError(f"{label} must stay inside projectPath.", status_code=400) from exc
+    else:
+        relative = raw
+
+    normalized = _safe_unity_asset_relative_path(relative, label=label)
+    allowed_root = PurePosixPath(AVATAR_ENCRYPTION_OUTPUT_ROOT).as_posix()
+    if normalized != allowed_root and not normalized.startswith(allowed_root + "/"):
+        raise AgentGatewayError(f"{label} must stay under {AVATAR_ENCRYPTION_OUTPUT_ROOT}.", status_code=400)
+    return normalized
+
+
+def normalize_avatar_encryption_output_folder(value: str, project_path: str) -> str:
+    return _normalize_avatar_encryption_managed_asset_path(
+        value,
+        project_path=project_path,
+        label="outputFolder",
+        default_value=AVATAR_ENCRYPTION_OUTPUT_ROOT,
+    )
+
+
+def normalize_avatar_encryption_manifest_path(value: str | None, project_path: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    manifest_path = _normalize_avatar_encryption_managed_asset_path(
+        raw,
+        project_path=project_path,
+        label="manifestPath",
+    )
+    if PurePosixPath(manifest_path).suffix.lower() != ".json":
+        raise AgentGatewayError("manifestPath must point to a JSON manifest.", status_code=400)
+    return manifest_path
 
 
 def infer_avatar_path_from_inventory(inventory: dict[str, Any]) -> str:
@@ -8227,6 +8311,12 @@ def build_dashboard_artifact_path(prefix: str, avatar_path: str | None, suffix: 
     return latest_dir / f"{prefix}_{safe_avatar}.{suffix.lstrip('.')}"
 
 
+def write_dashboard_json_artifact(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload.setdefault("jsonPath", str(path))
+
+
 def run_unity_cli_json(settings: Settings, cli_args: list[str]) -> dict[str, Any]:
     try:
         output = run_unity_mcp_passthrough(settings, cli_args)
@@ -8358,12 +8448,13 @@ def apply_blendshapes_direct(
 
 def scan_avatar_controls_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
     output_path = build_dashboard_artifact_path("avatar_controls", avatar_path, "json")
+    output_path.unlink(missing_ok=True)
     result = invoke_unity_mcp(
         settings,
         "vrc_scan_avatar_controls",
         {
             "avatarPath": avatar_path or "",
-            "outputPath": str(output_path),
+            "outputPath": "",
         },
     )
     if output_path.exists():
@@ -8372,7 +8463,9 @@ def scan_avatar_controls_direct(settings: Settings, avatar_path: str | None) -> 
         return ensure_dict_payload(payload, "avatar menu/parameter scan")
 
     payload = extract_tool_result_payload(result)
-    return ensure_dict_payload(payload, "avatar menu/parameter scan")
+    payload = ensure_dict_payload(payload, "avatar menu/parameter scan")
+    write_dashboard_json_artifact(output_path, payload)
+    return payload
 
 
 def toggle_scene_object_direct(settings: Settings, object_path: str, active: bool) -> Any:
@@ -8391,12 +8484,13 @@ def toggle_scene_object_direct(settings: Settings, object_path: str, active: boo
 
 def scan_avatar_parameters_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
     output_path = build_dashboard_artifact_path("avatar_parameters", avatar_path, "json")
+    output_path.unlink(missing_ok=True)
     result = invoke_unity_mcp(
         settings,
         "vrc_scan_avatar_parameters",
         {
             "avatarPath": avatar_path or "",
-            "outputPath": str(output_path),
+            "outputPath": "",
         },
     )
     if output_path.exists():
@@ -8405,7 +8499,9 @@ def scan_avatar_parameters_direct(settings: Settings, avatar_path: str | None) -
         return ensure_dict_payload(payload, "parameter scan")
 
     payload = extract_tool_result_payload(result)
-    return ensure_dict_payload(payload, "parameter scan")
+    payload = ensure_dict_payload(payload, "parameter scan")
+    write_dashboard_json_artifact(output_path, payload)
+    return payload
 
 
 def capture_scene_view_direct(
@@ -8543,6 +8639,7 @@ def apply_parameter_optimization_direct(
 
 def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
     output_path = build_dashboard_artifact_path("shader_material_inventory", avatar_path, "json")
+    output_path.unlink(missing_ok=True)
     original_timeout = int(settings.unity_mcp_timeout_seconds or 30)
     settings.unity_mcp_timeout_seconds = max(original_timeout, 120)
     try:
@@ -8551,7 +8648,7 @@ def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) ->
             "vrc_scan_avatar_materials",
             {
                 "avatarPath": avatar_path or "",
-                "outputPath": str(output_path),
+                "outputPath": "",
                 "refreshAssets": False,
             },
         )
@@ -8563,7 +8660,9 @@ def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) ->
         return ensure_dict_payload(payload, "shader material scan")
 
     payload = extract_tool_result_payload(result)
-    return ensure_dict_payload(payload, "shader material scan")
+    payload = ensure_dict_payload(payload, "shader material scan")
+    write_dashboard_json_artifact(output_path, payload)
+    return payload
 
 
 def apply_shader_material_tuning_direct(
@@ -12358,7 +12457,7 @@ def run_unity_artifact_scan_sync(
     # Never let a previous scan for the same avatar path masquerade as the
     # current Unity response when the tool fails to refresh its output file.
     output_path.unlink(missing_ok=True)
-    merged: dict[str, Any] = {"avatarPath": avatar_path, "outputPath": str(output_path)}
+    merged: dict[str, Any] = {"avatarPath": avatar_path, "outputPath": ""}
     merged.update(unity_params)
     result = invoke_unity_mcp(settings, tool_name, merged)
     if output_path.exists():
@@ -12367,6 +12466,8 @@ def run_unity_artifact_scan_sync(
     else:
         payload = extract_tool_result_payload(result)
     payload = ensure_dict_payload(payload, label)
+    if not output_path.exists():
+        write_dashboard_json_artifact(output_path, payload)
     payload.setdefault("ok", True)
     return payload
 
@@ -16494,6 +16595,8 @@ OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
     ".controller",
     ".anim",
 }
+OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES = 512 * 1024 * 1024
+OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO = 100.0
 
 
 def import_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -16626,10 +16729,27 @@ def _extract_unitypackage_from_zip(container_path: Path, entry_path: str, temp_r
         if raw_name is None:
             raise AgentGatewayError(f"UnityPackage entry was not found in ZIP: {normalized_entry}", status_code=400)
         info = archive.getinfo(raw_name)
+        if info.file_size > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES:
+            raise AgentGatewayError("Nested UnityPackage exceeds the import size limit.", status_code=400)
+        compression_ratio = float(info.file_size) / float(max(1, info.compress_size))
+        if compression_ratio > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO:
+            raise AgentGatewayError("Nested UnityPackage compression ratio exceeds the import limit.", status_code=400)
         safe_name = sanitize_artifact_name(Path(normalized_entry).stem) or "package"
         target = (temp_root / f"{safe_name}_{int(time.time() * 1000)}.unitypackage").resolve()
-        with archive.open(info) as source, target.open("wb") as destination:
-            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        try:
+            written = 0
+            with archive.open(info) as source, target.open("wb") as destination:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES:
+                        raise AgentGatewayError("Nested UnityPackage exceeds the import size limit.", status_code=400)
+                    destination.write(chunk)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
     return target
 
 
@@ -16717,10 +16837,22 @@ def _copy_loose_outfit_assets(source_root: Path, project_root: Path, target_fold
 
 def _resolve_import_target_folder(project_root: Path, target_folder: str) -> Path:
     normalized = str(target_folder or "Assets/VRCForge/ImportedOutfits").replace("\\", "/").strip().strip("/")
-    if not normalized.startswith("Assets/"):
+    relative = PurePosixPath(normalized)
+    parts = relative.parts
+    if (
+        len(parts) < 2
+        or relative.is_absolute()
+        or parts[0] != "Assets"
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
         raise AgentGatewayError("targetFolder must be under Assets/.", status_code=400)
-    target = (project_root / normalized).resolve()
+    target = (project_root / relative.as_posix()).resolve()
     _ensure_path_inside_project(project_root, target)
+    assets_root = (project_root / "Assets").resolve()
+    try:
+        target.relative_to(assets_root)
+    except ValueError as exc:
+        raise AgentGatewayError("targetFolder must stay under Assets/.", status_code=400) from exc
     return target
 
 

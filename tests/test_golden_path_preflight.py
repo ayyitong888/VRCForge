@@ -5,6 +5,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server
@@ -140,6 +141,25 @@ def test_outfit_import_handler_extracts_zip_queue_in_order(tmp_path: Path, monke
     assert payload["kind"] == "unitypackage_import_sequence"
     assert [item[1] for item in seen] == ["SECRET_MATERIAL_PACKAGE", "SECRET_DRESS_PACKAGE"]
     assert [item["role"] for item in payload["unityImports"]] == ["support", "target"]
+
+
+def test_outfit_zip_queue_blocks_high_ratio_nested_unitypackage(tmp_path: Path) -> None:
+    package = tmp_path / "DressBundle.zip"
+    temp_root = tmp_path / "extract"
+    temp_root.mkdir()
+    with zipfile.ZipFile(package, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Dress.unitypackage", b"\0" * (2 * 1024 * 1024))
+
+    with pytest.raises(dashboard_server.AgentGatewayError, match="compression ratio"):
+        dashboard_server._extract_unitypackage_from_zip(package, "Dress.unitypackage", temp_root)
+
+
+def test_loose_outfit_target_folder_cannot_escape_assets(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+
+    with pytest.raises(dashboard_server.AgentGatewayError, match="targetFolder"):
+        dashboard_server._resolve_import_target_folder(project, "Assets/../ProjectSettings")
 
 
 def test_outfit_import_handler_skips_installed_shader_support_package(tmp_path: Path, monkeypatch) -> None:

@@ -9,6 +9,22 @@ import agent_gateway
 import dashboard_server
 
 
+@pytest.fixture(autouse=True)
+def force_gateway_approval_mode():
+    config = dashboard_server.AGENT_GATEWAY.ensure_config()
+    original_mode = config.execution_mode
+    config.execution_mode = "approval"
+    dashboard_server.AGENT_GATEWAY.save_config(config)
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    try:
+        yield
+    finally:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.execution_mode = original_mode
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        dashboard_server.AGENT_GATEWAY._approvals.clear()
+
+
 def make_encryption_inventory() -> dict:
     return {
         "type": "material_inventory_snapshot",
@@ -512,6 +528,26 @@ def test_avatar_encryption_liltoon_apply_request_creates_explicit_connector_appr
     assert "checkpoint" in str(approval["preview"]["rollback"]).lower()
 
 
+def test_avatar_encryption_apply_request_blocks_output_folder_escape(monkeypatch) -> None:
+    monkeypatch.setenv(dashboard_server.AVATAR_ENCRYPTION_ADDON_URL_ENV, "http://127.0.0.1:9876")
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    payload = dashboard_server.request_avatar_encryption_apply_sync(
+        {
+            "avatarPath": "Scene/HeroAvatar",
+            "projectPath": "E:/unity/Hero",
+            "inventory": make_encryption_inventory(),
+            "outputFolder": "../Outside",
+            "confirmCreatorOwnedAssets": True,
+        },
+        target_family="liltoon",
+        agent_name="unit-test",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "blocked"
+    assert "outputFolder" in payload["error"]
+
+
 def test_avatar_encryption_apply_request_keeps_long_constraints_out_of_write_arguments(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(dashboard_server.AVATAR_ENCRYPTION_ADDON_URL_ENV, "http://127.0.0.1:9876")
     constraints_path = tmp_path / "AGENTS.md"
@@ -559,6 +595,42 @@ def test_avatar_encryption_remove_request_requires_manifest_or_avatar_target() -
     assert payload["ok"] is False
     assert payload["status"] == "blocked"
     assert "manifestPath or avatarPath" in payload["error"]
+
+
+def test_avatar_encryption_remove_request_blocks_manifest_outside_project(monkeypatch) -> None:
+    monkeypatch.setenv(dashboard_server.AVATAR_ENCRYPTION_ADDON_URL_ENV, "http://127.0.0.1:9876")
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    payload = dashboard_server.request_avatar_encryption_remove_sync(
+        {
+            "confirmRemove": True,
+            "projectPath": "E:/unity/Hero",
+            "manifestPath": "E:/tmp/manifest.private.json",
+        },
+        agent_name="unit-test",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "blocked"
+    assert "manifestPath" in payload["error"]
+
+
+def test_avatar_encryption_remove_request_normalizes_manifest_and_output_folder(monkeypatch) -> None:
+    monkeypatch.setenv(dashboard_server.AVATAR_ENCRYPTION_ADDON_URL_ENV, "http://127.0.0.1:9876")
+    dashboard_server.AGENT_GATEWAY._approvals.clear()
+    payload = dashboard_server.request_avatar_encryption_remove_sync(
+        {
+            "confirmRemove": True,
+            "projectPath": "E:/unity/Hero",
+            "manifestPath": "Assets/VRCForgeGenerated/AvatarEncryption/Hero/manifest.private.json",
+            "outputFolder": "Assets/VRCForgeGenerated/AvatarEncryption/Hero",
+        },
+        agent_name="unit-test",
+    )
+
+    assert payload["ok"] is True
+    approval = dashboard_server.AGENT_GATEWAY._approvals[payload["approval"]["id"]]
+    assert approval["arguments"]["manifestPath"] == "Assets/VRCForgeGenerated/AvatarEncryption/Hero/manifest.private.json"
+    assert approval["arguments"]["outputFolder"] == "Assets/VRCForgeGenerated/AvatarEncryption/Hero"
 
 
 def test_avatar_encryption_direct_internal_write_target_requires_wrapper() -> None:
