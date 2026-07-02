@@ -277,6 +277,55 @@ class DashboardServerTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_app_bootstrap_uses_cached_project_snapshot_without_waiting(self) -> None:
+        originals = {
+            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
+            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
+            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
+            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
+            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
+            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
+            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
+            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
+            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
+            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
+        }
+        dashboard_server.PROJECT_SNAPSHOT_CACHE = None
+        dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
+        dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
+        dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
+        dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
+        dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
+        dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
+        dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
+        dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
+        dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
+        try:
+            with (
+                patch("dashboard_server.schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
+                patch("dashboard_server.build_project_snapshot_payload", side_effect=AssertionError("bootstrap waited for project discovery")),
+                TestClient(dashboard_server.app) as client,
+            ):
+                response = client.get("/api/app/bootstrap")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            projects = payload["health"]["projects"]
+            self.assertEqual(projects["projects"], [])
+            self.assertIn(projects["scan"]["status"], {"pending", "refreshing"})
+            self.assertTrue(schedule_refresh.called)
+        finally:
+            dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
+            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
+            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
+            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
+            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
+            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
+            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
+            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
+            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
+            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
+
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.get("/")
@@ -7004,6 +7053,96 @@ namespace VRCForge.Editor
             self.assertTrue(projects[0]["hasVrcForge"])
             self.assertTrue(projects[0]["hasUnityMcpPackage"])
             self.assertTrue(projects[0]["selected"])
+
+    def test_project_snapshot_refresh_updates_cache_for_fast_bootstrap(self) -> None:
+        originals = {
+            "roots": list(dashboard_server.DASHBOARD_STATE.project_roots),
+            "selected": dashboard_server.DASHBOARD_STATE.selected_project_path,
+            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
+            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
+            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
+            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
+            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
+            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
+            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
+            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
+            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
+            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
+            "cache_path": dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH,
+            "unity_status": dashboard_server.CURRENT_UNITY_STATUS,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "Cached Project"
+            stale_project = root / "Removed Project"
+            (project_dir / "ProjectSettings").mkdir(parents=True)
+            (project_dir / "Packages").mkdir(parents=True)
+            (project_dir / "Assets").mkdir(parents=True)
+            (project_dir / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1\n",
+                encoding="utf-8",
+            )
+            dashboard_server.DASHBOARD_STATE.project_roots = [root]
+            dashboard_server.DASHBOARD_STATE.selected_project_path = dashboard_server.normalize_path_string(str(project_dir))
+            dashboard_server.PROJECT_SNAPSHOT_CACHE = {
+                "selectedProjectPath": "",
+                "unityEditorPath": "",
+                "projects": [
+                    {
+                        "name": "Removed Project",
+                        "path": dashboard_server.normalize_path_string(str(stale_project)),
+                        "sources": ["cached-test"],
+                    }
+                ],
+            }
+            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
+            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
+            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
+            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
+            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
+            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
+            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
+            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
+            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
+            dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH = root / "project-cache.json"
+            dashboard_server.CURRENT_UNITY_STATUS = {"instances": []}
+            try:
+                with (
+                    patch("dashboard_server.discover_vcc_projects", return_value=[]),
+                    patch("dashboard_server.discover_alcom_projects", return_value=[]),
+                    patch("dashboard_server.discover_unity_hub_projects", return_value=[]),
+                    patch("dashboard_server.discover_running_unity_projects", return_value=[]),
+                    patch("dashboard_server.load_project_prefs", return_value={"customPaths": [], "hiddenPaths": []}),
+                ):
+                    refreshed = dashboard_server.refresh_project_snapshot_cache_sync()
+                    cached = dashboard_server.project_snapshot_payload(use_cache=True, refresh_async=False)
+
+                self.assertEqual(refreshed["scan"]["status"], "ready")
+                self.assertFalse(refreshed["scan"]["refreshing"])
+                self.assertEqual(cached["scan"]["status"], "ready")
+                self.assertTrue(cached["scan"]["cached"])
+                self.assertEqual(len(cached["projects"]), 1)
+                self.assertEqual(cached["projects"][0]["name"], "Cached Project")
+                self.assertEqual(cached["scan"]["addedCount"], 1)
+                self.assertEqual(cached["scan"]["removedCount"], 1)
+                self.assertEqual(cached["scan"]["addedProjects"][0]["name"], "Cached Project")
+                self.assertEqual(cached["scan"]["removedProjects"][0]["name"], "Removed Project")
+                self.assertTrue(dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH.is_file())
+            finally:
+                dashboard_server.DASHBOARD_STATE.project_roots = originals["roots"]
+                dashboard_server.DASHBOARD_STATE.selected_project_path = originals["selected"]
+                dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
+                dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
+                dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
+                dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
+                dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
+                dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
+                dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
+                dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
+                dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
+                dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
+                dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH = originals["cache_path"]
+                dashboard_server.CURRENT_UNITY_STATUS = originals["unity_status"]
 
     def test_discover_projects_merges_active_mcp_instance_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
