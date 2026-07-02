@@ -579,6 +579,8 @@ export type AppBootstrap = {
   approvals: AgentApproval[];
 };
 
+export type AppHealth = AppBootstrap["health"];
+
 export type AppSessionHandshake = {
   ok: boolean;
   authRequired?: boolean;
@@ -604,6 +606,10 @@ export function setAppSessionToken(token: string) {
 
 export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
   return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
+}
+
+export async function fetchAppHealth(endpoint: string): Promise<AppHealth> {
+  return requestJson<AppHealth>(`${endpoint}/api/health`, { timeoutMs: 20000 });
 }
 
 export async function fetchAppSession(endpoint: string): Promise<AppSessionHandshake> {

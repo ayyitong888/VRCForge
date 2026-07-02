@@ -205,17 +205,24 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["customPaths"], [])
 
-    def test_app_bootstrap_degrades_when_health_diagnostics_fail(self) -> None:
-        with patch("dashboard_server.build_full_health_payload", side_effect=RuntimeError("project scanner exploded")):
+    def test_app_bootstrap_does_not_wait_for_full_health_diagnostics(self) -> None:
+        async def idle_status_monitor() -> None:
+            await asyncio.sleep(60)
+
+        with (
+            patch("dashboard_server.build_full_health_payload", side_effect=AssertionError("bootstrap waited for full health")),
+            patch("dashboard_server.build_unity_status_snapshot", side_effect=AssertionError("bootstrap waited for Unity diagnostics")),
+            patch("dashboard_server.status_monitor_loop", side_effect=idle_status_monitor),
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.get("/api/app/bootstrap")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
+        self.assertTrue(payload["health"]["deferredDiagnostics"])
         self.assertEqual(payload["health"]["components"]["backend"]["status"], "ok")
-        self.assertEqual(payload["health"]["components"]["startupDegraded"]["status"], "warning")
-        self.assertIn("project scanner exploded", payload["health"]["projects"]["warning"])
+        self.assertIn(payload["health"]["components"]["unityMcpBridgeReachable"]["status"], {"unknown", "warning"})
 
     def test_app_bootstrap_degrades_when_agent_surfaces_fail(self) -> None:
         with (

@@ -1548,7 +1548,7 @@ def read_agentic_app_bootstrap() -> dict[str, Any]:
             "browserRequired": False,
             "legacyDashboardDebugOnly": True,
         },
-        "health": build_agentic_app_health(),
+        "health": build_bootstrap_app_health(),
         "apiConfig": serialize_app_api_config(),
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
@@ -3715,6 +3715,125 @@ def build_agentic_app_health() -> dict[str, Any]:
         }
     payload.pop("apiConfig", None)
     return payload
+
+
+def build_bootstrap_app_health() -> dict[str, Any]:
+    api_config = serialize_app_api_config()
+    agent_health = safe_agent_health()
+    unity_status = CURRENT_UNITY_STATUS
+    projects = project_snapshot_payload(use_cache=True, refresh_async=True)
+    dashboard_index = DASHBOARD_DIR / "index.html"
+    components: dict[str, dict[str, Any]] = {
+        "backend": health_component(
+            "ok",
+            "Backend process is responding.",
+            {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+        ),
+        "dashboardFiles": health_component(
+            "ok" if dashboard_index.exists() else "error",
+            "Dashboard files are present." if dashboard_index.exists() else "Dashboard index.html is missing.",
+            {"index": str(dashboard_index), "dashboardUrl": "http://127.0.0.1:8757/"},
+        ),
+        "configReadWrite": health_component(
+            "ok" if CONFIG_DIR.exists() and RUNTIME_SETTINGS_PATH.exists() else "warning",
+            "Config path is available." if CONFIG_DIR.exists() else "Config directory is not initialized yet.",
+            {"directory": str(CONFIG_DIR), "settingsPath": str(RUNTIME_SETTINGS_PATH)},
+        ),
+        "logsWrite": health_component("unknown", "Log write diagnostics are refreshing.", {"directory": str(LOG_DIR)}),
+        "artifactsWrite": health_component("unknown", "Artifact write diagnostics are refreshing.", {"directory": str(ARTIFACTS_DIR)}),
+        "selectedUnityProject": health_component(
+            "unknown" if DASHBOARD_STATE.selected_project_path else "warning",
+            "Selected Unity project diagnostics are refreshing." if DASHBOARD_STATE.selected_project_path else "No Unity project selected.",
+            {"path": DASHBOARD_STATE.selected_project_path},
+        ),
+        "unityPluginInstalled": health_component("unknown", "Unity plugin status is refreshing.", ""),
+        "mcpPackageConfigured": health_component("unknown", "Unity MCP package status is refreshing.", ""),
+        "providerConfigPresent": health_component(
+            "ok" if not api_config.get("apiKeyRequired") or bool(api_config.get("apiKeyPresent")) else "warning",
+            "Provider configuration is present." if not api_config.get("apiKeyRequired") or bool(api_config.get("apiKeyPresent")) else f"{api_config.get('providerLabel') or api_config.get('provider') or 'Provider'} API key is not configured.",
+            {"provider": api_config.get("provider"), "model": api_config.get("model")},
+        ),
+        "agentGateway": health_component(
+            "ok" if agent_health.get("enabled") else "warning",
+            "Agent Gateway is enabled." if agent_health.get("enabled") else "Agent Gateway is disabled until enabled in the Launcher.",
+            {
+                "mcpUrl": agent_health.get("mcpUrl"),
+                "restUrl": agent_health.get("restUrl"),
+                "pendingApprovalCount": agent_health.get("pendingApprovalCount"),
+                "allowRoslynAdvanced": agent_health.get("allowRoslynAdvanced"),
+            },
+        ),
+    }
+    if isinstance(unity_status, dict):
+        connected = bool(unity_status.get("connected"))
+        missing_tools = unity_status.get("missingRequiredVrcForgeTools") or []
+        vrcforge_tools_registered = bool(unity_status.get("vrcForgeToolsRegistered"))
+        components["unityMcpBridgeReachable"] = health_component(
+            "ok" if connected else "warning",
+            "Unity MCP bridge is reachable." if connected else "Unity MCP bridge is not reachable.",
+            unity_status if connected else unity_status.get("error") or unity_status,
+        )
+        components["unityMcpInstance"] = health_component(
+            "ok" if unity_status.get("unityInstanceRegistered") else "warning",
+            "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "MCP server is reachable, but no Unity instance is registered.",
+            {
+                "activeInstance": unity_status.get("activeInstance"),
+                "activeInstanceCount": unity_status.get("activeInstanceCount"),
+                "selectedInstanceMatched": unity_status.get("selectedInstanceMatched"),
+            },
+        )
+        components["vrcForgeUnityTools"] = health_component(
+            "ok" if vrcforge_tools_registered and not missing_tools else "warning",
+            "VRCForge Unity tools are registered."
+            if vrcforge_tools_registered and not missing_tools
+            else "Unity MCP is connected, but VRCForge Unity tools are missing or incomplete.",
+            {
+                "totalTools": (unity_status.get("tools") or {}).get("totalTools"),
+                "vrcForgeToolsCount": (unity_status.get("tools") or {}).get("vrcForgeToolsCount"),
+                "missingRequiredVrcForgeTools": missing_tools,
+            },
+        )
+    else:
+        components["unityMcpBridgeReachable"] = health_component("unknown", "Unity MCP bridge status is refreshing.", "")
+        components["unityMcpInstance"] = health_component("unknown", "Unity instance status is refreshing.", "")
+        components["vrcForgeUnityTools"] = health_component("unknown", "VRCForge Unity tool status is refreshing.", "")
+
+    return {
+        "ok": not any(component["status"] == "error" for component in components.values()),
+        "schema": "vrcforge.bootstrap_health.v1",
+        "deferredDiagnostics": True,
+        "version": app.version,
+        "portableMode": PORTABLE_MODE,
+        "projectRoot": str(ROOT_DIR),
+        "settingsPath": str(RUNTIME_SETTINGS_PATH),
+        "configPath": str(CONFIG_PATH),
+        "paths": {
+            "programDir": str(ROOT_DIR),
+            "userDataDir": str(USER_DATA_DIR),
+            "configDir": str(CONFIG_DIR),
+            "logsDir": str(LOG_DIR),
+            "artifactsDir": str(ARTIFACTS_DIR),
+            "dashboardDir": str(DASHBOARD_DIR),
+        },
+        "components": components,
+        "defaults": {
+            "provider": api_config.get("provider"),
+            "model": api_config.get("model"),
+            "baseUrl": api_config.get("base_url"),
+            "sourceMode": "unity_live_export",
+            "exportJson": str(DEFAULT_MVP_EXPORT_PATH),
+            "planJson": "",
+            "mockExecute": False,
+            "minConfidence": 0.65,
+            "unityHost": DASHBOARD_STATE.unity_host,
+            "unityPort": DASHBOARD_STATE.unity_port,
+            "unityInstance": DASHBOARD_STATE.unity_instance,
+        },
+        "state": serialize_dashboard_state(),
+        "projects": projects,
+        "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
+        "unityStatus": unity_status,
+    }
 
 
 def safe_agent_manifest() -> dict[str, Any]:

@@ -141,6 +141,7 @@ import {
   fetchAgentMemory,
   fetchAgentRuns,
   fetchAppSession,
+  fetchAppHealth,
   fetchAvatars,
   fetchChats,
   fetchProjectPrefs,
@@ -753,6 +754,7 @@ export default function App() {
   const stopRequestedRef = useRef(false);
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
+  const healthRefreshInFlightRef = useRef(false);
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
@@ -1255,6 +1257,16 @@ export default function App() {
 
   useEffect(() => {
     if (!runtimeConnected) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void refreshFullHealth(endpoint);
+    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [runtimeConnected, endpoint, activeProjectPath]);
+
+  useEffect(() => {
+    if (!runtimeConnected) {
       setSubAgentList(null);
       return;
     }
@@ -1418,6 +1430,21 @@ export default function App() {
       setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
     } catch {
       // Keep the current UI usable; explicit retry remains available.
+    }
+  }
+
+  async function refreshFullHealth(target = endpoint) {
+    if (healthRefreshInFlightRef.current) {
+      return;
+    }
+    healthRefreshInFlightRef.current = true;
+    try {
+      const health = await fetchAppHealth(target);
+      setBootstrap((current) => (current ? { ...current, health } : current));
+    } catch {
+      // Full diagnostics are secondary; bootstrap keeps the chat surface usable.
+    } finally {
+      healthRefreshInFlightRef.current = false;
     }
   }
 
