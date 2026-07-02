@@ -193,8 +193,6 @@ def resolve_app_session_token() -> str:
     token = os.environ.get("VRCFORGE_APP_SESSION_TOKEN", "").strip()
     if token:
         return token
-    if not PORTABLE_MODE:
-        return ""
     token_path = CONFIG_DIR / "app-session-token"
     try:
         if token_path.exists():
@@ -209,8 +207,14 @@ def resolve_app_session_token() -> str:
         return secrets.token_urlsafe(32)
 
 
+def app_auth_disabled_for_test_process() -> bool:
+    if os.environ.get("VRCFORGE_DISABLE_APP_AUTH", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    return "pytest" in sys.modules
+
+
 APP_SESSION_TOKEN = resolve_app_session_token()
-APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN)
+APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
@@ -1303,6 +1307,24 @@ async def authorize_local_requests(request: Request, call_next):
                 }
             )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
+    if not is_preflight and artifact_route_requires_auth(request):
+        try:
+            authenticate_artifact_request(request)
+        except HTTPException as exc:
+            status_code = exc.status_code
+            record_debug_interaction(
+                {
+                    "kind": "http",
+                    "direction": "inbound",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
+                    "error": str(exc.detail),
+                    "client": request.client.host if request.client else "",
+                }
+            )
+            return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     if not is_preflight and app_route_requires_auth(request):
         try:
             authenticate_app_request(request)
@@ -1449,6 +1471,27 @@ def read_health() -> dict[str, Any]:
         "projects": project_snapshot_payload(),
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
+    }
+
+
+@app.get("/api/app/session")
+def read_app_session(request: Request) -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=True)
+    return {
+        "ok": True,
+        "authRequired": APP_AUTH_REQUIRED,
+        "appSessionToken": APP_SESSION_TOKEN,
+    }
+
+
+@app.get("/api/app/session-challenge")
+def read_app_session_challenge(request: Request, nonce: str = "") -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=False)
+    nonce_value = normalize_app_session_challenge_nonce(nonce)
+    return {
+        "ok": True,
+        "schema": "vrcforge.app_session_challenge.v1",
+        "signature": app_session_challenge_signature(nonce_value),
     }
 
 
@@ -3736,6 +3779,8 @@ def summarize_debug_payload(value: Any) -> Any:
 def record_debug_interaction(entry: dict[str, Any]) -> None:
     if not debug_logging_enabled():
         return
+    if isinstance(entry.get("query"), dict):
+        entry = {**entry, "query": redact_sensitive(entry["query"])}
     safe_entry = summarize_debug_payload({"timestamp": utc_now_iso(), **entry})
     with LOCAL_LOG_LOCK:
         INTERACTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -9012,11 +9057,68 @@ def build_parameter_rollback_preview(avatar_path: str | None, snapshot_payload: 
     )
 
 
+ARTIFACT_URL_TTL_SECONDS = 24 * 60 * 60
+ARTIFACT_URL_MAX_FUTURE_SECONDS = 7 * 24 * 60 * 60
+ARTIFACT_URL_CACHE_BUCKET_SECONDS = 60 * 60
+
+
+def normalize_artifact_relative_path(value: str) -> str:
+    text = str(value or "").replace("\\", "/").strip().lstrip("/")
+    path = PurePosixPath(text)
+    parts = path.parts
+    if not parts or path.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("Artifact path is not a safe relative path.")
+    return path.as_posix()
+
+
+def artifact_url_expiry(now: float | None = None) -> int:
+    current = int(time.time() if now is None else now)
+    bucket = max(1, ARTIFACT_URL_CACHE_BUCKET_SECONDS)
+    return (current // bucket) * bucket + ARTIFACT_URL_TTL_SECONDS
+
+
+def artifact_signature(relative_path: str, expires: int) -> str:
+    message = f"{normalize_artifact_relative_path(relative_path)}\n{int(expires)}".encode("utf-8")
+    return hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def normalize_app_session_challenge_nonce(value: str) -> str:
+    text = str(value or "").strip()
+    if not 8 <= len(text) <= 128:
+        raise HTTPException(status_code=400, detail="Session challenge nonce is invalid.")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", text):
+        raise HTTPException(status_code=400, detail="Session challenge nonce is invalid.")
+    return text
+
+
+def app_session_challenge_signature(nonce: str) -> str:
+    if not APP_SESSION_TOKEN:
+        raise HTTPException(status_code=503, detail="App session token is unavailable.")
+    message = f"vrcforge.app-session.v1\n{nonce}".encode("utf-8")
+    return hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def signed_artifact_url(relative_path: str, cache_version: str = "") -> str:
+    relative = normalize_artifact_relative_path(relative_path)
+    expires = artifact_url_expiry()
+    signature = artifact_signature(relative, expires)
+    version = f"&artifact_v={cache_version}" if cache_version else ""
+    return f"/artifacts/{relative}?artifact_expires={expires}&artifact_sig={signature}{version}"
+
+
+def strip_url_query_fragment(value: str) -> str:
+    return str(value or "").split("?", 1)[0].split("#", 1)[0]
+
+
 def to_artifact_url(path_value: str) -> str:
     try:
         path = resolve_local_path(path_value)
         relative = path.relative_to(DASHBOARD_ARTIFACTS_DIR).as_posix()
-        return f"/artifacts/{relative}"
+        try:
+            cache_version = str(path.stat().st_mtime_ns)
+        except OSError:
+            cache_version = ""
+        return signed_artifact_url(relative, cache_version=cache_version)
     except Exception:
         return ""
 
@@ -9121,7 +9223,8 @@ def resolve_reference_image_path_value(path_value: str | None) -> Path | None:
         return None
 
     if path_value.startswith("/artifacts/"):
-        image_path = resolve_under(DASHBOARD_ARTIFACTS_DIR, path_value[len("/artifacts/"):])
+        clean_path = strip_url_query_fragment(path_value)
+        image_path = resolve_under(DASHBOARD_ARTIFACTS_DIR, clean_path[len("/artifacts/"):])
     else:
         image_path = resolve_local_path(path_value)
 
@@ -12060,7 +12163,7 @@ def authenticate_agent_approval_request(request: Request):
 
 
 APP_AUTH_PREFIXES = ("/api",)
-APP_AUTH_EXEMPT_PATHS = {"/api/health"}
+APP_AUTH_EXEMPT_PATHS = {"/api/health", "/api/app/session", "/api/app/session-challenge"}
 APP_AUTH_EXEMPT_PREFIXES = ("/api/agent",)
 APP_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
@@ -12076,6 +12179,11 @@ def app_route_requires_auth(request: Request) -> bool:
     return True
 
 
+def artifact_route_requires_auth(request: Request) -> bool:
+    path = request.url.path
+    return path == "/artifacts" or path.startswith("/artifacts/")
+
+
 def is_cors_preflight_request(request: Request) -> bool:
     return (
         request.method.upper() == "OPTIONS"
@@ -12089,6 +12197,43 @@ def authenticate_app_request(request: Request) -> None:
     origin = request.headers.get("origin", "").strip()
     supplied = extract_bearer_token(request)
     validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
+
+
+def validate_app_session_handshake_request(request: Request, *, dev_only: bool) -> None:
+    if dev_only and PORTABLE_MODE:
+        raise HTTPException(status_code=404, detail="Development session handshake is unavailable in packaged mode.")
+    client_host = request.client.host if request.client else ""
+    origin = request.headers.get("origin", "").strip()
+    if client_host not in APP_LOOPBACK_CLIENT_HOSTS:
+        raise HTTPException(status_code=403, detail="App session handshake only accepts loopback clients.")
+    if origin not in APP_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="App session handshake origin is not allowed.")
+    if not APP_SESSION_TOKEN:
+        raise HTTPException(status_code=503, detail="App session token is unavailable.")
+
+
+def authenticate_artifact_request(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    origin = request.headers.get("origin", "").strip()
+    if client_host not in APP_LOOPBACK_CLIENT_HOSTS:
+        raise HTTPException(status_code=403, detail="Artifact access only accepts loopback clients.")
+    if origin and origin not in APP_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="Artifact origin is not allowed.")
+    if not APP_AUTH_REQUIRED:
+        return
+    relative = request.url.path[len("/artifacts/") :] if request.url.path.startswith("/artifacts/") else ""
+    try:
+        relative = normalize_artifact_relative_path(relative)
+        expires = int(str(request.query_params.get("artifact_expires") or "0"))
+        supplied = str(request.query_params.get("artifact_sig") or "")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Artifact URL is missing or invalid.") from exc
+    now = int(time.time())
+    if expires < now or expires > now + ARTIFACT_URL_MAX_FUTURE_SECONDS:
+        raise HTTPException(status_code=401, detail="Artifact URL has expired.")
+    expected = artifact_signature(relative, expires)
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Artifact URL signature is invalid.")
 
 
 def validate_app_request_auth(client_host: str, origin: str, supplied_token: str) -> None:

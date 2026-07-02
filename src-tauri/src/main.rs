@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
@@ -457,6 +458,45 @@ fn generate_session_token() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        key_block[..digest.len()].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= key_block[index];
+        outer_pad[index] ^= key_block[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_hash);
+    outer
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn app_session_challenge_signature(token: &str, nonce: &str) -> String {
+    hmac_sha256_hex(
+        token.as_bytes(),
+        format!("vrcforge.app-session.v1\n{nonce}").as_bytes(),
+    )
+}
+
 fn backend_port_open() -> bool {
     let addrs = (BACKEND_HOST, BACKEND_PORT).to_socket_addrs();
     let Ok(mut addrs) = addrs else {
@@ -470,6 +510,9 @@ fn backend_port_open() -> bool {
 }
 
 fn existing_backend_accepts_session(token: &str) -> bool {
+    let Ok(nonce) = generate_session_token() else {
+        return false;
+    };
     let addrs = (BACKEND_HOST, BACKEND_PORT).to_socket_addrs();
     let Ok(mut addrs) = addrs else {
         return false;
@@ -483,20 +526,60 @@ fn existing_backend_accepts_session(token: &str) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
     let request = format!(
-        "GET /api/app/bootstrap HTTP/1.1\r\nHost: {BACKEND_HOST}:{BACKEND_PORT}\r\nOrigin: tauri://localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        "GET /api/app/session-challenge?nonce={nonce} HTTP/1.1\r\nHost: {BACKEND_HOST}:{BACKEND_PORT}\r\nOrigin: tauri://localhost\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    let mut response = [0u8; 64];
-    let Ok(size) = stream.read(&mut response) else {
+    let Some(response) = read_bounded_http_response(&mut stream, 8192) else {
         return false;
     };
-    parse_http_status_ok(&response[..size])
+    let Some(signature) = parse_session_challenge_signature(&response) else {
+        return false;
+    };
+    signature == app_session_challenge_signature(token, &nonce)
 }
 
 fn parse_http_status_ok(response: &[u8]) -> bool {
     response.starts_with(b"HTTP/1.1 200 ") || response.starts_with(b"HTTP/1.0 200 ")
+}
+
+fn read_bounded_http_response(stream: &mut TcpStream, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut response = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(size) => {
+                response.extend_from_slice(&buffer[..size]);
+                if response.len() >= max_bytes {
+                    break;
+                }
+            }
+            Err(_) if !response.is_empty() => break,
+            Err(_) => return None,
+        }
+    }
+    if response.is_empty() {
+        None
+    } else {
+        Some(response)
+    }
+}
+
+fn parse_session_challenge_signature(response: &[u8]) -> Option<String> {
+    if !parse_http_status_ok(response) {
+        return None;
+    }
+    let body_start = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)?;
+    let payload: serde_json::Value = serde_json::from_slice(&response[body_start..]).ok()?;
+    payload
+        .get("signature")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 fn wait_for_backend(timeout: Duration) -> bool {
@@ -573,7 +656,8 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_http_status_ok, prepare_runtime_files, try_ensure_agent_notes_file,
+        app_session_challenge_signature, hmac_sha256_hex, parse_http_status_ok,
+        parse_session_challenge_signature, prepare_runtime_files, try_ensure_agent_notes_file,
         validate_local_folder_to_open, validate_project_folder_to_open,
     };
     use std::{
@@ -651,6 +735,34 @@ mod tests {
         assert!(!parse_http_status_ok(b"HTTP/1.1 401 Unauthorized\r\n"));
         assert!(!parse_http_status_ok(b"HTTP/1.1 404 Not Found\r\n"));
         assert!(!parse_http_status_ok(b"not http"));
+    }
+
+    #[test]
+    fn hmac_sha256_matches_known_vector() {
+        assert_eq!(
+            hmac_sha256_hex(b"key", b"The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+        );
+        assert_ne!(
+            app_session_challenge_signature("session-token", "nonce-value"),
+            app_session_challenge_signature("session-token", "other-nonce"),
+        );
+    }
+
+    #[test]
+    fn session_challenge_parser_requires_success_json_signature() {
+        assert_eq!(
+            parse_session_challenge_signature(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"signature\":\"abc123\"}"
+            )
+            .as_deref(),
+            Some("abc123"),
+        );
+        assert!(parse_session_challenge_signature(
+            b"HTTP/1.1 401 Unauthorized\r\n\r\n{\"signature\":\"abc123\"}"
+        )
+        .is_none());
+        assert!(parse_session_challenge_signature(b"HTTP/1.1 200 OK\r\n\r\nnot-json").is_none());
     }
 
     #[test]

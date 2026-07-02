@@ -539,7 +539,7 @@ class DashboardServerTests(unittest.TestCase):
                     self.assertEqual(update.status_code, 200)
                     self.assertTrue(update.json()["debugLogging"])
 
-                    bootstrap = client.get("/api/app/bootstrap")
+                    bootstrap = client.get("/api/app/bootstrap?app_token=query-secret&artifact_sig=artifact-secret")
                     self.assertEqual(bootstrap.status_code, 200)
 
                 entries = [
@@ -553,6 +553,8 @@ class DashboardServerTests(unittest.TestCase):
                 serialized = json.dumps(entries).lower()
                 self.assertNotIn("approval_token", serialized)
                 self.assertNotIn("api_key", serialized)
+                self.assertNotIn("query-secret", serialized)
+                self.assertNotIn("artifact-secret", serialized)
             finally:
                 dashboard_server.DIAGNOSTICS_CONFIG_PATH = original_config_path
                 dashboard_server.INTERACTION_LOG_PATH = original_interaction_log_path
@@ -591,6 +593,7 @@ class DashboardServerTests(unittest.TestCase):
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "path": "/api/test",
                             "authorization": "Bearer secret-token",
+                            "query": {"app_token": "query-secret", "artifact_sig": "artifact-secret"},
                             "cwd": private_path,
                         },
                         ensure_ascii=False,
@@ -616,6 +619,8 @@ class DashboardServerTests(unittest.TestCase):
                 lowered = content.lower()
                 self.assertNotIn("provider-secret", lowered)
                 self.assertNotIn("secret-token", lowered)
+                self.assertNotIn("query-secret", lowered)
+                self.assertNotIn("artifact-secret", lowered)
                 self.assertNotIn(private_path.lower(), lowered)
                 self.assertNotIn("privateavatarprojects", lowered)
                 self.assertIn(".../paidavatar", lowered)
@@ -876,6 +881,33 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
+    def test_source_mode_app_session_handshake_is_local_and_lightweight(self) -> None:
+        original_portable = dashboard_server.PORTABLE_MODE
+        dashboard_server.PORTABLE_MODE = False
+        try:
+            with TestClient(dashboard_server.app) as client:
+                missing_origin = client.get("/api/app/session")
+                bad_origin = client.get("/api/app/session", headers={"Origin": "https://example.invalid"})
+                dev_session = client.get("/api/app/session", headers={"Origin": "http://127.0.0.1:1420"})
+                challenge = client.get(
+                    "/api/app/session-challenge",
+                    params={"nonce": "startup-nonce-1"},
+                    headers={"Origin": "tauri://localhost"},
+                )
+
+            self.assertEqual(missing_origin.status_code, 403)
+            self.assertEqual(bad_origin.status_code, 403)
+            self.assertEqual(dev_session.status_code, 200)
+            self.assertGreaterEqual(len(dev_session.json()["appSessionToken"]), 32)
+            self.assertEqual(challenge.status_code, 200)
+            self.assertEqual(
+                challenge.json()["signature"],
+                dashboard_server.app_session_challenge_signature("startup-nonce-1"),
+            )
+            self.assertNotIn("appSessionToken", challenge.json())
+        finally:
+            dashboard_server.PORTABLE_MODE = original_portable
+
     def test_app_cors_preflight_is_not_blocked_by_session_auth(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN
@@ -919,6 +951,35 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(missing_token_post.status_code, 401)
             self.assertEqual(authorized_get.status_code, 200)
         finally:
+            dashboard_server.APP_AUTH_REQUIRED = original_required
+            dashboard_server.APP_SESSION_TOKEN = original_token
+
+    def test_artifact_urls_require_scoped_signature(self) -> None:
+        original_required = dashboard_server.APP_AUTH_REQUIRED
+        original_token = dashboard_server.APP_SESSION_TOKEN
+        dashboard_server.APP_AUTH_REQUIRED = True
+        dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
+        artifact_path = dashboard_server.DASHBOARD_ARTIFACTS_DIR / "latest" / "signed-artifact-test.txt"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("artifact-ok", encoding="utf-8")
+        try:
+            signed_url = dashboard_server.to_artifact_url(str(artifact_path))
+            repeated_url = dashboard_server.to_artifact_url(str(artifact_path))
+            self.assertTrue(signed_url.startswith("/artifacts/latest/signed-artifact-test.txt?"))
+            self.assertIn("artifact_sig=", signed_url)
+            self.assertIn("artifact_v=", signed_url)
+            self.assertNotIn("app_token=", signed_url)
+            self.assertEqual(repeated_url, signed_url)
+
+            with TestClient(dashboard_server.app) as client:
+                unsigned = client.get("/artifacts/latest/signed-artifact-test.txt")
+                signed = client.get(signed_url)
+
+            self.assertEqual(unsigned.status_code, 401)
+            self.assertEqual(signed.status_code, 200)
+            self.assertEqual(signed.text, "artifact-ok")
+        finally:
+            artifact_path.unlink(missing_ok=True)
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
@@ -6728,7 +6789,8 @@ namespace VRCForge.Editor
             response = client.post("/api/vision/capture", json={"avatar_path": "Scene/HeroAvatar"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["imageUrl"], "/artifacts/latest/vision_capture.png")
+        self.assertTrue(response.json()["imageUrl"].startswith("/artifacts/latest/vision_capture.png?"))
+        self.assertIn("artifact_sig=", response.json()["imageUrl"])
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_capture_scene_view")
         self.assertFalse(params["setRotation"])
@@ -6959,7 +7021,9 @@ namespace VRCForge.Editor
     def test_to_artifact_url_maps_local_artifacts_path(self) -> None:
         path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
         url = dashboard_server.to_artifact_url(path)
-        self.assertEqual(url, "/artifacts/latest/vision_capture.png")
+        self.assertTrue(url.startswith("/artifacts/latest/vision_capture.png?"))
+        self.assertIn("artifact_expires=", url)
+        self.assertIn("artifact_sig=", url)
 
     def test_optimizer_proof_index_detail_and_screenshot_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

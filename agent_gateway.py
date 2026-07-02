@@ -8311,9 +8311,16 @@ def summarize_params(value: Any) -> dict[str, Any]:
             if str(key).lower()
             not in {
                 "token",
+                "app_token",
+                "artifact_sig",
+                "artifact_signature",
+                "artifact_token",
                 "authorization",
                 "api_key",
                 "apikey",
+                "access_token",
+                "approval_token",
+                "refresh_token",
                 "secret",
                 "user_constraints",
                 "userconstraints",
@@ -8325,7 +8332,20 @@ def summarize_params(value: Any) -> dict[str, Any]:
 
 def summarize_value(key: Any, value: Any) -> Any:
     key_text = str(key).lower()
-    if key_text in {"token", "authorization", "api_key", "apikey", "secret"}:
+    if key_text in {
+        "token",
+        "app_token",
+        "artifact_sig",
+        "artifact_signature",
+        "artifact_token",
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "approval_token",
+        "refresh_token",
+        "secret",
+    }:
         return "<redacted>"
     if isinstance(value, dict):
         return {"type": "object", "keys": sorted(str(item) for item in value.keys())[:20], "keyCount": len(value)}
@@ -8347,9 +8367,16 @@ def redact_sensitive(value: Any) -> Any:
             lowered = str(key).lower()
             if lowered in {
                 "token",
+                "app_token",
+                "artifact_sig",
+                "artifact_signature",
+                "artifact_token",
                 "authorization",
                 "api_key",
                 "apikey",
+                "access_token",
+                "approval_token",
+                "refresh_token",
                 "secret",
                 "user_constraints",
                 "userconstraints",

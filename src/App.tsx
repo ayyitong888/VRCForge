@@ -140,6 +140,7 @@ import {
   fetchAgentGoals,
   fetchAgentMemory,
   fetchAgentRuns,
+  fetchAppSession,
   fetchAvatars,
   fetchChats,
   fetchProjectPrefs,
@@ -1382,6 +1383,12 @@ export default function App() {
         await refreshWithRetry(targetEndpoint);
       } else {
         setBackendMessage("dev");
+        try {
+          const session = await fetchAppSession(targetEndpoint);
+          setAppSessionToken(session.appSessionToken || session.app_session_token || "");
+        } catch {
+          setAppSessionToken("");
+        }
         await refreshWithRetry(targetEndpoint);
       }
       return targetEndpoint;

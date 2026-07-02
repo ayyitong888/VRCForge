@@ -579,6 +579,13 @@ export type AppBootstrap = {
   approvals: AgentApproval[];
 };
 
+export type AppSessionHandshake = {
+  ok: boolean;
+  authRequired?: boolean;
+  appSessionToken?: string;
+  app_session_token?: string;
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -597,6 +604,10 @@ export function setAppSessionToken(token: string) {
 
 export async function fetchBootstrap(endpoint: string): Promise<AppBootstrap> {
   return requestJson<AppBootstrap>(`${endpoint}/api/app/bootstrap`);
+}
+
+export async function fetchAppSession(endpoint: string): Promise<AppSessionHandshake> {
+  return requestJson<AppSessionHandshake>(`${endpoint}/api/app/session`, { timeoutMs: 5000 });
 }
 
 export async function fetchWorkspaceDiff(endpoint: string, root = "", includePatch = false): Promise<WorkspaceDiffSummary> {
