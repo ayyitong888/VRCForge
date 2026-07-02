@@ -104,14 +104,19 @@
     "runStatusRejected": "拒否済み",
     "runStatusRevisionRequested": "修正待ち",
     "runStatusPending": "保留中",
-    "runStatusUnknown": "不明"
+    "runStatusUnknown": "不明",
+    "goals": "ゴール",
+    "memory": "メモリ",
+    "desktopActions": "デスクトップ操作"
   },
   "composerAction": {
     "addContext": "コンテキストを追加",
     "attach": "ファイルを追加",
     "attachDesc": "画像またはプロジェクトファイルをこのターンに追加します。",
     "screenshot": "Unity ビューをキャプチャ",
-    "screenshotDesc": "現在の Unity / アバターのスクリーンショットをこのターンに追加します。"
+    "screenshotDesc": "現在の Unity / アバターのスクリーンショットをこのターンに追加します。",
+    "desktop": "デスクトップ救援",
+    "desktopDesc": "デスクトップ救援/Computer Use を明示的に依頼します。通常のチャットからは自動開始しません。"
   },
   "notice": {
     "projectNotGit": "選択中の Unity プロジェクトは Git リポジトリではありません。VRCForge アプリのコード変更を表示しています。",
@@ -119,7 +124,9 @@
     "browserContext": "ブラウザーコンテキストは右サイドバーに表示されます。アプリ内ブラウザー操作は明示的な Browser スキルから使用してください。",
     "screenshotSelected": "スクリーンショットスキルを選択しました。slash コマンドを確認して送信するとキャプチャします。",
     "annotationUnavailable": "注釈入口が選択されましたが、このビルドでは注釈キャプチャは未接続です。",
-    "desktopUnavailable": "Desktop Rescue / Computer Use は明示的な起動のみです。現在はスキル未接続のため使用できません。"
+    "desktopUnavailable": "Desktop Rescue / Computer Use は明示的な起動のみです。現在はスキル未接続のため使用できません。",
+    "desktopActionExecuted": "{{action}} を実行しました",
+    "desktopActionRecorded": "{{action}} を記録しました: {{status}}。"
   },
   "settings": {
     "title": "設定",
@@ -241,7 +248,10 @@
     "retryingMessage": "そのメッセージの直前から再送信しています。",
     "regeneratingMessage": "直前のユーザーメッセージから再生成しています。",
     "noPreviousUserMessage": "再生成に使える直前のユーザーメッセージが見つかりません。",
-    "cannotActionWhileRunning": "タスク実行中です。履歴を変更する前に停止するか完了を待ってください。"
+    "cannotActionWhileRunning": "タスク実行中です。履歴を変更する前に停止するか完了を待ってください。",
+    "slashGoal": "長期ゴールを作成",
+    "slashMemory": "明示的なメモリを保存",
+    "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任"
   },
   "agent": {
     "modeLabel": {
@@ -858,5 +868,13 @@
     "payloadLimitError": "ファイルが {{limit}} のペイロード上限を超えています。",
     "readTextFailed": "テキストペイロードを読み取れませんでした。",
     "readFileFailed": "ファイルペイロードを読み取れませんでした。"
+  },
+  "goal": {
+    "empty": "/goal の後にゴールを書いてください。",
+    "created": "ゴールを保存しました。"
+  },
+  "memory": {
+    "empty": "/memory の後に記憶したい内容を書いてください。",
+    "created": "メモリを保存しました。"
   }
 }

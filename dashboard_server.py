@@ -723,6 +723,63 @@ class AgentRuntimeQueueRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentDesktopActionRequest(BaseModel):
+    action: Literal["screenshot", "annotation", "browser", "desktop_rescue", "computer_use"]
+    prompt: str = ""
+    session_id: str | None = Field(default=None, alias="sessionId")
+    client_turn_id: str | None = Field(default=None, alias="clientTurnId")
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalCreateRequest(BaseModel):
+    title: str = ""
+    goal: str = ""
+    summary: str = ""
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalUpdateRequest(BaseModel):
+    status: Literal["active", "paused", "completed", "cancelled"]
+    summary: str = ""
+    note: str = ""
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentMemoryCreateRequest(BaseModel):
+    text: str = ""
+    content: str = ""
+    scope: Literal["user", "project"] = "project"
+    kind: str = "preference"
+    source: str = "user"
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentMemoryDeleteRequest(BaseModel):
+    reason: str = ""
+
+
+class AgentMemoryClearRequest(BaseModel):
+    scope: Literal["user", "project"] | str = ""
+    reason: str = "clear"
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentApprovalRevisionRequest(BaseModel):
     reason: str = ""
     note: str = ""
@@ -1148,7 +1205,7 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
         "package_install_diagnosis": lambda payload, cancel_event: run_package_install_sub_agent(payload, cancel_event),
         "outfit_import_plan_review": lambda payload, cancel_event: run_outfit_import_plan_sub_agent(payload, cancel_event),
     },
-    max_concurrent=3,
+    max_concurrent=5,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -1688,6 +1745,119 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
     await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=queue_request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/desktop-actions")
+def app_agent_desktop_actions(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_desktop_actions(limit=limit, session_id=sessionId, project_root=projectRoot)
+
+
+@app.post("/api/app/agent/desktop-actions")
+async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.request_desktop_action(
+            {
+                "action": request.action,
+                "prompt": request.prompt,
+                "sessionId": request.session_id,
+                "clientTurnId": request.client_turn_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+                "params": request.params,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/goals")
+def app_agent_goals(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
+
+
+@app.post("/api/app/agent/goals")
+async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.create_agent_goal(
+            {
+                "title": request.title,
+                "goal": request.goal,
+                "summary": request.summary,
+                "sessionId": request.session_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.post("/api/app/agent/goals/{goal_id}")
+async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.update_agent_goal(
+            goal_id,
+            {
+                "status": request.status,
+                "summary": request.summary,
+                "note": request.note,
+                "sessionId": request.session_id,
+                "projectRoot": request.project_root,
+            },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/memory")
+def app_agent_memory(limit: int = 50, projectRoot: str = "", scope: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_agent_memory(limit=limit, project_root=projectRoot, scope=scope)
+
+
+@app.post("/api/app/agent/memory")
+async def app_create_agent_memory(request: AgentMemoryCreateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.create_agent_memory(
+            {
+                "text": request.text,
+                "content": request.content,
+                "scope": request.scope,
+                "kind": request.kind,
+                "source": request.source,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30, project_root=request.project_root or ""))
+    return payload
+
+
+@app.delete("/api/app/agent/memory/{memory_id}")
+async def app_delete_agent_memory(memory_id: str, request: AgentMemoryDeleteRequest | None = None) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.delete_agent_memory(memory_id, {"reason": request.reason if request else ""})
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30))
+    return payload
+
+
+@app.post("/api/app/agent/memory/clear")
+async def app_clear_agent_memory(request: AgentMemoryClearRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.clear_agent_memory({"scope": request.scope, "reason": request.reason, "projectRoot": request.project_root})
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30, project_root=request.project_root or ""))
     return payload
 
 

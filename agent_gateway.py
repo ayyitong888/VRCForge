@@ -236,6 +236,9 @@ SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(
 RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
 RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
+AGENT_MEMORY_MAX_ITEMS = 120
+AGENT_GOAL_MAX_ITEMS = 60
+AGENT_DESKTOP_ACTION_MAX_ITEMS = 120
 
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
@@ -1496,6 +1499,18 @@ class AgentGateway:
             self._runtime_sessions.clear()
             self._cancelled_runtime_turns.clear()
 
+    @property
+    def agent_memory_log_path(self) -> Path:
+        return self.audit_dir / "agent-memory.jsonl"
+
+    @property
+    def agent_goal_log_path(self) -> Path:
+        return self.audit_dir / "agent-goals.jsonl"
+
+    @property
+    def desktop_action_log_path(self) -> Path:
+        return self.audit_dir / "desktop-actions.jsonl"
+
     def register_tool(
         self,
         name: str,
@@ -1950,9 +1965,12 @@ class AgentGateway:
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
         history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
         attachments = normalize_runtime_attachments(params.get("attachments"))
+        params["_runtimeAttachments"] = attachments
         if history:
             self._restore_runtime_session(session_id, history, now)
         observe = self.runtime_observe(session_id=session_id)
+        if attachments:
+            observe["turn"] = {"attachments": attachments}
         self.llm_reasoning_trace = {}
         self._append_runtime_run(
             {
@@ -2384,6 +2402,12 @@ class AgentGateway:
         user_constraints = self.read_user_constraints()
         pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
         session = self._runtime_sessions.get(session_id or "")
+        goals = [
+            goal
+            for goal in self.list_agent_goals(limit=8, session_id=session_id or "").get("goals", [])
+            if str(goal.get("status") or "") in {"active", "paused"}
+        ]
+        memories = self.list_agent_memory(limit=12).get("memories", [])
         return {
             "ok": True,
             "runtime": {
@@ -2408,6 +2432,32 @@ class AgentGateway:
                 "count": len(self.build_manifest().get("tools", [])),
             },
             "skills": summarize_skill_registry(self.build_skill_registry()),
+            "goals": {
+                "count": len(goals),
+                "items": [
+                    {
+                        "goalId": goal.get("goalId"),
+                        "status": goal.get("status"),
+                        "title": goal.get("title"),
+                        "summary": goal.get("summary"),
+                        "projectRoot": goal.get("projectRoot"),
+                    }
+                    for goal in goals[:8]
+                ],
+            },
+            "memory": {
+                "count": len(memories),
+                "items": [
+                    {
+                        "memoryId": memory.get("memoryId"),
+                        "scope": memory.get("scope"),
+                        "kind": memory.get("kind"),
+                        "text": memory.get("text"),
+                        "projectRoot": memory.get("projectRoot"),
+                    }
+                    for memory in memories[:12]
+                ],
+            },
             "session": {
                 "id": session_id or "",
                 "turnCount": len(session.get("turns", [])) if isinstance(session, dict) else 0,
@@ -2581,6 +2631,187 @@ class AgentGateway:
             "events": [redact_sensitive(item) for item in filtered_events[-max(1, min(limit, 200)):]],
             "count": len(runs),
         }
+
+    def request_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        action = re.sub(r"[^a-z0-9_.-]+", "_", str(params.get("action") or "").strip().lower()).strip("_")
+        if action not in {"screenshot", "annotation", "browser", "desktop_rescue", "computer_use"}:
+            raise AgentGatewayError("Unsupported desktop action.", status_code=400)
+        project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        client_turn_id = str(params.get("clientTurnId") or params.get("client_turn_id") or "").strip()
+        prompt = summarize_text(str(params.get("prompt") or params.get("message") or ""), 800)
+        status = "requested"
+        result: dict[str, Any] = {}
+        error = ""
+        if action == "screenshot" and "vrcforge_capture_screenshot" in self._tools:
+            try:
+                result = self.call_tool("vrcforge_capture_screenshot", ensure_dict(params.get("params")), agent_name="desktop-agent")
+                status = "executed" if result.get("ok") else "failed"
+                error = str(result.get("error") or "")
+            except Exception as exc:  # noqa: BLE001 - explicit desktop actions should return actionable errors.
+                status = "failed"
+                error = str(exc)
+        elif action in {"desktop_rescue", "computer_use"}:
+            status = "unavailable"
+            error = "Desktop control bridge is not connected. Launch this action from a configured desktop skill/provider."
+        else:
+            status = "recorded"
+        event = {
+            "event": "desktop_action",
+            "status": status,
+            "action": action,
+            "sessionId": session_id,
+            "clientTurnId": client_turn_id,
+            "projectRoot": project_root,
+            "promptSummary": prompt,
+            "resultSummary": summarize_params(result) if result else {},
+            "error": error,
+        }
+        self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
+        return {"ok": status not in {"failed"}, "schema": "vrcforge.desktop_action.v1", "status": status, "action": action, "event": redact_sensitive(event), "result": redact_sensitive(result), "error": error}
+
+    def list_desktop_actions(self, *, limit: int = 50, session_id: str = "", project_root: str = "") -> dict[str, Any]:
+        events = self._read_jsonl(self.desktop_action_log_path, limit=max(limit, 50))
+        filtered = []
+        for event in events:
+            if session_id and str(event.get("sessionId") or "") != session_id:
+                continue
+            if project_root and str(event.get("projectRoot") or "") not in {"", project_root}:
+                continue
+            filtered.append(redact_sensitive(event))
+        filtered = filtered[-max(1, min(limit, AGENT_DESKTOP_ACTION_MAX_ITEMS)) :]
+        filtered.reverse()
+        return {"ok": True, "schema": "vrcforge.desktop_actions.v1", "actions": filtered, "count": len(filtered)}
+
+    def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        title = summarize_text(str(params.get("title") or params.get("goal") or "").strip(), 240)
+        if not title:
+            raise AgentGatewayError("Goal title is required.", status_code=400)
+        goal_id = f"goal_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        event = {
+            "event": "goal_created",
+            "status": "active",
+            "goalId": goal_id,
+            "title": title,
+            "summary": summarize_text(str(params.get("summary") or ""), 1000),
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+            "approvalPolicy": "uses_vrcforge_approval_checkpoint_rollback",
+        }
+        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
+        return {"ok": True, "goal": self._project_agent_goals()[goal_id]}
+
+    def update_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        goal_id = str(goal_id or "").strip()
+        if not goal_id:
+            raise AgentGatewayError("goalId is required.", status_code=400)
+        status = str(params.get("status") or "").strip().lower()
+        allowed = {"active", "paused", "completed", "cancelled"}
+        if status not in allowed:
+            raise AgentGatewayError("Goal status must be active, paused, completed, or cancelled.", status_code=400)
+        current = self._project_agent_goals()
+        if goal_id not in current:
+            raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
+        event = {
+            "event": "goal_updated",
+            "status": status,
+            "goalId": goal_id,
+            "summary": summarize_text(str(params.get("summary") or params.get("note") or ""), 1000),
+            "projectRoot": str(params.get("projectRoot") or current[goal_id].get("projectRoot") or ""),
+            "sessionId": str(params.get("sessionId") or current[goal_id].get("sessionId") or ""),
+        }
+        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
+        return {"ok": True, "goal": self._project_agent_goals()[goal_id]}
+
+    def list_agent_goals(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
+        goals = list(self._project_agent_goals().values())
+        if project_root:
+            goals = [goal for goal in goals if str(goal.get("projectRoot") or "") in {"", project_root}]
+        if session_id:
+            goals = [goal for goal in goals if str(goal.get("sessionId") or "") in {"", session_id}]
+        goals.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        goals = goals[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        return {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
+
+    def create_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        text = summarize_text(str(params.get("text") or params.get("content") or "").strip(), 2000)
+        if not text:
+            raise AgentGatewayError("Memory text is required.", status_code=400)
+        scope = str(params.get("scope") or "project").strip().lower()
+        if scope not in {"user", "project"}:
+            raise AgentGatewayError("Memory scope must be user or project.", status_code=400)
+        memory_id = f"mem_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        event = {
+            "event": "memory_created",
+            "status": "active",
+            "memoryId": memory_id,
+            "scope": scope,
+            "kind": summarize_text(str(params.get("kind") or "preference"), 80),
+            "text": text,
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+            "source": summarize_text(str(params.get("source") or "user"), 120),
+        }
+        self._append_jsonl(self.agent_memory_log_path, "vrcforge.agent_memory.v1", event)
+        return {"ok": True, "memory": self._project_agent_memory()[memory_id]}
+
+    def delete_agent_memory(self, memory_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        memory_id = str(memory_id or "").strip()
+        if not memory_id:
+            raise AgentGatewayError("memoryId is required.", status_code=400)
+        current = self._project_agent_memory(include_deleted=True)
+        if memory_id not in current:
+            raise AgentGatewayError(f"Memory was not found: {memory_id}", status_code=404)
+        event = {
+            "event": "memory_deleted",
+            "status": "deleted",
+            "memoryId": memory_id,
+            "reason": summarize_text(str(params.get("reason") or ""), 500),
+        }
+        self._append_jsonl(self.agent_memory_log_path, "vrcforge.agent_memory.v1", event)
+        return {"ok": True, "memory": self._project_agent_memory(include_deleted=True)[memory_id]}
+
+    def clear_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        project_root = str(params.get("projectRoot") or params.get("project_root") or "").strip()
+        scope = str(params.get("scope") or "").strip().lower()
+        current = self._project_agent_memory()
+        cleared = 0
+        for memory_id, memory in current.items():
+            if project_root and str(memory.get("projectRoot") or "") != project_root:
+                continue
+            if scope and str(memory.get("scope") or "") != scope:
+                continue
+            self._append_jsonl(
+                self.agent_memory_log_path,
+                "vrcforge.agent_memory.v1",
+                {
+                    "event": "memory_deleted",
+                    "status": "deleted",
+                    "memoryId": memory_id,
+                    "reason": summarize_text(str(params.get("reason") or "clear"), 500),
+                },
+            )
+            cleared += 1
+        return {"ok": True, "cleared": cleared}
+
+    def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> dict[str, Any]:
+        memories = list(self._project_agent_memory().values())
+        if project_root:
+            memories = [
+                memory
+                for memory in memories
+                if str(memory.get("scope") or "") == "user" or str(memory.get("projectRoot") or "") in {"", project_root}
+            ]
+        if scope:
+            memories = [memory for memory in memories if str(memory.get("scope") or "") == scope]
+        memories.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        memories = memories[: max(1, min(limit, AGENT_MEMORY_MAX_ITEMS))]
+        return {"ok": True, "schema": "vrcforge.agent_memory_list.v1", "memories": [redact_sensitive(memory) for memory in memories], "count": len(memories)}
 
     def classify_shell(self, params: dict[str, Any] | str) -> dict[str, Any]:
         if isinstance(params, str):
@@ -5684,6 +5915,81 @@ class AgentGateway:
         with self.runtime_run_log_path.open("a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
 
+    def _append_jsonl(self, path: Path, schema: str, entry: dict[str, Any]) -> dict[str, Any]:
+        safe_entry = redact_sensitive(
+            {
+                "schema": schema,
+                "id": f"evt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
+                "createdAt": utc_now_iso(),
+                "updatedAt": utc_now_iso(),
+                **entry,
+            }
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+        return safe_entry
+
+    def _read_jsonl(self, path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        events: list[dict[str, Any]] = []
+        for line in lines[-max(1, min(limit, 5000)) :]:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                events.append(payload)
+        return events
+
+    def _project_agent_goals(self) -> dict[str, dict[str, Any]]:
+        goals: dict[str, dict[str, Any]] = {}
+        for event in self._read_jsonl(self.agent_goal_log_path, limit=2000):
+            goal_id = str(event.get("goalId") or "").strip()
+            if not goal_id:
+                continue
+            previous = goals.get(goal_id, {})
+            merged = {
+                **previous,
+                **event,
+                "id": goal_id,
+                "goalId": goal_id,
+                "createdAt": previous.get("createdAt") or event.get("createdAt"),
+                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+            }
+            if event.get("title"):
+                merged["title"] = event.get("title")
+            goals[goal_id] = merged
+        return goals
+
+    def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
+        memories: dict[str, dict[str, Any]] = {}
+        deleted: set[str] = set()
+        for event in self._read_jsonl(self.agent_memory_log_path, limit=4000):
+            memory_id = str(event.get("memoryId") or "").strip()
+            if not memory_id:
+                continue
+            if str(event.get("status") or "") == "deleted" or event.get("event") == "memory_deleted":
+                deleted.add(memory_id)
+            previous = memories.get(memory_id, {})
+            merged = {
+                **previous,
+                **event,
+                "id": memory_id,
+                "memoryId": memory_id,
+                "createdAt": previous.get("createdAt") or event.get("createdAt"),
+                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+            }
+            memories[memory_id] = merged
+        if include_deleted:
+            return memories
+        return {memory_id: memory for memory_id, memory in memories.items() if memory_id not in deleted}
+
     def _read_runtime_run_events(self, *, limit: int = 400) -> list[dict[str, Any]]:
         if not self.runtime_run_log_path.exists():
             return []
@@ -6407,7 +6713,7 @@ class AgentGateway:
         if plan_fn is None:
             return None
         try:
-            prompt = self._build_llm_plan_prompt(message, history, loop_state or [])
+            prompt = self._build_llm_plan_prompt(self._message_with_runtime_context(message, observe), history, loop_state or [], observe=observe)
             raw_response = plan_fn(prompt)
             payload = parse_llm_plan_response(raw_response)
         except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
@@ -6479,12 +6785,42 @@ class AgentGateway:
             "nextStep": "done",
         }
 
+    def _message_with_runtime_context(self, message: str, observe: dict[str, Any]) -> str:
+        lines = [message]
+        attachments = ensure_list((observe.get("turn") or {}).get("attachments"))
+        if attachments:
+            lines.append("\nCurrent attachments:")
+            for attachment in attachments[:RUNTIME_ATTACHMENT_MAX_ITEMS]:
+                if not isinstance(attachment, dict):
+                    continue
+                name = summarize_text(str(attachment.get("name") or "attachment"), 120)
+                kind = str(attachment.get("payloadKind") or "metadata")
+                if attachment.get("text"):
+                    lines.append(f"- {name} (text): {summarize_text(str(attachment.get('text') or ''), 1200)}")
+                else:
+                    lines.append(f"- {name} ({kind}, {attachment.get('type') or 'file'}, {attachment.get('size') or 0} bytes)")
+        memories = ensure_list(ensure_dict(observe.get("memory")).get("items"))
+        if memories:
+            lines.append("\nExplicit memory (user-visible and user-clearable):")
+            for memory in memories[:12]:
+                if isinstance(memory, dict) and memory.get("text"):
+                    lines.append(f"- [{memory.get('scope')}/{memory.get('kind')}] {summarize_text(str(memory.get('text')), 500)}")
+        goals = ensure_list(ensure_dict(observe.get("goals")).get("items"))
+        if goals:
+            lines.append("\nLong-running goals:")
+            for goal in goals[:8]:
+                if isinstance(goal, dict) and goal.get("title"):
+                    lines.append(f"- [{goal.get('status')}] {summarize_text(str(goal.get('title')), 240)} {summarize_text(str(goal.get('summary') or ''), 360)}")
+        return "\n".join(lines)
+
     def _build_llm_plan_prompt(
         self,
         message: str,
         history: list[dict[str, Any]],
         loop_state: list[dict[str, Any]] | None = None,
+        observe: dict[str, Any] | None = None,
     ) -> str:
+        observe = observe or {}
         tool_lines: list[str] = []
         for tool in self._tools.values():
             flags = []
@@ -7385,15 +7721,21 @@ def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:
         if data_url:
             item["dataUrl"] = data_url[:RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS]
             item["payloadKind"] = "data_url"
+            item["payloadHash"] = stable_hash(data_url)
+            item["replayable"] = True
             if len(data_url) > RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS:
                 item["truncated"] = True
         elif text:
             item["text"] = text[:RUNTIME_ATTACHMENT_TEXT_MAX_CHARS]
             item["payloadKind"] = "text"
+            item["payloadHash"] = stable_hash(text)
+            item["replayable"] = True
             if len(text) > RUNTIME_ATTACHMENT_TEXT_MAX_CHARS:
                 item["truncated"] = True
         else:
             item["payloadKind"] = "metadata"
+            item["payloadHash"] = stable_hash(json.dumps({k: item.get(k) for k in ("name", "type", "size")}, sort_keys=True))
+            item["replayable"] = False
         attachments.append(item)
     return attachments
 

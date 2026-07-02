@@ -69,6 +69,9 @@ import {
   AdjustmentCheckpoint,
   AgentCheckpoint,
   AgentCheckpointPreview,
+  AgentDesktopAction,
+  AgentGoal,
+  AgentMemory,
   AgentRuntimeRun,
   AgentRuntimeResponse,
   AgentReasoningTrace,
@@ -105,6 +108,8 @@ import {
   checkSkills,
   compactAgentHistory,
   cancelSubAgent,
+  createAgentGoal,
+  createAgentMemory,
   createSubAgent,
   createSkill,
   deleteSkill,
@@ -131,6 +136,9 @@ import {
   PermissionState,
   blockSkillPackage,
   fetchAgentNotes,
+  fetchAgentDesktopActions,
+  fetchAgentGoals,
+  fetchAgentMemory,
   fetchAgentRuns,
   fetchAvatars,
   fetchChats,
@@ -149,6 +157,7 @@ import {
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
   recordAgentRunQueued,
+  requestAgentDesktopAction,
   requestAgentRunCancel,
   requestApprovalRevision,
   requestOptimizationApply,
@@ -658,6 +667,10 @@ export default function App() {
   const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
   const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
+  const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
+  const [agentGoals, setAgentGoals] = useState<AgentGoal[]>([]);
+  const [agentMemory, setAgentMemory] = useState<AgentMemory[]>([]);
+  const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
@@ -761,7 +774,13 @@ export default function App() {
   const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
   const skillCount = skillRegistry?.count ?? skills.length;
   const slashCommands = useMemo(() => {
-    const list: Array<{ name: string; title: string }> = [{ name: "compact", title: t("chat.slashCompact") }];
+    const list: Array<{ name: string; title: string }> = [
+      { name: "compact", title: t("chat.slashCompact") },
+      { name: "goal", title: t("chat.slashGoal") },
+      { name: "memory", title: t("chat.slashMemory") },
+      { name: "delegate", title: t("chat.slashDelegate") },
+      { name: "desktop", title: t("composerAction.desktop") },
+    ];
     for (const skill of skills) {
       if (!skill.name || skill.enabled === false || skill.available === false || skill.userInvocable === false) {
         continue;
@@ -801,6 +820,11 @@ export default function App() {
           description: t("composerAction.screenshotDesc"),
         });
       }
+      actions.push({
+        id: "desktop",
+        label: t("composerAction.desktop"),
+        description: t("composerAction.desktopDesc"),
+      });
       return actions;
     },
     [t, vrcForgeSkillsReady],
@@ -1417,19 +1441,33 @@ export default function App() {
     if (!runtimeConnected) {
       setRuntimeRuns([]);
       setRuntimeRunsError("");
+      setDesktopActions([]);
+      setAgentGoals([]);
+      setAgentMemory([]);
+      setWorkspaceStateError("");
       return;
     }
     try {
-      const payload = await fetchAgentRuns(target, {
-        limit: 40,
-        sessionId: sessionId || undefined,
-        projectRoot: activeProjectPath || undefined,
-      });
+      const [payload, actionsPayload, goalsPayload, memoryPayload] = await Promise.all([
+        fetchAgentRuns(target, {
+          limit: 40,
+          sessionId: sessionId || undefined,
+          projectRoot: activeProjectPath || undefined,
+        }),
+        fetchAgentDesktopActions(target, { limit: 8, sessionId: sessionId || undefined, projectRoot: activeProjectPath || undefined }),
+        fetchAgentGoals(target, { limit: 8, sessionId: sessionId || undefined, projectRoot: activeProjectPath || undefined }),
+        fetchAgentMemory(target, { limit: 8, projectRoot: activeProjectPath || undefined }),
+      ]);
       setRuntimeRuns(payload.runs ?? []);
+      setDesktopActions(actionsPayload.actions ?? []);
+      setAgentGoals(goalsPayload.goals ?? []);
+      setAgentMemory(memoryPayload.memories ?? []);
       setRuntimeRunsError("");
+      setWorkspaceStateError("");
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setRuntimeRunsError(message);
+      setWorkspaceStateError(message);
       if (showError) {
         setRuntimeNotice(message);
       }
@@ -1641,7 +1679,7 @@ export default function App() {
     setRightRuntimeSectionsCollapsed((current) => ({ ...current, [section]: !current[section] }));
   }
 
-  function runExplicitWorkspaceAction(actionId: ComposerActionId) {
+  async function runExplicitWorkspaceAction(actionId: ComposerActionId) {
     const action = composerActions.find((item) => item.id === actionId);
     setRightSidebarCollapsed(false);
     setRuntimeNotice("");
@@ -1654,21 +1692,37 @@ export default function App() {
       setError(reason);
       return;
     }
-    if (actionId === "browser") {
-      setRuntimeNotice(t("notice.browserContext"));
-      return;
-    }
-    if (actionId === "screenshot") {
-      setInput((value) => (value.trim() ? `${value.trim()}\n/vrcforge_capture_screenshot ` : "/vrcforge_capture_screenshot "));
-      setRuntimeNotice(t("notice.screenshotSelected"));
-      return;
-    }
-    if (actionId === "annotation") {
-      setRuntimeNotice(t("notice.annotationUnavailable"));
-      return;
-    }
-    if (actionId === "desktop") {
-      setRuntimeNotice(t("notice.desktopUnavailable"));
+    const desktopAction =
+      actionId === "desktop"
+        ? "computer_use"
+        : actionId === "screenshot" || actionId === "annotation" || actionId === "browser"
+          ? actionId
+          : "";
+    if (desktopAction) {
+      try {
+        const payload = await requestAgentDesktopAction(endpoint, {
+          action: desktopAction,
+          prompt: input.trim(),
+          sessionId: sessionId || undefined,
+          clientTurnId: currentTurn?.clientTurnId,
+          projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+          projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
+          params: desktopAction === "screenshot" ? { projectPath: activeChat?.projectPath || activeProjectPath || undefined } : {},
+        });
+        const message =
+          payload.status === "executed"
+            ? t("notice.desktopActionExecuted", { action: action.label })
+            : payload.error || t("notice.desktopActionRecorded", { action: action.label, status: payload.status || "recorded" });
+        setRuntimeNotice(message);
+        if (payload.event) {
+          setDesktopActions((items) => [payload.event as AgentDesktopAction, ...items].slice(0, 8));
+        }
+        void refreshRuntimeRuns(false);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setRuntimeNotice(message);
+        setError(message);
+      }
     }
   }
 
@@ -1719,6 +1773,52 @@ export default function App() {
     }));
   }
 
+  async function createGoalFromSlash(raw: string) {
+    const title = raw.replace(/^\/goal\s*/i, "").trim();
+    if (!title) {
+      setError(t("goal.empty"));
+      return;
+    }
+    try {
+      const payload = await createAgentGoal(endpoint, {
+        title,
+        sessionId: sessionId || undefined,
+        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+        projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
+      });
+      setAgentGoals((items) => [payload.goal, ...items.filter((item) => item.goalId !== payload.goal.goalId)].slice(0, 8));
+      setRuntimeNotice(t("goal.created"));
+      setInput("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+    }
+  }
+
+  async function createMemoryFromSlash(raw: string) {
+    const text = raw.replace(/^\/memory\s*/i, "").trim();
+    if (!text) {
+      setError(t("memory.empty"));
+      return;
+    }
+    try {
+      const payload = await createAgentMemory(endpoint, {
+        text,
+        scope: activeProjectPath ? "project" : "user",
+        kind: "preference",
+        source: "slash",
+        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+        projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
+      });
+      setAgentMemory((items) => [payload.memory, ...items.filter((item) => item.memoryId !== payload.memory.memoryId)].slice(0, 8));
+      setRuntimeNotice(t("memory.created"));
+      setInput("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+    }
+  }
+
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
     const message = input.trim();
@@ -1732,6 +1832,25 @@ export default function App() {
     }
     if (message === "/compact" || message.startsWith("/compact ")) {
       void compactChat();
+      setInput("");
+      return;
+    }
+    if (message === "/goal" || message.startsWith("/goal ")) {
+      void createGoalFromSlash(message);
+      return;
+    }
+    if (message === "/memory" || message.startsWith("/memory ")) {
+      void createMemoryFromSlash(message);
+      return;
+    }
+    if (message === "/delegate" || message.startsWith("/delegate ")) {
+      const task = message.replace(/^\/delegate\s*/i, "").trim();
+      void startSubAgentTask(undefined, task || undefined);
+      setInput("");
+      return;
+    }
+    if (message === "/desktop" || message.startsWith("/desktop ")) {
+      await runExplicitWorkspaceAction("desktop");
       setInput("");
       return;
     }
@@ -2067,17 +2186,18 @@ export default function App() {
     }
   }
 
-  async function startSubAgentTask(roleOverride?: string) {
+  async function startSubAgentTask(roleOverride?: string, taskOverride?: string) {
     const agentName = pickSubAgentName();
     const projectPath = activeChat?.projectPath || activeProjectPath;
     const hasPackage = outfitPackagePath.trim().length > 0;
     const role = roleOverride || (hasPackage ? "outfit_import_plan_review" : "project_index_review");
-    const task =
+    const defaultTask =
       role === "outfit_import_plan_review"
         ? "Inspect the selected outfit package and return a supervised import plan summary."
         : role === "validation_triage"
           ? "Run read-only validation triage and summarize findings."
           : "Review the local Unity project index and summarize changed scanner families.";
+    const task = taskOverride?.trim() || defaultTask;
     setActiveView("chat");
     setError("");
     setSubAgentError("");
@@ -4788,6 +4908,73 @@ export default function App() {
                 </RuntimeSection>
               ) : null}
 
+              {agentGoals.length ? (
+                <RuntimeSection
+                  title={t("workspace.goals")}
+                  collapsed={rightRuntimeSectionsCollapsed.goals}
+                  onToggle={() => toggleRightRuntimeSection("goals")}
+                  count={<Badge tone="muted">{formatCount(agentGoals.length)}</Badge>}
+                >
+                  <div className="space-y-0.5">
+                    {agentGoals.slice(0, 5).map((goal) => (
+                      <div key={goal.goalId} className="rounded-md px-1 py-1.5 text-xs">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className={cn("h-2 w-2 shrink-0 rounded-full", goal.status === "active" ? "bg-primary" : goal.status === "paused" ? "bg-amber-500" : "bg-muted-foreground/40")} />
+                          <span className="min-w-0 flex-1 truncate font-medium">{goal.title || goal.goalId}</span>
+                          <span className="shrink-0 text-muted-foreground">{goal.status}</span>
+                        </div>
+                        {goal.summary ? <div className="mt-0.5 line-clamp-2 pl-4 text-muted-foreground">{goal.summary}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
+
+              {agentMemory.length ? (
+                <RuntimeSection
+                  title={t("workspace.memory")}
+                  collapsed={rightRuntimeSectionsCollapsed.memory}
+                  onToggle={() => toggleRightRuntimeSection("memory")}
+                  count={<Badge tone="muted">{formatCount(agentMemory.length)}</Badge>}
+                >
+                  <div className="space-y-0.5">
+                    {agentMemory.slice(0, 6).map((memory) => (
+                      <div key={memory.memoryId} className="rounded-md px-1 py-1.5 text-xs">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="shrink-0 text-muted-foreground">{memory.scope || "project"}</span>
+                          <span className="min-w-0 flex-1 truncate font-medium">{memory.kind || "memory"}</span>
+                        </div>
+                        <div className="mt-0.5 line-clamp-2 text-muted-foreground">{memory.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
+
+              {desktopActions.length ? (
+                <RuntimeSection
+                  title={t("workspace.desktopActions")}
+                  collapsed={rightRuntimeSectionsCollapsed.desktopActions}
+                  onToggle={() => toggleRightRuntimeSection("desktopActions")}
+                  count={<Badge tone="muted">{formatCount(desktopActions.length)}</Badge>}
+                >
+                  <div className="space-y-0.5">
+                    {desktopActions.slice(0, 5).map((action) => (
+                      <div key={action.id || `${action.action}-${action.createdAt}`} className="rounded-md px-1 py-1.5 text-xs">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <MousePointer2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 flex-1 truncate font-medium">{action.action}</span>
+                          <span className="shrink-0 text-muted-foreground">{action.status}</span>
+                        </div>
+                        {action.error || action.promptSummary ? <div className="mt-0.5 line-clamp-2 pl-5 text-muted-foreground">{action.error || action.promptSummary}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
+
+              {workspaceStateError ? <div className="px-1 py-2 text-xs text-muted-foreground">{workspaceStateError}</div> : null}
+
               {runtimeReviewEvidence.length ? (
                 <RuntimeSection
                   title={t("workspace.reviewEvidence")}
@@ -5502,7 +5689,7 @@ function Composer({
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   commands?: Array<{ name: string; title: string }>;
   actions?: ComposerAction[];
-  onAction?: (action: ComposerActionId) => void;
+  onAction?: (action: ComposerActionId) => void | Promise<void>;
   compact?: boolean;
   disabledReason?: string;
   attachments?: ChatAttachment[];

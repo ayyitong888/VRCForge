@@ -104,14 +104,19 @@
     "runStatusRejected": "已拒絕",
     "runStatusRevisionRequested": "待修改",
     "runStatusPending": "待處理",
-    "runStatusUnknown": "未知"
+    "runStatusUnknown": "未知",
+    "goals": "目標",
+    "memory": "記憶",
+    "desktopActions": "桌面操作"
   },
   "composerAction": {
     "addContext": "新增上下文",
     "attach": "新增檔案",
     "attachDesc": "把圖片或專案檔案加入本輪對話。",
     "screenshot": "截取 Unity 視圖",
-    "screenshotDesc": "把目前 Unity / Avatar 截圖加入本輪對話。"
+    "screenshotDesc": "把目前 Unity / Avatar 截圖加入本輪對話。",
+    "desktop": "桌面救援",
+    "desktopDesc": "明確請求桌面救援/Computer Use 協助。普通聊天不會自動啟動。"
   },
   "notice": {
     "projectNotGit": "所選 Unity 專案不是 Git 倉庫；正在顯示 VRCForge 應用程式碼變更。",
@@ -119,7 +124,9 @@
     "browserContext": "瀏覽器上下文會顯示在右側欄；應用內瀏覽器控制請從顯式 Browser 技能入口使用。",
     "screenshotSelected": "已選擇截圖技能。請檢查 slash 命令並發送以執行截圖。",
     "annotationUnavailable": "已選擇註釋入口，但此版本尚未連接註釋擷取。",
-    "desktopUnavailable": "桌面救援 / Computer Use 只能顯式觸發；目前因技能未連接而不可用。"
+    "desktopUnavailable": "桌面救援 / Computer Use 只能顯式觸發；目前因技能未連接而不可用。",
+    "desktopActionExecuted": "{{action}} 已執行",
+    "desktopActionRecorded": "{{action}} 已記錄：{{status}}。"
   },
   "settings": {
     "title": "設定",
@@ -241,7 +248,10 @@
     "retryingMessage": "已從該訊息之前重新發送。",
     "regeneratingMessage": "已從上一條使用者訊息重新生成。",
     "noPreviousUserMessage": "沒有找到可用於重新生成的上一條使用者訊息。",
-    "cannotActionWhileRunning": "目前任務執行中，請先停止或等它結束後再修改歷史。"
+    "cannotActionWhileRunning": "目前任務執行中，請先停止或等它結束後再修改歷史。",
+    "slashGoal": "建立長期目標",
+    "slashMemory": "儲存明確記憶",
+    "slashDelegate": "把範圍明確的唯讀工作委派給子 agent"
   },
   "agent": {
     "modeLabel": {
@@ -858,5 +868,13 @@
     "payloadLimitError": "檔案超過 {{limit}} 載荷上限。",
     "readTextFailed": "讀取文字載荷失敗。",
     "readFileFailed": "讀取檔案載荷失敗。"
+  },
+  "goal": {
+    "empty": "請在 /goal 後寫目標。",
+    "created": "目標已儲存。"
+  },
+  "memory": {
+    "empty": "請在 /memory 後寫要記住的內容。",
+    "created": "記憶已儲存。"
   }
 }

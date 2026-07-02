@@ -440,6 +440,49 @@ export type AgentRuntimeRunLedger = {
   count: number;
 };
 
+export type AgentDesktopAction = {
+  schema?: string;
+  id?: string;
+  action?: string;
+  status?: string;
+  sessionId?: string;
+  clientTurnId?: string;
+  projectRoot?: string;
+  promptSummary?: string;
+  resultSummary?: Record<string, unknown>;
+  error?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentGoal = {
+  schema?: string;
+  id?: string;
+  goalId: string;
+  title?: string;
+  summary?: string;
+  status?: "active" | "paused" | "completed" | "cancelled" | string;
+  projectRoot?: string;
+  sessionId?: string;
+  approvalPolicy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentMemory = {
+  schema?: string;
+  id?: string;
+  memoryId: string;
+  scope?: "user" | "project" | string;
+  kind?: string;
+  text?: string;
+  projectRoot?: string;
+  source?: string;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 export type HealthComponent = {
   status: "ok" | "warning" | "error" | "unknown";
   message: string;
@@ -1937,6 +1980,129 @@ export async function recordAgentRunQueued(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     timeoutMs: 30000,
+  });
+}
+
+export async function fetchAgentDesktopActions(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; schema?: string; actions: AgentDesktopAction[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/desktop-actions${suffix}`);
+}
+
+export async function requestAgentDesktopAction(
+  endpoint: string,
+  payload: { action: string; prompt?: string; sessionId?: string; clientTurnId?: string; projectPath?: string; projectRoot?: string; params?: Record<string, unknown> },
+): Promise<{ ok: boolean; schema?: string; status?: string; action?: string; event?: AgentDesktopAction; result?: unknown; error?: string }> {
+  return requestJson(`${endpoint}/api/app/agent/desktop-actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 60000,
+  });
+}
+
+export async function fetchAgentGoals(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; schema?: string; goals: AgentGoal[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/goals${suffix}`);
+}
+
+export async function createAgentGoal(
+  endpoint: string,
+  payload: { title?: string; goal?: string; summary?: string; sessionId?: string; projectPath?: string; projectRoot?: string },
+): Promise<{ ok: boolean; goal: AgentGoal }> {
+  return requestJson(`${endpoint}/api/app/agent/goals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAgentGoal(
+  endpoint: string,
+  goalId: string,
+  payload: { status: string; summary?: string; note?: string; sessionId?: string; projectRoot?: string },
+): Promise<{ ok: boolean; goal: AgentGoal }> {
+  return requestJson(`${endpoint}/api/app/agent/goals/${encodeURIComponent(goalId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAgentMemory(
+  endpoint: string,
+  params: { limit?: number; projectRoot?: string; scope?: string } = {},
+): Promise<{ ok: boolean; schema?: string; memories: AgentMemory[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  if (params.scope) {
+    query.set("scope", params.scope);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/memory${suffix}`);
+}
+
+export async function createAgentMemory(
+  endpoint: string,
+  payload: { text?: string; content?: string; scope?: string; kind?: string; source?: string; projectPath?: string; projectRoot?: string },
+): Promise<{ ok: boolean; memory: AgentMemory }> {
+  return requestJson(`${endpoint}/api/app/agent/memory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAgentMemory(
+  endpoint: string,
+  memoryId: string,
+  payload: { reason?: string } = {},
+): Promise<{ ok: boolean; memory: AgentMemory }> {
+  return requestJson(`${endpoint}/api/app/agent/memory/${encodeURIComponent(memoryId)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function clearAgentMemory(
+  endpoint: string,
+  payload: { scope?: string; reason?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; cleared: number }> {
+  return requestJson(`${endpoint}/api/app/agent/memory/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 }
 

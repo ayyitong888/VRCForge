@@ -74,44 +74,49 @@
     "more": "+{{count}} more",
     "queueMeta": "Queue {{index}} · {{provider}} / {{model}}",
     "fileSourceChanges": "changes",
-      "fileSourceMessage": "message",
-      "fileSourceShell": "shell",
-      "fileSourceSkill": "tool",
-      "fileSourceDiff": "diff",
-      "runLedger": "Run ledger",
-      "runLedgerItem": "Runtime event",
-      "runSteps": "{{count}} step(s)",
-      "reviewEvidence": "Review evidence",
-      "approvalEvidence": "Approval",
-      "approvalEvidenceMeta": "Approval {{status}}",
-      "checkpointEvidence": "Checkpoint proof",
-      "runEvidence": "Run evidence",
-      "gitDiffEvidence": "Git diff",
-      "gitDiffEvidenceMeta": "{{count}} file(s), +{{additions}} -{{deletions}}",
-      "proofShort": "proof",
-      "approvalShort": "approval",
-      "checkpointShort": "checkpoint",
-      "gitDiffShort": "diff",
-      "runShort": "run",
-      "runStatusRunning": "running",
-      "runStatusCompleted": "done",
-      "runStatusFailed": "failed",
-      "runStatusCancelled": "cancelled",
-      "runStatusCancelRequested": "stopping",
-      "runStatusApplying": "applying",
-      "runStatusApplied": "applied",
-      "runStatusApproved": "approved",
-      "runStatusRejected": "rejected",
-      "runStatusRevisionRequested": "revision",
-      "runStatusPending": "pending",
-      "runStatusUnknown": "unknown"
-    },
+    "fileSourceMessage": "message",
+    "fileSourceShell": "shell",
+    "fileSourceSkill": "tool",
+    "fileSourceDiff": "diff",
+    "runLedger": "Run ledger",
+    "runLedgerItem": "Runtime event",
+    "runSteps": "{{count}} step(s)",
+    "reviewEvidence": "Review evidence",
+    "approvalEvidence": "Approval",
+    "approvalEvidenceMeta": "Approval {{status}}",
+    "checkpointEvidence": "Checkpoint proof",
+    "runEvidence": "Run evidence",
+    "gitDiffEvidence": "Git diff",
+    "gitDiffEvidenceMeta": "{{count}} file(s), +{{additions}} -{{deletions}}",
+    "proofShort": "proof",
+    "approvalShort": "approval",
+    "checkpointShort": "checkpoint",
+    "gitDiffShort": "diff",
+    "runShort": "run",
+    "runStatusRunning": "running",
+    "runStatusCompleted": "done",
+    "runStatusFailed": "failed",
+    "runStatusCancelled": "cancelled",
+    "runStatusCancelRequested": "stopping",
+    "runStatusApplying": "applying",
+    "runStatusApplied": "applied",
+    "runStatusApproved": "approved",
+    "runStatusRejected": "rejected",
+    "runStatusRevisionRequested": "revision",
+    "runStatusPending": "pending",
+    "runStatusUnknown": "unknown",
+    "goals": "Goals",
+    "memory": "Memory",
+    "desktopActions": "Desktop actions"
+  },
   "composerAction": {
     "addContext": "Add context",
     "attach": "Attach file",
     "attachDesc": "Add images or project files to this turn.",
     "screenshot": "Capture Unity view",
-    "screenshotDesc": "Attach a current Unity/avatar screenshot to this turn."
+    "screenshotDesc": "Attach a current Unity/avatar screenshot to this turn.",
+    "desktop": "Desktop Rescue",
+    "desktopDesc": "Explicitly request desktop/computer-use help. It never starts from normal chat text."
   },
   "notice": {
     "projectNotGit": "Selected Unity project is not a Git repository; showing VRCForge app code changes.",
@@ -119,7 +124,9 @@
     "browserContext": "Browser context is shown in the runtime sidebar. In-app browser control is available from the explicit Browser skill surface.",
     "screenshotSelected": "Screenshot skill selected. Review the slash command and send it to run capture.",
     "annotationUnavailable": "Annotation entry selected, but annotation capture is not connected in this build.",
-    "desktopUnavailable": "Desktop Rescue / Computer Use is explicit-only and currently disabled because the skill is not connected."
+    "desktopUnavailable": "Desktop Rescue / Computer Use is explicit-only and currently disabled because the skill is not connected.",
+    "desktopActionExecuted": "{{action}} executed.",
+    "desktopActionRecorded": "{{action}} recorded ({{status}})."
   },
   "settings": {
     "title": "Settings",
@@ -241,7 +248,10 @@
     "retryingMessage": "Retrying from before that message.",
     "regeneratingMessage": "Regenerating from the previous user message.",
     "noPreviousUserMessage": "No previous user message was found for regeneration.",
-    "cannotActionWhileRunning": "A task is running. Stop it or wait before changing history."
+    "cannotActionWhileRunning": "A task is running. Stop it or wait before changing history.",
+    "slashGoal": "Create a long-running goal",
+    "slashMemory": "Save explicit memory",
+    "slashDelegate": "Delegate scoped read-only work to a sub-agent"
   },
   "agent": {
     "modeLabel": {
@@ -858,5 +868,13 @@
     "payloadLimitError": "File exceeds {{limit}} payload limit.",
     "readTextFailed": "Failed to read text payload.",
     "readFileFailed": "Failed to read file payload."
+  },
+  "goal": {
+    "empty": "Write a goal after /goal.",
+    "created": "Goal saved."
+  },
+  "memory": {
+    "empty": "Write a memory after /memory.",
+    "created": "Memory saved."
   }
 }

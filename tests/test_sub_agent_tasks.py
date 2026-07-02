@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 
-from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
+from sub_agent_tasks import SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT, SubAgentRole, SubAgentTaskRegistry
 
 
 def test_sub_agent_registry_runs_records_and_retries(tmp_path):
@@ -71,3 +71,15 @@ def test_sub_agent_registry_cancel_sets_event(tmp_path):
         payload = registry.get_task(task_id)
 
     assert payload["task"]["status"] == "cancelled"
+
+
+def test_sub_agent_registry_clamps_configured_concurrency_to_hard_limit(tmp_path):
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        max_concurrent=99,
+    )
+
+    assert registry.max_concurrent == SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT
+    assert registry.list_tasks()["maxConcurrent"] == SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT

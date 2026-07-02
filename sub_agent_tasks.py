@@ -13,6 +13,7 @@ from typing import Any, Callable
 SUB_AGENT_SCHEMA = "vrcforge.sub_agent_task.v1"
 SUB_AGENT_LIST_SCHEMA = "vrcforge.sub_agent_tasks.v1"
 SUB_AGENT_LOG_SCHEMA = "vrcforge.sub_agent_lifecycle.v1"
+SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
 
 SubAgentHandler = Callable[[dict[str, Any], threading.Event], dict[str, Any]]
 
@@ -59,7 +60,7 @@ class SubAgentTaskRegistry:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
         self.handlers = dict(handlers)
-        self.max_concurrent = max(1, int(max_concurrent))
+        self.max_concurrent = max(1, min(int(max_concurrent), SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT))
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}

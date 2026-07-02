@@ -313,6 +313,77 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["attachments"][0]["name"], "note.txt")
         self.assertEqual(payload["attachments"][0]["payloadKind"], "text")
         self.assertEqual(payload["attachments"][0]["text"], "hello world")
+        self.assertTrue(payload["attachments"][0]["replayable"])
+        self.assertTrue(payload["attachments"][0]["payloadHash"])
+
+    def test_agent_desktop_action_is_explicit_and_audited(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "prompt": "diagnose a desktop issue",
+                    "sessionId": "sess-test",
+                    "clientTurnId": "turn-test",
+                    "projectRoot": "ProjectA",
+                },
+            )
+            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-test"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertIn("Desktop control bridge", payload["error"])
+        self.assertEqual(listing.status_code, 200)
+        actions = listing.json()["actions"]
+        self.assertEqual(actions[0]["action"], "computer_use")
+        self.assertEqual(actions[0]["clientTurnId"], "turn-test")
+
+    def test_agent_goals_are_durable_and_statused(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            created = client.post(
+                "/api/app/agent/goals",
+                json={"title": "Finish avatar QA", "summary": "Long task", "sessionId": "sess-goal", "projectRoot": "ProjectA"},
+            )
+            goal_id = created.json()["goal"]["goalId"]
+            paused = client.post(f"/api/app/agent/goals/{goal_id}", json={"status": "paused", "summary": "Waiting on user"})
+            completed = client.post(f"/api/app/agent/goals/{goal_id}", json={"status": "completed", "summary": "Done"})
+            listing = client.get("/api/app/agent/goals", params={"sessionId": "sess-goal"})
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(paused.status_code, 200)
+        self.assertEqual(completed.status_code, 200)
+        goals = listing.json()["goals"]
+        self.assertEqual(goals[0]["goalId"], goal_id)
+        self.assertEqual(goals[0]["status"], "completed")
+        self.assertEqual(goals[0]["title"], "Finish avatar QA")
+
+    def test_agent_memory_can_be_inspected_deleted_and_cleared(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            first = client.post(
+                "/api/app/agent/memory",
+                json={"scope": "project", "kind": "style", "text": "Prefer soft lilToon outlines.", "projectRoot": "ProjectA"},
+            )
+            second = client.post(
+                "/api/app/agent/memory",
+                json={"scope": "user", "kind": "preference", "text": "Show approval summaries inline."},
+            )
+            memory_id = first.json()["memory"]["memoryId"]
+            listed = client.get("/api/app/agent/memory", params={"projectRoot": "ProjectA"})
+            deleted = client.request("DELETE", f"/api/app/agent/memory/{memory_id}", json={"reason": "test"})
+            after_delete = client.get("/api/app/agent/memory", params={"projectRoot": "ProjectA"})
+            cleared = client.post("/api/app/agent/memory/clear", json={"scope": "user", "reason": "test"})
+            after_clear = client.get("/api/app/agent/memory")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(listed.status_code, 200)
+        self.assertGreaterEqual(listed.json()["count"], 2)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(all(item["memoryId"] != memory_id for item in after_delete.json()["memories"]))
+        self.assertEqual(cleared.status_code, 200)
+        self.assertGreaterEqual(cleared.json()["cleared"], 1)
+        self.assertEqual(after_clear.json()["count"], 0)
 
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
