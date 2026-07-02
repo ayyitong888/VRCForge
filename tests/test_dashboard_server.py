@@ -206,7 +206,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["customPaths"], [])
 
     def test_app_bootstrap_degrades_when_health_diagnostics_fail(self) -> None:
-        with patch("dashboard_server.read_health", side_effect=RuntimeError("project scanner exploded")):
+        with patch("dashboard_server.build_full_health_payload", side_effect=RuntimeError("project scanner exploded")):
             with TestClient(dashboard_server.app) as client:
                 response = client.get("/api/app/bootstrap")
 
@@ -942,11 +942,20 @@ class DashboardServerTests(unittest.TestCase):
         try:
             with TestClient(dashboard_server.app) as client:
                 health = client.get("/api/health")
+                authorized_health = client.get("/api/health", headers=headers)
                 missing_token_get = client.get("/api/projects")
                 missing_token_post = client.post("/api/projects/install", json={})
                 authorized_get = client.get("/api/projects", headers=headers)
 
             self.assertEqual(health.status_code, 200)
+            health_payload = health.json()
+            self.assertEqual(health_payload["schema"], "vrcforge.public_health.v1")
+            self.assertNotIn("paths", health_payload)
+            self.assertNotIn("projects", health_payload)
+            self.assertNotIn("components", health_payload)
+            self.assertNotIn("configPath", health_payload)
+            self.assertEqual(authorized_health.status_code, 200)
+            self.assertIn("components", authorized_health.json())
             self.assertEqual(missing_token_get.status_code, 401)
             self.assertEqual(missing_token_post.status_code, 401)
             self.assertEqual(authorized_get.status_code, 200)
@@ -1949,7 +1958,8 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(preflight.json()["preview"]["manifest"]["id"], "community.avatar-review")
             self.assertEqual(imported.status_code, 200)
             self.assertEqual(imported.json()["projectedSkill"]["name"], "avatar-review")
-            self.assertTrue(any(skill["name"] == "avatar-review" and skill["source"] == "user" for skill in skills))
+            self.assertFalse(imported.json()["projectedSkill"]["enabled"])
+            self.assertTrue(any(skill["name"] == "avatar-review" and skill["source"] == "user" and not skill["enabled"] for skill in skills))
             self.assertEqual(exported.status_code, 200)
             self.assertTrue(exported_path.is_file())
             self.assertEqual(exported.json()["exported"]["signature_status"], "dev")

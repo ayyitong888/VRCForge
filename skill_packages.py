@@ -1280,6 +1280,12 @@ class SkillPackageService:
             warnings.append(f"safe mode disables {risk_level}-risk imported skills by default")
 
         import_allowed = not blocking_reasons
+        default_enabled = bool(import_allowed and not safe_mode_disables and signer_status == "trusted")
+        if import_allowed and not safe_mode_disables and not default_enabled:
+            if signer_status == "unsigned_dev":
+                warnings.append("dev package imports disabled by default until explicitly enabled")
+            elif signer_status == "untrusted":
+                warnings.append("signed package imports disabled by default until signer is trusted or explicitly enabled")
         enable_allowed = import_allowed and not (safe_mode_disables and bool(safe_mode.get("block_enable", True)))
         return {
             "schema": GOVERNANCE_DECISION_SCHEMA,
@@ -1289,7 +1295,7 @@ class SkillPackageService:
             "signerTrustStatus": signer_status,
             "safeMode": {
                 "enabled": bool(safe_mode.get("enabled")),
-                "defaultEnabled": bool(import_allowed and not safe_mode_disables),
+                "defaultEnabled": default_enabled,
                 "disablesRiskLevel": bool(safe_mode_disables),
                 "blockEnable": bool(safe_mode.get("block_enable", True)),
             },

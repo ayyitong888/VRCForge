@@ -166,6 +166,7 @@ def test_signed_package_trust_is_separate_from_verification(tmp_path: Path) -> N
     assert preview["governance"]["verified"] is False
     assert preview["governance"]["signerTrustStatus"] == "untrusted"
     assert preview["governance"]["importAllowed"] is True
+    assert preview["governance"]["safeMode"]["defaultEnabled"] is False
 
     trusted = service.trust_signer(key_pair.fingerprint, reason="local test signer")
     trusted_preview = service.preflight_import(package).as_dict()
@@ -173,6 +174,7 @@ def test_signed_package_trust_is_separate_from_verification(tmp_path: Path) -> N
     assert trusted["governance"]["trusted_signers"][key_pair.fingerprint]["reason"] == "local test signer"
     assert trusted_preview["governance"]["signerTrustStatus"] == "trusted"
     assert trusted_preview["governance"]["verified"] is False
+    assert trusted_preview["governance"]["safeMode"]["defaultEnabled"] is True
     assert service.load_registry()["audit"][-1]["event"] == "skill_package_signer_trusted"
 
 
@@ -255,6 +257,7 @@ def test_set_enabled_and_uninstall_package_keep_registry_and_metadata_in_sync(tm
     service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
     package = service.export_dev(make_skill_source(tmp_path), tmp_path / "helper.vsk").package_path
     service.install(package)
+    service.set_enabled("com.example.avatar-helper", True)
 
     disabled = service.set_enabled("com.example.avatar-helper", False)
 
@@ -294,7 +297,9 @@ def test_unsigned_dev_roundtrip_has_lock_but_no_signature(tmp_path: Path) -> Non
     preview = service.inspect_package(exported.package_path)
     assert preview.signature_status == "dev"
     assert preview.signer_fingerprint is None
-    assert service.install(exported.package_path).registry_entry["signature_status"] == "dev"
+    installed = service.install(exported.package_path)
+    assert installed.registry_entry["signature_status"] == "dev"
+    assert installed.registry_entry["enabled"] is False
 
 
 def test_tampered_payload_and_undeclared_files_are_rejected(tmp_path: Path) -> None:

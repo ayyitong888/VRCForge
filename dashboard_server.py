@@ -1431,8 +1431,27 @@ def read_dashboard_alias() -> FileResponse:
     return read_dashboard()
 
 
-@app.get("/api/health")
-def read_health() -> dict[str, Any]:
+def build_public_health_payload() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schema": "vrcforge.public_health.v1",
+        "version": app.version,
+        "portableMode": PORTABLE_MODE,
+        "authRequired": APP_AUTH_REQUIRED,
+    }
+
+
+def health_request_has_app_auth(request: Request) -> bool:
+    if not APP_AUTH_REQUIRED:
+        return True
+    try:
+        authenticate_app_request(request)
+    except HTTPException:
+        return False
+    return True
+
+
+def build_full_health_payload() -> dict[str, Any]:
     settings = load_settings(
         RUNTIME_SETTINGS_PATH,
         llm_override=serialize_api_config(include_secret=True),
@@ -1473,6 +1492,13 @@ def read_health() -> dict[str, Any]:
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
+
+
+@app.get("/api/health")
+def read_health(request: Request) -> dict[str, Any]:
+    if not health_request_has_app_auth(request):
+        return build_public_health_payload()
+    return build_full_health_payload()
 
 
 @app.get("/api/app/session")
@@ -3631,7 +3657,7 @@ def read_agent_skill_packages(request: Request) -> dict[str, Any]:
 
 def build_agentic_app_health() -> dict[str, Any]:
     try:
-        payload = copy.deepcopy(read_health())
+        payload = copy.deepcopy(build_full_health_payload())
     except Exception as exc:  # noqa: BLE001 - first-run desktop must still open as a normal agent.
         message = str(exc)
         return {
@@ -11350,7 +11376,7 @@ def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, An
         status = build_unity_status_snapshot()
     else:
         status = CURRENT_UNITY_STATUS
-    health = read_health()
+    health = build_full_health_payload()
     api_config = serialize_api_config(include_secret=include_secret)
     if not include_secret:
         health_api_config = health.get("apiConfig")
@@ -17341,7 +17367,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", inspect_outfit_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", plan_outfit_import_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: read_health())
+    AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
         "Read Unity MCP bridge status.",
