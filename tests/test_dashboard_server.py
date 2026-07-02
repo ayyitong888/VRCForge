@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -243,6 +244,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ok"])
 
+    def test_startup_schedules_mcp_init_without_waiting_for_it(self) -> None:
+        async def slow_mcp_init() -> None:
+            await asyncio.sleep(60)
+
+        async def slow_status_loop() -> None:
+            await asyncio.sleep(60)
+
+        async def exercise() -> None:
+            original_mcp_task = dashboard_server.AGENT_MCP_INIT_TASK
+            original_status_task = dashboard_server.STATUS_MONITOR_TASK
+            dashboard_server.AGENT_MCP_INIT_TASK = None
+            dashboard_server.STATUS_MONITOR_TASK = None
+            try:
+                with (
+                    patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
+                    patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
+                ):
+                    await dashboard_server.on_startup()
+                    self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
+                    self.assertFalse(dashboard_server.AGENT_MCP_INIT_TASK.done())
+            finally:
+                for task in (dashboard_server.AGENT_MCP_INIT_TASK, dashboard_server.STATUS_MONITOR_TASK):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
+                dashboard_server.STATUS_MONITOR_TASK = original_status_task
+
+        asyncio.run(exercise())
+
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.get("/")
@@ -316,19 +350,30 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["attachments"][0]["replayable"])
         self.assertTrue(payload["attachments"][0]["payloadHash"])
 
+    def test_agent_runtime_message_runs_off_event_loop(self) -> None:
+        with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/agent/message", json={"message": "check repository status"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.runtime_message for call in to_thread.call_args_list)
+        )
+
     def test_agent_desktop_action_is_explicit_and_audited(self) -> None:
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/app/agent/desktop-actions",
-                json={
-                    "action": "computer_use",
-                    "prompt": "diagnose a desktop issue",
-                    "sessionId": "sess-test",
-                    "clientTurnId": "turn-test",
-                    "projectRoot": "ProjectA",
-                },
-            )
-            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-test"})
+        with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/desktop-actions",
+                    json={
+                        "action": "computer_use",
+                        "prompt": "diagnose a desktop issue",
+                        "sessionId": "sess-test",
+                        "clientTurnId": "turn-test",
+                        "projectRoot": "ProjectA",
+                    },
+                )
+                listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-test"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -338,6 +383,9 @@ class DashboardServerTests(unittest.TestCase):
         actions = listing.json()["actions"]
         self.assertEqual(actions[0]["action"], "computer_use")
         self.assertEqual(actions[0]["clientTurnId"], "turn-test")
+        self.assertTrue(
+            any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.request_desktop_action for call in to_thread.call_args_list)
+        )
 
     def test_agent_goals_are_durable_and_statused(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1253,13 +1301,20 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse(target.exists())
 
                 approval_id = high_payload["shell"]["approval_id"]
-                approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
+                    approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
                 self.assertEqual(approved.status_code, 200)
                 approved_payload = approved.json()
                 self.assertTrue(approved_payload["ok"])
                 self.assertEqual(approved_payload["execution"]["status"], "applied")
                 self.assertTrue(target.exists())
                 self.assertEqual(target.read_text(encoding="utf-8-sig").strip(), "hi")
+                self.assertTrue(
+                    any(
+                        call.args and getattr(call.args[0], "__name__", "") == "approve_and_execute"
+                        for call in to_thread.call_args_list
+                    )
+                )
 
                 replay = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
                 self.assertEqual(replay.status_code, 200)

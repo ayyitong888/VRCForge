@@ -1157,6 +1157,7 @@ CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
 STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
+AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
@@ -1210,6 +1211,39 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
 AGENT_MCP_CONTEXT = None
+
+
+async def initialize_agent_mcp_mount() -> None:
+    global AGENT_MCP_APP
+    global AGENT_MCP_CONTEXT
+
+    context = None
+    try:
+        app_payload = create_agent_mcp_app(AGENT_GATEWAY)
+        context = app_payload.state.fastmcp_server.session_manager.run()
+        await context.__aenter__()
+        AGENT_MCP_APP = app_payload
+        AGENT_MCP_CONTEXT = context
+        AGENT_MCP_MOUNT.app = app_payload
+        emit_log("info", "agent", "Agent MCP app initialized.", {"mcpPath": "/mcp"})
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external MCP must not block the desktop agent.
+        AGENT_MCP_APP = None
+        AGENT_MCP_CONTEXT = None
+        AGENT_MCP_MOUNT.app = None
+        emit_log("warn", "agent", "Agent MCP app failed to initialize; desktop normal-agent mode remains available.", {"error": str(exc)})
+    finally:
+        if context is not None:
+            try:
+                await context.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 - shutdown should remain best-effort.
+                emit_log("warn", "agent", "Agent MCP app shutdown had a warning.", {"error": str(exc)})
+        if AGENT_MCP_CONTEXT is context:
+            AGENT_MCP_CONTEXT = None
+            AGENT_MCP_APP = None
+            AGENT_MCP_MOUNT.app = None
 
 
 @app.middleware("http")
@@ -1281,20 +1315,11 @@ async def authorize_local_requests(request: Request, call_next):
 @app.on_event("startup")
 async def on_startup() -> None:
     global STATUS_MONITOR_TASK
-    global AGENT_MCP_APP
-    global AGENT_MCP_CONTEXT
+    global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
-    try:
-        AGENT_MCP_APP = create_agent_mcp_app(AGENT_GATEWAY)
-        AGENT_MCP_CONTEXT = AGENT_MCP_APP.state.fastmcp_server.session_manager.run()
-        await AGENT_MCP_CONTEXT.__aenter__()
-        AGENT_MCP_MOUNT.app = AGENT_MCP_APP
-    except Exception as exc:  # noqa: BLE001 - external MCP must not block the desktop agent.
-        AGENT_MCP_APP = None
-        AGENT_MCP_CONTEXT = None
-        AGENT_MCP_MOUNT.app = None
-        emit_log("warn", "agent", "Agent MCP app failed to initialize; desktop normal-agent mode remains available.", {"error": str(exc)})
+    if AGENT_MCP_INIT_TASK is None or AGENT_MCP_INIT_TASK.done():
+        AGENT_MCP_INIT_TASK = asyncio.create_task(initialize_agent_mcp_mount())
     if not CONFIG_PATH.exists():
         save_dashboard_api_config(DASHBOARD_API_CONFIG)
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
@@ -1316,9 +1341,17 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global STATUS_MONITOR_TASK
+    global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
 
+    if AGENT_MCP_INIT_TASK is not None and not AGENT_MCP_INIT_TASK.done():
+        AGENT_MCP_INIT_TASK.cancel()
+        try:
+            await AGENT_MCP_INIT_TASK
+        except asyncio.CancelledError:
+            pass
+    AGENT_MCP_INIT_TASK = None
     if STATUS_MONITOR_TASK is not None:
         STATUS_MONITOR_TASK.cancel()
         try:
@@ -1326,11 +1359,9 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         STATUS_MONITOR_TASK = None
-    if AGENT_MCP_CONTEXT is not None:
-        await AGENT_MCP_CONTEXT.__aexit__(None, None, None)
-        AGENT_MCP_CONTEXT = None
-        AGENT_MCP_MOUNT.app = None
-        AGENT_MCP_APP = None
+    AGENT_MCP_CONTEXT = None
+    AGENT_MCP_MOUNT.app = None
+    AGENT_MCP_APP = None
 
 
 @app.get("/")
@@ -1597,7 +1628,8 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.runtime_message(
+    payload = await asyncio.to_thread(
+        AGENT_GATEWAY.runtime_message,
         {
             "session_id": runtime_request.session_id,
             "clientTurnId": runtime_request.client_turn_id,
@@ -1756,7 +1788,8 @@ def app_agent_desktop_actions(limit: int = 50, sessionId: str = "", projectRoot:
 @app.post("/api/app/agent/desktop-actions")
 async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.request_desktop_action(
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.request_desktop_action,
             {
                 "action": request.action,
                 "prompt": request.prompt,
@@ -2133,7 +2166,7 @@ async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, 
 
 @app.post("/api/app/agent/approvals/{approval_id}/approve")
 async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
-    try:
+    def approve_and_execute() -> dict[str, Any]:
         approved = AGENT_GATEWAY.approve(approval_id)
         execution = None
         approval = approved.get("approval") if isinstance(approved, dict) else None
@@ -2142,7 +2175,10 @@ async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
                 execution = AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
             else:
                 execution = AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
-        payload = {"ok": bool(approved.get("ok")), "approval": approved.get("approval"), "execution": execution}
+        return {"ok": bool(approved.get("ok")), "approval": approved.get("approval"), "execution": execution}
+
+    try:
+        payload = await asyncio.to_thread(approve_and_execute)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})

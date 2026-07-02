@@ -430,6 +430,7 @@ const MAX_ATTACHMENTS_PER_TURN = 8;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
+const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
@@ -1314,7 +1315,7 @@ export default function App() {
     }
     const timer = window.setTimeout(() => {
       void scanActiveProjectIndex(activeProjectPath, true);
-    }, 650);
+    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
@@ -1324,7 +1325,10 @@ export default function App() {
       setWorkspaceDiffError("");
       return;
     }
-    void refreshWorkspaceDiff(false);
+    const timer = window.setTimeout(() => {
+      void refreshWorkspaceDiff(false);
+    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
+    return () => window.clearTimeout(timer);
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
@@ -1333,7 +1337,10 @@ export default function App() {
       setRuntimeRunsError("");
       return;
     }
-    void refreshRuntimeRuns(false);
+    const timer = window.setTimeout(() => {
+      void refreshRuntimeRuns(false);
+    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
+    return () => window.clearTimeout(timer);
   }, [runtimeConnected, endpoint, sessionId, activeProjectPath]);
 
   useEffect(() => {
@@ -1366,7 +1373,7 @@ export default function App() {
     let targetEndpoint = endpoint;
     try {
       if (isTauriRuntime()) {
-        await invoke("ensure_agent_notes_file");
+        void invoke("ensure_agent_notes_file").catch(() => undefined);
         const result = await invoke<BackendStartResult>("start_backend");
         targetEndpoint = result.endpoint;
         setAppSessionToken(result.appSessionToken || result.app_session_token || "");
@@ -1448,7 +1455,7 @@ export default function App() {
       return;
     }
     try {
-      const [payload, actionsPayload, goalsPayload, memoryPayload] = await Promise.all([
+      const [runsResult, actionsResult, goalsResult, memoryResult] = await Promise.allSettled([
         fetchAgentRuns(target, {
           limit: 40,
           sessionId: sessionId || undefined,
@@ -1458,12 +1465,33 @@ export default function App() {
         fetchAgentGoals(target, { limit: 8, sessionId: sessionId || undefined, projectRoot: activeProjectPath || undefined }),
         fetchAgentMemory(target, { limit: 8, projectRoot: activeProjectPath || undefined }),
       ]);
-      setRuntimeRuns(payload.runs ?? []);
-      setDesktopActions(actionsPayload.actions ?? []);
-      setAgentGoals(goalsPayload.goals ?? []);
-      setAgentMemory(memoryPayload.memories ?? []);
-      setRuntimeRunsError("");
-      setWorkspaceStateError("");
+      const errors: string[] = [];
+      if (runsResult.status === "fulfilled") {
+        setRuntimeRuns(runsResult.value.runs ?? []);
+      } else {
+        errors.push(runsResult.reason instanceof Error ? runsResult.reason.message : String(runsResult.reason));
+      }
+      if (actionsResult.status === "fulfilled") {
+        setDesktopActions(actionsResult.value.actions ?? []);
+      } else {
+        errors.push(actionsResult.reason instanceof Error ? actionsResult.reason.message : String(actionsResult.reason));
+      }
+      if (goalsResult.status === "fulfilled") {
+        setAgentGoals(goalsResult.value.goals ?? []);
+      } else {
+        errors.push(goalsResult.reason instanceof Error ? goalsResult.reason.message : String(goalsResult.reason));
+      }
+      if (memoryResult.status === "fulfilled") {
+        setAgentMemory(memoryResult.value.memories ?? []);
+      } else {
+        errors.push(memoryResult.reason instanceof Error ? memoryResult.reason.message : String(memoryResult.reason));
+      }
+      const message = errors.join("; ");
+      setRuntimeRunsError(message);
+      setWorkspaceStateError(message);
+      if (showError && message) {
+        setRuntimeNotice(message);
+      }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setRuntimeRunsError(message);
