@@ -19,9 +19,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
-
 from optimization_service import (
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
@@ -7681,6 +7678,9 @@ class AgentGateway:
 
 
 def create_agent_mcp_app(gateway: AgentGateway):
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
+
     mcp = FastMCP(
         "VRCForge Agent Gateway",
         instructions=(
