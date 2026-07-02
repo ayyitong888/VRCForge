@@ -1113,6 +1113,64 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(replay.status_code, 200)
                 self.assertFalse(replay.json()["ok"])
 
+    def test_app_approval_revision_supersedes_pending_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            target = Path(workspace) / "revision.txt"
+            with TestClient(dashboard_server.app) as client:
+                high = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "write test file",
+                        "shell_command": "Set-Content -Path revision.txt -Value hi -Encoding utf8",
+                        "workspace_root": workspace,
+                        "cwd": workspace,
+                    },
+                )
+                self.assertEqual(high.status_code, 200)
+                approval_id = high.json()["shell"]["approval_id"]
+
+                revision = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/revision",
+                    json={"reason": "change request", "note": "use another name"},
+                )
+                self.assertEqual(revision.status_code, 200)
+                revision_payload = revision.json()
+                self.assertTrue(revision_payload["ok"])
+                self.assertEqual(revision_payload["approval"]["status"], "revision_requested")
+                self.assertEqual(revision_payload["approval"]["revisionReason"], "change request")
+                self.assertFalse(target.exists())
+
+                stale_approval = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                self.assertEqual(stale_approval.status_code, 200)
+                self.assertFalse(stale_approval.json()["ok"])
+                self.assertFalse(target.exists())
+
+    def test_app_approval_reject_does_not_rewrite_terminal_status(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            target = Path(workspace) / "terminal.txt"
+            with TestClient(dashboard_server.app) as client:
+                high = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "write test file",
+                        "shell_command": "Set-Content -Path terminal.txt -Value hi -Encoding utf8",
+                        "workspace_root": workspace,
+                        "cwd": workspace,
+                    },
+                )
+                self.assertEqual(high.status_code, 200)
+                approval_id = high.json()["shell"]["approval_id"]
+                approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                self.assertEqual(approved.status_code, 200)
+                self.assertTrue(approved.json()["ok"])
+                self.assertTrue(target.exists())
+
+                rejected = client.post(f"/api/app/agent/approvals/{approval_id}/reject")
+                self.assertEqual(rejected.status_code, 200)
+                rejected_payload = rejected.json()
+                self.assertFalse(rejected_payload["ok"])
+                self.assertEqual(rejected_payload["approval"]["status"], "applied")
+
     def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
         temp_project = tempfile.TemporaryDirectory()
         self.addCleanup(temp_project.cleanup)

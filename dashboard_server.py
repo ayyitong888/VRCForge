@@ -699,6 +699,11 @@ class AgentRuntimeMessageRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentApprovalRevisionRequest(BaseModel):
+    reason: str = ""
+    note: str = ""
+
+
 class AgentPermissionRequest(BaseModel):
     execution_mode: str = Field(default="approval")
     acknowledge_roslyn_risk: bool = Field(default=False)
@@ -1896,6 +1901,16 @@ async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
 async def app_agent_reject(approval_id: str) -> dict[str, Any]:
     try:
         payload = AGENT_GATEWAY.reject(approval_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/agent/approvals/{approval_id}/revision")
+async def app_agent_request_approval_revision(approval_id: str, request: AgentApprovalRevisionRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.request_approval_revision(approval_id, reason=request.reason, note=request.note)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})

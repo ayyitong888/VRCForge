@@ -235,7 +235,7 @@
     "openSettings": "開啟設定",
     "willDoNext": "我接下來會{{step}}",
     "executed": "已執行",
-    "noSummaryReturned": "沒有回傳摘要。",
+    "noSummaryReturned": "???????",
     "subagentTask": "背景任務",
     "coreDisconnectedSend": "核心未連線，訊息未發送。",
     "keywordPlannerHint1": "這句話我還沒辦法直接理解——目前在用本地關鍵詞規劃，只認識「日誌、截圖、表情、材質、健康檢查」這類固定指令。",
@@ -249,7 +249,24 @@
     "reason": "原因",
     "reject": "駁回",
     "approve": "同意執行",
-    "awaitingInline": "等待確認 — 請在下方輸入框上方的審批區處理"
+    "awaitingInline": "等待確認 — 請在下方輸入框上方的審批區處理",
+    "modifyPrompt": "修改審批 {{id}}（{{target}}）：",
+    "pendingContextTitle": "待修改審批上下文",
+    "modifyNotice": "審批已標記為需要修改。請在輸入框描述修改要求並送出追問。",
+    "requestTitle": "審批請求",
+    "needsApproval": "需要審批",
+    "viewParameters": "查看參數",
+    "modify": "修改",
+    "modifying": "標記中",
+    "rejecting": "駁回中",
+    "executing": "執行中",
+    "thisApproval": "???",
+    "contextPending": "???",
+    "contextTarget": "??",
+    "contextReason": "??",
+    "contextDetails": "??",
+    "revisionReason": "????????????",
+    "revisionNote": "???? {{id}}?{{target}}"
   },
   "shell": {
     "exitCode": "退出碼 {{code}}",
@@ -394,9 +411,14 @@
     "modelPlaceholder": "點擊右側刷新拉取模型列表，或手動填寫"
   },
   "thinking": {
-    "reasoning": "Reasoning",
-    "thinking": "Thinking",
-    "workingOnIt": "Working on it"
+    "reasoning": "??",
+    "thinking": "???",
+    "workingOnIt": "???",
+    "provider": "供應商",
+    "model": "模型",
+    "source": "來源",
+    "opaqueRetained": "供應商保留了不可展開的思考條目。",
+    "hiddenSummary": "思考內容已匯總到對話中，預設隱藏詳情。"
   },
   "format": {
     "seconds": "{{n}}秒",
@@ -430,17 +452,23 @@
     "statusDone": "{{count}} 完成",
     "statusReady": "就緒",
     "noTasks": "暫無背景任務。",
-    "inspect": "Inspect",
-    "cancel": "Cancel",
+    "inspect": "??",
+    "cancel": "??",
     "roles": {
-      "projectIndexReview": "Project",
-      "outfitPackageInspection": "Package",
-      "validationTriage": "Validation",
-      "packageInstallDiagnosis": "Install log",
-      "outfitImportPlanReview": "Outfit plan",
-      "fallback": "Worker"
+      "projectIndexReview": "??",
+      "outfitPackageInspection": "??",
+      "validationTriage": "??",
+      "packageInstallDiagnosis": "????",
+      "outfitImportPlanReview": "????",
+      "fallback": "?????"
     },
-    "taskLabel": "背景任務"
+    "taskLabel": "背景任務",
+    "result": "結果",
+    "statusQueued": "排隊中",
+    "statusRunningOne": "執行中",
+    "statusCancelling": "取消中",
+    "statusCompleted": "已完成",
+    "statusFailed": "失敗"
   },
   "connector": {
     "title": "智能體連接器",
@@ -783,5 +811,25 @@
     "freeLocal": "free/local",
     "paidApi": "paid API",
     "longContext": "long context"
+  },
+  "messageActions": {
+    "goodResponse": "回答有用",
+    "badResponse": "回答有問題"
+  },
+  "attachments": {
+    "selectedText": "{{count}} 個已選文本",
+    "metadataOnly": "僅元資料",
+    "remove": "移除",
+    "fallbackTitle": "??",
+    "limitReached": "?????????{{max}}??",
+    "limitOneTurn": "???????? {{max}} ????",
+    "payloadAttached": "?????",
+    "textAttached": "?????",
+    "metadataOnlyLarge": "??????????",
+    "summaryHeader": "??",
+    "fileTypeFallback": "??",
+    "payloadLimitError": "???? {{limit}} ?????",
+    "readTextFailed": "?????????",
+    "readFileFailed": "?????????"
   }
 }

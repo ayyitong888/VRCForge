@@ -146,6 +146,7 @@ import {
   previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
+  requestApprovalRevision,
   requestOptimizationApply,
   requestAvatarEncryptionApply,
   requestRestoreInterruptedApplyRecovery,
@@ -366,7 +367,7 @@ type ContextUsage = {
   warning: boolean;
 };
 
-type ApprovalActionState = "approve" | "reject";
+type ApprovalActionState = "approve" | "reject" | "modify";
 type MessageFeedback = "up" | "down";
 
 type RunSingleTurnOptions = {
@@ -850,7 +851,7 @@ export default function App() {
       items.push({
         id: "current-turn",
         status: stopRequested ? "cancelling" : "running",
-        title: currentTurn.text || "Attachments",
+        title: currentTurn.text || i18n.t("attachments.fallbackTitle"),
         meta: `${currentTurn.providerLabel} / ${currentTurn.model}`,
       });
     }
@@ -858,7 +859,7 @@ export default function App() {
       items.push({
         id: `queued-${turn.id}`,
         status: "queued",
-        title: turn.text || "Attachments",
+        title: turn.text || i18n.t("attachments.fallbackTitle"),
         meta: i18n.t("workspace.queueMeta", { index: index + 1, provider: turn.providerLabel, model: turn.model }),
       });
     });
@@ -1405,23 +1406,40 @@ export default function App() {
     return null;
   }
 
-  function modifyApprovalInComposer(approval: AgentApproval) {
-    const target = approval.targetTool || approval.preview?.command || "this approval";
+  async function modifyApprovalInComposer(approval: AgentApproval) {
+    const target = approval.targetTool || approval.preview?.command || t("approval.thisApproval");
     const detail = approval.paramsSummary || approval.arguments || approval.preview || {};
     const approvalContext = [
-      `Pending approval: ${approval.id}`,
-      `Target: ${target}`,
-      approval.reason ? `Reason: ${approval.reason}` : "",
-      `Details:\n${formatPayload(detail)}`,
+      `${t("approval.contextPending")}: ${approval.id}`,
+      `${t("approval.contextTarget")}: ${target}`,
+      approval.reason ? `${t("approval.contextReason")}: ${approval.reason}` : "",
+      `${t("approval.contextDetails")}:\n${formatPayload(detail)}`,
     ]
       .filter(Boolean)
       .join("\n\n");
     setInput((current) => {
       const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
-      return `${prefix}Modify pending approval ${approval.id} (${target}):\n`;
+      return `${prefix}${t("approval.modifyPrompt", { id: approval.id, target })}\n`;
     });
-    setAttachments((current) => [...current, textContextAttachment("Pending approval context", approvalContext)].slice(0, MAX_ATTACHMENTS_PER_TURN));
-    setRuntimeNotice("Approval kept pending. Describe the change in the composer and send it as a follow-up.");
+    setAttachments((current) => [...current, textContextAttachment(t("approval.pendingContextTitle"), approvalContext)].slice(0, MAX_ATTACHMENTS_PER_TURN));
+    setRuntimeNotice(t("approval.modifyNotice"));
+    setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
+    setError("");
+    try {
+      await requestApprovalRevision(endpoint, approval.id, {
+        reason: t("approval.revisionReason"),
+        note: t("approval.revisionNote", { id: approval.id, target }),
+      });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setApprovalActions((current) => {
+        const next = { ...current };
+        delete next[approval.id];
+        return next;
+      });
+    }
   }
 
   function copyConversationItem(item: ConversationItem) {
@@ -1430,7 +1448,7 @@ export default function App() {
       return;
     }
     void navigator.clipboard?.writeText(text).catch(() => undefined);
-    setRuntimeNotice("Copied message.");
+    setRuntimeNotice(t("chat.copiedMessage"));
   }
 
   function setConversationFeedback(itemId: string, value: MessageFeedback) {
@@ -1462,12 +1480,12 @@ export default function App() {
       sessionId: "",
       items: current.items.slice(0, index),
     }));
-    setRuntimeNotice("Message moved back to the composer. Edit and send to continue from here.");
+    setRuntimeNotice(t("chat.editingMessage"));
   }
 
   function retryConversationItem(itemId: string) {
     if (sendingRef.current) {
-      setError("A turn is already running. Stop it or wait before retrying.");
+      setError(t("chat.cannotActionWhileRunning"));
       return;
     }
     const chat = chatsRef.current.find((item) => item.id === activeChatId);
@@ -1489,7 +1507,7 @@ export default function App() {
     }
     const userItem = userIndex >= 0 ? chat.items[userIndex] : null;
     if (!userItem || userItem.type !== "user") {
-      setError("No earlier user message found to retry.");
+      setError(t("chat.noPreviousUserMessage"));
       return;
     }
     const turn: QueuedTurn = {
@@ -1652,7 +1670,7 @@ export default function App() {
 
   async function runTurnNow(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
     if (sendingRef.current) {
-      setError("A turn is already running. Stop it or wait before retrying.");
+      setError(t("chat.cannotActionWhileRunning"));
       return;
     }
     sendingRef.current = true;
@@ -1752,14 +1770,14 @@ export default function App() {
     }
     const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TURN - attachments.length);
     if (remaining === 0) {
-      setError(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN}).`);
+      setError(t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
       return;
     }
     const selected = Array.from(files).slice(0, remaining);
     const nextAttachments = await Promise.all(selected.map(readChatAttachment));
     setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
     if (files.length > remaining) {
-      setError(`Only ${MAX_ATTACHMENTS_PER_TURN} attachments can be sent in one turn.`);
+      setError(t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN }));
     }
   }
 
@@ -2022,7 +2040,7 @@ export default function App() {
 
   function addSelectionToComposer(text: string) {
     if (attachments.length >= MAX_ATTACHMENTS_PER_TURN) {
-      setError(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN}).`);
+      setError(t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
       clearSelectionMenu();
       return;
     }
@@ -4453,7 +4471,7 @@ export default function App() {
                           <Loader2 className="h-3 w-3 animate-spin" />
                           {t("chat.queued")} {index + 1}
                         </div>
-                        <p className="whitespace-pre-wrap break-words">{turn.text || "Attachments"}</p>
+                        <p className="whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
                         {turn.attachments.length ? <AttachmentStrip attachments={turn.attachments} compact /> : null}
                       </div>
                     </div>
@@ -5582,6 +5600,7 @@ function AttachmentStrip({
   onRemove?: (id: string) => void;
   compact?: boolean;
 }) {
+  const { t } = useTranslation();
   if (!attachments.length) {
     return null;
   }
@@ -5603,9 +5622,9 @@ function AttachmentStrip({
             ) : (
               <Archive className="h-4 w-4 shrink-0 text-muted-foreground" />
             )}
-            <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? "1 个已选文本" : attachment.name}</span>
+            <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? t("attachments.selectedText", { count: 1 }) : attachment.name}</span>
             {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
-            {attachment.truncated ? <span className="shrink-0 text-amber-700">metadata</span> : null}
+            {attachment.truncated ? <span className="shrink-0 text-amber-700">{t("attachments.metadataOnly")}</span> : null}
             {isSelectedText && selectedPreview ? (
               <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
                 {selectedPreview}
@@ -5617,7 +5636,8 @@ function AttachmentStrip({
                 type="button"
                 className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => onRemove(attachment.id)}
-                title="Remove"
+                title={t("attachments.remove")}
+                aria-label={t("attachments.remove")}
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -5878,15 +5898,15 @@ function OutfitImportPanel({
 function subAgentRoleLabel(role: string): string {
   switch (role) {
     case "project_index_review":
-      return "Project";
+      return i18n.t("subagent.roles.projectIndexReview");
     case "outfit_package_inspection":
-      return "Package";
+      return i18n.t("subagent.roles.outfitPackageInspection");
     case "validation_triage":
-      return "Validation";
+      return i18n.t("subagent.roles.validationTriage");
     case "package_install_diagnosis":
-      return "Install log";
+      return i18n.t("subagent.roles.packageInstallDiagnosis");
     case "outfit_import_plan_review":
-      return "Outfit plan";
+      return i18n.t("subagent.roles.outfitImportPlanReview");
     default:
       return role || i18n.t("subagent.roles.fallback");
   }
@@ -5903,6 +5923,23 @@ function subAgentStatusTone(status: string): "ok" | "warn" | "danger" | "muted" 
     return "warn";
   }
   return "muted";
+}
+
+function displaySubAgentStatus(status: string): string {
+  switch (status) {
+    case "queued":
+      return i18n.t("subagent.statusQueued");
+    case "running":
+      return i18n.t("subagent.statusRunningOne");
+    case "cancelling":
+      return i18n.t("subagent.statusCancelling");
+    case "completed":
+      return i18n.t("subagent.statusCompleted");
+    case "failed":
+      return i18n.t("subagent.statusFailed");
+    default:
+      return status || i18n.t("subagent.statusReady");
+  }
 }
 
 function SubAgentPanel({
@@ -9496,15 +9533,15 @@ function ConversationCard({
         <div className="mt-2 flex flex-wrap gap-2">
           <Button type="button" variant="outline" className="h-7 px-2 text-xs" onClick={() => onRetryItem?.(item.id)}>
             <RotateCcw className="h-3.5 w-3.5" />
-            Retry
+            {t("chat.retryMessage")}
           </Button>
           <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCopyItem?.(item)}>
             <Copy className="h-3.5 w-3.5" />
-            Copy
+            {t("chat.copyMessage")}
           </Button>
           <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onOpenDoctor?.()}>
             <Wrench className="h-3.5 w-3.5" />
-            Doctor
+            {t("sidebar.doctor")}
           </Button>
         </div>
       </div>
@@ -9560,13 +9597,13 @@ function ConversationCard({
               {task.displayName || t("agent.subagentTask")} · {subAgentRoleLabel(task.role)}
             </span>
             <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
-              {task.status}
+              {displaySubAgentStatus(task.status)}
             </Badge>
           </div>
           <p className="whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
             {task.summary || task.error || task.task || t("agent.noSummaryReturned")}
           </p>
-          {task.result !== undefined ? <OutputBlock label="Result" value={formatPayload(task.result)} /> : null}
+          {task.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(task.result)} /> : null}
           <MessageActions
             onCopy={() => onCopyItem?.(item)}
             onRetry={() => onRetryItem?.(item.id)}
@@ -9745,6 +9782,7 @@ function MessageActions({
   onFeedbackUp?: () => void;
   onFeedbackDown?: () => void;
 }) {
+  const { t } = useTranslation();
   const hasActions = onCopy || onRetry || onEdit || onFeedbackUp || onFeedbackDown;
   if (!hasActions) {
     return null;
@@ -9761,8 +9799,8 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onCopy}
-          title="Copy"
-          aria-label="Copy message"
+          title={t("chat.copyMessage")}
+          aria-label={t("chat.copyMessage")}
         >
           <Copy className="h-3.5 w-3.5" />
         </button>
@@ -9772,8 +9810,8 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onRetry}
-          title="Retry"
-          aria-label="Retry from this message"
+          title={t("chat.retryMessage")}
+          aria-label={t("chat.retryMessage")}
         >
           <RotateCcw className="h-3.5 w-3.5" />
         </button>
@@ -9783,8 +9821,8 @@ function MessageActions({
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
           onClick={onEdit}
-          title="Edit and resend"
-          aria-label="Edit and resend"
+          title={t("chat.editMessage")}
+          aria-label={t("chat.editMessage")}
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
@@ -9797,8 +9835,8 @@ function MessageActions({
             feedback === "up" && "bg-muted text-foreground",
           )}
           onClick={onFeedbackUp}
-          title="Good response"
-          aria-label="Good response"
+          title={t("messageActions.goodResponse")}
+          aria-label={t("messageActions.goodResponse")}
         >
           <ThumbsUp className="h-3.5 w-3.5" />
         </button>
@@ -9811,8 +9849,8 @@ function MessageActions({
             feedback === "down" && "bg-muted text-foreground",
           )}
           onClick={onFeedbackDown}
-          title="Bad response"
-          aria-label="Bad response"
+          title={t("messageActions.badResponse")}
+          aria-label={t("messageActions.badResponse")}
         >
           <ThumbsDown className="h-3.5 w-3.5" />
         </button>
@@ -9861,14 +9899,14 @@ function ReasoningTracePanel({
       </button>
       {open ? (
         <div className="space-y-2 border-t border-border/70 px-2 py-2">
-          <DataLine label="Provider" value={provider} />
-          {model ? <DataLine label="Model" value={model} mono /> : null}
-          {trace?.source ? <DataLine label="Source" value={trace.source} mono /> : null}
+          <DataLine label={t("thinking.provider")} value={provider} />
+          {model ? <DataLine label={t("thinking.model")} value={model} mono /> : null}
+          {trace?.source ? <DataLine label={t("thinking.source")} value={trace.source} mono /> : null}
           {items.map((item, index) => (
             <OutputBlock
               key={`${item.title || item.kind || "reasoning"}-${index}`}
               label={item.title || item.kind || t("thinking.reasoning")}
-              value={item.opaque ? "Opaque reasoning item retained by provider response." : "Reasoning content is summarized in chat and hidden by default."}
+              value={item.opaque ? t("thinking.opaqueRetained") : t("thinking.hiddenSummary")}
             />
           ))}
         </div>
@@ -9950,7 +9988,7 @@ function InlineApprovalCard({
 }) {
   const { t } = useTranslation();
   const busy = Boolean(action);
-  const title = approval.targetTool || approval.preview?.command || "Approval request";
+  const title = approval.targetTool || approval.preview?.command || t("approval.requestTitle");
   const detail = approval.paramsSummary || approval.arguments || approval.preview;
   return (
     <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-sm">
@@ -9958,7 +9996,7 @@ function InlineApprovalCard({
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate font-medium">需要审批</span>
+            <span className="min-w-0 flex-1 truncate font-medium">{t("approval.needsApproval")}</span>
             <Badge tone="warn" className="shrink-0">
               {approval.riskLevel || "write"}
             </Badge>
@@ -9969,7 +10007,7 @@ function InlineApprovalCard({
       </div>
       {detail ? (
         <details className="mt-2 rounded-md border border-amber-500/20 bg-background/70 px-2 py-1.5 text-xs">
-          <summary className="cursor-pointer text-muted-foreground">查看参数</summary>
+          <summary className="cursor-pointer text-muted-foreground">{t("approval.viewParameters")}</summary>
           <pre className="app-scrollbar mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
             {formatPayload(detail)}
           </pre>
@@ -9977,16 +10015,16 @@ function InlineApprovalCard({
       ) : null}
       <div className="mt-3 flex flex-wrap justify-end gap-2">
         <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onModify?.(approval)}>
-          <Pencil className="h-3.5 w-3.5" />
-          修改
+          {action === "modify" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
+          {action === "modify" ? t("approval.modifying") : t("approval.modify")}
         </Button>
         <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onReject?.(approval.id)}>
           {action === "reject" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-          {action === "reject" ? "驳回中" : t("approval.reject")}
+          {action === "reject" ? t("approval.rejecting") : t("approval.reject")}
         </Button>
         <Button className="h-8 px-3 text-xs" disabled={busy} onClick={() => onApprove?.(approval.id)}>
           {action === "approve" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-          {action === "approve" ? "执行中" : t("approval.approve")}
+          {action === "approve" ? t("approval.executing") : t("approval.approve")}
         </Button>
       </div>
     </div>
@@ -10425,7 +10463,7 @@ function SidebarChat({
       <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
         <button
           type="button"
-          title={pinned ? t("contextMenu.unpinChat") : "置顶"}
+          title={pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}
           onClick={(event) => {
             event.stopPropagation();
             onTogglePin?.();
@@ -11255,18 +11293,13 @@ function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
       if (text) {
         history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
       }
-    } else if (item.type === "result") {
-      const text = (item.result?.stdout || item.error || "").trim();
-      if (text) {
-        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
-      }
     } else if (item.type === "compact") {
       history.push({ role: "agent", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
     } else if (item.type === "subagent") {
       const task = item.task;
       const text = [
         `${i18n.t("subagent.taskLabel")} ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
-        task.summary || task.error || task.task || "",
+        task.status === "failed" && task.error ? `${i18n.t("subagent.statusFailed")}: ${task.error}` : task.summary || task.error || task.task || "",
       ]
         .filter(Boolean)
         .join("\n")
@@ -11287,16 +11320,16 @@ function appendAttachmentSummary(text: string, attachments: ChatAttachment[]): s
     .map((attachment) => {
       const payload =
         attachment.payloadKind === "data_url"
-          ? "payload attached"
+          ? i18n.t("attachments.payloadAttached")
           : attachment.payloadKind === "text"
-            ? "text attached"
+            ? i18n.t("attachments.textAttached")
             : attachment.truncated
-              ? "metadata only, too large"
-              : "metadata only";
-      return `- ${attachment.name} (${attachment.type || "file"}, ${formatAttachmentSize(attachment.size)}, ${payload})`;
+              ? i18n.t("attachments.metadataOnlyLarge")
+              : i18n.t("attachments.metadataOnly");
+      return `- ${attachment.name} (${attachment.type || i18n.t("attachments.fileTypeFallback")}, ${formatAttachmentSize(attachment.size)}, ${payload})`;
     })
     .join("\n");
-  return [text.trim(), `Attachments:\n${summary}`].filter(Boolean).join("\n\n");
+  return [text.trim(), `${i18n.t("attachments.summaryHeader")}:\n${summary}`].filter(Boolean).join("\n\n");
 }
 
 function selectedTextAttachment(text: string): ChatAttachment {
@@ -11377,13 +11410,18 @@ function readChatAttachment(file: File): Promise<ChatAttachment> {
     type: file.type || "application/octet-stream",
   };
   if (file.size > MAX_ATTACHMENT_PAYLOAD_BYTES) {
-    return Promise.resolve({ ...base, payloadKind: "metadata", truncated: true, error: `File exceeds ${formatAttachmentSize(MAX_ATTACHMENT_PAYLOAD_BYTES)} payload limit.` });
+    return Promise.resolve({
+      ...base,
+      payloadKind: "metadata",
+      truncated: true,
+      error: i18n.t("attachments.payloadLimitError", { limit: formatAttachmentSize(MAX_ATTACHMENT_PAYLOAD_BYTES) }),
+    });
   }
   if (file.type.startsWith("text/") && file.size <= MAX_TEXT_ATTACHMENT_BYTES) {
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = () => resolve({ ...base, text: typeof reader.result === "string" ? reader.result : "", payloadKind: "text" });
-      reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: "Failed to read text payload." });
+      reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: i18n.t("attachments.readTextFailed") });
       reader.readAsText(file);
     });
   }
@@ -11395,7 +11433,7 @@ function readChatAttachment(file: File): Promise<ChatAttachment> {
         dataUrl: typeof reader.result === "string" ? reader.result : undefined,
         payloadKind: typeof reader.result === "string" ? "data_url" : "metadata",
       });
-    reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: "Failed to read file payload." });
+    reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: i18n.t("attachments.readFileFailed") });
     reader.readAsDataURL(file);
   });
 }

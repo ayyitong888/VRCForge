@@ -1862,6 +1862,19 @@ export async function rejectAgentApproval(
   });
 }
 
+export async function requestApprovalRevision(
+  endpoint: string,
+  approvalId: string,
+  payload: { reason?: string; note?: string } = {},
+): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+  return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/revision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 60000,
+  });
+}
+
 export async function fetchCheckpoints(
   endpoint: string,
   projectRoot?: string,

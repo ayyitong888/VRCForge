@@ -249,7 +249,24 @@
     "reason": "Reason",
     "reject": "Reject",
     "approve": "Approve",
-    "awaitingInline": "Awaiting approval — handle in the approval area above the input"
+    "awaitingInline": "Awaiting approval — handle in the approval area above the input",
+    "modifyPrompt": "Revise approval {{id}} ({{target}}):",
+    "pendingContextTitle": "Pending approval context",
+    "modifyNotice": "Approval marked for revision. Describe the change and send a follow-up.",
+    "requestTitle": "Approval request",
+    "needsApproval": "Approval required",
+    "viewParameters": "View parameters",
+    "modify": "Modify",
+    "modifying": "Marking",
+    "rejecting": "Rejecting",
+    "executing": "Executing",
+    "thisApproval": "this approval",
+    "contextPending": "Pending approval",
+    "contextTarget": "Target",
+    "contextReason": "Reason",
+    "contextDetails": "Details",
+    "revisionReason": "User requested changes before approval.",
+    "revisionNote": "Revise approval {{id}}: {{target}}"
   },
   "shell": {
     "exitCode": "Exit code {{code}}",
@@ -396,7 +413,12 @@
   "thinking": {
     "reasoning": "Reasoning",
     "thinking": "Thinking",
-    "workingOnIt": "Working on it"
+    "workingOnIt": "Working on it",
+    "provider": "Provider",
+    "model": "Model",
+    "source": "Source",
+    "opaqueRetained": "Opaque reasoning item retained by provider response.",
+    "hiddenSummary": "Reasoning content is summarized in chat and hidden by default."
   },
   "format": {
     "seconds": "{{n}}s",
@@ -440,7 +462,13 @@
       "outfitImportPlanReview": "Outfit plan",
       "fallback": "Worker"
     },
-    "taskLabel": "Background task"
+    "taskLabel": "Background task",
+    "result": "Result",
+    "statusQueued": "Queued",
+    "statusRunningOne": "Running",
+    "statusCancelling": "Cancelling",
+    "statusCompleted": "Completed",
+    "statusFailed": "Failed"
   },
   "connector": {
     "title": "Agent Connectors",
@@ -783,5 +811,25 @@
     "freeLocal": "free/local",
     "paidApi": "paid API",
     "longContext": "long context"
+  },
+  "messageActions": {
+    "goodResponse": "Good response",
+    "badResponse": "Bad response"
+  },
+  "attachments": {
+    "selectedText": "{{count}} selected text",
+    "metadataOnly": "metadata only",
+    "remove": "Remove",
+    "fallbackTitle": "Attachments",
+    "limitReached": "Attachment limit reached ({{max}}).",
+    "limitOneTurn": "Only {{max}} attachments can be sent in one turn.",
+    "payloadAttached": "payload attached",
+    "textAttached": "text attached",
+    "metadataOnlyLarge": "metadata only, too large",
+    "summaryHeader": "Attachments",
+    "fileTypeFallback": "file",
+    "payloadLimitError": "File exceeds {{limit}} payload limit.",
+    "readTextFailed": "Failed to read text payload.",
+    "readFileFailed": "Failed to read file payload."
   }
 }

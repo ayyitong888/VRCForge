@@ -6820,12 +6820,33 @@ class AgentGateway:
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") not in {"pending", "approved"} and status == "approved":
                 return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
+            if approval.get("status") != "pending" and status == "rejected":
+                return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
             if approval.get("status") == "expired":
                 return {"ok": False, "approval": approval, "message": "Approval has expired."}
             approval["status"] = status
             approval[f"{status}At"] = utc_now_iso()
             self._approvals[approval_id] = approval
             self.append_audit({"event": f"approval_{status}", "approval": approval})
+            return {"ok": True, "approval": redact_sensitive(dict(approval))}
+
+    def request_approval_revision(self, approval_id: str, *, reason: str = "", note: str = "") -> dict[str, Any]:
+        with self._lock:
+            approval = self._approvals.get(approval_id)
+            if not approval:
+                approval = self._load_approval_from_audit(approval_id)
+            if not approval:
+                raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
+            approval = self._refresh_approval_expiry(approval)
+            status = str(approval.get("status") or "")
+            if status != "pending":
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {status}."}
+            approval["status"] = "revision_requested"
+            approval["revisionRequestedAt"] = utc_now_iso()
+            approval["revisionReason"] = reason.strip()
+            approval["revisionNote"] = note.strip()
+            self._approvals[approval_id] = approval
+            self.append_audit({"event": "approval_revision_requested", "approval": approval})
             return {"ok": True, "approval": redact_sensitive(dict(approval))}
 
     def _refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:

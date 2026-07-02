@@ -235,7 +235,7 @@
     "openSettings": "設定を開く",
     "willDoNext": "次に{{step}}します",
     "executed": "実行済み",
-    "noSummaryReturned": "サマリーが返されませんでした。",
+    "noSummaryReturned": "????????????",
     "subagentTask": "バックグラウンドタスク",
     "coreDisconnectedSend": "コア未接続、メッセージは送信されませんでした。",
     "keywordPlannerHint1": "この文は直接理解できません。現在のローカルキーワードプランナーは「ログ、スクリーンショット、表情、マテリアル、ヘルスチェック」などの固定コマンドのみ認識します。",
@@ -249,7 +249,24 @@
     "reason": "理由",
     "reject": "却下",
     "approve": "承認して実行",
-    "awaitingInline": "承認待ち — 入力欄上の承認エリアで処理してください"
+    "awaitingInline": "承認待ち — 入力欄上の承認エリアで処理してください",
+    "modifyPrompt": "承認 {{id}}（{{target}}）を修正：",
+    "pendingContextTitle": "修正待ち承認のコンテキスト",
+    "modifyNotice": "承認を修正要求としてマークしました。入力欄に変更内容を書いて送信してください。",
+    "requestTitle": "承認リクエスト",
+    "needsApproval": "承認が必要",
+    "viewParameters": "パラメータを表示",
+    "modify": "修正",
+    "modifying": "マーク中",
+    "rejecting": "却下中",
+    "executing": "実行中",
+    "thisApproval": "????",
+    "contextPending": "????",
+    "contextTarget": "??",
+    "contextReason": "??",
+    "contextDetails": "??",
+    "revisionReason": "?????????????????????",
+    "revisionNote": "?? {{id}} ????{{target}}"
   },
   "shell": {
     "exitCode": "終了コード {{code}}",
@@ -394,9 +411,14 @@
     "modelPlaceholder": "右の更新ボタンでモデルリストを取得、または手動入力"
   },
   "thinking": {
-    "reasoning": "Reasoning",
-    "thinking": "Thinking",
-    "workingOnIt": "Working on it"
+    "reasoning": "??",
+    "thinking": "???",
+    "workingOnIt": "???",
+    "provider": "プロバイダ",
+    "model": "モデル",
+    "source": "ソース",
+    "opaqueRetained": "プロバイダの応答に含まれる非公開の思考項目です。",
+    "hiddenSummary": "思考内容はチャットに要約され、詳細は既定で非表示です。"
   },
   "format": {
     "seconds": "{{n}}秒",
@@ -430,17 +452,23 @@
     "statusDone": "{{count}} 完了",
     "statusReady": "準備完了",
     "noTasks": "バックグラウンドタスクはありません。",
-    "inspect": "Inspect",
-    "cancel": "Cancel",
+    "inspect": "??",
+    "cancel": "?????",
     "roles": {
-      "projectIndexReview": "Project",
-      "outfitPackageInspection": "Package",
-      "validationTriage": "Validation",
-      "packageInstallDiagnosis": "Install log",
-      "outfitImportPlanReview": "Outfit plan",
-      "fallback": "Worker"
+      "projectIndexReview": "??????",
+      "outfitPackageInspection": "?????",
+      "validationTriage": "??",
+      "packageInstallDiagnosis": "????????",
+      "outfitImportPlanReview": "???????",
+      "fallback": "????"
     },
-    "taskLabel": "バックグラウンドタスク"
+    "taskLabel": "バックグラウンドタスク",
+    "result": "結果",
+    "statusQueued": "キュー中",
+    "statusRunningOne": "実行中",
+    "statusCancelling": "キャンセル中",
+    "statusCompleted": "完了",
+    "statusFailed": "失敗"
   },
   "connector": {
     "title": "エージェントコネクタ",
@@ -783,5 +811,25 @@
     "freeLocal": "free/local",
     "paidApi": "paid API",
     "longContext": "long context"
+  },
+  "messageActions": {
+    "goodResponse": "良い回答",
+    "badResponse": "問題のある回答"
+  },
+  "attachments": {
+    "selectedText": "選択したテキスト {{count}} 件",
+    "metadataOnly": "メタデータのみ",
+    "remove": "削除",
+    "fallbackTitle": "??????",
+    "limitReached": "?????????????????{{max}}??",
+    "limitOneTurn": "1 ???????????? {{max}} ??????",
+    "payloadAttached": "???????",
+    "textAttached": "?????????",
+    "metadataOnlyLarge": "???????????????????",
+    "summaryHeader": "??????",
+    "fileTypeFallback": "????",
+    "payloadLimitError": "????? {{limit}} ????????????????",
+    "readTextFailed": "?????????????????????",
+    "readFileFailed": "?????????????????????"
   }
 }
