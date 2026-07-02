@@ -878,6 +878,87 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("session_id", payload)
         self.assertIn("turn_id", payload)
 
+    def test_agent_runtime_run_ledger_records_message_turn(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/message",
+                json={
+                    "message": "hello ledger",
+                    "clientTurnId": "client-turn-1",
+                    "provider": "deepseek",
+                    "providerLabel": "DeepSeek",
+                    "model": "deepseek-v4-pro",
+                    "projectRoot": "D:/AvatarProject",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            turn_payload = response.json()
+
+            dashboard_server.AGENT_GATEWAY._runtime_sessions.clear()
+            ledger_response = client.get(
+                "/api/app/agent/runs",
+                params={"sessionId": turn_payload["sessionId"], "limit": "10"},
+            )
+
+        self.assertEqual(ledger_response.status_code, 200)
+        ledger = ledger_response.json()
+        self.assertTrue(ledger["ok"])
+        runs = ledger["runs"]
+        self.assertGreaterEqual(len(runs), 1)
+        run = next(item for item in runs if item.get("turnId") == turn_payload["turnId"])
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["clientTurnId"], "client-turn-1")
+        self.assertEqual(run["providerLabel"], "DeepSeek")
+        self.assertEqual(run["model"], "deepseek-v4-pro")
+        self.assertIn("stepCount", run)
+
+    def test_agent_runtime_cancel_records_request(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/runs/cancel",
+                json={"sessionId": "sess-cancel", "clientTurnId": "client-cancel-1", "reason": "user_stop"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "cancel_requested")
+
+            ledger_response = client.get(
+                "/api/app/agent/runs",
+                params={"sessionId": "sess-cancel", "clientTurnId": "client-cancel-1"},
+            )
+
+        self.assertEqual(ledger_response.status_code, 200)
+        runs = ledger_response.json()["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["status"], "cancel_requested")
+        self.assertEqual(runs[0]["clientTurnId"], "client-cancel-1")
+
+    def test_agent_runtime_queue_records_request(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/runs/queue",
+                json={
+                    "sessionId": "sess-queue",
+                    "clientTurnId": "client-queue-1",
+                    "message": "queued follow-up",
+                    "providerLabel": "DeepSeek",
+                    "model": "deepseek-v4-pro",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "queued")
+
+            ledger_response = client.get(
+                "/api/app/agent/runs",
+                params={"sessionId": "sess-queue", "clientTurnId": "client-queue-1"},
+            )
+
+        self.assertEqual(ledger_response.status_code, 200)
+        runs = ledger_response.json()["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["status"], "queued")
+        self.assertEqual(runs[0]["messageSummary"], "queued follow-up")
+        self.assertEqual(runs[0]["providerLabel"], "DeepSeek")
+
     @patch("dashboard_server.request_llm_plan_with_metadata")
     @patch("dashboard_server.load_dashboard_settings")
     def test_agent_runtime_message_includes_provider_reasoning_trace(

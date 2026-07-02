@@ -69,6 +69,7 @@ import {
   AdjustmentCheckpoint,
   AgentCheckpoint,
   AgentCheckpointPreview,
+  AgentRuntimeRun,
   AgentRuntimeResponse,
   AgentReasoningTrace,
   AgentSkill,
@@ -130,6 +131,7 @@ import {
   PermissionState,
   blockSkillPackage,
   fetchAgentNotes,
+  fetchAgentRuns,
   fetchAvatars,
   fetchChats,
   fetchProjectPrefs,
@@ -146,6 +148,8 @@ import {
   previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
+  recordAgentRunQueued,
+  requestAgentRunCancel,
   requestApprovalRevision,
   requestOptimizationApply,
   requestAvatarEncryptionApply,
@@ -339,6 +343,7 @@ type QueuedTurn = {
 };
 
 type CurrentTurn = {
+  clientTurnId?: string;
   text: string;
   startedAt: number;
   providerLabel: string;
@@ -385,6 +390,15 @@ type RuntimeScheduleItem = {
 type RuntimeFileReference = {
   path: string;
   source: string;
+};
+
+type RuntimeReviewEvidence = {
+  id: string;
+  kind: "approval" | "checkpoint" | "diff" | "run";
+  title: string;
+  meta: string;
+  status?: string;
+  action?: () => void;
 };
 
 type ProjectUiPrefs = {
@@ -642,6 +656,8 @@ export default function App() {
   const [workspaceDiffError, setWorkspaceDiffError] = useState("");
   const [workspaceDiffReviewOpen, setWorkspaceDiffReviewOpen] = useState(false);
   const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
+  const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
+  const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
@@ -883,6 +899,61 @@ export default function App() {
   const workspaceDiffFiles = workspaceDiff?.files ?? [];
   const runtimeFileReferences = useMemo(() => buildRuntimeFileReferences(conversation, workspaceDiffFiles), [conversation, workspaceDiffFiles]);
   const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
+  const runtimeReviewEvidence = useMemo<RuntimeReviewEvidence[]>(() => {
+    const items: RuntimeReviewEvidence[] = [];
+    for (const approval of pendingApprovalItems.slice(0, 4)) {
+      items.push({
+        id: `approval-${approval.id}`,
+        kind: "approval",
+        title: approval.targetTool || approval.preview?.command || t("workspace.approvalEvidence"),
+        meta: t("workspace.approvalEvidenceMeta", { status: approval.status || "pending" }),
+        status: approval.status,
+      });
+    }
+    const seenCheckpoints = new Set<string>();
+    for (const run of runtimeRuns) {
+      const checkpointIds = [run.checkpointId, ...(run.checkpointIds ?? [])].filter(Boolean) as string[];
+      for (const checkpointId of checkpointIds) {
+        if (seenCheckpoints.has(checkpointId)) {
+          continue;
+        }
+        seenCheckpoints.add(checkpointId);
+        items.push({
+          id: `checkpoint-${checkpointId}`,
+          kind: "checkpoint",
+          title: checkpointId,
+          meta: run.targetTool || run.writeTool || run.messageSummary || t("workspace.checkpointEvidence"),
+          status: run.status,
+          action: () => setActiveView("checkpoints"),
+        });
+      }
+    }
+    const recentRunWithApproval = runtimeRuns.find((run) => (run.approvalId || (run.approvalIds ?? []).length) && !run.checkpointId);
+    if (recentRunWithApproval && items.length < 6) {
+      items.push({
+        id: `run-approval-${recentRunWithApproval.id || recentRunWithApproval.turnId || recentRunWithApproval.clientTurnId}`,
+        kind: "run",
+        title: recentRunWithApproval.targetTool || recentRunWithApproval.writeTool || t("workspace.runEvidence"),
+        meta: recentRunWithApproval.status || recentRunWithApproval.lastEvent || "",
+        status: recentRunWithApproval.status,
+      });
+    }
+    if (workspaceDiffChanged) {
+      items.push({
+        id: "git-diff",
+        kind: "diff",
+        title: t("workspace.gitDiffEvidence"),
+        meta: t("workspace.gitDiffEvidenceMeta", {
+          count: formatCount(workspaceDiff?.fileCount || 0),
+          additions: formatCount(workspaceDiff?.additions || 0),
+          deletions: formatCount(workspaceDiff?.deletions || 0),
+        }),
+        status: workspaceDiff?.status,
+        action: toggleWorkspaceDiffReview,
+      });
+    }
+    return items.slice(0, 8);
+  }, [pendingApprovalItems, runtimeRuns, t, workspaceDiff?.additions, workspaceDiff?.deletions, workspaceDiff?.fileCount, workspaceDiff?.status, workspaceDiffChanged]);
   const backendComponent = healthComponents.backend;
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
@@ -1233,6 +1304,15 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
+    if (!runtimeConnected) {
+      setRuntimeRuns([]);
+      setRuntimeRunsError("");
+      return;
+    }
+    void refreshRuntimeRuns(false);
+  }, [runtimeConnected, endpoint, sessionId, activeProjectPath]);
+
+  useEffect(() => {
     if (!runtimeConnected || rightSidebarCollapsed) {
       return;
     }
@@ -1241,6 +1321,16 @@ export default function App() {
     }, 5000);
     return () => window.clearInterval(timer);
   }, [runtimeConnected, endpoint, activeProjectPath, rightSidebarCollapsed]);
+
+  useEffect(() => {
+    if (!runtimeConnected || rightSidebarCollapsed || (!sending && pendingApprovals === 0)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshRuntimeRuns(false);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [runtimeConnected, endpoint, sessionId, activeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
   async function startRuntime(): Promise<string | null> {
     if (runtimeStartingRef.current) {
@@ -1319,6 +1409,29 @@ export default function App() {
       }
       if (includePatch) {
         setLoadingWorkspaceDiffPatch(false);
+      }
+    }
+  }
+
+  async function refreshRuntimeRuns(showError = false, target = endpoint) {
+    if (!runtimeConnected) {
+      setRuntimeRuns([]);
+      setRuntimeRunsError("");
+      return;
+    }
+    try {
+      const payload = await fetchAgentRuns(target, {
+        limit: 40,
+        sessionId: sessionId || undefined,
+        projectRoot: activeProjectPath || undefined,
+      });
+      setRuntimeRuns(payload.runs ?? []);
+      setRuntimeRunsError("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setRuntimeRunsError(message);
+      if (showError) {
+        setRuntimeNotice(message);
       }
     }
   }
@@ -1431,6 +1544,7 @@ export default function App() {
         note: t("approval.revisionNote", { id: approval.id, target }),
       });
       await refresh();
+      await refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1640,6 +1754,18 @@ export default function App() {
       }
       queueRef.current.push(turn);
       setQueued([...queueRef.current]);
+      void recordAgentRunQueued(endpoint, {
+        sessionId: sessionId || undefined,
+        clientTurnId: turn.id,
+        message: turn.text,
+        attachments: serializeChatAttachments(turn.attachments),
+        provider: providerSnapshot.provider,
+        providerLabel: turn.providerLabel,
+        model: turn.model,
+        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+      })
+        .then(() => refreshRuntimeRuns(false))
+        .catch(() => undefined);
       return;
     }
     const chatId = ensureActiveChat();
@@ -1700,7 +1826,7 @@ export default function App() {
     const abortController = new AbortController();
     let userItemId = "";
     activeTurnAbortRef.current = abortController;
-    setCurrentTurn({ text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
+    setCurrentTurn({ clientTurnId: turn.id, text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -1726,6 +1852,7 @@ export default function App() {
         provider: providerSnapshot.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
+        clientTurnId: turn.id,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
@@ -1737,6 +1864,7 @@ export default function App() {
         ],
       }));
       await refresh(targetEndpoint);
+      await refreshRuntimeRuns(false, targetEndpoint);
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
       if (userItemId && text.toLowerCase().includes("cancel")) {
@@ -1761,6 +1889,16 @@ export default function App() {
     setStopRequested(true);
     queueRef.current = [];
     setQueued([]);
+    const current = currentTurn;
+    if (current?.clientTurnId || sessionId) {
+      void requestAgentRunCancel(endpoint, {
+        sessionId: sessionId || undefined,
+        clientTurnId: current?.clientTurnId,
+        reason: "user_stop",
+      })
+        .then(() => refreshRuntimeRuns(false))
+        .catch(() => undefined);
+    }
     activeTurnAbortRef.current?.abort();
   }
 
@@ -1802,6 +1940,7 @@ export default function App() {
         });
       }
       await refresh();
+      await refreshRuntimeRuns(false);
       const executionRecord = asRecord(payload.execution);
       const executionTargetTool = typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "";
       const executionResultRecord = asRecord(executionResult);
@@ -1839,6 +1978,7 @@ export default function App() {
         });
       }
       await refresh();
+      await refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -4622,12 +4762,46 @@ export default function App() {
                     {runtimeNotice}
                   </div>
                 ) : null}
-                {pendingApprovalItems.length ? (
+              {pendingApprovalItems.length ? (
                   <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/5 px-2 py-2 text-xs text-amber-700">
                     {t("workspace.inlineApprovalHint")}
                   </div>
                 ) : null}
               </section>
+
+              {runtimeRuns.length || runtimeRunsError ? (
+                <RuntimeSection
+                  title={t("workspace.runLedger")}
+                  collapsed={rightRuntimeSectionsCollapsed.runs}
+                  onToggle={() => toggleRightRuntimeSection("runs")}
+                  count={<Badge tone={runtimeRunsError ? "warn" : "muted"}>{runtimeRunsError ? "!" : formatCount(runtimeRuns.length)}</Badge>}
+                >
+                  {runtimeRunsError ? (
+                    <div className="text-xs text-muted-foreground">{runtimeRunsError}</div>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {runtimeRuns.slice(0, 6).map((run, index) => (
+                        <RuntimeRunRow key={run.id || run.turnId || run.clientTurnId || index} run={run} />
+                      ))}
+                    </div>
+                  )}
+                </RuntimeSection>
+              ) : null}
+
+              {runtimeReviewEvidence.length ? (
+                <RuntimeSection
+                  title={t("workspace.reviewEvidence")}
+                  collapsed={rightRuntimeSectionsCollapsed.reviewEvidence}
+                  onToggle={() => toggleRightRuntimeSection("reviewEvidence")}
+                  count={<Badge tone="muted">{formatCount(runtimeReviewEvidence.length)}</Badge>}
+                >
+                  <div className="space-y-0.5">
+                    {runtimeReviewEvidence.map((item) => (
+                      <RuntimeReviewEvidenceRow key={item.id} item={item} />
+                    ))}
+                  </div>
+                </RuntimeSection>
+              ) : null}
 
               {runtimeFileReferences.length ? (
                 <RuntimeSection
@@ -10177,6 +10351,73 @@ function RuntimeInfoRow({
   );
 }
 
+function RuntimeRunRow({ run }: { run: AgentRuntimeRun }) {
+  const status = String(run.status || run.lastEvent || "unknown");
+  const title = run.messageSummary || run.targetTool || run.writeTool || run.skillTool || run.event || i18n.t("workspace.runLedgerItem");
+  const provider = run.providerLabel || run.provider || "";
+  const model = run.model || "";
+  const metaParts = [
+    runtimeRunStatusLabel(status),
+    run.stepCount ? i18n.t("workspace.runSteps", { count: formatCount(run.stepCount) }) : "",
+    provider || model ? `${provider}${provider && model ? " / " : ""}${model}` : "",
+  ].filter(Boolean);
+  return (
+    <div className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] gap-2 rounded-md px-1 py-1.5 text-xs hover:bg-muted/70">
+      <div className="pt-1">
+        <span className={cn("block h-3 w-3 rounded-full", runtimeRunStatusClass(status))} />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-medium text-foreground" title={title}>
+          {title}
+        </div>
+        <div className="truncate text-muted-foreground">{metaParts.join(" · ") || i18n.t("workspace.runLedgerItem")}</div>
+      </div>
+      {run.approvalId || run.checkpointId || (run.approvalIds ?? []).length || (run.checkpointIds ?? []).length ? (
+        <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+          {run.checkpointId || (run.checkpointIds ?? [])[0] ? i18n.t("workspace.proofShort") : i18n.t("workspace.approvalShort")}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeReviewEvidenceRow({ item }: { item: RuntimeReviewEvidence }) {
+  const icon =
+    item.kind === "checkpoint" ? (
+      <Archive className="h-3.5 w-3.5" />
+    ) : item.kind === "diff" ? (
+      <FileText className="h-3.5 w-3.5" />
+    ) : item.kind === "approval" ? (
+      <ListChecks className="h-3.5 w-3.5" />
+    ) : (
+      <History className="h-3.5 w-3.5" />
+    );
+  const content = (
+    <>
+      <span className="flex items-center justify-center text-muted-foreground">{icon}</span>
+      <span className="min-w-0">
+        <span className="block truncate font-medium text-foreground" title={item.title}>
+          {item.title}
+        </span>
+        <span className="block truncate text-muted-foreground">{item.meta}</span>
+      </span>
+      <span className="shrink-0 text-muted-foreground">{runtimeRunStatusLabel(item.status || item.kind)}</span>
+    </>
+  );
+  if (item.action) {
+    return (
+      <button
+        type="button"
+        className="grid w-full min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1.5 text-left text-xs hover:bg-muted/70"
+        onClick={item.action}
+      >
+        {content}
+      </button>
+    );
+  }
+  return <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1.5 text-xs">{content}</div>;
+}
+
 function RuntimeScheduleRow({ item }: { item: RuntimeScheduleItem }) {
   const tone =
     item.status === "cancelling"
@@ -10235,6 +10476,45 @@ function runtimeFileSourceLabel(source: RuntimeFileReference["source"]) {
     return i18n.t("workspace.fileSourceSkill");
   }
   return i18n.t("workspace.fileSourceDiff");
+}
+
+function runtimeRunStatusLabel(status: string) {
+  const normalized = status.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    running: i18n.t("workspace.runStatusRunning"),
+    completed: i18n.t("workspace.runStatusCompleted"),
+    failed: i18n.t("workspace.runStatusFailed"),
+    cancelled: i18n.t("workspace.runStatusCancelled"),
+    cancel_requested: i18n.t("workspace.runStatusCancelRequested"),
+    applying: i18n.t("workspace.runStatusApplying"),
+    applied: i18n.t("workspace.runStatusApplied"),
+    approved: i18n.t("workspace.runStatusApproved"),
+    rejected: i18n.t("workspace.runStatusRejected"),
+    revision_requested: i18n.t("workspace.runStatusRevisionRequested"),
+    pending: i18n.t("workspace.runStatusPending"),
+    diff: i18n.t("workspace.gitDiffShort"),
+    checkpoint: i18n.t("workspace.checkpointShort"),
+    approval: i18n.t("workspace.approvalShort"),
+    run: i18n.t("workspace.runShort"),
+  };
+  return labels[normalized] || status || i18n.t("workspace.runStatusUnknown");
+}
+
+function runtimeRunStatusClass(status: string) {
+  const normalized = status.trim().toLowerCase();
+  if (["running", "applying", "cancel_requested"].includes(normalized)) {
+    return "bg-primary animate-pulse";
+  }
+  if (["completed", "applied", "approved"].includes(normalized)) {
+    return "bg-emerald-500";
+  }
+  if (["failed", "rejected", "cancelled"].includes(normalized)) {
+    return "bg-destructive";
+  }
+  if (["pending", "revision_requested"].includes(normalized)) {
+    return "bg-amber-500";
+  }
+  return "bg-muted-foreground/50";
 }
 
 function RuntimeSection({

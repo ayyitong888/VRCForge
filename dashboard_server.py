@@ -682,6 +682,7 @@ class AgentSessionRequest(BaseModel):
 class AgentRuntimeMessageRequest(BaseModel):
     agent_name: str = "desktop-agent"
     session_id: str | None = None
+    client_turn_id: str | None = Field(default=None, alias="clientTurnId")
     message: str
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     shell_command: str | None = None
@@ -695,6 +696,29 @@ class AgentRuntimeMessageRequest(BaseModel):
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentRuntimeCancelRequest(BaseModel):
+    session_id: str | None = Field(default=None, alias="sessionId")
+    turn_id: str | None = Field(default=None, alias="turnId")
+    client_turn_id: str | None = Field(default=None, alias="clientTurnId")
+    reason: str = "user_stop"
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentRuntimeQueueRequest(BaseModel):
+    session_id: str | None = Field(default=None, alias="sessionId")
+    client_turn_id: str = Field(alias="clientTurnId")
+    message: str = ""
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    provider: str | None = None
+    provider_label: str | None = Field(default=None, alias="providerLabel")
+    model: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
 
     model_config = {"populate_by_name": True}
 
@@ -1519,6 +1543,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     payload = AGENT_GATEWAY.runtime_message(
         {
             "session_id": runtime_request.session_id,
+            "clientTurnId": runtime_request.client_turn_id,
             "message": runtime_request.message,
             "attachments": runtime_request.attachments,
             "shell_command": runtime_request.shell_command,
@@ -1536,6 +1561,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         agent_name=runtime_request.agent_name,
     )
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
+    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=payload.get("sessionId") or payload.get("session_id") or ""))
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
 
@@ -1607,6 +1633,62 @@ def app_agent_runtime_session(session_id: str) -> dict[str, Any]:
         return AGENT_GATEWAY.get_runtime_session(session_id)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/app/agent/runs")
+def app_agent_runtime_runs(
+    limit: int = 50,
+    sessionId: str = "",
+    projectRoot: str = "",
+    clientTurnId: str = "",
+) -> dict[str, Any]:
+    return AGENT_GATEWAY.list_runtime_runs(
+        limit=limit,
+        session_id=sessionId,
+        project_root=projectRoot,
+        client_turn_id=clientTurnId,
+    )
+
+
+@app.post("/api/app/agent/runs/cancel")
+async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.request_runtime_cancel(
+            {
+                "session_id": cancel_request.session_id,
+                "turnId": cancel_request.turn_id,
+                "clientTurnId": cancel_request.client_turn_id,
+                "reason": cancel_request.reason,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentRuntimeCancel", payload)
+    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=cancel_request.session_id or ""))
+    return payload
+
+
+@app.post("/api/app/agent/runs/queue")
+async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.record_runtime_queue_event(
+            {
+                "session_id": queue_request.session_id,
+                "clientTurnId": queue_request.client_turn_id,
+                "message": queue_request.message,
+                "attachments": queue_request.attachments,
+                "provider": queue_request.provider,
+                "providerLabel": queue_request.provider_label,
+                "model": queue_request.model,
+                "projectPath": queue_request.project_path,
+                "projectRoot": queue_request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
+    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=queue_request.session_id or ""))
+    return payload
 
 
 @app.get("/api/app/agent/approvals")

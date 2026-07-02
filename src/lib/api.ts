@@ -338,6 +338,7 @@ export type AgentRuntimeResponse = {
   sessionId: string;
   turn_id: string;
   turnId: string;
+  clientTurnId?: string;
   approval_id?: string;
   approvalId?: string;
   observe: Record<string, unknown>;
@@ -385,6 +386,58 @@ export type AgentRuntimeResponse = {
   };
   skill?: AgentSkillResult;
   result?: AgentShellResult;
+};
+
+export type AgentRuntimeRun = {
+  id?: string;
+  schema?: string;
+  event?: string;
+  lastEvent?: string;
+  status?: string;
+  sessionId?: string;
+  turnId?: string;
+  clientTurnId?: string;
+  agent?: string;
+  messageSummary?: string;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  projectRoot?: string;
+  planSummary?: string;
+  planner?: string;
+  nextStep?: string;
+  stepCount?: number;
+  eventCount?: number;
+  attachmentCount?: number;
+  approvalId?: string;
+  approvalIds?: string[];
+  checkpointId?: string;
+  checkpointIds?: string[];
+  targetTool?: string;
+  shellStatus?: string;
+  skillStatus?: string;
+  skillTool?: string;
+  writeStatus?: string;
+  writeTool?: string;
+  resultSummary?: unknown;
+  error?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  steps?: Array<{
+    index?: number;
+    kind?: string;
+    tool?: string;
+    summary?: string;
+    status?: string;
+  }>;
+};
+
+export type AgentRuntimeRunLedger = {
+  ok: boolean;
+  schema?: string;
+  runs: AgentRuntimeRun[];
+  events?: AgentRuntimeRun[];
+  count: number;
 };
 
 export type HealthComponent = {
@@ -1811,7 +1864,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
@@ -1820,6 +1873,7 @@ export async function sendAgentMessage(
     body: JSON.stringify({
       agent_name: agentName || "desktop-agent",
       session_id: sessionId || null,
+      clientTurnId: options.clientTurnId || undefined,
       message,
       history: history ?? [],
       attachments: options.attachments ?? [],
@@ -1828,6 +1882,61 @@ export async function sendAgentMessage(
       providerLabel: options.providerLabel || undefined,
       model: options.model || undefined,
     }),
+  });
+}
+
+export async function fetchAgentRuns(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string; clientTurnId?: string } = {},
+): Promise<AgentRuntimeRunLedger> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  if (params.clientTurnId) {
+    query.set("clientTurnId", params.clientTurnId);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson<AgentRuntimeRunLedger>(`${endpoint}/api/app/agent/runs${suffix}`);
+}
+
+export async function requestAgentRunCancel(
+  endpoint: string,
+  payload: { sessionId?: string; turnId?: string; clientTurnId?: string; reason?: string },
+): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+  return requestJson(`${endpoint}/api/app/agent/runs/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 30000,
+  });
+}
+
+export async function recordAgentRunQueued(
+  endpoint: string,
+  payload: {
+    sessionId?: string;
+    clientTurnId: string;
+    message?: string;
+    attachments?: AgentMessageAttachment[];
+    provider?: string;
+    providerLabel?: string;
+    model?: string;
+    projectPath?: string;
+    projectRoot?: string;
+  },
+): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+  return requestJson(`${endpoint}/api/app/agent/runs/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 30000,
   });
 }
 
