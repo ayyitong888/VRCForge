@@ -1133,6 +1133,18 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(runs[0]["status"], "cancel_requested")
         self.assertEqual(runs[0]["clientTurnId"], "client-cancel-1")
 
+    def test_agent_runtime_cancel_by_session_is_observed_by_turn(self) -> None:
+        session_id = "sess-cancel-observed"
+        dashboard_server.AGENT_GATEWAY.request_runtime_cancel({"session_id": session_id, "reason": "user_stop"})
+        try:
+            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                {"message": "hello after cancel", "session_id": session_id},
+            )
+        finally:
+            dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.discard(session_id)
+
+        self.assertEqual(payload["plan"]["nextStep"], "cancelled")
+
     def test_agent_runtime_queue_records_request(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.post(
@@ -1334,10 +1346,40 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(low["risk"], "low")
 
+        rg_low = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "rg TODO .", "workspace_root": workspace_root}
+        )
+        self.assertEqual(rg_low["risk"], "low")
+
+        git_show_low = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "git show --stat HEAD", "workspace_root": workspace_root}
+        )
+        self.assertEqual(git_show_low["risk"], "low")
+
         high = dashboard_server.AGENT_GATEWAY.classify_shell(
             {"command": "Set-Content test.txt hi", "workspace_root": workspace_root}
         )
         self.assertEqual(high["risk"], "high")
+
+        home_path = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Get-Content ~\\.codex\\auth.json", "workspace_root": workspace_root}
+        )
+        self.assertEqual(home_path["risk"], "high")
+
+        root_relative = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Get-Content \\Windows\\win.ini", "workspace_root": workspace_root}
+        )
+        self.assertEqual(root_relative["risk"], "high")
+
+        rg_preprocessor = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "rg --pre powershell TODO .", "workspace_root": workspace_root}
+        )
+        self.assertEqual(rg_preprocessor["risk"], "high")
+
+        git_show_output = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "git show --stat --output=leak.txt HEAD", "workspace_root": workspace_root}
+        )
+        self.assertEqual(git_show_output["risk"], "high")
 
         redirected = dashboard_server.AGENT_GATEWAY.classify_shell(
             {"command": "Get-Content a.txt > b.txt", "workspace_root": workspace_root}
@@ -1351,6 +1393,25 @@ class DashboardServerTests(unittest.TestCase):
 
         rejected = dashboard_server.AGENT_GATEWAY.classify_shell({"command": "", "workspace_root": workspace_root})
         self.assertEqual(rejected["risk"], "reject")
+
+    def test_shell_command_can_be_cancelled_before_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cancel_id = "sess-shell-cancel"
+            dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.add(cancel_id)
+            try:
+                result = dashboard_server.AGENT_GATEWAY._run_shell_command(
+                    "Start-Sleep -Seconds 30",
+                    Path(temp_dir),
+                    timeout_seconds=30,
+                    cancel_ids=[cancel_id],
+                )
+            finally:
+                dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.discard(cancel_id)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result["timedOut"])
+        self.assertLess(result["durationSeconds"], 5)
 
     def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
@@ -4960,6 +5021,20 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "healthy")
         mock_popen.assert_not_called()
+
+    def test_repair_unity_mcp_bridge_returns_busy_when_repair_running(self) -> None:
+        acquired = dashboard_server.UNITY_MCP_REPAIR_LOCK.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            result = dashboard_server.repair_unity_mcp_bridge_sync(
+                dashboard_server.UnityMcpRepairRequest(projectPath=r"C:\Unity\AvatarProject")
+            )
+        finally:
+            dashboard_server.UNITY_MCP_REPAIR_LOCK.release()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "busy")
+        self.assertIn("repair_lock", {phase["id"] for phase in result["phases"]})
 
     def test_repair_unity_mcp_bridge_refuses_to_close_unmatched_unity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

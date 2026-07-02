@@ -1190,6 +1190,7 @@ EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
 LOCAL_LOG_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
+UNITY_MCP_REPAIR_LOCK = Lock()
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
@@ -10818,8 +10819,32 @@ def resolve_unity_mcp_repair_project(project_path: str) -> Path:
 
 
 def repair_unity_mcp_bridge_sync(request: UnityMcpRepairRequest) -> dict[str, Any]:
-    phases: list[dict[str, Any]] = []
     generated_at = utc_now_iso()
+    if not UNITY_MCP_REPAIR_LOCK.acquire(blocking=False):
+        return {
+            "ok": False,
+            "schema": "vrcforge.unity_mcp_repair.v1",
+            "status": "busy",
+            "generatedAt": generated_at,
+            "projectPath": request.project_path,
+            "phases": [
+                _repair_phase(
+                    "repair_lock",
+                    "warning",
+                    "Another Unity MCP repair is already running. Wait for it to finish, then retry.",
+                )
+            ],
+            "before": {},
+            "after": {},
+        }
+    try:
+        return _repair_unity_mcp_bridge_sync_unlocked(request, generated_at=generated_at)
+    finally:
+        UNITY_MCP_REPAIR_LOCK.release()
+
+
+def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, generated_at: str) -> dict[str, Any]:
+    phases: list[dict[str, Any]] = []
     try:
         project_root = resolve_unity_mcp_repair_project(request.project_path)
         settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))

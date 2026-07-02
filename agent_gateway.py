@@ -2008,7 +2008,7 @@ class AgentGateway:
         cap_reached = False
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
-            if turn_id in self._cancelled_runtime_turns or (client_turn_id and client_turn_id in self._cancelled_runtime_turns):
+            if self._runtime_cancel_requested(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
@@ -2062,6 +2062,7 @@ class AgentGateway:
                         "workspace_root": params.get("workspace_root") or params.get("workspaceRoot"),
                         "session_id": session_id,
                         "turn_id": turn_id,
+                        "client_turn_id": client_turn_id,
                         "reason": plan.get("summary") or "Agent shell step",
                     },
                     agent_name=agent_name,
@@ -2135,7 +2136,7 @@ class AgentGateway:
             cap_reached = True
 
         reasoning_trace = ensure_dict(self.llm_reasoning_trace)
-        first_plan = first_plan or {}
+        first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         top_plan = first_plan if iterations <= 1 else self._summarize_loop_plan(
             message, first_plan, last_plan, steps
@@ -2538,6 +2539,8 @@ class AgentGateway:
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
         with self._lock:
+            if session_id:
+                self._cancelled_runtime_turns.add(session_id)
             if turn_id:
                 self._cancelled_runtime_turns.add(turn_id)
             if client_turn_id:
@@ -2552,6 +2555,19 @@ class AgentGateway:
         }
         self._append_runtime_run(event)
         return {"ok": True, "status": "cancel_requested", "event": event}
+
+    def _runtime_cancel_requested(
+        self,
+        *,
+        session_id: str = "",
+        turn_id: str = "",
+        client_turn_id: str = "",
+    ) -> bool:
+        candidates = [item for item in (session_id, turn_id, client_turn_id) if item]
+        if not candidates:
+            return False
+        with self._lock:
+            return any(item in self._cancelled_runtime_turns for item in candidates)
 
     def record_runtime_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -2891,7 +2907,16 @@ class AgentGateway:
                 "approvalId": approval["id"],
             }
 
-        result = self._run_shell_command(command, Path(classification["cwd"]), timeout_seconds=int(params.get("timeout_seconds") or 120))
+        result = self._run_shell_command(
+            command,
+            Path(classification["cwd"]),
+            timeout_seconds=int(params.get("timeout_seconds") or 120),
+            cancel_ids=[
+                str(params.get("session_id") or params.get("sessionId") or ""),
+                str(params.get("turn_id") or params.get("turnId") or ""),
+                str(params.get("client_turn_id") or params.get("clientTurnId") or ""),
+            ],
+        )
         self.append_audit(
             {
                 "event": "shell_executed",
@@ -2943,7 +2968,16 @@ class AgentGateway:
         if classification.get("commandHash") != expected_hash:
             raise AgentGatewayError("Reclassified shell command hash does not match approval.")
 
-        result = self._run_shell_command(command, cwd, timeout_seconds=timeout_seconds)
+        result = self._run_shell_command(
+            command,
+            cwd,
+            timeout_seconds=timeout_seconds,
+            cancel_ids=[
+                str(params.get("session_id") or params.get("sessionId") or ""),
+                str(params.get("turn_id") or params.get("turnId") or ""),
+                str(params.get("client_turn_id") or params.get("clientTurnId") or ""),
+            ],
+        )
         self.append_audit(
             {
                 "event": "shell_approved_executed",
@@ -6230,7 +6264,7 @@ class AgentGateway:
     def _low_risk_reasons(self, command_name: str, args: list[str], workspace_root: Path) -> list[str]:
         read_only = {"get-childitem", "dir", "ls", "get-content", "type", "rg", "findstr"}
         if command_name in read_only:
-            if self._args_stay_in_workspace(args, workspace_root):
+            if self._read_command_args_are_low_risk(command_name, args, workspace_root):
                 return ["Read-only workspace inspection command."]
             return []
 
@@ -6245,17 +6279,46 @@ class AgentGateway:
 
         return []
 
+    def _read_command_args_are_low_risk(self, command_name: str, args: list[str], workspace_root: Path) -> bool:
+        if command_name == "rg":
+            for arg in args:
+                lowered = arg.lower()
+                if lowered == "--pre" or lowered.startswith("--pre="):
+                    return False
+                if lowered == "--pre-glob" or lowered.startswith("--pre-glob="):
+                    return False
+        return self._args_stay_in_workspace(args, workspace_root)
+
     def _args_stay_in_workspace(self, args: list[str], workspace_root: Path) -> bool:
+        skip_next = False
         for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
             if not arg or arg.startswith("-"):
+                if arg in {"--pre", "--pre-glob", "--output"}:
+                    return False
+                if arg in {"--glob", "-g", "--pathspec-from-file"}:
+                    skip_next = True
                 continue
             cleaned = strip_quotes(arg)
             if cleaned in {".", "*"}:
                 continue
+            lowered = cleaned.lower()
+            if lowered.startswith(("~", "$", "%userprofile%", "%home%")):
+                return False
+            if cleaned.startswith(("/", "\\")) and not cleaned.startswith(("./", ".\\", "../", "..\\")):
+                return False
             if ".." in re.split(r"[\\/]+", cleaned):
                 return False
             if looks_like_absolute_path(cleaned) and not is_path_within(Path(cleaned), workspace_root):
                 return False
+            if any(separator in cleaned for separator in ("/", "\\")):
+                candidate = Path(cleaned)
+                if not candidate.is_absolute():
+                    candidate = workspace_root / cleaned
+                if not is_path_within(candidate, workspace_root):
+                    return False
         return True
 
     def _git_low_risk_reasons(self, args: list[str], workspace_root: Path) -> list[str]:
@@ -6276,7 +6339,7 @@ class AgentGateway:
             return ["Read-only git log command."]
         if verb == "diff" and self._git_diff_args_are_low_risk(rest, workspace_root):
             return ["Read-only git diff command."]
-        if verb == "show" and "--stat" in rest and "--ext-diff" not in rest:
+        if verb == "show" and self._git_show_args_are_low_risk(rest, workspace_root):
             return ["Read-only git show stat command."]
         return []
 
@@ -6306,6 +6369,28 @@ class AgentGateway:
             path_args = args[args.index("--") + 1 :]
             return self._args_stay_in_workspace(path_args, workspace_root)
         return all(arg in {"--stat", "--name-only", "--name-status"} for arg in args)
+
+    def _git_show_args_are_low_risk(self, args: list[str], workspace_root: Path) -> bool:
+        if "--stat" not in args:
+            return False
+        if any(arg == "--ext-diff" or arg.startswith("--output") or arg == "--output" for arg in args):
+            return False
+        allowed_flags = {"--stat", "--no-ext-diff"}
+        if "--" in args:
+            split_index = args.index("--")
+            before_paths = args[:split_index]
+            path_args = args[split_index + 1 :]
+        else:
+            before_paths = args
+            path_args = []
+        for arg in before_paths:
+            if arg in allowed_flags:
+                continue
+            if arg.startswith("-"):
+                return False
+            if any(separator in arg for separator in ("/", "\\")) and not self._args_stay_in_workspace([arg], workspace_root):
+                return False
+        return self._args_stay_in_workspace(path_args, workspace_root) if path_args else True
 
     def _create_shell_approval(
         self,
@@ -6371,7 +6456,13 @@ class AgentGateway:
         )
         return approval
 
-    def _run_shell_command(self, command: str, cwd: Path, timeout_seconds: int = 120) -> dict[str, Any]:
+    def _run_shell_command(
+        self,
+        command: str,
+        cwd: Path,
+        timeout_seconds: int = 120,
+        cancel_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         started = time.monotonic()
         started_at = utc_now_iso()
         env = os.environ.copy()
@@ -6401,21 +6492,37 @@ class AgentGateway:
             creationflags=creationflags,
         )
         timed_out = False
-        try:
-            stdout, stderr = process.communicate(timeout=max(1, min(timeout_seconds, 600)))
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            kill_process_tree(process)
-            stdout, stderr = process.communicate()
+        cancelled = False
+        deadline = time.monotonic() + max(1, min(timeout_seconds, 600))
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_ids and self._runtime_cancel_requested(
+                    session_id=cancel_ids[0] if len(cancel_ids) > 0 else "",
+                    turn_id=cancel_ids[1] if len(cancel_ids) > 1 else "",
+                    client_turn_id=cancel_ids[2] if len(cancel_ids) > 2 else "",
+                ):
+                    cancelled = True
+                    kill_process_tree(process)
+                    stdout, stderr = process.communicate()
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    kill_process_tree(process)
+                    stdout, stderr = process.communicate()
+                    break
 
         duration = time.monotonic() - started
         exit_code = process.returncode if process.returncode is not None else -1
         return {
-            "ok": exit_code == 0 and not timed_out,
+            "ok": exit_code == 0 and not timed_out and not cancelled,
             "command": command,
             "cwd": str(cwd),
             "exitCode": exit_code,
             "timedOut": timed_out,
+            "cancelled": cancelled,
             "startedAt": started_at,
             "finishedAt": utc_now_iso(),
             "durationSeconds": round(duration, 3),
