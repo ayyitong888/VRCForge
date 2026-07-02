@@ -104,20 +104,27 @@ namespace VRCForge.Editor
             var requestedSubset = new HashSet<string>(
                 (parameters.assetPaths ?? new List<string>())
                     .Where(path => !string.IsNullOrWhiteSpace(path))
-                    .Select(NormalizeAssetPath),
+                    .Select(NormalizeRequestedAssetPath)
+                    .Where(path => !string.IsNullOrWhiteSpace(path)),
                 StringComparer.OrdinalIgnoreCase);
             var files = manifest["files"] as JArray ?? new JArray();
             foreach (var file in files.OfType<JObject>())
             {
-                var relativePath = NormalizeAssetPath((string)file["project_relative_path"] ?? "");
-                var backupRelativePath = NormalizeAssetPath((string)file["backup_relative_path"] ?? "");
+                var rawRelativePath = (string)file["project_relative_path"] ?? "";
+                var rawBackupRelativePath = (string)file["backup_relative_path"] ?? "";
                 var originalSha = ((string)file["sha256"] ?? "").Trim();
-                if (string.IsNullOrWhiteSpace(relativePath) || string.IsNullOrWhiteSpace(backupRelativePath))
+                var relativePathOk = TryNormalizeManifestRelativePath(rawRelativePath, out var relativePath, out var relativePathError);
+                var backupRelativePathOk = TryNormalizeManifestRelativePath(rawBackupRelativePath, out var backupRelativePath, out var backupRelativePathError);
+                if (!relativePathOk || !backupRelativePathOk)
                 {
                     skipped.Add(new RestoreSkippedItem
                     {
-                        project_relative_path = relativePath,
-                        reason = "Manifest entry is missing project_relative_path or backup_relative_path."
+                        project_relative_path = NormalizeAssetPath(rawRelativePath),
+                        reason = !string.IsNullOrWhiteSpace(relativePathError)
+                            ? relativePathError
+                            : !string.IsNullOrWhiteSpace(backupRelativePathError)
+                                ? backupRelativePathError
+                                : "Manifest entry is missing project_relative_path or backup_relative_path."
                     });
                     continue;
                 }
@@ -138,8 +145,8 @@ namespace VRCForge.Editor
                     continue;
                 }
 
-                var backupFilePath = Path.Combine(backupPath, backupRelativePath).Replace("\\", "/");
-                var targetPath = Path.Combine(projectRoot, relativePath).Replace("\\", "/");
+                var backupFilePath = ResolveContainedPath(backupPath, backupRelativePath, "Backup file");
+                var targetPath = ResolveContainedPath(projectRoot, relativePath, "Restore target");
                 EnsureInsideProject(projectRoot, targetPath);
 
                 if (!File.Exists(backupFilePath))
@@ -183,8 +190,8 @@ namespace VRCForge.Editor
             {
                 foreach (var item in planned)
                 {
-                    var backupFilePath = Path.Combine(backupPath, item.backup_relative_path).Replace("\\", "/");
-                    var targetPath = Path.Combine(projectRoot, item.project_relative_path).Replace("\\", "/");
+                    var backupFilePath = ResolveContainedPath(backupPath, item.backup_relative_path, "Backup file");
+                    var targetPath = ResolveContainedPath(projectRoot, item.project_relative_path, "Restore target");
                     var directory = Path.GetDirectoryName(targetPath);
                     if (!string.IsNullOrEmpty(directory))
                     {
@@ -245,7 +252,7 @@ namespace VRCForge.Editor
         {
             if (!string.IsNullOrWhiteSpace(parameters.backupPath))
             {
-                return ResolveProjectPath(parameters.backupPath, projectRoot);
+                return NormalizeFullPath(ResolveProjectPath(parameters.backupPath, projectRoot));
             }
 
             if (string.IsNullOrWhiteSpace(parameters.backupId))
@@ -253,13 +260,18 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("backupPath or backupId is required.");
             }
 
-            return Path.Combine(ResolveProjectPath(parameters.backupRoot, projectRoot), parameters.backupId).Replace("\\", "/");
+            if (!TryNormalizeManifestRelativePath(parameters.backupId, out var backupId, out var backupIdError))
+            {
+                throw new InvalidOperationException(backupIdError ?? "backupId must be a safe relative folder name.");
+            }
+
+            return ResolveContainedPath(ResolveProjectPath(parameters.backupRoot, projectRoot), backupId, "Backup id");
         }
 
         private static void EnsureInsideProject(string projectRoot, string targetPath)
         {
-            var root = projectRoot.Replace("\\", "/").TrimEnd('/') + "/";
-            var target = targetPath.Replace("\\", "/");
+            var root = NormalizeFullPath(projectRoot).TrimEnd('/') + "/";
+            var target = NormalizeFullPath(targetPath);
             if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException($"Restore target is outside the Unity project: {targetPath}");
@@ -269,6 +281,62 @@ namespace VRCForge.Editor
         private static string NormalizeAssetPath(string value)
         {
             return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
+        }
+
+        private static string NormalizeRequestedAssetPath(string value)
+        {
+            return TryNormalizeManifestRelativePath(value, out var normalized, out _) ? normalized : "";
+        }
+
+        private static bool TryNormalizeManifestRelativePath(string value, out string normalized, out string error)
+        {
+            normalized = "";
+            error = "";
+            var raw = (value ?? string.Empty).Replace("\\", "/").Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                error = "Manifest entry is missing project_relative_path or backup_relative_path.";
+                return false;
+            }
+
+            if (Path.IsPathRooted(raw) || raw.StartsWith("/", StringComparison.Ordinal))
+            {
+                error = $"Manifest path must be relative: {raw}";
+                return false;
+            }
+
+            var segments = raw.Trim('/').Split('/');
+            var safeSegments = new List<string>();
+            foreach (var segment in segments)
+            {
+                if (string.IsNullOrWhiteSpace(segment) || segment == "." || segment == "..")
+                {
+                    error = $"Manifest path is not a safe relative path: {raw}";
+                    return false;
+                }
+
+                safeSegments.Add(segment);
+            }
+
+            normalized = string.Join("/", safeSegments);
+            return !string.IsNullOrWhiteSpace(normalized);
+        }
+
+        private static string ResolveContainedPath(string rootPath, string relativePath, string label)
+        {
+            var root = NormalizeFullPath(rootPath).TrimEnd('/') + "/";
+            var target = NormalizeFullPath(Path.Combine(root, relativePath));
+            if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"{label} resolved outside its expected root: {relativePath}");
+            }
+
+            return target;
+        }
+
+        private static string NormalizeFullPath(string path)
+        {
+            return Path.GetFullPath(path).Replace("\\", "/");
         }
 
         private static string GetProjectRoot()
@@ -287,10 +355,10 @@ namespace VRCForge.Editor
             var path = string.IsNullOrWhiteSpace(requestedPath) ? DefaultBackupRoot : requestedPath;
             if (Path.IsPathRooted(path))
             {
-                return path.Replace("\\", "/");
+                return NormalizeFullPath(path);
             }
 
-            return Path.Combine(projectRoot, path).Replace("\\", "/");
+            return NormalizeFullPath(Path.Combine(projectRoot, path));
         }
 
         private static string ComputeSha256(string fullPath)

@@ -782,7 +782,7 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "title": "Supervised Unity MCP Write",
         "inputs": ["Unity MCP tool name and argument object."],
         "outputs": ["Unity MCP execution result plus the automatic pre-write checkpoint."],
-        "sideEffects": "runs an arbitrary Unity MCP write only after approval and rollback checkpoint creation",
+        "sideEffects": "runs a VRCForge-owned static Unity MCP write only after approval and rollback checkpoint creation",
         "tags": ["unity", "mcp", "checkpoint", "write"],
     },
     "vrcforge_restore_safe_backup": {

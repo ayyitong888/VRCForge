@@ -901,6 +901,27 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
+    def test_app_auth_covers_legacy_api_routes_but_keeps_health_public(self) -> None:
+        original_required = dashboard_server.APP_AUTH_REQUIRED
+        original_token = dashboard_server.APP_SESSION_TOKEN
+        dashboard_server.APP_AUTH_REQUIRED = True
+        dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
+        headers = {"Authorization": "Bearer test-app-session-token"}
+        try:
+            with TestClient(dashboard_server.app) as client:
+                health = client.get("/api/health")
+                missing_token_get = client.get("/api/projects")
+                missing_token_post = client.post("/api/projects/install", json={})
+                authorized_get = client.get("/api/projects", headers=headers)
+
+            self.assertEqual(health.status_code, 200)
+            self.assertEqual(missing_token_get.status_code, 401)
+            self.assertEqual(missing_token_post.status_code, 401)
+            self.assertEqual(authorized_get.status_code, 200)
+        finally:
+            dashboard_server.APP_AUTH_REQUIRED = original_required
+            dashboard_server.APP_SESSION_TOKEN = original_token
+
     def test_packaged_backend_exe_resolves_payload_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload_root = Path(tmp) / "VRCForge_Windows_x64"
@@ -2118,10 +2139,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(settings.unity_mcp_timeout_seconds, 75)
         self.assertEqual(mock_invoke.call_args.args[2]["timeoutSeconds"], 10)
 
-    def test_generic_unity_write_cannot_bypass_roslyn_gate(self) -> None:
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_generic_unity_write_cannot_bypass_roslyn_gate(self, mock_invoke) -> None:
         result = dashboard_server.unity_mcp_write_sync({"toolName": "vrc_execute_roslyn", "arguments": {"code": "return 42;"}})
         self.assertFalse(result["ok"])
         self.assertIn("dedicated Roslyn permission path", result["error"])
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_generic_unity_write_rejects_non_allowlisted_tools(self, mock_invoke) -> None:
+        result = dashboard_server.unity_mcp_write_sync({"toolName": "vrc_import_unitypackage", "arguments": {"packagePath": "Assets/test.unitypackage"}})
+        self.assertFalse(result["ok"])
+        self.assertIn("static write allowlist", result["error"])
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_generic_unity_write_allows_static_vrcforge_tool(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace(unity_mcp_timeout_seconds=30)
+        mock_invoke.return_value = dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"ok": True})
+
+        result = dashboard_server.unity_mcp_write_sync(
+            {
+                "toolName": "vrc_set_material_shader",
+                "arguments": {
+                    "materialAssetPath": "Assets/Avatar/Test.mat",
+                    "shaderName": "Standard",
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_invoke.call_args.args[1], "vrc_set_material_shader")
+        self.assertEqual(mock_invoke.call_args.args[2]["shaderName"], "Standard")
 
     def test_agent_gateway_mcp_lists_codex_debug_loop_tools(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -2215,6 +2265,16 @@ class DashboardServerTests(unittest.TestCase):
         old_dynamic_type = "CSharp" + "Script"
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
+
+    def test_safe_backup_restore_source_constrains_manifest_paths(self) -> None:
+        source = Path("Assets/VRCForge/Editor/PrefabTools.cs").read_text(encoding="utf-8-sig")
+
+        self.assertIn("TryNormalizeManifestRelativePath", source)
+        self.assertIn("ResolveContainedPath", source)
+        self.assertIn("Path.GetFullPath", source)
+        self.assertIn("Manifest path must be relative", source)
+        self.assertIn("Manifest path is not a safe relative path", source)
+        self.assertNotIn("Path.Combine(backupPath, backupRelativePath)", source)
 
     def test_wardrobe_scanner_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -5552,6 +5612,16 @@ namespace VRCForge.Editor
         self.assertEqual(payload["createdCount"], 1)
         self.assertEqual(payload["skipped"], [])
         self.assertEqual(payload["assetDir"], "Assets/VRCForge/Generated/FX")
+
+    def test_provider_config_default_path_is_outside_source_root(self) -> None:
+        if os.environ.get("VRCFORGE_CONFIG_PATH") or os.environ.get("VRCFORGE_CONFIG_DIR"):
+            self.skipTest("config location is explicitly overridden")
+
+        source_root_config = (dashboard_server.ROOT_DIR / "config.json").resolve()
+
+        self.assertNotEqual(dashboard_server.CONFIG_PATH.resolve(), source_root_config)
+        self.assertNotEqual(dashboard_server.CONFIG_PATH.resolve().parent, dashboard_server.ROOT_DIR.resolve())
+        self.assertEqual(dashboard_server.CONFIG_PATH.resolve().parent, dashboard_server.CONFIG_DIR.resolve())
 
     def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

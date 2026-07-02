@@ -143,6 +143,7 @@ PORTABLE_MODE = bool(getattr(sys, "frozen", False)) or any(
         "VRCFORGE_APP_DIR",
         "VRCFORGE_USER_DATA_DIR",
         "VRCFORGE_CONFIG_DIR",
+        "VRCFORGE_CONFIG_PATH",
         "VRCFORGE_LOG_DIR",
         "VRCFORGE_ARTIFACTS_DIR",
         "VRCFORGE_DASHBOARD_DIR",
@@ -151,7 +152,7 @@ PORTABLE_MODE = bool(getattr(sys, "frozen", False)) or any(
 )
 USER_DATA_DIR = resolve_runtime_path("VRCFORGE_USER_DATA_DIR", default_user_data_root())
 DASHBOARD_DIR = resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", ROOT_DIR / "dashboard")
-CONFIG_DIR = resolve_runtime_path("VRCFORGE_CONFIG_DIR", USER_DATA_DIR / "config") if PORTABLE_MODE else ROOT_DIR
+CONFIG_DIR = resolve_runtime_path("VRCFORGE_CONFIG_DIR", USER_DATA_DIR / "config")
 LOG_DIR = resolve_runtime_path("VRCFORGE_LOG_DIR", USER_DATA_DIR / "logs") if PORTABLE_MODE else ROOT_DIR / "artifacts" / "dashboard"
 ARTIFACTS_DIR = resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", USER_DATA_DIR / "artifacts") if PORTABLE_MODE else ROOT_DIR / "artifacts"
 DASHBOARD_ARTIFACTS_DIR = ARTIFACTS_DIR / "dashboard"
@@ -164,7 +165,7 @@ SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.js
 SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
 TOOLS_DIR = ROOT_DIR / "tools"
 INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
-CONFIG_PATH = CONFIG_DIR / "config.json" if PORTABLE_MODE else ROOT_DIR / "config.json"
+CONFIG_PATH = resolve_runtime_path("VRCFORGE_CONFIG_PATH", CONFIG_DIR / "config.json")
 RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     "VRCFORGE_SETTINGS_PATH",
     CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
@@ -231,6 +232,38 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_setup_outfit",
     "vrc_scan_avatar_performance",
 ]
+VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
+    {
+        "vrc_apply_blendshapes",
+        "vrc_apply_material_tuning",
+        "vrc_apply_clothing_fx",
+        "vrc_apply_parameter_optimization",
+        "vrc_rollback_avatar_parameters",
+        "vrc_set_material_shader",
+        "vrc_toggle_scene_object",
+        "vrc_setup_outfit",
+        "vrc_add_wardrobe_outfit",
+        "vrc_manage_wardrobe",
+        "vrc_add_outfit_part",
+        "vrc_add_modular_avatar_component",
+        "vrc_create_wardrobe",
+        "vrc_write_avatar_descriptor",
+        "vrc_write_animation_curve",
+        "vrc_manage_expression_parameters",
+        "vrc_manage_expression_menu",
+        "vrc_manage_fx_animator",
+        "vrc_add_component",
+        "vrc_remove_component",
+        "vrc_set_property",
+        "vrc_create_gameobject",
+        "vrc_rename_gameobject",
+        "vrc_reparent_gameobject",
+        "vrc_delete_gameobject",
+        "vrc_set_gameobject_active",
+        "vrc_instantiate_prefab",
+        "vrc_unpack_prefab",
+    }
+)
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 DASHBOARD_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -11927,11 +11960,9 @@ def authenticate_agent_approval_request(request: Request):
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-APP_AUTH_PREFIXES = (
-    "/api/app",
-    "/api/config",
-    "/api/models",
-)
+APP_AUTH_PREFIXES = ("/api",)
+APP_AUTH_EXEMPT_PATHS = {"/api/health"}
+APP_AUTH_EXEMPT_PREFIXES = ("/api/agent",)
 APP_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
@@ -11939,7 +11970,9 @@ def app_route_requires_auth(request: Request) -> bool:
     path = request.url.path
     if not any(path == prefix or path.startswith(prefix + "/") for prefix in APP_AUTH_PREFIXES):
         return False
-    if not APP_AUTH_REQUIRED and request.method.upper() == "GET":
+    if path in APP_AUTH_EXEMPT_PATHS:
+        return False
+    if any(path == prefix or path.startswith(prefix + "/") for prefix in APP_AUTH_EXEMPT_PREFIXES):
         return False
     return True
 
@@ -12152,6 +12185,8 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"Internal checkpoint tool cannot be invoked through the generic write wrapper: {tool_name}"}
     if tool_name in {"vrc_execute_roslyn", "execute_code"}:
         return {"ok": False, "error": f"Advanced code execution must use the dedicated Roslyn permission path: {tool_name}"}
+    if tool_name not in VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST:
+        return {"ok": False, "error": f"Unity MCP write tool is not in the VRCForge static write allowlist: {tool_name}"}
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
     if not isinstance(arguments, dict):
         arguments = {}
@@ -17416,7 +17451,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_unity_mcp_write",
-        "Run a Unity MCP write tool through the VRCForge approval and rollback checkpoint boundary.",
+        "Run an allowlisted VRCForge static Unity MCP write tool through the approval and rollback checkpoint boundary.",
         "high",
         unity_mcp_write_sync,
     )
