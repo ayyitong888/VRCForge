@@ -230,6 +230,39 @@ def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatc
     assert payload["task"]["events"]
 
 
+def test_sub_agent_endpoint_runs_selected_context_worker(tmp_path: Path, monkeypatch) -> None:
+    registry = SubAgentTaskRegistry(
+        tmp_path / "sub-agents",
+        roles=[SubAgentRole("selected_context_review", "Selection", "Review selected text.")],
+        handlers={"selected_context_review": dashboard_server.run_selected_context_sub_agent},
+    )
+    monkeypatch.setattr(dashboard_server, "SUB_AGENT_REGISTRY", registry)
+
+    with TestClient(dashboard_server.app) as client:
+        created = client.post(
+            "/api/app/sub-agents",
+            json={
+                "role": "selected_context_review",
+                "displayName": "Kikyo",
+                "task": "Review selected text.",
+                "params": {"selectedText": "This selected passage should open on the right."},
+            },
+        )
+        assert created.status_code == 200
+        task_id = created.json()["task"]["id"]
+
+        deadline = time.time() + 5
+        payload = client.get(f"/api/app/sub-agents/{task_id}").json()
+        while payload["task"]["status"] not in {"completed", "failed"} and time.time() < deadline:
+            time.sleep(0.05)
+            payload = client.get(f"/api/app/sub-agents/{task_id}").json()
+
+    assert payload["task"]["status"] == "completed"
+    assert payload["task"]["role"] == "selected_context_review"
+    assert payload["task"]["result"]["selectedTextPreview"].startswith("This selected passage")
+    assert payload["task"]["summary"].startswith("Selected context opened in a sub-agent thread")
+
+
 def test_tool_registry_v1_exposes_read_tools_and_supervised_writes() -> None:
     registry = dashboard_server.AGENT_GATEWAY.build_tool_registry()
     assert registry["ok"] is True

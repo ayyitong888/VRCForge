@@ -1245,6 +1245,12 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
             tool_profile="read-only",
         ),
         SubAgentRole(
+            id="selected_context_review",
+            title="Selected context review",
+            description="Open a scoped read-only sub-agent thread from selected chat text.",
+            tool_profile="read-only",
+        ),
+        SubAgentRole(
             id="package_install_diagnosis",
             title="Package install diagnosis",
             description="Classify package install output and Unity compile errors without repairing automatically.",
@@ -1261,6 +1267,7 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
         "project_index_review": lambda payload, cancel_event: run_project_index_sub_agent(payload, cancel_event),
         "outfit_package_inspection": lambda payload, cancel_event: run_outfit_package_sub_agent(payload, cancel_event),
         "validation_triage": lambda payload, cancel_event: run_validation_sub_agent(payload, cancel_event),
+        "selected_context_review": lambda payload, cancel_event: run_selected_context_sub_agent(payload, cancel_event),
         "package_install_diagnosis": lambda payload, cancel_event: run_package_install_sub_agent(payload, cancel_event),
         "outfit_import_plan_review": lambda payload, cancel_event: run_outfit_import_plan_sub_agent(payload, cancel_event),
     },
@@ -3120,6 +3127,30 @@ def run_validation_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict
         "summaryText": summary_text,
         "validation": result,
         "proposedNextAction": "Convert selected validation findings into separate supervised fix plans.",
+    }
+
+
+def run_selected_context_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+    _sub_agent_cancel_checkpoint(cancel_event)
+    selected_text = str(payload.get("selectedText") or payload.get("selected_text") or "").strip()
+    if not selected_text:
+        selected_text = str(payload.get("task") or "").strip()
+    preview = selected_text[:1600]
+    omitted = max(0, len(selected_text) - len(preview))
+    summary_text = (
+        f"Selected context opened in a sub-agent thread: {len(selected_text)} character(s)"
+        + (f", preview truncated by {omitted} character(s)." if omitted else ".")
+    )
+    _sub_agent_cancel_checkpoint(cancel_event)
+    return {
+        "ok": True,
+        "schema": "vrcforge.sub_agent.selected_context_review.v1",
+        "role": "selected_context_review",
+        "readOnly": True,
+        "summaryText": summary_text,
+        "selectedTextPreview": preview,
+        "selectedTextCharacters": len(selected_text),
+        "proposedNextAction": "Use this scoped sub-agent thread for follow-up review without branching the main chat history.",
     }
 
 

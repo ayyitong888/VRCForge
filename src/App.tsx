@@ -390,6 +390,13 @@ type ContextUsage = {
   warning: boolean;
 };
 
+type ContextUsageInputs = {
+  agentNotes?: string;
+  agentNotesLoaded?: boolean;
+  goals?: AgentGoal[];
+  memories?: AgentMemory[];
+};
+
 type ApprovalActionState = "approve" | "reject" | "modify";
 type MessageFeedback = "up" | "down";
 
@@ -439,6 +446,11 @@ const MAX_ATTACHMENTS_PER_TURN = 8;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
+const CONTEXT_FIXED_PROMPT_OVERHEAD_CHARS = 20000;
+const CONTEXT_HISTORY_PROMPT_MAX_ITEMS = 12;
+const CONTEXT_HISTORY_PROMPT_ENTRY_MAX_CHARS = 500;
+const CONTEXT_AGENT_NOTES_INLINE_MAX_CHARS = 4000;
+const CONTEXT_TURN_ATTACHMENT_TEXT_MAX_CHARS = 1200;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
@@ -575,6 +587,18 @@ function isMarkdownSmokeMode(): boolean {
   }
 }
 
+function markdownSmokeCase(): string {
+  try {
+    return new URLSearchParams(window.location.search).get("case") || "";
+  } catch {
+    return "";
+  }
+}
+
+function isSubAgentContextSmokeMode(): boolean {
+  return isMarkdownSmokeMode() && markdownSmokeCase() === "subagent-context";
+}
+
 const MARKDOWN_SMOKE_TEXT = [
   "# Markdown Smoke H1",
   "## Markdown Smoke H2",
@@ -667,9 +691,90 @@ function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: st
   };
 }
 
+function createSubAgentContextSmokeTask(): SubAgentTask | null {
+  if (!isSubAgentContextSmokeMode()) {
+    return null;
+  }
+  return {
+    id: "subagent-context-smoke",
+    role: "selected_context_review",
+    displayName: "New session question",
+    task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
+    parentSessionId: "markdown-smoke-session",
+    projectPath: "",
+    toolProfile: "read-only",
+    status: "completed",
+    createdAt: "2026-07-03T00:00:00Z",
+    startedAt: "2026-07-03T00:00:01Z",
+    stoppedAt: "2026-07-03T00:00:02Z",
+    updatedAt: "2026-07-03T00:00:02Z",
+    summary: "Selected context opened in a sub-agent thread: 1462 character(s).",
+    result: {
+      ok: true,
+      schema: "vrcforge.sub_agent.selected_context_review.v1",
+      role: "selected_context_review",
+      readOnly: true,
+      summaryText: "Selected context opened in a sub-agent thread: 1462 character(s).",
+      selectedTextPreview: "Tool sync and async execution notes selected from the transcript.",
+      selectedTextCharacters: 1462,
+    },
+    paramsSummary: {
+      source: "selection-menu",
+      selectedTextCharacters: 1462,
+    },
+    eventCount: 2,
+  };
+}
+
+function markdownSmokeAgentNotes(): string {
+  if (!isSubAgentContextSmokeMode()) {
+    return "";
+  }
+  return [
+    "Project instruction notes:",
+    "- Review project status before changing files.",
+    "- Keep user-facing changes scoped to the requested workflow.",
+    "- Preserve approval, checkpoint, validation, and rollback boundaries for writes.",
+    "- Prefer existing app APIs instead of bypassing the runtime.",
+    "- Keep heavyweight diagnostics outside first-screen startup.",
+  ].join("\n");
+}
+
+function markdownSmokeGoals(): AgentGoal[] {
+  if (!isSubAgentContextSmokeMode()) {
+    return [];
+  }
+  return [
+    {
+      goalId: "goal-context-smoke",
+      title: "Route selected text into a sub-agent workspace",
+      summary: "The right workspace owns the scoped follow-up thread and can close or reopen the detail panel.",
+      status: "active",
+      sessionId: "markdown-smoke-session",
+    },
+  ];
+}
+
+function markdownSmokeMemories(): AgentMemory[] {
+  if (!isSubAgentContextSmokeMode()) {
+    return [];
+  }
+  return [
+    {
+      memoryId: "memory-context-smoke",
+      scope: "project",
+      kind: "constraint",
+      text: "Context usage must include real prompt inputs: recent chat, current draft, attachments, project instructions, goals, and memories.",
+      status: "active",
+    },
+  ];
+}
+
 export default function App() {
   const { t } = useTranslation();
   const initialChatState = useMemo(() => createMarkdownSmokeChatState(), []);
+  const smokeMode = isMarkdownSmokeMode();
+  const initialSubAgentTask = useMemo(() => createSubAgentContextSmokeTask(), []);
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
@@ -765,10 +870,31 @@ export default function App() {
   const [protectionMessage, setProtectionMessage] = useState("");
   const [protectionAvatarMessage, setProtectionAvatarMessage] = useState("");
   const [requestingProtectionFamily, setRequestingProtectionFamily] = useState("");
-  const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(null);
+  const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(() =>
+    initialSubAgentTask
+      ? {
+          ok: true,
+          schema: "vrcforge.sub_agent_tasks.v1",
+          tasks: [initialSubAgentTask],
+          count: 1,
+          roles: [
+            {
+              id: "selected_context_review",
+              title: "Selected context review",
+              description: "Open a scoped read-only sub-agent thread from selected chat text.",
+              toolProfile: "read-only",
+              readOnly: true,
+            },
+          ],
+          maxConcurrent: 5,
+          runningCount: 0,
+        }
+      : null,
+  );
   const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
-  const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(null);
+  const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
+  const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [outfitPackagePath, setOutfitPackagePath] = useState("");
   const [outfitImportPlan, setOutfitImportPlan] = useState<OutfitImportPlanResult | null>(null);
   const [outfitImportStatus, setOutfitImportStatus] = useState("");
@@ -783,8 +909,8 @@ export default function App() {
   const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
-  const [agentGoals, setAgentGoals] = useState<AgentGoal[]>([]);
-  const [agentMemory, setAgentMemory] = useState<AgentMemory[]>([]);
+  const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
+  const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
   const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
@@ -847,9 +973,9 @@ export default function App() {
   const [checkpointMessage, setCheckpointMessage] = useState("");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const [adjustmentMessage, setAdjustmentMessage] = useState("");
-  const [agentNotes, setAgentNotes] = useState("");
+  const [agentNotes, setAgentNotes] = useState(() => markdownSmokeAgentNotes());
   const [agentNotesPath, setAgentNotesPath] = useState("");
-  const [agentNotesLoaded, setAgentNotesLoaded] = useState(false);
+  const [agentNotesLoaded, setAgentNotesLoaded] = useState(() => Boolean(markdownSmokeAgentNotes()));
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesMessage, setNotesMessage] = useState("");
   const [connectorStatus, setConnectorStatus] = useState<ExternalAgentConnectorStatus | null>(null);
@@ -988,8 +1114,16 @@ export default function App() {
     [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
   const contextUsage = useMemo(
-    () => (apiConfig ? buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo) : undefined),
-    [apiConfig, attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider],
+    () =>
+      apiConfig || smokeMode
+        ? buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, {
+            agentNotes,
+            agentNotesLoaded,
+            goals: agentGoals,
+            memories: agentMemory,
+          })
+        : undefined,
+    [agentGoals, agentMemory, agentNotes, agentNotesLoaded, apiConfig, attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider, smokeMode],
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
@@ -1001,6 +1135,12 @@ export default function App() {
       return sameSession || sameProject || (!parentSession && !projectKeyValue);
     });
   }, [activeChat?.projectPath, activeChat?.sessionId, activeProjectPath, subAgentTasks]);
+  const visibleSubAgentTasks = useMemo(() => {
+    if (!selectedSubAgent || activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)) {
+      return activeSubAgentTasks;
+    }
+    return [selectedSubAgent, ...activeSubAgentTasks];
+  }, [activeSubAgentTasks, selectedSubAgent]);
   const runtimeSchedule = useMemo<RuntimeScheduleItem[]>(() => {
     const items: RuntimeScheduleItem[] = [];
     if (currentTurn) {
@@ -2441,15 +2581,11 @@ export default function App() {
           packagePath: outfitPackagePath.trim(),
         },
       });
-      setSubAgentList((current) => ({
-        ok: true,
-        schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
-        tasks: [payload.task, ...(current?.tasks || []).filter((taskItem) => taskItem.id !== payload.task.id)],
-        count: (current?.count || 0) + 1,
-        roles: current?.roles,
-        maxConcurrent: current?.maxConcurrent,
-        runningCount: (current?.runningCount || 0) + 1,
-      }));
+      setRightSidebarCollapsed(false);
+      setSelectedSubAgent(payload.task);
+      setSelectedSubAgentPanelOpen(true);
+      setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
       void loadSubAgents(false);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
@@ -2477,6 +2613,9 @@ export default function App() {
   async function inspectSubAgentTask(taskId: string) {
     try {
       const payload = await fetchSubAgent(endpoint, taskId);
+      setRightSidebarCollapsed(false);
+      setSelectedSubAgentPanelOpen(true);
+      setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
       setSelectedSubAgent(payload.task);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
     } catch (cause) {
@@ -2527,17 +2666,60 @@ export default function App() {
     clearSelectionMenu();
   }
 
-  function askInNewSession(text: string) {
+  async function openSelectionInSubAgent(text: string) {
+    const selectedText = text.trim();
+    if (!selectedText) {
+      clearSelectionMenu();
+      return;
+    }
     const projectPath = activeChat?.projectPath ?? activeProjectPath;
-    // 基于选中内容开新会话提问——后续多 agent 的入口。
-    const id = `chat-${Date.now()}`;
     const agentName = pickSubAgentName();
-    setChats((list) => [{ id, sessionId: "", title: agentName, projectPath, agentName, items: [] }, ...list]);
-    setActiveChatId(id);
     setActiveView("chat");
-    setAttachments([selectedTextAttachment(text)]);
-    setInput("");
     clearSelectionMenu();
+    setRightSidebarCollapsed(false);
+    setSelectedSubAgentPanelOpen(true);
+    setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
+    setSubAgentError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setSubAgentError("Runtime is not connected.");
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await createSubAgent(targetEndpoint, {
+        role: "selected_context_review",
+        task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
+        displayName: agentName,
+        parentSessionId: activeChat?.sessionId || "",
+        projectPath,
+        params: {
+          projectPath,
+          selectedText,
+          source: "selection-menu",
+        },
+      });
+      setSelectedSubAgent(payload.task);
+      setSubAgentList((current) => ({
+        ok: true,
+        schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
+        tasks: [payload.task, ...(current?.tasks || []).filter((taskItem) => taskItem.id !== payload.task.id)],
+        count: (current?.count || 0) + 1,
+        roles: current?.roles,
+        maxConcurrent: current?.maxConcurrent,
+        runningCount: (current?.runningCount || 0) + 1,
+      }));
+      void loadSubAgents(false);
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function askInNewSession(text: string) {
+    void openSelectionInSubAgent(text);
   }
 
   async function persistProjectPrefs(next: ProjectPrefs): Promise<ProjectPrefs | null> {
@@ -5319,15 +5501,15 @@ export default function App() {
                 </RuntimeSection>
               ) : null}
 
-              {activeSubAgentTasks.length ? (
+              {visibleSubAgentTasks.length ? (
                 <RuntimeSection
                   title={t("workspace.subAgents")}
                   collapsed={rightRuntimeSectionsCollapsed.subagents}
                   onToggle={() => toggleRightRuntimeSection("subagents")}
-                  count={<Badge tone="warn">{formatCount(activeSubAgentTasks.length)}</Badge>}
+                  count={<Badge tone="warn">{formatCount(visibleSubAgentTasks.length)}</Badge>}
                 >
                   <div className="space-y-1">
-                    {activeSubAgentTasks.slice(0, rightRuntimeSectionsCollapsed.subagents ? 0 : 6).map((task) => {
+                    {visibleSubAgentTasks.slice(0, rightRuntimeSectionsCollapsed.subagents ? 0 : 6).map((task) => {
                       const runningTask = ["queued", "running", "cancelling"].includes(task.status);
                       return (
                         <button
@@ -5345,8 +5527,47 @@ export default function App() {
                         </button>
                       );
                     })}
-                    {activeSubAgentTasks.length > 6 ? (
-                      <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(activeSubAgentTasks.length - 6) })}</div>
+                    {visibleSubAgentTasks.length > 6 ? (
+                      <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(visibleSubAgentTasks.length - 6) })}</div>
+                    ) : null}
+                    {selectedSubAgent && selectedSubAgentPanelOpen ? (
+                      <div
+                        className="mt-2 rounded-md border border-border bg-background/80 p-2 text-xs"
+                        data-vrcforge-sub-agent-panel="true"
+                      >
+                        <div className="mb-2 flex min-w-0 items-center gap-2">
+                          <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
+                          <span className="min-w-0 flex-1 truncate font-medium">{selectedSubAgent.displayName || subAgentRoleLabel(selectedSubAgent.role)}</span>
+                          <Badge tone={subAgentStatusTone(selectedSubAgent.status)} className="shrink-0">
+                            {displaySubAgentStatus(selectedSubAgent.status)}
+                          </Badge>
+                          <button
+                            type="button"
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                            onClick={() => setSelectedSubAgentPanelOpen(false)}
+                            title={t("common.hide")}
+                            aria-label={t("common.hide")}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="grid gap-2">
+                          <DataLine label="Role" value={subAgentRoleLabel(selectedSubAgent.role)} />
+                          <OutputBlock label="Task" value={selectedSubAgent.task || selectedSubAgent.id} />
+                          {selectedSubAgent.summary ? <OutputBlock label="Summary" value={selectedSubAgent.summary} /> : null}
+                          {selectedSubAgent.error ? <OutputBlock label={t("doctor.error")} value={selectedSubAgent.error} danger /> : null}
+                          {selectedSubAgent.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(selectedSubAgent.result)} /> : null}
+                        </div>
+                      </div>
+                    ) : selectedSubAgent ? (
+                      <button
+                        type="button"
+                        className="mt-2 flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
+                        onClick={() => setSelectedSubAgentPanelOpen(true)}
+                      >
+                        <span className="truncate">{selectedSubAgent.displayName || subAgentRoleLabel(selectedSubAgent.role)}</span>
+                        <span className="shrink-0 text-muted-foreground">{t("common.open")}</span>
+                      </button>
                     ) : null}
                   </div>
                 </RuntimeSection>
@@ -6508,6 +6729,8 @@ function subAgentRoleLabel(role: string): string {
       return i18n.t("subagent.roles.outfitPackageInspection");
     case "validation_triage":
       return i18n.t("subagent.roles.validationTriage");
+    case "selected_context_review":
+      return i18n.t("contextMenu.askInNewSession");
     case "package_install_diagnosis":
       return i18n.t("subagent.roles.packageInstallDiagnosis");
     case "outfit_import_plan_review":
@@ -12100,9 +12323,9 @@ function buildContextUsage(
   provider = "",
   model = "",
   modelInfo?: ProviderModelInfo,
+  extraContext: ContextUsageInputs = {},
 ): ContextUsage {
-  const text = [...buildChatHistory(items).map((entry) => entry.text), appendAttachmentSummary(draft, attachments)].join("\n");
-  const used = Math.ceil(text.length / 4);
+  const used = estimateRuntimePromptTokens(items, draft, attachments, extraContext);
   const contextLimit = contextLimitForProviderModel(provider, model, modelInfo);
   const limit = contextLimit.limit;
   const ratio = Math.min(1, used / limit);
@@ -12130,13 +12353,70 @@ function buildContextUsage(
   };
 }
 
+function estimateRuntimePromptTokens(
+  items: ConversationItem[],
+  draft: string,
+  attachments: ChatAttachment[],
+  extraContext: ContextUsageInputs,
+): number {
+  const historyLines = buildChatHistory(items)
+    .slice(-CONTEXT_HISTORY_PROMPT_MAX_ITEMS)
+    .map((entry) => `${entry.role}: ${clipText(entry.text, CONTEXT_HISTORY_PROMPT_ENTRY_MAX_CHARS)}`);
+  const attachmentLines = attachments.slice(0, MAX_ATTACHMENTS_PER_TURN).map((attachment) => {
+    const name = attachment.name || "attachment";
+    if (attachment.text) {
+      return `${name}: ${clipText(attachment.text, CONTEXT_TURN_ATTACHMENT_TEXT_MAX_CHARS)}`;
+    }
+    return `${name}: ${attachment.payloadKind || "metadata"} ${attachment.type || "file"} ${attachment.size || 0} bytes`;
+  });
+  const notesText = extraContext.agentNotes?.trim() ? extraContext.agentNotes : "";
+  const agentNotes = extraContext.agentNotesLoaded && notesText
+    ? notesText.length <= CONTEXT_AGENT_NOTES_INLINE_MAX_CHARS
+      ? notesText
+      : `${clipText(notesText, 240)}\nProject notes active: ${notesText.length} characters`
+    : "";
+  const goalLines = (extraContext.goals || [])
+    .slice(0, 8)
+    .map((goal) => `[${goal.status || "active"}] ${goal.title || ""} ${goal.summary || ""}`.trim())
+    .filter(Boolean);
+  const memoryLines = (extraContext.memories || [])
+    .slice(0, 12)
+    .map((memory) => `[${memory.scope || "user"}/${memory.kind || "memory"}] ${clipText(memory.text || "", 500)}`)
+    .filter((line) => line.trim());
+  const promptText = [
+    historyLines.length ? `Recent conversation:\n${historyLines.join("\n")}` : "",
+    draft || attachments.length ? `Latest user message:\n${appendAttachmentSummary(draft, attachments)}` : "",
+    attachmentLines.length ? `Current attachments:\n${attachmentLines.map((line) => `- ${line}`).join("\n")}` : "",
+    agentNotes ? `User constraints:\n${agentNotes}` : "",
+    goalLines.length ? `Long-running goals:\n${goalLines.map((line) => `- ${line}`).join("\n")}` : "",
+    memoryLines.length ? `Explicit memory:\n${memoryLines.map((line) => `- ${line}`).join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return Math.ceil(CONTEXT_FIXED_PROMPT_OVERHEAD_CHARS / 4) + estimateTextTokens(promptText);
+}
+
+function estimateTextTokens(text: string): number {
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) || 0;
+    if (code <= 0x7f) {
+      ascii += 1;
+    } else {
+      nonAscii += 1;
+    }
+  }
+  return Math.ceil(ascii / 4 + nonAscii);
+}
+
 function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
   for (const item of items) {
     if (item.type === "user") {
       history.push({ role: "user", text: clipText(appendAttachmentSummary(item.text, item.attachments || []), HISTORY_ENTRY_MAX_CHARS) });
     } else if (item.type === "agent") {
-      const parts = [item.response.plan?.summary || ""];
+      const parts = [item.response.plan?.reply || item.response.plan?.summary || ""];
       const stdout = item.response.result?.stdout || item.response.shell?.result?.stdout || "";
       if (stdout.trim()) {
         parts.push(stdout.trim());
