@@ -3180,6 +3180,9 @@ class AgentGateway:
                 "approvalId": approval_id,
                 "mode": permission_context["permissionMode"],
                 **permission_context,
+                "targetTool": approval.get("targetTool"),
+                "agent": approval.get("agentName") or "",
+                "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
             }
         )
         applied = self.apply_approved({"approval_id": approval_id})

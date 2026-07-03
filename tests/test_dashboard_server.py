@@ -1397,6 +1397,7 @@ class DashboardServerTests(unittest.TestCase):
                     event.get("event") == "approval_auto_approved"
                     and event.get("fullPermission") is True
                     and event.get("permissionLabel") == "full permission"
+                    and event.get("targetTool") == "vrcforge_test_delete_asset"
                     for event in audit_logs
                 )
             )
