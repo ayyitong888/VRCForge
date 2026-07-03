@@ -210,7 +210,7 @@
     "approval": "受限模式",
     "approvalDesc": "沙箱模式：高风险命令与写操作逐项审批，最安全。",
     "auto": "自动审批",
-    "autoDesc": "审批自动通过并留痕，Roslyn 高级能力保持关闭。",
+    "autoDesc": "普通审批会自动通过并留痕；删除和项目外路径仍需确认，Roslyn 高级能力保持关闭。",
     "roslynFullAuto": "完全权限",
     "roslynFullAutoDesc": "自动审批 + Roslyn 全自动，风险最高，首次开启需确认。"
   },

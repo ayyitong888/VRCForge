@@ -210,7 +210,7 @@
     "approval": "Restricted",
     "approvalDesc": "Sandbox mode: high-risk commands and writes require individual approval. Safest option.",
     "auto": "Auto Approve",
-    "autoDesc": "Approvals pass automatically with an audit trail. Roslyn advanced features stay off.",
+    "autoDesc": "Routine approvals pass automatically with an audit trail; deletes and outside-project paths still ask for confirmation. Roslyn advanced features stay off.",
     "roslynFullAuto": "Full Permission",
     "roslynFullAutoDesc": "Auto approve + Roslyn fully automatic. Highest risk; confirmation required on first enable."
   },

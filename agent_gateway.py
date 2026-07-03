@@ -17,7 +17,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from optimization_service import (
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
@@ -48,6 +48,25 @@ CHECKPOINT_ARCHIVE_BYTES_PER_MB = 1024 * 1024
 CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT = 1024 * 1024
 CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB = 10 * 1024
 CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT = 2
+AUTO_APPROVAL_MANUAL_SHELL_COMMANDS = {
+    "del",
+    "erase",
+    "rd",
+    "ri",
+    "rm",
+    "rmdir",
+    "remove-item",
+}
+AUTO_APPROVAL_MANUAL_WRITE_TOKENS = (
+    "delete",
+    "remove",
+    "restore",
+    "reset",
+    "clear",
+    "prune",
+    "uninstall",
+)
+WRITE_PATH_KEY_MARKERS = ("path", "root", "file", "dir", "directory", "folder")
 ROLLBACK_FRAMEWORK_PACKAGES = {
     "modular_avatar": {
         "label": "Modular Avatar",
@@ -1848,6 +1867,22 @@ class AgentGateway:
         config = config or self.ensure_config()
         return normalize_execution_mode(config.execution_mode) in {"auto", "roslyn_full_auto"}
 
+    def _auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
+        config = config or self.ensure_config()
+        mode = normalize_execution_mode(config.execution_mode)
+        if mode == "roslyn_full_auto":
+            return ""
+        if mode != "auto":
+            return "Current permission mode does not auto-approve."
+        explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
+        if approval.get("requiresExplicitApproval"):
+            return explicit_reason or "This approval requires manual confirmation in Auto Approve mode."
+        if str(approval.get("targetTool") or "") == "vrcforge_shell_execute":
+            arguments = ensure_dict(approval.get("arguments"))
+            classification = ensure_dict(arguments.get("classification_snapshot") or approval.get("preview"))
+            return self._shell_auto_manual_approval_reason(classification)
+        return ""
+
     def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
@@ -1855,6 +1890,7 @@ class AgentGateway:
             "executionMode": mode,
             "perActionApproval": mode == "approval",
             "autoApprove": mode in {"auto", "roslyn_full_auto"},
+            "autoApproveDangerousRequiresApproval": mode == "auto",
             "roslynFullAuto": mode == "roslyn_full_auto",
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
@@ -3023,10 +3059,14 @@ class AgentGateway:
         )
         execution_mode = normalize_execution_mode(config.execution_mode)
         full_permission_auto = execution_mode == "roslyn_full_auto"
-        requires_explicit_for_mode = requires_explicit_approval and not full_permission_auto
+        auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
+        requires_explicit_for_mode = (
+            requires_explicit_approval or (execution_mode == "auto" and bool(auto_policy_reason))
+        ) and not full_permission_auto
         explicit_approval_reason = str(
             params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
+            or auto_policy_reason
             or "This write request requires explicit user approval."
         ).strip()
         if user_constraints.content and isinstance(preview, dict):
@@ -3046,7 +3086,7 @@ class AgentGateway:
             requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
         )
-        if full_permission_auto and requires_explicit_approval:
+        if full_permission_auto and (requires_explicit_approval or auto_policy_reason):
             self.append_audit(
                 {
                     "event": "approval_explicit_requirement_overridden_by_full_permission",
@@ -3091,6 +3131,18 @@ class AgentGateway:
         """
         approval_id = str(approval.get("id") or "").strip()
         if not approval_id:
+            return None
+        block_reason = self._auto_approval_block_reason(approval)
+        if block_reason:
+            self.append_audit(
+                {
+                    "event": "approval_auto_approval_suppressed",
+                    "approvalId": approval_id,
+                    "mode": normalize_execution_mode(self.ensure_config().execution_mode),
+                    "reason": block_reason,
+                    "targetTool": approval.get("targetTool"),
+                }
+            )
             return None
         approved = self.approve(approval_id)
         if not approved.get("ok"):
@@ -3140,7 +3192,15 @@ class AgentGateway:
                 }
 
             target_tool = str(approval.get("targetTool") or "")
-            write_handler = self._write_handlers.get(target_tool)
+            if target_tool == "vrcforge_shell_execute":
+                write_handler = AgentWriteHandler(
+                    "vrcforge_shell_execute",
+                    "Execute an approved high-risk shell command.",
+                    "high",
+                    self.execute_shell_payload,
+                )
+            else:
+                write_handler = self._write_handlers.get(target_tool)
             if not write_handler:
                 raise AgentGatewayError(f"Write target is no longer available: {target_tool}", status_code=404)
 
@@ -4207,7 +4267,9 @@ class AgentGateway:
                         archive.write(source, relative)
                         file_count += 1
                         total_bytes += source.stat().st_size
+            fsync_file_path(temp_path)
             os.replace(temp_path, archive_path)
+            fsync_directory_best_effort(archive_path.parent)
         except Exception as exc:  # noqa: BLE001
             try:
                 if temp_path.exists():
@@ -4284,7 +4346,9 @@ class AgentGateway:
                             "fileCount": root_file_count,
                         }
                     )
+            fsync_file_path(temp_path)
             os.replace(temp_path, archive_path)
+            fsync_directory_best_effort(archive_path.parent)
         except Exception as exc:  # noqa: BLE001
             try:
                 if temp_path.exists():
@@ -4490,6 +4554,7 @@ class AgentGateway:
                     temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
                     with archive.open(info, "r") as source, temp_target.open("wb") as destination:
                         shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        flush_and_fsync(destination)
                     os.replace(temp_target, target)
                     restored.append(relative)
 
@@ -4556,6 +4621,7 @@ class AgentGateway:
                     temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
                     with archive.open(info, "r") as source, temp_target.open("wb") as destination:
                         shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        flush_and_fsync(destination)
                     os.replace(temp_target, target)
                     restored.append(info.filename)
 
@@ -5028,6 +5094,7 @@ class AgentGateway:
         self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            flush_and_fsync(handle)
         self._maybe_record_adjustment_checkpoint(record)
 
     def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
@@ -5135,6 +5202,7 @@ class AgentGateway:
         self.apply_recovery_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.apply_recovery_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            flush_and_fsync(handle)
         return payload
 
     def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
@@ -6268,6 +6336,54 @@ class AgentGateway:
             "workspaceRoot": str(workspace_root),
         }
 
+    def _shell_auto_manual_approval_reason(self, classification: dict[str, Any]) -> str:
+        command = str(classification.get("command") or "")
+        tokens = [strip_quotes(token).lower() for token in tokenize_command(command)]
+        if any(token in AUTO_APPROVAL_MANUAL_SHELL_COMMANDS for token in tokens):
+            return "Delete/removal shell commands require manual approval in Auto Approve mode."
+        reasons = " ".join(str(reason or "").lower() for reason in ensure_list(classification.get("reasons")))
+        if "outside the workspace root" in reasons or "parent path traversal" in reasons:
+            return "Shell commands that reference paths outside the workspace require manual approval in Auto Approve mode."
+        return ""
+
+    def _write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
+        target_lower = str(target_tool or "").lower()
+        if any(token in target_lower for token in AUTO_APPROVAL_MANUAL_WRITE_TOKENS):
+            return "Delete, remove, restore, reset, or uninstall write requests require manual approval in Auto Approve mode."
+
+        for key, value in iter_param_leaf_values(arguments):
+            key_lower = key.lower()
+            text_value = str(value or "").strip()
+            value_lower = text_value.lower()
+            if any(token in key_lower for token in AUTO_APPROVAL_MANUAL_WRITE_TOKENS) and value not in {False, None, "", 0, "false", "False"}:
+                return "Delete, remove, restore, reset, or uninstall write requests require manual approval in Auto Approve mode."
+            if key_lower.split(".")[-1] in {"action", "operation", "mode"} and value_lower in AUTO_APPROVAL_MANUAL_WRITE_TOKENS:
+                return "Delete, remove, restore, reset, or uninstall write requests require manual approval in Auto Approve mode."
+
+        project_root = extract_project_root(arguments)
+        if project_root:
+            for key, value in iter_param_leaf_values(arguments):
+                key_lower = key.lower()
+                if not any(marker in key_lower for marker in WRITE_PATH_KEY_MARKERS):
+                    continue
+                if key_lower.endswith("projectroot") or key_lower.endswith("project_root") or key_lower.endswith("projectpath"):
+                    continue
+                text_value = str(value or "").strip()
+                if looks_like_absolute_path(text_value) and not is_path_within(Path(text_value), project_root):
+                    return "Write requests that reference paths outside the selected project require manual approval in Auto Approve mode."
+
+        if isinstance(preview, dict):
+            preview_root = project_root or extract_project_root(preview)
+            if preview_root:
+                for key, value in iter_param_leaf_values(preview):
+                    key_lower = key.lower()
+                    if not any(marker in key_lower for marker in WRITE_PATH_KEY_MARKERS):
+                        continue
+                    text_value = str(value or "").strip()
+                    if looks_like_absolute_path(text_value) and not is_path_within(Path(text_value), preview_root):
+                        return "Write requests that reference paths outside the selected project require manual approval in Auto Approve mode."
+        return ""
+
     def _low_risk_reasons(self, command_name: str, args: list[str], workspace_root: Path) -> list[str]:
         read_only = {"get-childitem", "dir", "ls", "get-content", "type", "rg", "findstr"}
         if command_name in read_only:
@@ -6431,6 +6547,9 @@ class AgentGateway:
             "timeout_hash": stable_hash(str(int(params.get("timeout_seconds") or 120))),
             "classification_snapshot": classification,
         }
+        auto_manual_reason = ""
+        if normalize_execution_mode(self.ensure_config().execution_mode) == "auto":
+            auto_manual_reason = self._shell_auto_manual_approval_reason(classification)
         approval = self._new_approval(
             agent_name=agent_name,
             target_tool="vrcforge_shell_execute",
@@ -6444,6 +6563,8 @@ class AgentGateway:
             },
             risk_level="high",
             user_constraints=self.read_user_constraints(),
+            requires_explicit_approval=bool(auto_manual_reason),
+            explicit_approval_reason=auto_manual_reason,
         )
         with self._lock:
             stored = self._approvals.get(approval["id"])
@@ -7835,6 +7956,34 @@ def is_path_within(path: Path, root: Path) -> bool:
         return False
 
 
+def extract_project_root(payload: dict[str, Any]) -> Path | None:
+    raw = str(payload.get("projectRoot") or payload.get("project_root") or payload.get("projectPath") or payload.get("project_path") or "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def iter_param_leaf_values(value: Any, prefix: str = "", *, max_items: int = 200) -> Iterator[tuple[str, Any]]:
+    if max_items <= 0:
+        return
+    if isinstance(value, dict):
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_items:
+                break
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            yield from iter_param_leaf_values(item, next_prefix, max_items=max_items - index - 1)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value[:max_items]):
+            next_prefix = f"{prefix}.{index}" if prefix else str(index)
+            yield from iter_param_leaf_values(item, next_prefix, max_items=max_items - index - 1)
+        return
+    yield prefix, value
+
+
 def command_hash(command: str) -> str:
     return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
 
@@ -7846,8 +7995,37 @@ def stable_hash(value: str) -> str:
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        flush_and_fsync(handle)
     temp_path.replace(path)
+    fsync_directory_best_effort(path.parent)
+
+
+def flush_and_fsync(handle: Any) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def fsync_file_path(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def fsync_directory_best_effort(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def parse_llm_plan_response(raw_response: str) -> dict[str, Any] | None:

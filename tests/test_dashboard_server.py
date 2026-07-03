@@ -1219,6 +1219,134 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Unity acknowledgement sync is pending", payload["unityAcknowledgement"]["warning"])
         mock_unity_ack.assert_called_once_with()
 
+    def test_auto_permission_shell_delete_and_outside_read_require_manual_until_full_auto(self) -> None:
+        def ps_quote(path: Path) -> str:
+            return "'" + str(path).replace("'", "''") + "'"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("outside-ok", encoding="utf-8")
+            victim = workspace / "victim.txt"
+            victim.write_text("delete-me", encoding="utf-8")
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+
+            config = gateway.ensure_config()
+            config.enabled = True
+            config.execution_mode = "auto"
+            gateway.save_config(config)
+
+            outside_read = gateway.execute_shell(
+                {
+                    "command": f"Get-Content -LiteralPath {ps_quote(outside)}",
+                    "workspace_root": str(workspace),
+                    "cwd": str(workspace),
+                    "timeout_seconds": 5,
+                }
+            )
+            self.assertEqual(outside_read["status"], "pending_approval")
+            self.assertTrue(outside_read["approval"]["requiresExplicitApproval"])
+            self.assertIn("outside", outside_read["approval"]["explicitApprovalReason"].lower())
+
+            delete_request = gateway.execute_shell(
+                {
+                    "command": f"Remove-Item -LiteralPath {ps_quote(victim)}",
+                    "workspace_root": str(workspace),
+                    "cwd": str(workspace),
+                    "timeout_seconds": 5,
+                }
+            )
+            self.assertEqual(delete_request["status"], "pending_approval")
+            self.assertTrue(delete_request["approval"]["requiresExplicitApproval"])
+            self.assertTrue(victim.exists())
+
+            config = gateway.ensure_config()
+            config.execution_mode = "roslyn_full_auto"
+            config.roslyn_risk_acknowledged = True
+            config.allow_roslyn_advanced = True
+            gateway.save_config(config)
+
+            full_read = gateway.execute_shell(
+                {
+                    "command": f"Get-Content -LiteralPath {ps_quote(outside)}",
+                    "workspace_root": str(workspace),
+                    "cwd": str(workspace),
+                    "timeout_seconds": 5,
+                }
+            )
+            self.assertEqual(full_read["status"], "executed")
+            self.assertIn("outside-ok", full_read["result"]["stdout"])
+
+            full_delete = gateway.execute_shell(
+                {
+                    "command": f"Remove-Item -LiteralPath {ps_quote(victim)}",
+                    "workspace_root": str(workspace),
+                    "cwd": str(workspace),
+                    "timeout_seconds": 5,
+                }
+            )
+            self.assertEqual(full_delete["status"], "executed")
+            self.assertFalse(victim.exists())
+
+    def test_auto_permission_delete_write_requires_manual_until_full_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Assets" / "target.txt").write_text("delete-me", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+
+            def delete_handler(args: dict) -> dict:
+                target = Path(args["assetPath"])
+                target.unlink(missing_ok=True)
+                return {"ok": True, "deleted": target.name}
+
+            gateway.register_write_handler("vrcforge_test_delete_asset", "Delete test asset.", "high", delete_handler)
+            config = gateway.ensure_config()
+            config.enabled = True
+            config.execution_mode = "auto"
+            gateway.save_config(config)
+
+            auto_request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_delete_asset",
+                    "arguments": {
+                        "projectRoot": str(project),
+                        "assetPath": str(project / "Assets" / "target.txt"),
+                        "delete": True,
+                    },
+                }
+            )
+            self.assertEqual(auto_request["status"], "pending")
+            self.assertTrue(auto_request["approval"]["requiresExplicitApproval"])
+            self.assertTrue((project / "Assets" / "target.txt").exists())
+
+            config = gateway.ensure_config()
+            config.execution_mode = "roslyn_full_auto"
+            config.roslyn_risk_acknowledged = True
+            config.allow_roslyn_advanced = True
+            gateway.save_config(config)
+            full_request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_delete_asset",
+                    "arguments": {
+                        "projectRoot": str(project),
+                        "assetPath": str(project / "Assets" / "target.txt"),
+                        "delete": True,
+                    },
+                }
+            )
+            self.assertEqual(full_request["status"], "executed")
+            self.assertTrue(full_request["autoApproved"])
+            self.assertFalse((project / "Assets" / "target.txt").exists())
+
     @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
     @patch("dashboard_server.load_dashboard_settings")
     def test_unity_roslyn_acknowledgement_uses_short_timeout(self, mock_load_settings, mock_invoke) -> None:
@@ -1942,6 +2070,17 @@ class DashboardServerTests(unittest.TestCase):
 
             self.assertEqual(config.checkpoint_archive_max_size_mb, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
             self.assertEqual(gateway.checkpoint_archive_usage(config)["maxSizeMb"], CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
+
+    def test_external_agent_gateway_checkpoint_ledgers_are_fsynced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+
+            with patch("agent_gateway.os.fsync") as fsync:
+                gateway._append_checkpoint({"id": "ckpt_fsync", "ok": True})
+                gateway._append_apply_recovery_entry({"id": "rec_fsync", "checkpointId": "ckpt_fsync", "status": "applying"})
+
+            self.assertGreaterEqual(fsync.call_count, 2)
 
     def test_external_agent_gateway_checkpoint_archive_limit_zero_keeps_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

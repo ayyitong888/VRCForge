@@ -210,7 +210,7 @@
     "approval": "受限模式",
     "approvalDesc": "沙盒模式：高風險命令與寫操作逐項審批，最安全。",
     "auto": "自動審批",
-    "autoDesc": "審批自動通過並留痕，Roslyn 進階能力保持關閉。",
+    "autoDesc": "普通審批會自動通過並留痕；刪除和專案外路徑仍需確認，Roslyn 進階能力保持關閉。",
     "roslynFullAuto": "完全權限",
     "roslynFullAutoDesc": "自動審批 + Roslyn 全自動，風險最高，首次開啟需確認。"
   },
