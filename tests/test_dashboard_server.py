@@ -1386,7 +1386,29 @@ class DashboardServerTests(unittest.TestCase):
             )
             self.assertEqual(full_request["status"], "executed")
             self.assertTrue(full_request["autoApproved"])
+            self.assertTrue(full_request["fullPermission"])
+            self.assertEqual(full_request["permissionLabel"], "full permission")
+            self.assertTrue(full_request["approval"]["fullPermission"])
+            self.assertEqual(full_request["approval"]["permissionMode"], "roslyn_full_auto")
             self.assertFalse((project / "Assets" / "target.txt").exists())
+            audit_logs = gateway.recent_audit_logs(limit=30)
+            self.assertTrue(
+                any(
+                    event.get("event") == "approval_auto_approved"
+                    and event.get("fullPermission") is True
+                    and event.get("permissionLabel") == "full permission"
+                    for event in audit_logs
+                )
+            )
+            runtime_events = gateway.list_runtime_runs(limit=30)["events"]
+            self.assertTrue(
+                any(
+                    event.get("event") == "approval_applied"
+                    and event.get("fullPermission") is True
+                    and event.get("permissionLabel") == "full permission"
+                    for event in runtime_events
+                )
+            )
 
     @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
     @patch("dashboard_server.load_dashboard_settings")

@@ -1686,6 +1686,7 @@ class AgentGateway:
 
     def build_manifest(self) -> dict[str, Any]:
         config = self.ensure_config()
+        permission_context = self.permission_audit_context(config)
         user_constraints = self.read_user_constraints()
         tools = [
             self._serialize_tool(tool, config)
@@ -1704,6 +1705,8 @@ class AgentGateway:
             "allowRoslynAdvanced": self.roslyn_available(config),
             "executionMode": normalize_execution_mode(config.execution_mode),
             "roslynFullAuto": normalize_execution_mode(config.execution_mode) == "roslyn_full_auto",
+            "fullPermission": permission_context["fullPermission"],
+            "permissionLabel": permission_context["permissionLabel"],
             "roslynRiskAcknowledged": config.roslyn_risk_acknowledged,
             "approvalTimeoutSeconds": config.approval_timeout_seconds,
             "tools": tools,
@@ -1867,6 +1870,19 @@ class AgentGateway:
         config = config or self.ensure_config()
         return normalize_execution_mode(config.execution_mode) in {"auto", "roslyn_full_auto"}
 
+    def permission_audit_context(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        mode = normalize_execution_mode(config.execution_mode)
+        full_permission = mode == "roslyn_full_auto"
+        return {
+            "permissionMode": mode,
+            "fullPermission": full_permission,
+            "permissionLabel": "full permission" if full_permission else ("auto approval" if mode == "auto" else "step approval"),
+            "perActionApproval": mode == "approval",
+            "autoApprove": mode in {"auto", "roslyn_full_auto"},
+            "autoApproveDangerousRequiresApproval": mode == "auto",
+        }
+
     def _auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
         config = config or self.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
@@ -1886,12 +1902,15 @@ class AgentGateway:
     def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
+        permission_context = self.permission_audit_context(config)
         return {
             "executionMode": mode,
-            "perActionApproval": mode == "approval",
-            "autoApprove": mode in {"auto", "roslyn_full_auto"},
-            "autoApproveDangerousRequiresApproval": mode == "auto",
+            "perActionApproval": permission_context["perActionApproval"],
+            "autoApprove": permission_context["autoApprove"],
+            "autoApproveDangerousRequiresApproval": permission_context["autoApproveDangerousRequiresApproval"],
             "roslynFullAuto": mode == "roslyn_full_auto",
+            "fullPermission": permission_context["fullPermission"],
+            "permissionLabel": permission_context["permissionLabel"],
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
             "allowRoslynAdvanced": self.roslyn_available(config),
@@ -1926,6 +1945,7 @@ class AgentGateway:
                     "event": "permission_mode_updated",
                     "previous": previous,
                     "updated": updated,
+                    **self.permission_audit_context(config),
                 }
             )
             return {"ok": True, "permission": updated}
@@ -2923,7 +2943,7 @@ class AgentGateway:
         classification = self.classify_shell(params)
         command = classification["command"]
         if classification["risk"] == "reject":
-            self.append_audit({"event": "shell_rejected", "classification": classification, "agent": agent_name})
+            self.append_audit({"event": "shell_rejected", "classification": classification, "agent": agent_name, **self.permission_audit_context()})
             return {"ok": False, "status": "rejected", "classification": classification, "error": "; ".join(classification["reasons"])}
 
         if classification["risk"] == "high":
@@ -2958,6 +2978,7 @@ class AgentGateway:
                 "agent": agent_name,
                 "classification": classification,
                 "result": summarize_shell_result(result),
+                **self.permission_audit_context(),
             }
         )
         return {"ok": result["ok"], "status": "executed", "classification": classification, "result": result}
@@ -3025,6 +3046,7 @@ class AgentGateway:
                 "cwd": str(cwd),
                 "workspaceRoot": str(workspace_root),
                 "result": summarize_shell_result(result),
+                **self.permission_audit_context(),
             }
         )
         return result
@@ -3059,6 +3081,7 @@ class AgentGateway:
         )
         execution_mode = normalize_execution_mode(config.execution_mode)
         full_permission_auto = execution_mode == "roslyn_full_auto"
+        permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
         requires_explicit_for_mode = (
             requires_explicit_approval or (execution_mode == "auto" and bool(auto_policy_reason))
@@ -3092,6 +3115,7 @@ class AgentGateway:
                     "event": "approval_explicit_requirement_overridden_by_full_permission",
                     "approvalId": approval.get("id"),
                     "mode": execution_mode,
+                    **permission_context,
                     "reason": explicit_approval_reason,
                     "targetTool": target_tool,
                 }
@@ -3106,6 +3130,7 @@ class AgentGateway:
                     "event": "approval_auto_approval_suppressed",
                     "approvalId": approval.get("id"),
                     "mode": execution_mode,
+                    **permission_context,
                     "reason": explicit_approval_reason,
                     "targetTool": target_tool,
                 }
@@ -3133,12 +3158,14 @@ class AgentGateway:
         if not approval_id:
             return None
         block_reason = self._auto_approval_block_reason(approval)
+        permission_context = self.permission_audit_context()
         if block_reason:
             self.append_audit(
                 {
                     "event": "approval_auto_approval_suppressed",
                     "approvalId": approval_id,
-                    "mode": normalize_execution_mode(self.ensure_config().execution_mode),
+                    "mode": permission_context["permissionMode"],
+                    **permission_context,
                     "reason": block_reason,
                     "targetTool": approval.get("targetTool"),
                 }
@@ -3151,7 +3178,8 @@ class AgentGateway:
             {
                 "event": "approval_auto_approved",
                 "approvalId": approval_id,
-                "mode": normalize_execution_mode(self.ensure_config().execution_mode),
+                "mode": permission_context["permissionMode"],
+                **permission_context,
             }
         )
         applied = self.apply_approved({"approval_id": approval_id})
@@ -3159,6 +3187,9 @@ class AgentGateway:
             "ok": bool(applied.get("ok")),
             "status": "executed" if applied.get("ok") else "failed",
             "autoApproved": True,
+            "fullPermission": permission_context["fullPermission"],
+            "permissionMode": permission_context["permissionMode"],
+            "permissionLabel": permission_context["permissionLabel"],
             "approval": applied.get("approval") or approved.get("approval") or approval,
             "approval_id": approval_id,
             "approvalId": approval_id,
@@ -3225,13 +3256,15 @@ class AgentGateway:
 
             approval["status"] = "applying"
             self._approvals[approval_id] = approval
-            self.append_audit({"event": "approval_applying", "approval": approval})
+            permission_context = self.permission_audit_context()
+            self.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
             self._append_runtime_run(
                 {
                     "event": "approval_applying",
                     "status": "applying",
                     "approvalId": approval_id,
                     "approvalIds": [approval_id],
+                    **permission_context,
                     "targetTool": target_tool,
                     "agent": approval.get("agentName") or "",
                     "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
@@ -3267,13 +3300,15 @@ class AgentGateway:
                 approval["appliedAt"] = utc_now_iso()
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
                 self._approvals[approval_id] = approval
-                self.append_audit({"event": "approval_applied", "approval": approval})
+                permission_context = self.permission_audit_context()
+                self.append_audit({"event": "approval_applied", "approval": approval, **permission_context})
                 self._append_runtime_run(
                     {
                         "event": "approval_applied",
                         "status": "applied",
                         "approvalId": approval_id,
                         "approvalIds": [approval_id],
+                        **permission_context,
                         "targetTool": target_tool,
                         "agent": approval.get("agentName") or "",
                         "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
@@ -3299,13 +3334,15 @@ class AgentGateway:
                 approval["failedAt"] = utc_now_iso()
                 approval["error"] = str(exc)
                 self._approvals[approval_id] = approval
-                self.append_audit({"event": "approval_failed", "approval": approval})
+                permission_context = self.permission_audit_context()
+                self.append_audit({"event": "approval_failed", "approval": approval, **permission_context})
                 self._append_runtime_run(
                     {
                         "event": "approval_failed",
                         "status": "failed",
                         "approvalId": approval_id,
                         "approvalIds": [approval_id],
+                        **permission_context,
                         "targetTool": target_tool,
                         "agent": approval.get("agentName") or "",
                         "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
@@ -7707,6 +7744,7 @@ class AgentGateway:
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         config = self.ensure_config()
+        permission_context = self.permission_audit_context(config)
         approval = {
             "id": f"appr_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}",
             "createdAt": now.isoformat(),
@@ -7719,6 +7757,9 @@ class AgentGateway:
             "arguments": arguments,
             "paramsSummary": summarize_params(arguments),
             "preview": preview if preview is not None else summarize_params(arguments),
+            "permissionMode": permission_context["permissionMode"],
+            "fullPermission": permission_context["fullPermission"],
+            "permissionLabel": permission_context["permissionLabel"],
         }
         if requires_explicit_approval:
             approval["requiresExplicitApproval"] = True
@@ -7729,7 +7770,7 @@ class AgentGateway:
             approval["userConstraintsPath"] = str(user_constraints.path)
         with self._lock:
             self._approvals[approval["id"]] = approval
-            self.append_audit({"event": "approval_requested", "approval": approval})
+            self.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
         return redact_sensitive(dict(approval))
 
     def _set_approval_status(self, approval_id: str, status: str) -> dict[str, Any]:
@@ -7749,13 +7790,15 @@ class AgentGateway:
             approval["status"] = status
             approval[f"{status}At"] = utc_now_iso()
             self._approvals[approval_id] = approval
-            self.append_audit({"event": f"approval_{status}", "approval": approval})
+            permission_context = self.permission_audit_context()
+            self.append_audit({"event": f"approval_{status}", "approval": approval, **permission_context})
             self._append_runtime_run(
                 {
                     "event": f"approval_{status}",
                     "status": status,
                     "approvalId": approval_id,
                     "approvalIds": [approval_id],
+                    **permission_context,
                     "targetTool": approval.get("targetTool") or "",
                     "agent": approval.get("agentName") or "",
                     "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",

@@ -6,6 +6,8 @@ export type PermissionState = {
   autoApprove?: boolean;
   autoApproveDangerousRequiresApproval?: boolean;
   roslynFullAuto: boolean;
+  fullPermission?: boolean;
+  permissionLabel?: string;
   roslynRiskAcknowledged: boolean;
   allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
@@ -108,6 +110,8 @@ export type AgentManifest = {
   allowRoslynAdvanced: boolean;
   executionMode: string;
   roslynFullAuto: boolean;
+  fullPermission?: boolean;
+  permissionLabel?: string;
   roslynRiskAcknowledged: boolean;
 };
 

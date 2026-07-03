@@ -1,4 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import type { Components } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
   Archive,
@@ -562,9 +567,109 @@ function loadThemePreference(): ThemeMode {
   }
 }
 
+function isMarkdownSmokeMode(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("markdownSmoke") === "1";
+  } catch {
+    return false;
+  }
+}
+
+const MARKDOWN_SMOKE_TEXT = [
+  "# Markdown Smoke H1",
+  "## Markdown Smoke H2",
+  "### Markdown Smoke H3",
+  "",
+  "Paragraph with **bold text**, *italic text*, ***bold italic text***, ~~deleted text~~, `inline code`, escaped \\*asterisks\\*, and a hard break  ",
+  "after two trailing spaces.",
+  "",
+  "Autolink literal: https://example.com and explicit [safe link](https://example.com/docs).",
+  "",
+  "> Blockquote with **formatting**.",
+  ">",
+  "> - Quote list item",
+  "",
+  "1. Ordered item",
+  "2. Nested item",
+  "   - Nested bullet",
+  "   - Another nested bullet with `code`",
+  "",
+  "- [x] Completed task",
+  "- [ ] Open task",
+  "",
+  "| Feature | Status | Notes |",
+  "| --- | :---: | ---: |",
+  "| Tables | **Rendered** | 1 |",
+  "| HTML | <mark>sanitized</mark> | 2 |",
+  "",
+  "```ts",
+  "const rendered: boolean = true;",
+  "console.log(rendered);",
+  "```",
+  "",
+  "![Markdown image](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lUXYkwAAAABJRU5ErkJggg==)",
+  "",
+  "Footnote reference[^1].",
+  "",
+  "[^1]: Footnote body rendered by GFM.",
+  "",
+  "<details><summary>Safe HTML summary</summary><kbd>Ctrl</kbd> + <kbd>K</kbd></details>",
+  "",
+  "<script>window.__vrcforgeMarkdownUnsafe = true</script>",
+  "<img src=x onerror=\"window.__vrcforgeMarkdownUnsafe = true\" />",
+].join("\n");
+
+function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: string } {
+  if (!isMarkdownSmokeMode()) {
+    return { chats: [], activeChatId: "" };
+  }
+  const chatId = "markdown-smoke-chat";
+  const response: AgentRuntimeResponse = {
+    ok: true,
+    session_id: "markdown-smoke-session",
+    sessionId: "markdown-smoke-session",
+    turn_id: "markdown-smoke-turn",
+    turnId: "markdown-smoke-turn",
+    observe: {},
+    plan: {
+      summary: MARKDOWN_SMOKE_TEXT,
+      reply: MARKDOWN_SMOKE_TEXT,
+      planner: "markdown-smoke",
+      plannerLabel: "Markdown Smoke",
+      shellNeeded: false,
+      nextStep: "done",
+    },
+  };
+  return {
+    activeChatId: chatId,
+    chats: [
+      {
+        id: chatId,
+        sessionId: "markdown-smoke-session",
+        title: "Markdown smoke",
+        projectPath: "",
+        items: [
+          {
+            id: "markdown-smoke-user",
+            type: "user",
+            text: MARKDOWN_SMOKE_TEXT,
+          },
+          {
+            id: "markdown-smoke-agent",
+            type: "agent",
+            response,
+            providerLabel: "Smoke",
+            model: "CommonMark + GFM",
+          },
+        ],
+      },
+    ],
+  };
+}
 
 export default function App() {
   const { t } = useTranslation();
+  const initialChatState = useMemo(() => createMarkdownSmokeChatState(), []);
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
@@ -575,8 +680,8 @@ export default function App() {
   const [showRoslynWarning, setShowRoslynWarning] = useState(false);
   const [pendingMode, setPendingMode] = useState<PermissionState["executionMode"] | null>(null);
   const [input, setInput] = useState("");
-  const [chats, setChats] = useState<ChatThread[]>([]);
-  const [activeChatId, setActiveChatId] = useState("");
+  const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
+  const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
@@ -609,6 +714,9 @@ export default function App() {
   const [renameDraft, setRenameDraft] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(() => {
+    if (isMarkdownSmokeMode()) {
+      return false;
+    }
     try {
       return window.localStorage.getItem(ONBOARDING_FLAG_KEY) !== "true";
     } catch {
@@ -10009,8 +10117,8 @@ function ConversationCard({
       <div className="group flex justify-end">
         <div className="relative flex max-w-[78%] flex-col items-end">
           <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
-          {item.text ? <p className="whitespace-pre-wrap break-words">{item.text}</p> : null}
-          {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
+            {item.text ? <ChatMarkdown text={item.text} variant="user" /> : null}
+            {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
           </div>
           <MessageActions
             align="right"
@@ -10149,7 +10257,7 @@ function ConversationCard({
     <div className="group flex justify-start">
       <div className="relative w-full max-w-[85%] space-y-1.5">
         <div className="px-1 text-sm">
-          <p className="whitespace-pre-wrap break-words leading-relaxed">{response.plan.reply || response.plan.summary}</p>
+          <ChatMarkdown text={response.plan.reply || response.plan.summary} />
           {false && showIntent ? (
             <p className="hidden">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
@@ -10260,6 +10368,142 @@ function ConversationCard({
       </div>
     </div>
   );
+}
+
+function ChatMarkdown({ text, variant = "agent" }: { text?: string; variant?: "agent" | "user" }) {
+  const inverted = variant === "user";
+  const components = useMemo(() => buildChatMarkdownComponents(inverted), [inverted]);
+  if (!text?.trim()) {
+    return null;
+  }
+  return (
+    <div
+      className={cn("chat-markdown break-words leading-relaxed", inverted ? "text-primary-foreground" : "text-foreground")}
+      data-testid={`chat-markdown-${variant}`}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA]]}
+        components={components}
+        urlTransform={safeMarkdownUrlTransform}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [
+    ...new Set([
+      ...(defaultSchema.tagNames || []),
+      "details",
+      "summary",
+      "input",
+      "kbd",
+      "mark",
+    ]),
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    a: [
+      ...(defaultSchema.attributes?.a || []),
+      "target",
+      "rel",
+    ],
+    input: [
+      ...(defaultSchema.attributes?.input || []),
+      ["type", "checkbox"],
+      "checked",
+      "disabled",
+      "aria-checked",
+    ],
+    code: [
+      ...(defaultSchema.attributes?.code || []),
+      ["className", /^language-[A-Za-z0-9_-]+$/],
+    ],
+    span: [
+      ...(defaultSchema.attributes?.span || []),
+      ["className", /^math-inline$/],
+    ],
+    div: [
+      ...(defaultSchema.attributes?.div || []),
+      ["className", /^math-display$/],
+    ],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    src: [
+      ...new Set([...(defaultSchema.protocols?.src || []), "data"]),
+    ],
+  },
+};
+
+function buildChatMarkdownComponents(inverted: boolean): Components {
+  const textClass = inverted ? "text-primary-foreground" : "text-foreground";
+  const mutedClass = inverted ? "text-primary-foreground/80" : "text-muted-foreground";
+  const borderClass = inverted ? "border-primary-foreground/35" : "border-border";
+  const softBgClass = inverted ? "bg-primary-foreground/15" : "bg-muted/70";
+  const linkClass = inverted ? "text-primary-foreground underline underline-offset-2" : "text-primary underline underline-offset-2";
+  return {
+    h1: ({ node: _node, ...props }) => <h1 className={cn("mb-3 mt-5 text-xl font-semibold leading-snug first:mt-0", textClass)} {...props} />,
+    h2: ({ node: _node, ...props }) => <h2 className={cn("mb-3 mt-5 text-lg font-semibold leading-snug first:mt-0", textClass)} {...props} />,
+    h3: ({ node: _node, ...props }) => <h3 className={cn("mb-2 mt-4 text-base font-semibold leading-snug first:mt-0", textClass)} {...props} />,
+    h4: ({ node: _node, ...props }) => <h4 className={cn("mb-2 mt-4 text-sm font-semibold leading-snug first:mt-0", textClass)} {...props} />,
+    h5: ({ node: _node, ...props }) => <h5 className={cn("mb-2 mt-4 text-sm font-semibold leading-snug first:mt-0", mutedClass)} {...props} />,
+    h6: ({ node: _node, ...props }) => <h6 className={cn("mb-2 mt-4 text-xs font-semibold uppercase leading-snug first:mt-0", mutedClass)} {...props} />,
+    p: ({ node: _node, ...props }) => <p className="my-3 whitespace-pre-wrap first:mt-0 last:mb-0" {...props} />,
+    a: ({ node: _node, href, ...props }) => {
+      const safeHref = safeMarkdownUrlTransform(String(href || ""));
+      if (!safeHref) {
+        return <span {...props} />;
+      }
+      return <a className={linkClass} href={safeHref} target="_blank" rel="noreferrer" {...props} />;
+    },
+    blockquote: ({ node: _node, ...props }) => <blockquote className={cn("my-3 border-l-2 pl-3", borderClass, mutedClass)} {...props} />,
+    ul: ({ node: _node, className, ...props }) => <ul className={cn("my-3 list-disc space-y-1.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
+    ol: ({ node: _node, className, ...props }) => <ol className={cn("my-3 list-decimal space-y-1.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
+    li: ({ node: _node, className, ...props }) => <li className={cn("pl-1", inverted ? "marker:text-primary-foreground/80" : "marker:text-muted-foreground", className)} {...props} />,
+    table: ({ node: _node, ...props }) => (
+      <div className={cn("app-scrollbar my-3 overflow-auto rounded-md border first:mt-0 last:mb-0", borderClass)}>
+        <table className="min-w-full border-collapse text-xs" {...props} />
+      </div>
+    ),
+    thead: ({ node: _node, ...props }) => <thead className={inverted ? "bg-primary-foreground/15" : "bg-muted/70"} {...props} />,
+    th: ({ node: _node, ...props }) => <th className={cn("border-b border-r px-3 py-2 text-left font-semibold last:border-r-0", borderClass)} {...props} />,
+    td: ({ node: _node, ...props }) => <td className={cn("border-b border-r px-3 py-2 align-top last:border-r-0", borderClass)} {...props} />,
+    tr: ({ node: _node, ...props }) => <tr className="last:[&>td]:border-b-0" {...props} />,
+    hr: ({ node: _node, ...props }) => <hr className={cn("my-4", borderClass)} {...props} />,
+    pre: ({ node: _node, ...props }) => <pre className={cn("app-scrollbar my-3 max-h-80 overflow-auto rounded-md border p-3 text-xs first:mt-0 last:mb-0", borderClass, softBgClass)} {...props} />,
+    code: ({ node: _node, className, ...props }) => <code className={cn("rounded px-1 py-0.5 font-mono text-[0.92em]", softBgClass, className)} {...props} />,
+    strong: ({ node: _node, ...props }) => <strong className={cn("font-semibold", textClass)} {...props} />,
+    em: ({ node: _node, ...props }) => <em className="italic" {...props} />,
+    del: ({ node: _node, ...props }) => <del className={mutedClass} {...props} />,
+    input: ({ node: _node, className, ...props }) => <input className={cn("mr-2 align-middle", className)} disabled {...props} />,
+    mark: ({ node: _node, ...props }) => <mark className={inverted ? "rounded bg-primary-foreground px-1 text-primary" : "rounded bg-yellow-200 px-1 text-yellow-950"} {...props} />,
+    img: ({ node: _node, alt, src, ...props }) => {
+      const safeSrc = safeMarkdownUrlTransform(String(src || ""));
+      if (!safeSrc) {
+        return alt ? <span>{alt}</span> : null;
+      }
+      return <img className={cn("my-3 max-h-96 max-w-full rounded-md border object-contain", borderClass)} src={safeSrc} alt={alt || ""} {...props} />;
+    },
+  };
+}
+
+function safeMarkdownUrlTransform(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (/^(?:https?:|mailto:|tel:|#|\/(?!\/))/i.test(trimmed)) {
+    return defaultUrlTransform(trimmed);
+  }
+  if (/^data:image\/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return "";
 }
 
 function MessageActions({
