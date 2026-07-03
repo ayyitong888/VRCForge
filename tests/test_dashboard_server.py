@@ -1569,6 +1569,141 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["reasoning"]["collapsedDefault"])
         self.assertEqual(payload["reasoning"]["items"][0]["text"], "visible model thinking")
 
+    @patch("dashboard_server.request_llm_plan_with_metadata")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_agent_runtime_message_reports_provider_context_usage(
+        self,
+        mock_load_settings,
+        mock_request_llm_plan,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="ollama",
+            llm_api_key="",
+            llm_model="deepseek-v4-pro",
+        )
+        mock_request_llm_plan.return_value = LlmPlanResponse(
+            text=json.dumps({"action": "reply", "reply": "ready"}),
+            reasoning={},
+            usage={
+                "schema": "vrcforge.provider_usage.v1",
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-v4-pro",
+                "source": "openai-compatible",
+                "exact": True,
+                "inputTokens": 1234,
+                "outputTokens": 56,
+                "totalTokens": 1290,
+            },
+        )
+
+        history = [{"role": "user", "text": "first visible request"}]
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/message",
+                json={"message": "hello model planner", "history": history},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        usage = response.json()["contextUsage"]
+        self.assertTrue(usage["exact"])
+        self.assertEqual(usage["inputTokens"], 1234)
+        self.assertEqual(usage["outputTokens"], 56)
+        self.assertEqual(usage["totalTokens"], 1290)
+        self.assertEqual(usage["sentHistoryEntryCount"], 1)
+        self.assertGreater(usage["promptCharacterCount"], 0)
+
+    def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
+        captured: dict[str, str] = {}
+        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
+        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
+        try:
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
+
+            def plan_fn(prompt: str) -> dict:
+                captured["prompt"] = prompt
+                return {
+                    "text": json.dumps({"action": "reply", "reply": "done"}),
+                    "usage": {"exact": True, "inputTokens": 77, "outputTokens": 5, "totalTokens": 82},
+                }
+
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
+            long_tail = "visible-long-history-" + ("x" * 700) + "-tail-kept"
+            history = [
+                {"role": "user", "text": "first turn is still present", "tool": "DO_NOT_SEND_TOOL_FIELD"},
+                {"role": "agent", "text": "assistant visible reply one", "reasoning": "DO_NOT_SEND_COT_FIELD"},
+            ]
+            for index in range(13):
+                history.append({"role": "user", "text": f"middle user {index}"})
+            history.append({"role": "agent", "text": long_tail, "shell": {"stdout": "DO_NOT_SEND_STDOUT_FIELD"}})
+
+            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                {
+                    "message": "latest user message",
+                    "session_id": "sess-full-visible-history",
+                    "history": history,
+                }
+            )
+        finally:
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
+            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-full-visible-history", None)
+
+        self.assertTrue(payload["ok"])
+        prompt = captured["prompt"]
+        self.assertIn("first turn is still present", prompt)
+        self.assertIn("middle user 0", prompt)
+        self.assertIn("middle user 12", prompt)
+        self.assertIn("-tail-kept", prompt)
+        self.assertIn("latest user message", prompt)
+        self.assertNotIn("DO_NOT_SEND_TOOL_FIELD", prompt)
+        self.assertNotIn("DO_NOT_SEND_COT_FIELD", prompt)
+        self.assertNotIn("DO_NOT_SEND_STDOUT_FIELD", prompt)
+
+    def test_llm_planner_prompt_uses_thin_loop_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            prompt = gateway._build_llm_plan_prompt(
+                "continue after tool execution",
+                history=[],
+                loop_state=[
+                    {
+                        "tool": "shell",
+                        "kind": "shell",
+                        "status": "executed",
+                        "result": {
+                            "ok": True,
+                            "exitCode": 0,
+                            "timedOut": False,
+                            "stdoutSummary": "DO_NOT_SEND_STDOUT_SUMMARY",
+                            "stderrSummary": "DO_NOT_SEND_STDERR_SUMMARY",
+                            "payload": {"raw": "DO_NOT_SEND_PAYLOAD"},
+                        },
+                    },
+                    {
+                        "tool": "vrcforge_test_tool",
+                        "kind": "skill",
+                        "status": "failed",
+                        "result": {
+                            "ok": False,
+                            "code": "missing_parameter",
+                            "error": "missing avatar path",
+                            "data": {"raw": "DO_NOT_SEND_DATA"},
+                        },
+                    },
+                ],
+            )
+
+        self.assertIn("shell", prompt)
+        self.assertIn("exitCode=0", prompt)
+        self.assertIn("missing_parameter", prompt)
+        self.assertIn("missing avatar path", prompt)
+        self.assertNotIn("DO_NOT_SEND_STDOUT_SUMMARY", prompt)
+        self.assertNotIn("DO_NOT_SEND_STDERR_SUMMARY", prompt)
+        self.assertNotIn("DO_NOT_SEND_PAYLOAD", prompt)
+        self.assertNotIn("DO_NOT_SEND_DATA", prompt)
+
     def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.post("/api/app/agent/message", json={"message": "检查 Unity MCP 状态"})

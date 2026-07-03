@@ -31,6 +31,7 @@ ToolHandler = Callable[[dict[str, Any]], Any]
 ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
 ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
 APPLY_RECOVERY_SCHEMA = "vrcforge.interrupted_apply_recovery.v1"
+CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 LOCAL_STATE_CHECKPOINT_TARGETS = {
@@ -1500,11 +1501,12 @@ class AgentGateway:
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
-        self.llm_plan_fn: Callable[[str], str] | None = None
+        self.llm_plan_fn: Callable[[str], Any] | None = None
         # 由宿主在配置/调用 LLM 时更新，例如 "DeepSeek · deepseek-chat"。
         # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
         self.llm_planner_label: str = ""
         self.llm_reasoning_trace: dict[str, Any] = {}
+        self.llm_context_usage: dict[str, Any] = {}
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
@@ -2027,6 +2029,7 @@ class AgentGateway:
         if attachments:
             observe["turn"] = {"attachments": attachments}
         self.llm_reasoning_trace = {}
+        self.llm_context_usage = {}
         self._append_runtime_run(
             {
                 "event": "runtime_turn_started",
@@ -2191,6 +2194,7 @@ class AgentGateway:
             cap_reached = True
 
         reasoning_trace = ensure_dict(self.llm_reasoning_trace)
+        context_usage = ensure_dict(self.llm_context_usage)
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         top_plan = first_plan if iterations <= 1 else self._summarize_loop_plan(
@@ -2221,6 +2225,8 @@ class AgentGateway:
             turn["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             turn["reasoning"] = reasoning_trace
+        if context_usage:
+            turn["contextUsage"] = context_usage
         if shell_payload is not None:
             turn["shell"] = shell_payload
         if skill_payload is not None:
@@ -2255,6 +2261,7 @@ class AgentGateway:
                 "skillStatus": skill_payload.get("status") if skill_payload else "none",
                 "skillTool": skill_payload.get("tool") if skill_payload else "",
                 "writeStatus": write_payload.get("status") if write_payload else "none",
+                "contextUsage": context_usage,
             }
         )
         self._append_runtime_run(
@@ -2274,6 +2281,7 @@ class AgentGateway:
                 skill_payload=skill_payload,
                 write_payload=write_payload,
                 approval_id=approval_id,
+                context_usage=context_usage,
             )
         )
 
@@ -2294,6 +2302,8 @@ class AgentGateway:
             payload["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             payload["reasoning"] = reasoning_trace
+        if context_usage:
+            payload["contextUsage"] = context_usage
         if shell_payload is not None:
             payload["shell"] = shell_payload
         if skill_payload is not None:
@@ -2545,6 +2555,7 @@ class AgentGateway:
         skill_payload: dict[str, Any] | None,
         write_payload: dict[str, Any] | None,
         approval_id: str,
+        context_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         approval_ids = []
         if approval_id:
@@ -2558,7 +2569,7 @@ class AgentGateway:
             nested_id = str(nested.get("id") or "").strip()
             if nested_id and nested_id not in approval_ids:
                 approval_ids.append(nested_id)
-        return {
+        record = {
             "event": event,
             "status": status,
             "agent": agent_name,
@@ -2583,6 +2594,9 @@ class AgentGateway:
             "writeStatus": write_payload.get("status") if write_payload else "none",
             "writeTool": write_payload.get("tool") if write_payload else "",
         }
+        if context_usage:
+            record["contextUsage"] = context_usage
+        return record
 
     def request_runtime_cancel(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -7056,7 +7070,9 @@ class AgentGateway:
         try:
             prompt = self._build_llm_plan_prompt(self._message_with_runtime_context(message, observe), history, loop_state or [], observe=observe)
             raw_response = plan_fn(prompt)
-            payload = parse_llm_plan_response(raw_response)
+            response_text, provider_usage = normalize_llm_plan_result(raw_response)
+            self._record_llm_context_usage(prompt, history, provider_usage)
+            payload = parse_llm_plan_response(response_text)
         except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
             return None
         if not isinstance(payload, dict):
@@ -7126,6 +7142,67 @@ class AgentGateway:
             "nextStep": "done",
         }
 
+    def _record_llm_context_usage(
+        self,
+        prompt: str,
+        history: list[dict[str, Any]],
+        provider_usage: dict[str, Any] | None,
+    ) -> None:
+        usage = ensure_dict(provider_usage)
+        current = ensure_dict(self.llm_context_usage)
+        if not current:
+            current = {
+                "schema": CONTEXT_USAGE_SCHEMA,
+                "source": "provider_usage",
+                "exact": True,
+                "requestCount": 0,
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "totalTokens": 0,
+                "cacheReadTokens": 0,
+                "promptCharacterCount": 0,
+            }
+
+        current["requestCount"] = int(current.get("requestCount") or 0) + 1
+        current["promptCharacterCount"] = int(current.get("promptCharacterCount") or 0) + len(prompt)
+        current["lastPromptCharacterCount"] = len(prompt)
+        current["sentHistoryEntryCount"] = sum(
+            1 for entry in history if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+        )
+        current["sentHistoryCharacterCount"] = sum(
+            len(str(entry.get("text") or ""))
+            for entry in history
+            if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+        )
+
+        for key in ("provider", "providerLabel", "model"):
+            value = str(usage.get(key) or "").strip()
+            if value:
+                current[key] = value
+
+        exact = bool(usage.get("exact"))
+        input_tokens = usage_int(usage.get("inputTokens"))
+        output_tokens = usage_int(usage.get("outputTokens"))
+        total_tokens = usage_int(usage.get("totalTokens"))
+        cache_read_tokens = usage_int(usage.get("cacheReadTokens"))
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
+
+        if exact and (input_tokens is not None or output_tokens is not None or total_tokens is not None):
+            if input_tokens is not None:
+                current["inputTokens"] = int(current.get("inputTokens") or 0) + input_tokens
+            if output_tokens is not None:
+                current["outputTokens"] = int(current.get("outputTokens") or 0) + output_tokens
+            if total_tokens is not None:
+                current["totalTokens"] = int(current.get("totalTokens") or 0) + total_tokens
+            if cache_read_tokens is not None:
+                current["cacheReadTokens"] = int(current.get("cacheReadTokens") or 0) + cache_read_tokens
+        else:
+            current["exact"] = False
+            current["unavailableReason"] = str(usage.get("unavailableReason") or "provider_usage_missing")
+
+        self.llm_context_usage = current
+
     def _message_with_runtime_context(self, message: str, observe: dict[str, Any]) -> str:
         lines = [message]
         attachments = ensure_list((observe.get("turn") or {}).get("attachments"))
@@ -7154,6 +7231,34 @@ class AgentGateway:
                     lines.append(f"- [{goal.get('status')}] {summarize_text(str(goal.get('title')), 240)} {summarize_text(str(goal.get('summary') or ''), 360)}")
         return "\n".join(lines)
 
+    def _llm_loop_step_observation(self, step: dict[str, Any]) -> str:
+        result = step.get("result")
+        fields: list[str] = []
+        if isinstance(result, dict):
+            for key in (
+                "ok",
+                "status",
+                "code",
+                "exitCode",
+                "timedOut",
+                "cancelled",
+                "approvalId",
+                "approval_id",
+                "checkpointId",
+                "checkpoint_id",
+                "schema",
+            ):
+                value = result.get(key)
+                if value not in (None, ""):
+                    fields.append(f"{key}={summarize_text(str(value), 120)}")
+            for key in ("error", "reason"):
+                value = result.get(key)
+                if value not in (None, ""):
+                    fields.append(f"{key}={summarize_text(str(value), 180)}")
+        elif result is not None:
+            fields.append("result=available")
+        return "; ".join(fields)
+
     def _build_llm_plan_prompt(
         self,
         message: str,
@@ -7172,9 +7277,9 @@ class AgentGateway:
             suffix = f"（{','.join(flags)}）" if flags else ""
             tool_lines.append(f"- {tool.name}{suffix}: {summarize_text(tool.description, 120)}")
         history_lines: list[str] = []
-        for entry in history[-12:]:
+        for entry in history:
             role = "用户" if str(entry.get("role") or "user").strip().lower() == "user" else "助手"
-            text = summarize_text(str(entry.get("text") or ""), 500)
+            text = str(entry.get("text") or "").strip()
             if text:
                 history_lines.append(f"{role}: {text}")
         history_block = "\n".join(history_lines) if history_lines else "（无）"
@@ -7184,12 +7289,12 @@ class AgentGateway:
                 continue
             label = str(step.get("tool") or step.get("kind") or "step")
             status = str(step.get("status") or "")
-            result_text = summarize_text(json.dumps(step.get("result"), ensure_ascii=False, default=str), 600) if step.get("result") is not None else ""
+            observation_text = self._llm_loop_step_observation(step)
             line = f"{index}. {label}"
             if status:
                 line += f"（{status}）"
-            if result_text:
-                line += f" → {result_text}"
+            if observation_text:
+                line += f" -> {observation_text}"
             step_lines.append(line)
         steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
         return (
@@ -8095,6 +8200,34 @@ def parse_llm_plan_response(raw_response: str) -> dict[str, Any] | None:
             continue
         if isinstance(payload, dict):
             return payload
+    return None
+
+
+def normalize_llm_plan_result(raw_response: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(raw_response, dict):
+        text = str(
+            raw_response.get("text")
+            or raw_response.get("content")
+            or raw_response.get("response")
+            or raw_response.get("message")
+            or ""
+        )
+        return text, ensure_dict(raw_response.get("usage") or raw_response.get("tokenUsage"))
+    text_value = getattr(raw_response, "text", None)
+    if text_value is not None:
+        return str(text_value), ensure_dict(getattr(raw_response, "usage", None))
+    return str(raw_response or ""), {}
+
+
+def usage_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float) and value.is_integer():
+        return max(0, int(value))
+    if isinstance(value, str) and value.strip().isdigit():
+        return max(0, int(value.strip()))
     return None
 
 

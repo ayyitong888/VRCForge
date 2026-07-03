@@ -337,6 +337,25 @@ export type AgentReasoningTrace = {
   }>;
 };
 
+export type AgentContextUsage = {
+  schema?: string;
+  source?: string;
+  exact?: boolean;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  requestCount?: number;
+  sentHistoryEntryCount?: number;
+  sentHistoryCharacterCount?: number;
+  promptCharacterCount?: number;
+  lastPromptCharacterCount?: number;
+  unavailableReason?: string;
+};
+
 export type AgentRuntimeResponse = {
   ok: boolean;
   session_id: string;
@@ -363,6 +382,7 @@ export type AgentRuntimeResponse = {
     nextStep?: string;
   };
   reasoning?: AgentReasoningTrace;
+  contextUsage?: AgentContextUsage;
   attachments?: AgentMessageAttachment[];
   write?: {
     ok?: boolean;

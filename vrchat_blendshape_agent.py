@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +121,7 @@ class McpResult:
 class LlmPlanResponse:
     text: str
     reasoning: dict[str, Any]
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class UnityMcpError(RuntimeError):
@@ -1343,6 +1344,7 @@ def request_gemini_plan_with_metadata(
         return LlmPlanResponse(
             text=getattr(response, "text", "") or "",
             reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
+            usage=extract_llm_token_usage(response, settings, source="gemini"),
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
@@ -1393,6 +1395,7 @@ def request_vertex_ai_plan_with_metadata(
         return LlmPlanResponse(
             text=getattr(response, "text", "") or "",
             reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
+            usage=extract_llm_token_usage(response, settings, source="vertexai"),
         )
     except Exception as exc:  # noqa: BLE001
         detail = (
@@ -1465,6 +1468,7 @@ def request_openai_compatible_plan_with_metadata(
         return LlmPlanResponse(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
+            usage=extract_llm_token_usage(response, settings, source="openai-compatible"),
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
@@ -1532,6 +1536,7 @@ def request_anthropic_plan_with_metadata(
         return LlmPlanResponse(
             text=extract_anthropic_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="anthropic"),
+            usage=extract_llm_token_usage(response, settings, source="anthropic"),
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
@@ -1734,6 +1739,98 @@ def extract_llm_reasoning_trace(response: Any, settings: Settings, source: str =
         "itemCount": len(items),
         "items": items,
     }
+
+
+def extract_llm_token_usage(response: Any, settings: Settings, source: str = "") -> dict[str, Any]:
+    """Extract provider-reported token usage without estimating missing values."""
+    usage = (
+        get_value(response, "usage")
+        or get_value(response, "usage_metadata")
+        or get_value(response, "usageMetadata")
+        or {}
+    )
+    input_tokens = first_usage_int(
+        usage,
+        (
+            "prompt_tokens",
+            "promptTokens",
+            "prompt_token_count",
+            "promptTokenCount",
+            "input_tokens",
+            "inputTokens",
+            "input_token_count",
+            "inputTokenCount",
+        ),
+    )
+    output_tokens = first_usage_int(
+        usage,
+        (
+            "completion_tokens",
+            "completionTokens",
+            "candidates_token_count",
+            "candidatesTokenCount",
+            "output_tokens",
+            "outputTokens",
+            "output_token_count",
+            "outputTokenCount",
+        ),
+    )
+    total_tokens = first_usage_int(
+        usage,
+        (
+            "total_tokens",
+            "totalTokens",
+            "total_token_count",
+            "totalTokenCount",
+        ),
+    )
+    cache_read_tokens = first_usage_int(
+        usage,
+        (
+            "cached_tokens",
+            "cachedTokens",
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+            "cacheReadTokens",
+        ),
+    )
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    exact = input_tokens is not None or output_tokens is not None or total_tokens is not None
+    payload: dict[str, Any] = {
+        "schema": "vrcforge.provider_usage.v1",
+        "provider": normalize_provider_name(settings.llm_provider),
+        "providerLabel": provider_display_name(settings.llm_provider),
+        "model": settings.llm_model,
+        "source": source,
+        "exact": exact,
+    }
+    if input_tokens is not None:
+        payload["inputTokens"] = input_tokens
+    if output_tokens is not None:
+        payload["outputTokens"] = output_tokens
+    if total_tokens is not None:
+        payload["totalTokens"] = total_tokens
+    if cache_read_tokens is not None:
+        payload["cacheReadTokens"] = cache_read_tokens
+    if not exact:
+        payload["unavailableReason"] = "provider_usage_missing"
+    return payload
+
+
+def first_usage_int(container: Any, keys: Sequence[str]) -> int | None:
+    for key in keys:
+        value = get_value(container, key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float) and value.is_integer():
+            return max(0, int(value))
+        if isinstance(value, str) and value.strip().isdigit():
+            return max(0, int(value.strip()))
+    return None
 
 
 def get_value(value: Any, key: str) -> Any:

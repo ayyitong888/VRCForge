@@ -60,6 +60,7 @@ import i18n, { SUPPORTED_LOCALES, setLocale } from "./i18n";
 import {
   FormEvent,
   MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
   ReactNode,
   useEffect,
   useLayoutEffect,
@@ -77,6 +78,7 @@ import {
   AgentDesktopAction,
   AgentGoal,
   AgentMemory,
+  AgentContextUsage,
   AgentRuntimeRun,
   AgentRuntimeResponse,
   AgentReasoningTrace,
@@ -304,7 +306,7 @@ function formatStorageSize(bytes?: number) {
 }
 
 type ConversationItem =
-  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[] }
+  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
@@ -358,6 +360,7 @@ type QueuedTurn = {
   attachments: ChatAttachment[];
   providerLabel: string;
   model: string;
+  queuedFrom?: boolean;
 };
 
 type CurrentTurn = {
@@ -383,18 +386,12 @@ type ContextUsage = {
   used: number;
   limit: number;
   limitKnown: boolean;
-  source: "provider" | "known" | "estimated";
+  source: "provider_usage" | "unavailable";
+  exact: boolean;
   ratio: number;
   label: string;
   title: string;
   warning: boolean;
-};
-
-type ContextUsageInputs = {
-  agentNotes?: string;
-  agentNotesLoaded?: boolean;
-  goals?: AgentGoal[];
-  memories?: AgentMemory[];
 };
 
 type ApprovalActionState = "approve" | "reject" | "modify";
@@ -431,6 +428,11 @@ type ProjectUiPrefs = {
   aliases: Record<string, string>;
 };
 
+type LayoutPaneWidths = {
+  left: number;
+  right: number;
+};
+
 type ThemeMode = "light" | "dark";
 
 const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
@@ -439,6 +441,7 @@ const PROJECT_UI_PREFS_KEY = "vrcforge_project_ui_prefs";
 const THEME_STORAGE_KEY = "vrcforge_theme";
 const LEFT_SIDEBAR_COLLAPSED_KEY = "vrcforge_left_sidebar_collapsed";
 const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
+const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
 const CONTEXT_AUTO_COMPACT_RATIO = 0.92;
 const MAX_QUEUED_TURNS = 8;
@@ -446,13 +449,17 @@ const MAX_ATTACHMENTS_PER_TURN = 8;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
-const CONTEXT_FIXED_PROMPT_OVERHEAD_CHARS = 20000;
-const CONTEXT_HISTORY_PROMPT_MAX_ITEMS = 12;
-const CONTEXT_HISTORY_PROMPT_ENTRY_MAX_CHARS = 500;
-const CONTEXT_AGENT_NOTES_INLINE_MAX_CHARS = 4000;
-const CONTEXT_TURN_ATTACHMENT_TEXT_MAX_CHARS = 1200;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
+const DEFAULT_LEFT_PANE_WIDTH = 280;
+const DEFAULT_RIGHT_PANE_WIDTH = 320;
+const COLLAPSED_LEFT_PANE_WIDTH = 56;
+const RESIZE_HANDLE_WIDTH = 6;
+const MIN_LEFT_PANE_WIDTH = 220;
+const MAX_LEFT_PANE_WIDTH = 440;
+const MIN_RIGHT_PANE_WIDTH = 260;
+const MAX_RIGHT_PANE_WIDTH = 520;
+const MIN_CENTER_PANE_WIDTH = 520;
 // 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
 const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
 
@@ -512,6 +519,43 @@ const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description:
 
 function executionModeLabel(mode?: string): string {
   return EXECUTION_MODES.find((item) => item.value === mode)?.label || i18n.t("executionMode.approval");
+}
+
+type PermissionVisualState = {
+  tier: "restricted" | "auto" | "full";
+  badgeTone: "muted" | "warn" | "danger";
+  textClass: string;
+  hoverClass: string;
+  selectedClass: string;
+};
+
+function permissionVisualState(permission?: PermissionState | null, mode?: ExecutionMode | string): PermissionVisualState {
+  const effectiveMode = mode || permission?.executionMode || "approval";
+  if (permission?.roslynFullAuto || effectiveMode === "roslyn_full_auto") {
+    return {
+      tier: "full",
+      badgeTone: "danger",
+      textClass: "text-destructive",
+      hoverClass: "hover:bg-destructive/10",
+      selectedClass: "border-destructive bg-destructive/5",
+    };
+  }
+  if (permission?.autoApprove || effectiveMode === "auto") {
+    return {
+      tier: "auto",
+      badgeTone: "warn",
+      textClass: "text-amber-700 dark:text-amber-300",
+      hoverClass: "hover:bg-amber-500/10",
+      selectedClass: "border-amber-400 bg-amber-500/5",
+    };
+  }
+  return {
+    tier: "restricted",
+    badgeTone: "muted",
+    textClass: "text-muted-foreground",
+    hoverClass: "hover:bg-muted",
+    selectedClass: "border-border bg-muted",
+  };
 }
 
 function isTauriRuntime() {
@@ -579,6 +623,29 @@ function loadThemePreference(): ThemeMode {
   }
 }
 
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function loadLayoutPaneWidths(): LayoutPaneWidths {
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_PANE_WIDTHS_KEY);
+    if (!raw) {
+      return { left: DEFAULT_LEFT_PANE_WIDTH, right: DEFAULT_RIGHT_PANE_WIDTH };
+    }
+    const parsed = raw ? JSON.parse(raw) : {};
+    return {
+      left: clampNumber(Number(parsed.left || DEFAULT_LEFT_PANE_WIDTH), MIN_LEFT_PANE_WIDTH, MAX_LEFT_PANE_WIDTH),
+      right: clampNumber(Number(parsed.right || DEFAULT_RIGHT_PANE_WIDTH), MIN_RIGHT_PANE_WIDTH, MAX_RIGHT_PANE_WIDTH),
+    };
+  } catch {
+    return { left: DEFAULT_LEFT_PANE_WIDTH, right: DEFAULT_RIGHT_PANE_WIDTH };
+  }
+}
+
 function isMarkdownSmokeMode(): boolean {
   try {
     return new URLSearchParams(window.location.search).get("markdownSmoke") === "1";
@@ -597,6 +664,22 @@ function markdownSmokeCase(): string {
 
 function isSubAgentContextSmokeMode(): boolean {
   return isMarkdownSmokeMode() && markdownSmokeCase() === "subagent-context";
+}
+
+function isContextMeterSmokeMode(): boolean {
+  return isMarkdownSmokeMode() && markdownSmokeCase() === "context-meter";
+}
+
+function markdownSmokeContextPercent(): number {
+  try {
+    const raw = Number(new URLSearchParams(window.location.search).get("contextPct") || "1");
+    if (!Number.isFinite(raw)) {
+      return 1;
+    }
+    return Math.max(0, Math.min(100, Math.round(raw)));
+  } catch {
+    return 1;
+  }
 }
 
 const MARKDOWN_SMOKE_TEXT = [
@@ -648,6 +731,8 @@ function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: st
     return { chats: [], activeChatId: "" };
   }
   const chatId = "markdown-smoke-chat";
+  const contextPercent = isContextMeterSmokeMode() ? markdownSmokeContextPercent() : 1;
+  const smokeInputTokens = Math.round(1_048_576 * (contextPercent / 100));
   const response: AgentRuntimeResponse = {
     ok: true,
     session_id: "markdown-smoke-session",
@@ -662,6 +747,20 @@ function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: st
       plannerLabel: "Markdown Smoke",
       shellNeeded: false,
       nextStep: "done",
+    },
+    contextUsage: {
+      schema: "vrcforge.context_usage.v1",
+      source: "provider_usage",
+      exact: true,
+      provider: "smoke",
+      providerLabel: "Smoke",
+      model: "CommonMark + GFM",
+      inputTokens: smokeInputTokens,
+      outputTokens: 321,
+      totalTokens: smokeInputTokens + 321,
+      requestCount: 1,
+      sentHistoryEntryCount: 1,
+      promptCharacterCount: 18000,
     },
   };
   return {
@@ -803,6 +902,7 @@ export default function App() {
       return false;
     }
   });
+  const [layoutPaneWidths, setLayoutPaneWidths] = useState<LayoutPaneWidths>(() => loadLayoutPaneWidths());
   const [rightRuntimeSectionsCollapsed, setRightRuntimeSectionsCollapsed] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem(RIGHT_RUNTIME_SECTION_COLLAPSED_KEY);
@@ -996,6 +1096,7 @@ export default function App() {
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
+  const currentPermissionVisual = permissionVisualState(permission);
   const apiConfig = bootstrap?.apiConfig;
   const healthComponents = bootstrap?.health.components ?? {};
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
@@ -1113,17 +1214,13 @@ export default function App() {
     },
     [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
+  const latestContextUsage = useMemo(() => latestAgentContextUsage(conversation), [conversation]);
   const contextUsage = useMemo(
     () =>
       apiConfig || smokeMode
-        ? buildContextUsage(conversation, input, attachments, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, {
-            agentNotes,
-            agentNotesLoaded,
-            goals: agentGoals,
-            memories: agentMemory,
-          })
+        ? buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo)
         : undefined,
-    [agentGoals, agentMemory, agentNotes, agentNotesLoaded, apiConfig, attachments, conversation, currentModelInfo, input, providerSnapshot.model, providerSnapshot.provider, smokeMode],
+    [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode],
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
@@ -1175,7 +1272,70 @@ export default function App() {
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
-  const workspaceGridColumns = `${leftSidebarCollapsed ? "56px" : "280px"} minmax(0,1fr) ${rightSidebarCollapsed ? "0px" : "320px"}`;
+  const effectiveLeftPaneWidth = leftSidebarCollapsed ? COLLAPSED_LEFT_PANE_WIDTH : layoutPaneWidths.left;
+  const effectiveRightPaneWidth = rightSidebarCollapsed ? 0 : layoutPaneWidths.right;
+  const workspaceGridColumns = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
+  const startLayoutResize = (side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startLeftWidth = effectiveLeftPaneWidth;
+    const startRightWidth = effectiveRightPaneWidth;
+    const leftCollapseThreshold = MIN_LEFT_PANE_WIDTH * 0.65;
+    const rightCollapseThreshold = MIN_RIGHT_PANE_WIDTH * 0.65;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const maxLeftWidth = () => {
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - (rightSidebarCollapsed ? 0 : layoutPaneWidths.right);
+      return Math.max(MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, available));
+    };
+    const maxRightWidth = () => {
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - (leftSidebarCollapsed ? COLLAPSED_LEFT_PANE_WIDTH : layoutPaneWidths.left);
+      return Math.max(MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, available));
+    };
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const delta = moveEvent.clientX - startX;
+      if (side === "left") {
+        const proposed = startLeftWidth + delta;
+        if (proposed <= leftCollapseThreshold) {
+          setLeftSidebarCollapsed(true);
+          return;
+        }
+        setLeftSidebarCollapsed(false);
+        setLayoutPaneWidths((current) => ({
+          ...current,
+          left: clampNumber(proposed, MIN_LEFT_PANE_WIDTH, maxLeftWidth()),
+        }));
+        return;
+      }
+
+      const proposed = startRightWidth - delta;
+      if (proposed <= rightCollapseThreshold) {
+        setRightSidebarCollapsed(true);
+        return;
+      }
+      setRightSidebarCollapsed(false);
+      setLayoutPaneWidths((current) => ({
+        ...current,
+        right: clampNumber(proposed, MIN_RIGHT_PANE_WIDTH, maxRightWidth()),
+      }));
+    };
+
+    const onPointerUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  };
   const workspaceDiffFiles = workspaceDiff?.files ?? [];
   const runtimeFileReferences = useMemo(() => buildRuntimeFileReferences(conversation, workspaceDiffFiles), [conversation, workspaceDiffFiles]);
   const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
@@ -1393,6 +1553,14 @@ export default function App() {
       // Sidebar width is best-effort local UI state.
     }
   }, [rightSidebarCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LAYOUT_PANE_WIDTHS_KEY, JSON.stringify(layoutPaneWidths));
+    } catch {
+      // Pane widths are best-effort local UI state.
+    }
+  }, [layoutPaneWidths]);
 
   useEffect(() => {
     try {
@@ -2230,7 +2398,8 @@ export default function App() {
         setAttachments(turn.attachments);
         return;
       }
-      queueRef.current.push(turn);
+      const queuedTurn = { ...turn, queuedFrom: true };
+      queueRef.current.push(queuedTurn);
       setQueued([...queueRef.current]);
       void recordAgentRunQueued(endpoint, {
         sessionId: sessionId || undefined,
@@ -2314,7 +2483,7 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
-      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments };
+      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments, queuedFrom: Boolean(turn.queuedFrom) };
       userItemId = userItem.id;
       const message = turn.text;
       updateChat(chatId, (current) => ({
@@ -4629,6 +4798,20 @@ export default function App() {
           </div>
         </aside>
 
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-valuenow={Math.round(effectiveLeftPaneWidth)}
+          aria-valuemin={COLLAPSED_LEFT_PANE_WIDTH}
+          aria-valuemax={MAX_LEFT_PANE_WIDTH}
+          data-layout-splitter="left"
+          className="group relative h-screen cursor-col-resize touch-none bg-transparent"
+          onPointerDown={(event) => startLayoutResize("left", event)}
+          title={t("workspace.resizeLeftPane")}
+        >
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
+        </div>
+
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
           <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
             <div className="flex min-w-0 items-center gap-2 text-sm">
@@ -4652,12 +4835,12 @@ export default function App() {
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {permission?.roslynFullAuto ? (
-                <Badge tone="danger">
+                <Badge tone={currentPermissionVisual.badgeTone}>
                   <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
                   {t("header.fullPermission")}
                 </Badge>
               ) : permission?.executionMode === "auto" ? (
-                <Badge tone="warn">{t("header.autoApproval")}</Badge>
+                <Badge tone={currentPermissionVisual.badgeTone}>{t("header.autoApproval")}</Badge>
               ) : null}
               <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
               <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
@@ -4863,39 +5046,41 @@ export default function App() {
                 <section className="mt-10">
                   <div className="flex min-w-0 items-center gap-2">
                     <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
-                    <Badge tone={permission?.roslynFullAuto ? "danger" : permission?.autoApprove ? "warn" : "muted"} className="shrink-0">
+                    <Badge tone={currentPermissionVisual.badgeTone} className="shrink-0">
                       {t("settings.currentMode", { mode: executionModeLabel(permission?.executionMode) })}
                     </Badge>
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">{t("settings.permissionModeDescription")}</p>
                   <div className="mt-4 grid gap-3">
-                    {EXECUTION_MODES.map((mode) => (
-                      <button
-                        key={mode.value}
-                        type="button"
-                        disabled={loading || !runtimeConnected}
-                        onClick={() => void switchMode(mode.value)}
-                        className={cn(
-                          "grid min-w-0 gap-1 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60",
-                          permission?.executionMode === mode.value
-                            ? "border-primary bg-primary/5"
-                            : "border-border hover:border-primary/40 hover:bg-muted/60",
-                        )}
-                      >
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className="truncate text-sm font-medium">{mode.label}</span>
-                          {mode.value === "roslyn_full_auto" ? (
-                            <Badge tone="danger" className="shrink-0">
-                              {t("settings.highRisk")}
-                            </Badge>
-                          ) : null}
-                          {permission?.executionMode === mode.value ? (
-                            <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />
-                          ) : null}
-                        </div>
-                        <div className="text-xs text-muted-foreground">{mode.description}</div>
-                      </button>
-                    ))}
+                    {EXECUTION_MODES.map((mode) => {
+                      const modeVisual = permissionVisualState(undefined, mode.value);
+                      const selected = permission?.executionMode === mode.value;
+                      return (
+                        <button
+                          key={mode.value}
+                          type="button"
+                          disabled={loading || !runtimeConnected}
+                          onClick={() => void switchMode(mode.value)}
+                          className={cn(
+                            "grid min-w-0 gap-1 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60",
+                            selected ? modeVisual.selectedClass : cn("border-border", modeVisual.hoverClass),
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className={cn("truncate text-sm font-medium", modeVisual.textClass)}>{mode.label}</span>
+                            {mode.value === "roslyn_full_auto" ? (
+                              <Badge tone={modeVisual.badgeTone} className="shrink-0">
+                                {t("settings.highRisk")}
+                              </Badge>
+                            ) : null}
+                            {selected ? (
+                              <Check className={cn("ml-auto h-4 w-4 shrink-0", modeVisual.textClass)} />
+                            ) : null}
+                          </div>
+                          <div className="text-xs text-muted-foreground">{mode.description}</div>
+                        </button>
+                      );
+                    })}
                   </div>
                   {permission?.roslynRiskAcknowledged ? (
                     <div className="mt-3 text-xs text-muted-foreground">{t("settings.roslynConfirmed")}</div>
@@ -5205,6 +5390,19 @@ export default function App() {
             </div>
           ) : null}
         </section>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-valuenow={Math.round(effectiveRightPaneWidth)}
+          aria-valuemin={0}
+          aria-valuemax={MAX_RIGHT_PANE_WIDTH}
+          data-layout-splitter="right"
+          className="group relative h-screen cursor-col-resize touch-none bg-transparent"
+          onPointerDown={(event) => startLayoutResize("right", event)}
+          title={t("workspace.resizeRightPane")}
+        >
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
+        </div>
         {rightSidebarCollapsed ? null : (
           <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
@@ -6174,6 +6372,7 @@ function Composer({
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
+  const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
   const commandActions: ComposerSlashCommand[] = actions.map((action) => ({
     name: action.id === "desktop" ? "desktop-rescue" : action.id,
@@ -6297,7 +6496,7 @@ function Composer({
             <div className="relative">
               <button
                 type="button"
-                className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm text-amber-700 transition-colors hover:bg-amber-500/10"
+                className={cn("flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm transition-colors", currentModeVisual.textClass, currentModeVisual.hoverClass)}
                 onClick={() => setModeMenuOpen((open) => !open)}
               >
                 <Shield className="h-4 w-4 shrink-0" />
@@ -6307,30 +6506,34 @@ function Composer({
               {modeMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setModeMenuOpen(false)} /> : null}
               {modeMenuOpen ? (
                 <div className="absolute bottom-10 left-0 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
-                  {EXECUTION_MODES.map((mode) => (
-                    <button
-                      key={mode.value}
-                      type="button"
-                      className={cn(
-                        "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted",
-                        currentMode === mode.value ? "bg-muted" : "",
-                      )}
-                      onClick={() => {
-                        setModeMenuOpen(false);
-                        if (mode.value !== currentMode) {
-                          onSwitchMode(mode.value);
-                        }
-                      }}
-                    >
-                      <Check className={cn("mt-0.5 h-4 w-4 shrink-0", currentMode === mode.value ? "text-primary" : "opacity-0")} />
-                      <span className="min-w-0">
-                        <span className={cn("block font-medium", mode.value === "roslyn_full_auto" ? "text-destructive" : "")}>
-                          {mode.label}
+                  {EXECUTION_MODES.map((mode) => {
+                    const modeVisual = permissionVisualState(undefined, mode.value);
+                    return (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        className={cn(
+                          "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
+                          modeVisual.hoverClass,
+                          currentMode === mode.value ? "bg-muted" : "",
+                        )}
+                        onClick={() => {
+                          setModeMenuOpen(false);
+                          if (mode.value !== currentMode) {
+                            onSwitchMode(mode.value);
+                          }
+                        }}
+                      >
+                        <Check className={cn("mt-0.5 h-4 w-4 shrink-0", currentMode === mode.value ? modeVisual.textClass : "opacity-0")} />
+                        <span className="min-w-0">
+                          <span className={cn("block font-medium", modeVisual.textClass)}>
+                            {mode.label}
+                          </span>
+                          <span className="block text-xs text-muted-foreground">{mode.description}</span>
                         </span>
-                        <span className="block text-xs text-muted-foreground">{mode.description}</span>
-                      </span>
-                    </button>
-                  ))}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
@@ -6342,11 +6545,6 @@ function Composer({
                 {providerLabel || t("provider.apiProvider")}{model ? ` · ${model}` : ""}
               </Badge>
             ) : null}
-            {contextUsage ? (
-              <Badge tone={contextUsage.warning ? "warn" : "muted"} className="max-w-[300px] truncate" title={contextUsage.title}>
-                {t("chat.contextUsage", { value: contextUsage.label })}
-              </Badge>
-            ) : null}
             {sending ? (
               <Badge tone="warn" className="max-w-[240px] truncate">
                 <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
@@ -6355,6 +6553,9 @@ function Composer({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {contextUsage ? (
+              <ContextUsageMeter usage={contextUsage} />
+            ) : null}
             {sending ? (
               <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
                 <Square className="h-4 w-4" />
@@ -6414,6 +6615,44 @@ function Composer({
         ) : null}
       </div>
     </form>
+  );
+}
+
+function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsage; className?: string }) {
+  const knownRatio = usage.limitKnown && usage.exact;
+  const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
+  const fillColorClass = percent >= 90 ? "bg-destructive" : percent >= 60 ? "bg-amber-500" : "bg-primary";
+  const tooltipTitle = knownRatio ? i18n.t("chat.contextMeterPercentUsed", { percent }) : i18n.t("chat.contextUsageUnavailable");
+  const tooltipDetail = knownRatio
+    ? i18n.t("chat.contextMeterTokenDetail", { used: formatCount(usage.used), limit: formatCount(usage.limit) })
+    : "";
+  const nativeTitle = tooltipDetail ? `${tooltipTitle}\n${tooltipDetail}` : tooltipTitle;
+  return (
+    <div
+      className={cn("group relative flex h-10 w-32 shrink-0 items-center rounded-md px-1", className)}
+      tabIndex={0}
+      aria-label={nativeTitle}
+      title={nativeTitle}
+      data-context-meter="true"
+      data-context-percent={knownRatio ? String(percent) : "unknown"}
+    >
+      <div className="h-2.5 w-full overflow-hidden rounded-full border border-border bg-muted">
+        {knownRatio ? (
+          <div
+            className={cn("h-full rounded-full transition-[width,background-color] duration-500", fillColorClass)}
+            style={{ width: `${percent}%` }}
+            data-context-segment={percent >= 90 ? "high" : percent >= 60 ? "medium" : "low"}
+          />
+        ) : (
+          <div className="h-full w-full bg-muted-foreground/35" data-context-segment="unknown" />
+        )}
+      </div>
+      <div className="pointer-events-none absolute bottom-full right-0 z-40 mb-2 hidden w-52 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
+        <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
+        <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>
+        {tooltipDetail ? <div className="mt-1 text-muted-foreground">{tooltipDetail}</div> : null}
+      </div>
+    </div>
   );
 }
 
@@ -8245,23 +8484,24 @@ function OptimizationWorkspace({
 }
 
 function optimizerApprovalBadge(permission?: PermissionState) {
-  if (permission?.roslynFullAuto) {
+  const visual = permissionVisualState(permission);
+  if (visual.tier === "full") {
     return {
-      modeTone: "danger" as const,
-      requestTone: "danger" as const,
+      modeTone: visual.badgeTone,
+      requestTone: visual.badgeTone,
       requestLabel: i18n.t("optimization.explicitApproval"),
     };
   }
-  if (permission?.autoApprove || permission?.executionMode === "auto") {
+  if (visual.tier === "auto") {
     return {
-      modeTone: "warn" as const,
-      requestTone: "warn" as const,
+      modeTone: visual.badgeTone,
+      requestTone: visual.badgeTone,
       requestLabel: i18n.t("optimization.explicitApproval"),
     };
   }
   return {
-    modeTone: "muted" as const,
-    requestTone: "muted" as const,
+    modeTone: visual.badgeTone,
+    requestTone: visual.badgeTone,
     requestLabel: i18n.t("encryption.approvalRequired"),
   };
 }
@@ -10339,6 +10579,12 @@ function ConversationCard({
     return (
       <div className="group flex justify-end">
         <div className="relative flex max-w-[78%] flex-col items-end">
+          {item.queuedFrom ? (
+            <div className="mb-1 flex items-center gap-1 rounded-full border border-border bg-muted/80 px-2 py-1 text-[11px] text-muted-foreground">
+              <MessageSquare className="h-3 w-3" />
+              {t("chat.queuedSent")}
+            </div>
+          ) : null}
           <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
             {item.text ? <ChatMarkdown text={item.text} variant="user" /> : null}
             {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
@@ -12234,7 +12480,6 @@ function formatDuration(totalSeconds: number): string {
   return restMinutes > 0 ? i18n.t("format.hoursMinutes", { h: hours, m: restMinutes }) : i18n.t("format.hours", { n: hours });
 }
 
-const HISTORY_ENTRY_MAX_CHARS = 2000;
 const COMPACT_ENTRY_MAX_CHARS = 400;
 const COMPACT_HEAD_ENTRIES = 2;
 const COMPACT_TAIL_ENTRIES = 8;
@@ -12246,7 +12491,7 @@ function clipText(text: string, limit: number): string {
 type ContextLimitResolution = {
   limit: number;
   known: boolean;
-  source: ContextUsage["source"];
+  source: "provider" | "known" | "estimated";
 };
 
 const KNOWN_MODEL_CONTEXT_LIMITS: Record<string, number> = {
@@ -12316,132 +12561,98 @@ function contextLimitForProviderModel(provider: string, model: string, modelInfo
   return { limit: CONTEXT_TOKEN_LIMIT_ESTIMATE, known: false, source: "estimated" };
 }
 
-function buildContextUsage(
-  items: ConversationItem[],
-  draft: string,
-  attachments: ChatAttachment[] = [],
+function buildContextUsageFromRuntime(
+  usage: AgentContextUsage | undefined,
   provider = "",
   model = "",
   modelInfo?: ProviderModelInfo,
-  extraContext: ContextUsageInputs = {},
-): ContextUsage {
-  const used = estimateRuntimePromptTokens(items, draft, attachments, extraContext);
+): ContextUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
   const contextLimit = contextLimitForProviderModel(provider, model, modelInfo);
   const limit = contextLimit.limit;
-  const ratio = Math.min(1, used / limit);
+  const used = numberOrNull(usage.inputTokens) ?? numberOrNull(usage.totalTokens);
+  if (!usage.exact || used === null) {
+    return {
+      used: 0,
+      limit,
+      limitKnown: contextLimit.known,
+      source: "unavailable",
+      exact: false,
+      ratio: 0,
+      label: i18n.t("chat.contextUsageUnavailable"),
+      title: i18n.t("chat.contextUsageUnavailableTitle", {
+        model: usage.model || model || provider || i18n.t("chat.currentModel"),
+      }),
+      warning: false,
+    };
+  }
+
+  const ratio = contextLimit.known ? Math.min(1, used / limit) : 0;
   const percent = Math.round(ratio * 100);
-  const limitLabel = `${contextLimit.known ? "" : "~"}${formatCount(limit)}`;
-  const sourceLabel =
-    contextLimit.source === "provider"
-      ? i18n.t("chat.contextSourceProvider")
-      : contextLimit.source === "known"
-        ? i18n.t("chat.contextSourceKnown")
-        : i18n.t("chat.contextSourceEstimated");
+  const limitLabel = contextLimit.known ? formatCount(limit) : i18n.t("chat.contextLimitUnknown");
   return {
     used,
     limit,
     limitKnown: contextLimit.known,
-    source: contextLimit.source,
+    source: "provider_usage",
+    exact: true,
     ratio,
-    label: `${formatCount(used)} / ${limitLabel} (${percent}%)`,
-    title: i18n.t("chat.contextUsageTitle", {
-      source: sourceLabel,
-      limit: formatCount(limit),
-      model: model || provider || i18n.t("chat.currentModel"),
+    label: contextLimit.known ? `${formatCount(used)} / ${limitLabel} (${percent}%)` : `${formatCount(used)} / ${limitLabel}`,
+    title: i18n.t("chat.contextUsageActualTitle", {
+      input: formatCount(numberOrNull(usage.inputTokens) ?? 0),
+      output: formatCount(numberOrNull(usage.outputTokens) ?? 0),
+      total: formatCount(numberOrNull(usage.totalTokens) ?? used),
+      requests: formatCount(numberOrNull(usage.requestCount) ?? 1),
+      history: formatCount(numberOrNull(usage.sentHistoryEntryCount) ?? 0),
+      chars: formatCount(numberOrNull(usage.promptCharacterCount) ?? 0),
+      limit: limitLabel,
+      model: usage.model || model || provider || i18n.t("chat.currentModel"),
     }),
-    warning: ratio >= CONTEXT_AUTO_COMPACT_RATIO,
+    warning: contextLimit.known && ratio >= CONTEXT_AUTO_COMPACT_RATIO,
   };
 }
 
-function estimateRuntimePromptTokens(
-  items: ConversationItem[],
-  draft: string,
-  attachments: ChatAttachment[],
-  extraContext: ContextUsageInputs,
-): number {
-  const historyLines = buildChatHistory(items)
-    .slice(-CONTEXT_HISTORY_PROMPT_MAX_ITEMS)
-    .map((entry) => `${entry.role}: ${clipText(entry.text, CONTEXT_HISTORY_PROMPT_ENTRY_MAX_CHARS)}`);
-  const attachmentLines = attachments.slice(0, MAX_ATTACHMENTS_PER_TURN).map((attachment) => {
-    const name = attachment.name || "attachment";
-    if (attachment.text) {
-      return `${name}: ${clipText(attachment.text, CONTEXT_TURN_ATTACHMENT_TEXT_MAX_CHARS)}`;
-    }
-    return `${name}: ${attachment.payloadKind || "metadata"} ${attachment.type || "file"} ${attachment.size || 0} bytes`;
-  });
-  const notesText = extraContext.agentNotes?.trim() ? extraContext.agentNotes : "";
-  const agentNotes = extraContext.agentNotesLoaded && notesText
-    ? notesText.length <= CONTEXT_AGENT_NOTES_INLINE_MAX_CHARS
-      ? notesText
-      : `${clipText(notesText, 240)}\nProject notes active: ${notesText.length} characters`
-    : "";
-  const goalLines = (extraContext.goals || [])
-    .slice(0, 8)
-    .map((goal) => `[${goal.status || "active"}] ${goal.title || ""} ${goal.summary || ""}`.trim())
-    .filter(Boolean);
-  const memoryLines = (extraContext.memories || [])
-    .slice(0, 12)
-    .map((memory) => `[${memory.scope || "user"}/${memory.kind || "memory"}] ${clipText(memory.text || "", 500)}`)
-    .filter((line) => line.trim());
-  const promptText = [
-    historyLines.length ? `Recent conversation:\n${historyLines.join("\n")}` : "",
-    draft || attachments.length ? `Latest user message:\n${appendAttachmentSummary(draft, attachments)}` : "",
-    attachmentLines.length ? `Current attachments:\n${attachmentLines.map((line) => `- ${line}`).join("\n")}` : "",
-    agentNotes ? `User constraints:\n${agentNotes}` : "",
-    goalLines.length ? `Long-running goals:\n${goalLines.map((line) => `- ${line}`).join("\n")}` : "",
-    memoryLines.length ? `Explicit memory:\n${memoryLines.map((line) => `- ${line}`).join("\n")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  return Math.ceil(CONTEXT_FIXED_PROMPT_OVERHEAD_CHARS / 4) + estimateTextTokens(promptText);
-}
-
-function estimateTextTokens(text: string): number {
-  let ascii = 0;
-  let nonAscii = 0;
-  for (const char of text) {
-    const code = char.codePointAt(0) || 0;
-    if (code <= 0x7f) {
-      ascii += 1;
-    } else {
-      nonAscii += 1;
+function latestAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "agent" && item.response.contextUsage) {
+      return item.response.contextUsage;
     }
   }
-  return Math.ceil(ascii / 4 + nonAscii);
+  return undefined;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
   for (const item of items) {
     if (item.type === "user") {
-      history.push({ role: "user", text: clipText(appendAttachmentSummary(item.text, item.attachments || []), HISTORY_ENTRY_MAX_CHARS) });
-    } else if (item.type === "agent") {
-      const parts = [item.response.plan?.reply || item.response.plan?.summary || ""];
-      const stdout = item.response.result?.stdout || item.response.shell?.result?.stdout || "";
-      if (stdout.trim()) {
-        parts.push(stdout.trim());
-      }
-      const text = parts.filter(Boolean).join("\n").trim();
+      const text = appendAttachmentSummary(item.text, item.attachments || []).trim();
       if (text) {
-        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
+        history.push({ role: "user", text });
+      }
+    } else if (item.type === "agent") {
+      const text = visibleAgentDialogueText(item.response).trim();
+      if (text) {
+        history.push({ role: "agent", text });
       }
     } else if (item.type === "compact") {
-      history.push({ role: "agent", text: clipText(item.text, HISTORY_ENTRY_MAX_CHARS) });
-    } else if (item.type === "subagent") {
-      const task = item.task;
-      const text = [
-        `${i18n.t("subagent.taskLabel")} ${task.displayName || task.id} (${subAgentRoleLabel(task.role)}) ${task.status}`,
-        task.status === "failed" && task.error ? `${i18n.t("subagent.statusFailed")}: ${task.error}` : task.summary || task.error || task.task || "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .trim();
+      const text = item.text.trim();
       if (text) {
-        history.push({ role: "agent", text: clipText(text, HISTORY_ENTRY_MAX_CHARS) });
+        history.push({ role: "agent", text });
       }
     }
   }
   return history;
+}
+
+function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
+  return String(response.plan?.reply || response.plan?.summary || "");
 }
 
 function appendAttachmentSummary(text: string, attachments: ChatAttachment[]): string {

@@ -18,6 +18,7 @@ from vrchat_blendshape_agent import (
     filter_planning_payload_to_face_blendshapes,
     build_planning_payload,
     extract_llm_reasoning_trace,
+    extract_llm_token_usage,
     humanize_unity_mcp_error,
     load_settings,
     load_export_payload,
@@ -166,6 +167,52 @@ class LlmReasoningTraceTests(unittest.TestCase):
         self.assertTrue(trace["redacted"])
         self.assertIn("visible block", trace["items"][0]["text"])
         self.assertTrue(trace["items"][1]["opaque"])
+
+
+class LlmTokenUsageTests(unittest.TestCase):
+    def test_extracts_openai_compatible_usage(self) -> None:
+        settings = SimpleNamespace(llm_provider="deepseek", llm_model="deepseek-v4-pro")
+        response = {"usage": {"prompt_tokens": 1200, "completion_tokens": 34, "total_tokens": 1234}}
+
+        usage = extract_llm_token_usage(response, settings, source="openai-compatible")
+
+        self.assertTrue(usage["exact"])
+        self.assertEqual(usage["inputTokens"], 1200)
+        self.assertEqual(usage["outputTokens"], 34)
+        self.assertEqual(usage["totalTokens"], 1234)
+
+    def test_extracts_gemini_usage_metadata(self) -> None:
+        settings = SimpleNamespace(llm_provider="gemini", llm_model="gemini-2.5-flash")
+        response = SimpleNamespace(
+            usageMetadata=SimpleNamespace(
+                promptTokenCount=2048,
+                candidatesTokenCount=128,
+                totalTokenCount=2176,
+                cachedTokens=512,
+            )
+        )
+
+        usage = extract_llm_token_usage(response, settings, source="gemini")
+
+        self.assertTrue(usage["exact"])
+        self.assertEqual(usage["inputTokens"], 2048)
+        self.assertEqual(usage["outputTokens"], 128)
+        self.assertEqual(usage["totalTokens"], 2176)
+        self.assertEqual(usage["cacheReadTokens"], 512)
+
+    def test_extracts_anthropic_usage_and_marks_missing_usage_unavailable(self) -> None:
+        settings = SimpleNamespace(llm_provider="anthropic", llm_model="claude-sonnet")
+        response = SimpleNamespace(usage=SimpleNamespace(input_tokens=100, output_tokens=20))
+
+        usage = extract_llm_token_usage(response, settings, source="anthropic")
+        missing = extract_llm_token_usage(SimpleNamespace(), settings, source="anthropic")
+
+        self.assertTrue(usage["exact"])
+        self.assertEqual(usage["inputTokens"], 100)
+        self.assertEqual(usage["outputTokens"], 20)
+        self.assertEqual(usage["totalTokens"], 120)
+        self.assertFalse(missing["exact"])
+        self.assertEqual(missing["unavailableReason"], "provider_usage_missing")
 
 
 class AvatarSelectionTests(unittest.TestCase):

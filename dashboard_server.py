@@ -8420,7 +8420,7 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     return settings
 
 
-def _agent_gateway_llm_plan(prompt: str) -> str:
+def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     """LLM planner hook for the agent gateway (multi-provider dispatch).
 
     Raises when no API key is configured so the gateway falls back to the
@@ -8436,7 +8436,7 @@ def _agent_gateway_llm_plan(prompt: str) -> str:
     reasoning = dict(response.reasoning or {})
     if int(reasoning.get("itemCount") or 0) > 0:
         AGENT_GATEWAY.llm_reasoning_trace = reasoning
-    return response.text
+    return {"text": response.text, "usage": dict(response.usage or {})}
 
 
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
