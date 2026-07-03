@@ -13,7 +13,7 @@ from unittest.mock import ANY, patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
-from agent_gateway import AgentGateway, AgentGatewayError
+from agent_gateway import AgentGateway, AgentGatewayError, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
 from skill_packages import SkillPackageService
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
@@ -1928,11 +1928,20 @@ class DashboardServerTests(unittest.TestCase):
             payload = response.json()
             self.assertEqual(response.status_code, 200)
             self.assertEqual(payload["gateway"]["checkpointArchiveMaxSizeMb"], 1)
-            self.assertEqual(payload["gateway"]["checkpointArchivePrune"]["deletedCount"], 2)
+            self.assertEqual(payload["gateway"]["checkpointArchivePrune"]["deletedCount"], 1)
             self.assertFalse(paths[0].exists())
-            self.assertFalse(paths[1].exists())
+            self.assertTrue(paths[1].exists())
             self.assertTrue(paths[2].exists())
-            self.assertLessEqual(payload["gateway"]["checkpointArchiveUsage"]["sizeBytes"], 1_048_576)
+            self.assertGreater(payload["gateway"]["checkpointArchiveUsage"]["sizeBytes"], 1_048_576)
+
+    def test_external_agent_gateway_checkpoint_archive_default_limit_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            config = gateway.ensure_config()
+
+            self.assertEqual(config.checkpoint_archive_max_size_mb, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
+            self.assertEqual(gateway.checkpoint_archive_usage(config)["maxSizeMb"], CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
 
     def test_external_agent_gateway_checkpoint_archive_limit_zero_keeps_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2031,10 +2040,16 @@ class DashboardServerTests(unittest.TestCase):
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             archive_dir = gateway.checkpoint_store_dir / "project"
             archive_dir.mkdir(parents=True)
+            base_time = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
             keep = archive_dir / "ckpt_protected.zip"
             drop = archive_dir / "ckpt_free.zip"
+            recent = archive_dir / "ckpt_recent.zip"
             keep.write_bytes(b"x" * 1024)
             drop.write_bytes(b"x" * 1024)
+            recent.write_bytes(b"x" * 1024)
+            os.utime(drop, (base_time, base_time))
+            os.utime(keep, (base_time + 1, base_time + 1))
+            os.utime(recent, (base_time + 2, base_time + 2))
             gateway._append_apply_recovery_entry(
                 {"id": "rec_2", "checkpointId": "ckpt_protected", "status": "applying"}
             )
@@ -2057,6 +2072,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(delete["deletedCount"], 1)
             self.assertIn("ckpt_protected", delete["protectedSkipped"])
             self.assertTrue(keep.exists())
+            self.assertTrue(recent.exists())
             self.assertFalse(drop.exists())
 
     def test_skill_package_import_projects_skill_and_export_endpoint_builds_vsk(self) -> None:

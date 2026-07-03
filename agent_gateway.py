@@ -46,6 +46,8 @@ APPLY_RECOVERY_EXEMPT_WRITE_TARGETS = {
 }
 CHECKPOINT_ARCHIVE_BYTES_PER_MB = 1024 * 1024
 CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT = 1024 * 1024
+CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB = 10 * 1024
+CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT = 2
 ROLLBACK_FRAMEWORK_PACKAGES = {
     "modular_avatar": {
         "label": "Modular Avatar",
@@ -80,7 +82,7 @@ class AgentGatewayConfig:
     approval_timeout_seconds: int = 600
     execution_mode: str = "approval"
     roslyn_risk_acknowledged: bool = False
-    checkpoint_archive_max_size_mb: int = 0
+    checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     checkpoint_archive_dir: str = ""
 
 
@@ -1562,7 +1564,7 @@ class AgentGateway:
                 "approval_timeout_seconds": 600,
                 "execution_mode": "approval",
                 "roslyn_risk_acknowledged": False,
-                "checkpoint_archive_max_size_mb": 0,
+                "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
             }
             for key, value in defaults.items():
@@ -3311,7 +3313,7 @@ class AgentGateway:
         config = config or self.ensure_config()
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
-        protected_ids = self._protected_checkpoint_archive_ids()
+        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
         labels = self._checkpoint_archive_labels()
         items = [
             {
@@ -3364,7 +3366,7 @@ class AgentGateway:
             if str(cid).strip()
         }
         archives = self._checkpoint_archive_files()
-        protected_ids = self._protected_checkpoint_archive_ids()
+        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
         deleted: list[dict[str, Any]] = []
         protected_skipped: list[str] = []
         for archive in archives:
@@ -3605,10 +3607,7 @@ class AgentGateway:
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
         protected_ids = set(protected_checkpoint_ids or set())
-        protected_ids.update(self._protected_checkpoint_archive_ids())
-        if archives:
-            newest = max(archives, key=lambda item: item["modifiedAt"])
-            protected_ids.add(newest["checkpointId"])
+        protected_ids.update(self._protected_checkpoint_archive_ids(include_recent=True, archives=archives))
         if normalized_max <= 0:
             return {
                 **self.checkpoint_archive_usage(config),
@@ -5053,12 +5052,23 @@ class AgentGateway:
             )
         return archives
 
-    def _protected_checkpoint_archive_ids(self) -> set[str]:
+    def _protected_checkpoint_archive_ids(
+        self,
+        *,
+        include_recent: bool = False,
+        archives: list[dict[str, Any]] | None = None,
+    ) -> set[str]:
         protected: set[str] = set()
         for recovery in self._active_apply_recoveries():
             checkpoint_id = str(recovery.get("checkpointId") or recovery.get("checkpoint_id") or "").strip()
             if checkpoint_id:
                 protected.add(checkpoint_id)
+        if include_recent:
+            candidates = archives if archives is not None else self._checkpoint_archive_files()
+            for archive in sorted(candidates, key=lambda item: item["modifiedAt"], reverse=True)[
+                :CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT
+            ]:
+                protected.add(str(archive["checkpointId"]))
         return protected
 
     def _remove_empty_checkpoint_archive_parents(self, start: Path) -> None:
@@ -8399,7 +8409,7 @@ def normalize_checkpoint_archive_max_size_mb(value: Any) -> int:
     try:
         amount = int(float(value))
     except (TypeError, ValueError):
-        return 0
+        return CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     if amount <= 0:
         return 0
     return min(amount, CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT)

@@ -745,7 +745,7 @@ export default function App() {
   const [connectorStatus, setConnectorStatus] = useState<ExternalAgentConnectorStatus | null>(null);
   const [loadingConnectors, setLoadingConnectors] = useState(false);
   const [connectorMessage, setConnectorMessage] = useState("");
-  const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("0");
+  const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("10240");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const chatsLoadedRef = useRef(false);
@@ -1109,7 +1109,7 @@ export default function App() {
 
   useEffect(() => {
     const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
-    setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "0");
+    setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "10240");
   }, [connectorStatus?.gateway?.checkpointArchiveMaxSizeMb]);
 
   useEffect(() => {

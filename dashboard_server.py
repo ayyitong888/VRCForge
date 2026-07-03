@@ -35,7 +35,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agent_gateway import AgentGateway, AgentGatewayError, create_agent_mcp_app, ensure_dict, redact_sensitive
+from agent_gateway import (
+    AgentGateway,
+    AgentGatewayError,
+    create_agent_mcp_app,
+    ensure_dict,
+    normalize_checkpoint_archive_max_size_mb,
+    redact_sensitive,
+)
 from external_agent_connector_installer import (
     ConnectorInstallError,
     connector_client_statuses,
@@ -3235,7 +3242,7 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     checkpoint_limit = params.get("checkpointArchiveMaxSizeMb", params.get("checkpoint_archive_max_size_mb"))
     prune_summary: dict[str, Any] | None = None
     if checkpoint_limit is not None:
-        config.checkpoint_archive_max_size_mb = int(checkpoint_limit)
+        config.checkpoint_archive_max_size_mb = normalize_checkpoint_archive_max_size_mb(checkpoint_limit)
     if params.get("revokeToken") is True or params.get("revoke_token") is True:
         config.token = secrets.token_urlsafe(32)
         config.approval_token = secrets.token_urlsafe(32)
