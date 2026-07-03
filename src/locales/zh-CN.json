@@ -33,7 +33,7 @@
   },
   "workspace": {
     "title": "工作区",
-    "refreshStatus": "刷新工作区状态",
+    "refreshStatus": "刷新 Unity 工具",
     "showSidebar": "显示右侧栏",
     "hideSidebar": "隐藏右侧栏",
     "projectStatus": "项目状态",
@@ -107,7 +107,8 @@
     "runStatusUnknown": "未知",
     "goals": "目标",
     "memory": "记忆",
-    "desktopActions": "桌面操作"
+    "desktopActions": "桌面操作",
+    "refreshChanges": "刷新变更"
   },
   "composerAction": {
     "addContext": "添加上下文",

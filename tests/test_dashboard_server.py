@@ -224,6 +224,47 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["health"]["components"]["backend"]["status"], "ok")
         self.assertIn(payload["health"]["components"]["unityMcpBridgeReachable"]["status"], {"unknown", "warning"})
 
+    def test_app_unity_readiness_refresh_updates_cached_status_without_project_scan(self) -> None:
+        async def idle_status_monitor() -> None:
+            await asyncio.sleep(60)
+
+        previous_status = dashboard_server.CURRENT_UNITY_STATUS
+        previous_fingerprint = dashboard_server.LAST_STATUS_FINGERPRINT
+        previous_connected = dashboard_server.LAST_STATUS_CONNECTED
+        snapshot = {
+            "connected": True,
+            "mcpServerReachable": True,
+            "unityInstanceRegistered": True,
+            "selectedInstanceMatched": True,
+            "activeInstanceCount": 1,
+            "vrcForgeToolsRegistered": True,
+            "missingRequiredVrcForgeTools": [],
+            "tools": {"totalTools": 80, "vrcForgeToolsCount": 42},
+            "error": "",
+        }
+        try:
+            dashboard_server.CURRENT_UNITY_STATUS = {"connected": False}
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=snapshot) as mock_status,
+                patch("dashboard_server.status_monitor_loop", side_effect=idle_status_monitor),
+                patch("dashboard_server.bootstrap_project_snapshot_payload", side_effect=AssertionError("Unity refresh triggered project scan")),
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post("/api/app/unity/readiness/refresh")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "vrcforge.unity_readiness_refresh.v1")
+            self.assertEqual(payload["unityStatus"], snapshot)
+            self.assertEqual(dashboard_server.CURRENT_UNITY_STATUS, snapshot)
+            self.assertEqual(payload["health"]["components"]["unityMcpBridgeReachable"]["status"], "ok")
+            self.assertEqual(payload["health"]["components"]["vrcForgeUnityTools"]["status"], "ok")
+            mock_status.assert_called_once_with()
+        finally:
+            dashboard_server.CURRENT_UNITY_STATUS = previous_status
+            dashboard_server.LAST_STATUS_FINGERPRINT = previous_fingerprint
+            dashboard_server.LAST_STATUS_CONNECTED = previous_connected
+
     def test_app_bootstrap_degrades_when_agent_surfaces_fail(self) -> None:
         with (
             patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest", side_effect=RuntimeError("manifest broken")),

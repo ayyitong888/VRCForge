@@ -33,7 +33,7 @@
   },
   "workspace": {
     "title": "Workspace",
-    "refreshStatus": "Refresh workspace status",
+    "refreshStatus": "Refresh Unity tools",
     "showSidebar": "Show runtime sidebar",
     "hideSidebar": "Hide runtime sidebar",
     "projectStatus": "Project status",
@@ -107,7 +107,8 @@
     "runStatusUnknown": "unknown",
     "goals": "Goals",
     "memory": "Memory",
-    "desktopActions": "Desktop actions"
+    "desktopActions": "Desktop actions",
+    "refreshChanges": "Refresh changes"
   },
   "composerAction": {
     "addContext": "Add context",

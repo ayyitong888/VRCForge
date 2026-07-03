@@ -4,6 +4,7 @@ export type PermissionState = {
   executionMode: ExecutionMode;
   perActionApproval: boolean;
   autoApprove?: boolean;
+  autoApproveDangerousRequiresApproval?: boolean;
   roslynFullAuto: boolean;
   roslynRiskAcknowledged: boolean;
   allowWriteRequests: boolean;
@@ -598,6 +599,13 @@ export type AppBootstrap = {
 
 export type AppHealth = AppBootstrap["health"];
 
+export type UnityReadinessRefresh = {
+  ok: boolean;
+  schema: "vrcforge.unity_readiness_refresh.v1" | string;
+  unityStatus?: Record<string, unknown>;
+  health: AppHealth;
+};
+
 export type AppSessionHandshake = {
   ok: boolean;
   authRequired?: boolean;
@@ -635,6 +643,10 @@ export async function fetchAppHealth(endpoint: string): Promise<AppHealth> {
 
 export async function refreshProjects(endpoint: string): Promise<ProjectSnapshot> {
   return requestJson<ProjectSnapshot>(`${endpoint}/api/projects/refresh`, { method: "POST", timeoutMs: 30000 });
+}
+
+export async function refreshUnityReadiness(endpoint: string): Promise<UnityReadinessRefresh> {
+  return requestJson<UnityReadinessRefresh>(`${endpoint}/api/app/unity/readiness/refresh`, { method: "POST", timeoutMs: 20000 });
 }
 
 export async function fetchAppSession(endpoint: string): Promise<AppSessionHandshake> {

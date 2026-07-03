@@ -1728,6 +1728,26 @@ def read_workspace_diff(root: str = "", includePatch: bool = False) -> dict[str,
     return build_workspace_diff_summary(root, include_patch=includePatch)
 
 
+@app.post("/api/app/unity/readiness/refresh")
+async def refresh_app_unity_readiness() -> dict[str, Any]:
+    global CURRENT_UNITY_STATUS
+    global LAST_STATUS_CONNECTED
+    global LAST_STATUS_FINGERPRINT
+
+    snapshot = await asyncio.to_thread(build_unity_status_snapshot)
+    fingerprint = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+    CURRENT_UNITY_STATUS = snapshot
+    LAST_STATUS_FINGERPRINT = fingerprint
+    LAST_STATUS_CONNECTED = bool(snapshot.get("connected"))
+    await EVENT_BUS.broadcast("unity_status", snapshot)
+    return {
+        "ok": True,
+        "schema": "vrcforge.unity_readiness_refresh.v1",
+        "unityStatus": snapshot,
+        "health": build_bootstrap_app_health(refresh_projects=False),
+    }
+
+
 @app.get("/api/app/permission")
 def read_agentic_app_permission() -> dict[str, Any]:
     return {"ok": True, "permission": AGENT_GATEWAY.permission_state()}

@@ -33,7 +33,7 @@
   },
   "workspace": {
     "title": "ワークスペース",
-    "refreshStatus": "ワークスペース状態を更新",
+    "refreshStatus": "Unity ツールを更新",
     "showSidebar": "右サイドバーを表示",
     "hideSidebar": "右サイドバーを隠す",
     "projectStatus": "プロジェクト状態",
@@ -107,7 +107,8 @@
     "runStatusUnknown": "不明",
     "goals": "ゴール",
     "memory": "メモリ",
-    "desktopActions": "デスクトップ操作"
+    "desktopActions": "デスクトップ操作",
+    "refreshChanges": "変更を更新"
   },
   "composerAction": {
     "addContext": "コンテキストを追加",

@@ -170,6 +170,7 @@ import {
   requestRestoreCheckpoint,
   resolveInterruptedApplyRecovery,
   refreshProjects,
+  refreshUnityReadiness,
   selectAdjustmentCheckpoint,
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
@@ -670,6 +671,7 @@ export default function App() {
   const [workspaceDiffError, setWorkspaceDiffError] = useState("");
   const [workspaceDiffReviewOpen, setWorkspaceDiffReviewOpen] = useState(false);
   const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
+  const [loadingUnityStatus, setLoadingUnityStatus] = useState(false);
   const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
@@ -1473,6 +1475,25 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingProjects(false);
+    }
+  }
+
+  async function refreshUnityStatus(target = endpoint) {
+    if (!runtimeConnected || loadingUnityStatus) {
+      return;
+    }
+    setLoadingUnityStatus(true);
+    try {
+      const payload = await refreshUnityReadiness(target);
+      setBootstrap((current) => (current ? { ...current, health: payload.health } : current));
+      setWorkspaceStateError("");
+      setError((current) => (current.toLowerCase().includes("unity") ? "" : current));
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setWorkspaceStateError(message);
+      setError(message);
+    } finally {
+      setLoadingUnityStatus(false);
     }
   }
 
@@ -4901,11 +4922,11 @@ export default function App() {
               <button
                 type="button"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                onClick={() => void refreshWorkspaceDiff()}
+                onClick={() => void refreshUnityStatus()}
                 title={t("workspace.refreshStatus")}
-                disabled={!runtimeConnected || loadingWorkspaceDiff}
+                disabled={!runtimeConnected || loadingUnityStatus}
               >
-                <RefreshCw className={cn("h-4 w-4", loadingWorkspaceDiff && "animate-spin")} />
+                <RefreshCw className={cn("h-4 w-4", loadingUnityStatus && "animate-spin")} />
               </button>
               <button
                 type="button"
@@ -5109,7 +5130,7 @@ export default function App() {
                 </RuntimeSection>
               ) : null}
 
-              {workspaceDiffFiles.length || workspaceDiffError ? (
+              {workspaceDiffFiles.length || workspaceDiffError || workspaceDiff ? (
                 <RuntimeSection
                   title={t("workspace.changes")}
                   collapsed={rightRuntimeSectionsCollapsed.diff}
@@ -5120,6 +5141,17 @@ export default function App() {
                     </Badge>
                   }
                 >
+                <div className="mb-2 flex justify-end">
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
+                    onClick={() => void refreshWorkspaceDiff()}
+                    title={t("workspace.refreshChanges")}
+                    disabled={!runtimeConnected || loadingWorkspaceDiff}
+                  >
+                    <RefreshCw className={cn("h-3.5 w-3.5", loadingWorkspaceDiff && "animate-spin")} />
+                  </button>
+                </div>
                 {workspaceDiffFiles.length ? (
                   <div className="space-y-2">
                     <button
