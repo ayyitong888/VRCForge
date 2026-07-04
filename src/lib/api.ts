@@ -2245,19 +2245,40 @@ export async function compactAgentHistory(
 export async function approveAgentApproval(
   endpoint: string,
   approvalId: string,
+  scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(scope),
     timeoutMs: 180000,
   });
+}
+
+export async function fetchAgentApprovals(
+  endpoint: string,
+  params: { projectRoot?: string; globalOnly?: boolean } = {},
+): Promise<{ ok: boolean; approvals: AgentApproval[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  if (params.globalOnly) {
+    query.set("globalOnly", "1");
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/approvals${suffix}`);
 }
 
 export async function rejectAgentApproval(
   endpoint: string,
   approvalId: string,
+  scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(scope),
     timeoutMs: 60000,
   });
 }
@@ -2265,7 +2286,7 @@ export async function rejectAgentApproval(
 export async function requestApprovalRevision(
   endpoint: string,
   approvalId: string,
-  payload: { reason?: string; note?: string } = {},
+  payload: { reason?: string; note?: string; expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/revision`, {
     method: "POST",

@@ -146,6 +146,7 @@ import {
   fetchAgentDesktopActions,
   fetchAgentGoals,
   fetchAgentMemory,
+  fetchAgentApprovals,
   fetchAgentRuns,
   fetchAppSession,
   fetchAppHealth,
@@ -877,6 +878,7 @@ export default function App() {
   const initialSubAgentTask = useMemo(() => createSubAgentContextSmokeTask(), []);
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
+  const [agentApprovals, setAgentApprovals] = useState<AgentApproval[] | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1100,6 +1102,7 @@ export default function App() {
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
   const healthRefreshInFlightRef = useRef(false);
+  const runtimeRefreshSeqRef = useRef(0);
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
@@ -1119,8 +1122,6 @@ export default function App() {
         .join("|")}`;
   const showDoctorStartupPrompt =
     activeView !== "doctor" && dismissedDoctorPromptSignature !== doctorPromptSignature && (hasStartupIssue || hasEnvironmentAttention);
-  const pendingApprovalItems = (bootstrap?.approvals ?? []).filter((item) => item.status === "pending");
-  const pendingApprovals = Math.max(bootstrap?.agentHealth.pendingApprovalCount ?? 0, pendingApprovalItems.length);
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
   const skillCount = skillRegistry?.count ?? skills.length;
@@ -1212,6 +1213,9 @@ export default function App() {
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
+  const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
+  const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
+  const pendingApprovals = pendingApprovalItems.length;
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1233,13 +1237,13 @@ export default function App() {
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
     const parentSession = activeChat?.sessionId || "";
-    const projectKeyValue = normalizeProjectPathKey(activeChat?.projectPath || activeProjectPath);
+    const projectKeyValue = normalizeProjectPathKey(activeRuntimeProjectPath);
     return subAgentTasks.filter((task) => {
       const sameSession = parentSession && task.parentSessionId === parentSession;
       const sameProject = projectKeyValue && normalizeProjectPathKey(task.projectPath || "") === projectKeyValue;
       return sameSession || sameProject || (!parentSession && !projectKeyValue);
     });
-  }, [activeChat?.projectPath, activeChat?.sessionId, activeProjectPath, subAgentTasks]);
+  }, [activeChat?.sessionId, activeRuntimeProjectPath, subAgentTasks]);
   const visibleSubAgentTasks = useMemo(() => {
     if (!selectedSubAgent || activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)) {
       return activeSubAgentTasks;
@@ -1252,7 +1256,7 @@ export default function App() {
       items.push({
         id: "current-turn",
         status: stopRequested ? "cancelling" : "running",
-        title: currentTurn.text || i18n.t("attachments.fallbackTitle"),
+        title: thinkingStatusForModelLabel(currentTurn.providerLabel, currentTurn.model),
         meta: `${currentTurn.providerLabel} / ${currentTurn.model}`,
       });
     }
@@ -1783,6 +1787,10 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
+    setAgentApprovals(null);
+  }, [activeRuntimeProjectPath]);
+
+  useEffect(() => {
     if (!runtimeConnected) {
       setRuntimeRuns([]);
       setRuntimeRunsError("");
@@ -1792,7 +1800,7 @@ export default function App() {
       void refreshRuntimeRuns(false);
     }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [runtimeConnected, endpoint, sessionId, activeProjectPath]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath]);
 
   useEffect(() => {
     if (!runtimeConnected || rightSidebarCollapsed) {
@@ -1812,7 +1820,7 @@ export default function App() {
       void refreshRuntimeRuns(false);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [runtimeConnected, endpoint, sessionId, activeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
   async function startRuntime(): Promise<string | null> {
     if (runtimeStartingRef.current) {
@@ -1962,27 +1970,46 @@ export default function App() {
   }
 
   async function refreshRuntimeRuns(showError = false, target = endpoint) {
+    const refreshSeq = runtimeRefreshSeqRef.current + 1;
+    runtimeRefreshSeqRef.current = refreshSeq;
+    const requestSessionId = sessionId;
+    const requestProjectRoot = activeRuntimeProjectPath || "";
+    const isLatestRefresh = () =>
+      runtimeRefreshSeqRef.current === refreshSeq &&
+      requestSessionId === sessionId &&
+      requestProjectRoot === (activeRuntimeProjectPath || "");
     if (!runtimeConnected) {
       setRuntimeRuns([]);
       setRuntimeRunsError("");
       setDesktopActions([]);
       setAgentGoals([]);
       setAgentMemory([]);
+      setAgentApprovals(null);
       setWorkspaceStateError("");
       return;
     }
     try {
-      const [runsResult, actionsResult, goalsResult, memoryResult] = await Promise.allSettled([
+      const projectRoot = requestProjectRoot || undefined;
+      const [approvalsResult, runsResult, actionsResult, goalsResult, memoryResult] = await Promise.allSettled([
+        fetchAgentApprovals(target, { projectRoot, globalOnly: !projectRoot }),
         fetchAgentRuns(target, {
           limit: 40,
-          sessionId: sessionId || undefined,
-          projectRoot: activeProjectPath || undefined,
+          sessionId: requestSessionId || undefined,
+          projectRoot,
         }),
-        fetchAgentDesktopActions(target, { limit: 8, sessionId: sessionId || undefined, projectRoot: activeProjectPath || undefined }),
-        fetchAgentGoals(target, { limit: 8, sessionId: sessionId || undefined, projectRoot: activeProjectPath || undefined }),
-        fetchAgentMemory(target, { limit: 8, projectRoot: activeProjectPath || undefined }),
+        fetchAgentDesktopActions(target, { limit: 8, sessionId: requestSessionId || undefined, projectRoot }),
+        fetchAgentGoals(target, { limit: 8, sessionId: requestSessionId || undefined, projectRoot }),
+        fetchAgentMemory(target, { limit: 8, projectRoot }),
       ]);
+      if (!isLatestRefresh()) {
+        return;
+      }
       const errors: string[] = [];
+      if (approvalsResult.status === "fulfilled") {
+        setAgentApprovals(approvalsResult.value.approvals ?? []);
+      } else {
+        errors.push(approvalsResult.reason instanceof Error ? approvalsResult.reason.message : String(approvalsResult.reason));
+      }
       if (runsResult.status === "fulfilled") {
         setRuntimeRuns(runsResult.value.runs ?? []);
       } else {
@@ -2010,6 +2037,9 @@ export default function App() {
         setRuntimeNotice(message);
       }
     } catch (cause) {
+      if (!isLatestRefresh()) {
+        return;
+      }
       const message = cause instanceof Error ? cause.message : String(cause);
       setRuntimeRunsError(message);
       setWorkspaceStateError(message);
@@ -2121,10 +2151,12 @@ export default function App() {
     setRuntimeNotice(t("approval.modifyNotice"));
     setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
     setError("");
+    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
     try {
       await requestApprovalRevision(endpoint, approval.id, {
         reason: t("approval.revisionReason"),
         note: t("approval.revisionNote", { id: approval.id, target }),
+        ...approvalScope,
       });
       await refresh();
       await refreshRuntimeRuns(false);
@@ -2250,9 +2282,9 @@ export default function App() {
           prompt: input.trim(),
           sessionId: sessionId || undefined,
           clientTurnId: currentTurn?.clientTurnId,
-          projectPath: activeChat?.projectPath || activeProjectPath || undefined,
-          projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
-          params: desktopAction === "screenshot" ? { projectPath: activeChat?.projectPath || activeProjectPath || undefined } : {},
+          projectPath: activeRuntimeProjectPath || undefined,
+          projectRoot: activeRuntimeProjectPath || undefined,
+          params: desktopAction === "screenshot" ? { projectPath: activeRuntimeProjectPath || undefined } : {},
         });
         const message =
           payload.status === "executed"
@@ -2328,8 +2360,8 @@ export default function App() {
       const payload = await createAgentGoal(endpoint, {
         title,
         sessionId: sessionId || undefined,
-        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
-        projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
+        projectPath: activeRuntimeProjectPath || undefined,
+        projectRoot: activeRuntimeProjectPath || undefined,
       });
       setAgentGoals((items) => [payload.goal, ...items.filter((item) => item.goalId !== payload.goal.goalId)].slice(0, 8));
       setRuntimeNotice(t("goal.created"));
@@ -2349,11 +2381,11 @@ export default function App() {
     try {
       const payload = await createAgentMemory(endpoint, {
         text,
-        scope: activeProjectPath ? "project" : "user",
+        scope: activeRuntimeProjectPath ? "project" : "user",
         kind: "preference",
         source: "slash",
-        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
-        projectRoot: activeChat?.projectPath || activeProjectPath || undefined,
+        projectPath: activeRuntimeProjectPath || undefined,
+        projectRoot: activeRuntimeProjectPath || undefined,
       });
       setAgentMemory((items) => [payload.memory, ...items.filter((item) => item.memoryId !== payload.memory.memoryId)].slice(0, 8));
       setRuntimeNotice(t("memory.created"));
@@ -2427,7 +2459,8 @@ export default function App() {
         provider: providerSnapshot.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
-        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+        projectPath: activeRuntimeProjectPath || undefined,
+        projectRoot: activeRuntimeProjectPath || undefined,
       })
         .then(() => refreshRuntimeRuns(false))
         .catch(() => undefined);
@@ -2513,7 +2546,7 @@ export default function App() {
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         attachments: serializeChatAttachments(turn.attachments),
-        projectPath: chat?.projectPath || activeProjectPath || undefined,
+        projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,
         provider: providerSnapshot.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
@@ -2591,8 +2624,9 @@ export default function App() {
   async function approveShell(approvalId: string) {
     setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
     setError("");
+    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
     try {
-      const payload = await approveAgentApproval(endpoint, approvalId);
+      const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
       const executionResult = payload.execution?.result;
       const shellResult = isAgentShellResult(executionResult) ? executionResult : undefined;
       if (activeChatId && (shellResult || payload.execution?.error)) {
@@ -2632,8 +2666,9 @@ export default function App() {
   async function rejectShell(approvalId: string) {
     setApprovalActions((current) => ({ ...current, [approvalId]: "reject" }));
     setError("");
+    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
     try {
-      await rejectAgentApproval(endpoint, approvalId);
+      await rejectAgentApproval(endpoint, approvalId, approvalScope);
       if (activeChatId) {
         appendToChat(activeChatId, {
           id: `result-${approvalId}-${Date.now()}`,
@@ -5434,7 +5469,7 @@ export default function App() {
                     );
                   })}
                   {sending && currentTurn ? (
-                    <RunningIndicator startedAt={currentTurn.startedAt} text={currentTurn.text} provider={currentTurn.providerLabel} model={currentTurn.model} />
+                    <RunningIndicator startedAt={currentTurn.startedAt} provider={currentTurn.providerLabel} model={currentTurn.model} />
                   ) : null}
                   {queued.map((turn, index) => (
                     <div key={turn.id} className="flex justify-end opacity-65">
@@ -11351,7 +11386,7 @@ function ReasoningTracePanel({
   if (!items.length) {
     return null;
   }
-  const status = thinkingStatusForModel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
+  const status = thinkingStatusForModelLabel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
   const provider = trace?.providerLabel || trace?.provider || fallbackLabel || "model";
   const model = trace?.model || "";
   const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
@@ -11430,20 +11465,21 @@ function RunRow({
   );
 }
 
-function RunningIndicator({ startedAt, text, provider, model }: { startedAt: number; text: string; provider: string; model: string }) {
+function RunningIndicator({ startedAt, provider, model }: { startedAt: number; provider: string; model: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-  const status = thinkingStatusForModel(provider, model);
+  const status = thinkingStatusForModelLabel(provider, model);
+  const providerModelLabel = model ? `${provider} / ${model}` : provider;
   return (
     <div className="flex justify-start">
       <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs text-muted-foreground">
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
         <span className="shrink-0 font-medium text-foreground">{status}</span>
-        <span className="min-w-0 truncate text-muted-foreground">「{text}」</span>
+        <span className="min-w-0 truncate text-muted-foreground">{providerModelLabel}</span>
         <span className="shrink-0 font-mono text-xs">{formatDuration(seconds)}</span>
       </div>
     </div>
@@ -12491,27 +12527,27 @@ function providerCapabilities(provider: string): Array<{ label: string; tone: "o
   return capabilities;
 }
 
-function thinkingStatusForModel(provider: string, model: string): string {
+function thinkingStatusForModelLabel(provider: string, model: string): string {
   const key = `${provider || ""} ${model || ""}`.toLowerCase();
   if (/(deepseek-reasoner|deepseek-r1|\br1\b|\bo[134](?:-|$)|reason|thinking)/.test(key)) {
-    return "Reasoning";
+    return i18n.t("thinking.reasoning");
   }
   if (/(claude|anthropic)/.test(key)) {
-    return "Thinking";
+    return i18n.t("thinking.thinking");
   }
   if (/(gemini|google|vertex)/.test(key)) {
-    return "Thinking";
+    return i18n.t("thinking.thinking");
   }
   if (/(gpt|openai)/.test(key)) {
-    return "Thinking";
+    return i18n.t("thinking.thinking");
   }
   if (/(deepseek|grok|x-ai|openrouter)/.test(key)) {
-    return "Thinking";
+    return i18n.t("thinking.thinking");
   }
   if (/(ollama|llama|qwen|mistral|mixtral|phi|local|custom)/.test(key)) {
-    return "Working on it";
+    return i18n.t("thinking.workingOnIt");
   }
-  return "Working on it";
+  return i18n.t("thinking.workingOnIt");
 }
 
 function emptySkillDraft(): Partial<AgentSkill> {

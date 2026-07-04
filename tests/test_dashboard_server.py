@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -634,6 +636,189 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(cleared.status_code, 200)
         self.assertGreaterEqual(cleared.json()["cleared"], 1)
         self.assertEqual(after_clear.json()["count"], 0)
+
+    def test_agent_project_memory_requires_project_root(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            missing_project = client.post(
+                "/api/app/agent/memory",
+                json={"scope": "project", "kind": "style", "text": "Project-specific preference."},
+            )
+            user_memory = client.post(
+                "/api/app/agent/memory",
+                json={"scope": "user", "kind": "preference", "text": "User-wide preference."},
+            )
+
+        self.assertEqual(missing_project.status_code, 400)
+        self.assertIn("projectRoot", missing_project.json()["detail"])
+        self.assertEqual(user_memory.status_code, 200)
+        self.assertEqual(user_memory.json()["memory"]["scope"], "user")
+
+    def test_agent_memory_no_project_list_only_returns_user_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.create_agent_memory(
+                {"scope": "project", "kind": "note", "text": "Project A private memory.", "projectRoot": str(root / "ProjectA")}
+            )
+            gateway.create_agent_memory(
+                {"scope": "project", "kind": "note", "text": "Project B private memory.", "projectRoot": str(root / "ProjectB")}
+            )
+            gateway.create_agent_memory({"scope": "user", "kind": "preference", "text": "User-wide memory."})
+
+            no_project = gateway.list_agent_memory(limit=10)
+            project_a = gateway.list_agent_memory(limit=10, project_root=str(root / "ProjectA"))
+
+        self.assertEqual([item["text"] for item in no_project["memories"]], ["User-wide memory."])
+        self.assertEqual(
+            {item["text"] for item in project_a["memories"]},
+            {"Project A private memory.", "User-wide memory."},
+        )
+
+    def test_agent_project_filters_normalize_windows_style_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project = root / "AvatarProject"
+            project.mkdir()
+            stored_project = str(project).replace("/", "\\")
+            query_project = str(project).replace("\\", "/")
+            gateway.record_runtime_queue_event({"clientTurnId": "turn-path", "message": "queued", "projectRoot": stored_project})
+            gateway.request_desktop_action({"action": "computer_use", "prompt": "inspect", "projectRoot": stored_project})
+            gateway.create_agent_goal({"title": "Path scoped goal", "projectRoot": stored_project})
+            gateway.create_agent_memory({"scope": "project", "text": "Path scoped memory", "projectRoot": stored_project})
+
+            runs = gateway.list_runtime_runs(project_root=query_project, limit=10)
+            actions = gateway.list_desktop_actions(project_root=query_project, limit=10)
+            goals = gateway.list_agent_goals(project_root=query_project, limit=10)
+            memories = gateway.list_agent_memory(project_root=query_project, limit=10)
+
+        self.assertEqual(runs["count"], 1)
+        self.assertEqual(actions["count"], 1)
+        self.assertEqual(goals["count"], 1)
+        self.assertEqual({item["text"] for item in memories["memories"]}, {"Path scoped memory"})
+
+    def test_agent_memory_active_state_keeps_entries_before_last_4000_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            first_id = gateway.create_agent_memory({"scope": "user", "text": "Oldest active memory."})["memory"]["memoryId"]
+            for index in range(4001):
+                gateway.create_agent_memory({"scope": "user", "text": f"Active memory {index}"})
+
+            active_memory_ids = set(gateway._project_agent_memory())  # noqa: SLF001
+
+        self.assertIn(first_id, active_memory_ids)
+
+    def test_agent_approval_list_filters_by_normalized_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project_a = root / "ProjectA"
+            project_b = root / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.create_apply_request(
+                {"target_tool": "tool_a", "arguments": {"projectRoot": str(project_a).replace("/", "\\")}, "reason": "A"}
+            )
+            gateway.create_apply_request(
+                {"target_tool": "tool_b", "arguments": {"projectRoot": str(project_b)}, "reason": "B"}
+            )
+
+            filtered = gateway.list_approvals(include_expired=False, project_root=str(project_a).replace("\\", "/"))
+
+        self.assertEqual([item["id"] for item in filtered], [approval_a["approval"]["id"]])
+
+    def test_agent_approval_scope_checks_project_aliases_on_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project_a = root / "ProjectA"
+            project_b = root / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.create_apply_request(
+                {"target_tool": "tool_a", "arguments": {"projectPath": str(project_a)}, "reason": "A"}
+            )["approval"]
+            approval_b = gateway.create_apply_request(
+                {"target_tool": "tool_b", "arguments": {"project_path": str(project_b)}, "reason": "B"}
+            )["approval"]
+
+            project_a_approvals = gateway.list_approvals(include_expired=False, project_root=str(project_a))
+            global_approvals = gateway.list_approvals(include_expired=False, global_only=True)
+
+            with self.assertRaises(AgentGatewayError):
+                gateway.approve(approval_b["id"], expected_project_root=str(project_a))
+            with self.assertRaises(AgentGatewayError):
+                gateway.reject(approval_a["id"], global_only=True)
+
+            approved = gateway.approve(approval_a["id"], expected_project_root=str(project_a))
+
+        self.assertEqual([item["id"] for item in project_a_approvals], [approval_a["id"]])
+        self.assertEqual(global_approvals, [])
+        self.assertTrue(approved["ok"])
+
+    def test_agent_runtime_observe_filters_goals_by_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project_a = root / "ProjectA"
+            project_b = root / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            gateway.create_agent_goal({"title": "Goal A", "projectRoot": str(project_a)})
+            gateway.create_agent_goal({"title": "Goal B private", "projectRoot": str(project_b)})
+
+            observe = gateway.runtime_observe(project_root=str(project_a))
+            titles = {item["title"] for item in observe["goals"]["items"]}
+
+        self.assertEqual(titles, {"Goal A"})
+
+    def test_agent_runtime_context_usage_is_turn_local_for_concurrent_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def fake_llm(prompt: str) -> dict[str, object]:
+                if "alpha request" in prompt:
+                    time.sleep(0.05)
+                    tokens = 111
+                    reply = "alpha done"
+                else:
+                    tokens = 222
+                    reply = "beta done"
+                return {
+                    "text": json.dumps({"action": "reply", "summary": reply, "reply": reply}),
+                    "usage": {
+                        "exact": True,
+                        "inputTokens": tokens,
+                        "outputTokens": 1,
+                        "totalTokens": tokens + 1,
+                        "provider": "test",
+                        "model": "model",
+                    },
+                }
+
+            gateway.llm_plan_fn = fake_llm
+            results: dict[str, dict[str, object]] = {}
+
+            def run_turn(name: str, message: str) -> None:
+                results[name] = gateway.runtime_message({"message": message, "sessionId": f"sess-{name}"})
+
+            threads = [
+                threading.Thread(target=run_turn, args=("alpha", "alpha request")),
+                threading.Thread(target=run_turn, args=("beta", "beta request")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(results["alpha"]["contextUsage"]["inputTokens"], 111)
+        self.assertEqual(results["beta"]["contextUsage"]["inputTokens"], 222)
 
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -1660,6 +1845,48 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("DO_NOT_SEND_COT_FIELD", prompt)
         self.assertNotIn("DO_NOT_SEND_STDOUT_FIELD", prompt)
 
+    def test_agent_runtime_prompt_filters_project_memory_by_project_root(self) -> None:
+        captured: list[str] = []
+        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
+        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
+        try:
+            dashboard_server.AGENT_GATEWAY.create_agent_memory(
+                {"scope": "project", "kind": "style", "text": "ProjectA private memory", "projectRoot": "ProjectA"}
+            )
+            dashboard_server.AGENT_GATEWAY.create_agent_memory(
+                {"scope": "project", "kind": "style", "text": "ProjectB private memory", "projectRoot": "ProjectB"}
+            )
+            dashboard_server.AGENT_GATEWAY.create_agent_memory(
+                {"scope": "user", "kind": "preference", "text": "Global user memory"}
+            )
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
+
+            def plan_fn(prompt: str) -> dict:
+                captured.append(prompt)
+                return {"text": json.dumps({"action": "reply", "reply": "done"})}
+
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
+            dashboard_server.AGENT_GATEWAY.runtime_message(
+                {"message": "use scoped memory", "session_id": "sess-memory-project-a", "projectRoot": "ProjectA"}
+            )
+            dashboard_server.AGENT_GATEWAY.runtime_message(
+                {"message": "use only user memory", "session_id": "sess-memory-no-project"}
+            )
+        finally:
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
+            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-project-a", None)
+            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-no-project", None)
+
+        self.assertEqual(len(captured), 2)
+        project_prompt, no_project_prompt = captured
+        self.assertIn("ProjectA private memory", project_prompt)
+        self.assertIn("Global user memory", project_prompt)
+        self.assertNotIn("ProjectB private memory", project_prompt)
+        self.assertIn("Global user memory", no_project_prompt)
+        self.assertNotIn("ProjectA private memory", no_project_prompt)
+        self.assertNotIn("ProjectB private memory", no_project_prompt)
+
     def test_llm_planner_prompt_uses_thin_loop_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2085,7 +2312,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(external_cannot_apply.status_code, 404)
 
             with patch("dashboard_server.apply_manual_blendshapes_sync", return_value={"ok": True, "appliedAdjustments": []}) as mock_apply:
-                applied = client.post(f"/api/app/agent/approvals/{approval['id']}/approve")
+                applied = client.post(
+                    f"/api/app/agent/approvals/{approval['id']}/approve",
+                    json={"expectedProjectRoot": str(project)},
+                )
             self.assertEqual(applied.status_code, 200)
             self.assertTrue(applied.json()["ok"])
             self.assertEqual(applied.json()["execution"]["status"], "applied")
@@ -4437,7 +4667,10 @@ class DashboardServerTests(unittest.TestCase):
             approval_id = request["approval"]["id"]
 
             with TestClient(dashboard_server.app) as client:
-                payload = client.post(f"/api/app/agent/approvals/{approval_id}/approve").json()
+                payload = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": str(project)},
+                ).json()
 
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["execution"]["status"], "applied")
@@ -4498,7 +4731,10 @@ class DashboardServerTests(unittest.TestCase):
                     preview = client.post(f"/api/app/checkpoints/{checkpoint_id}/preview").json()
                     restore_request = client.post(f"/api/app/checkpoints/{checkpoint_id}/restore").json()
                     restore_approval_id = restore_request["approval"]["id"]
-                    applied = client.post(f"/api/app/agent/approvals/{restore_approval_id}/approve").json()
+                    applied = client.post(
+                        f"/api/app/agent/approvals/{restore_approval_id}/approve",
+                        json={"expectedProjectRoot": str(project.resolve())},
+                    ).json()
 
                 self.assertTrue(preview["ok"])
                 self.assertEqual(restore_request["status"], "pending")
@@ -6185,6 +6421,20 @@ namespace VRCForge.Editor
         self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", web_nsis)
         self.assertIn("nsDialogs.nsh", offline_nsis)
         self.assertIn("nsDialogs.nsh", web_nsis)
+        self.assertIn("MUI_UNGETLANGUAGE", offline_nsis)
+        self.assertIn("MUI_UNGETLANGUAGE", web_nsis)
+        self.assertIn("UninstallShortcutName", offline_nsis)
+        self.assertIn("UninstallShortcutName", web_nsis)
+        self.assertIn('CreateShortCut "$SMPROGRAMS\\VRCForge\\$(UninstallShortcutName)"', offline_nsis)
+        self.assertIn('CreateShortCut "$SMPROGRAMS\\VRCForge\\$(UninstallShortcutName)"', web_nsis)
+        for shortcut_name in (
+            "Uninstall VRCForge.lnk",
+            "卸载 VRCForge.lnk",
+            "解除安裝 VRCForge.lnk",
+            "VRCForge をアンインストール.lnk",
+        ):
+            self.assertIn(shortcut_name, offline_nsis)
+            self.assertIn(shortcut_name, web_nsis)
         self.assertIn("清除用户数据和历史对话", offline_nsis)
         self.assertIn("Clear user data and chat history", web_nsis)
         self.assertIn("chat-projects.json", offline_nsis)

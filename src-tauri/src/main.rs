@@ -436,6 +436,7 @@ fn generate_session_token() -> Result<String, String> {
 /// HMAC-SHA256 hex digest backed by the audited RustCrypto `hmac` crate
 /// (replaces a hand-rolled ipad/opad implementation with identical output —
 /// see the known-vector test below).
+#[cfg(test)]
 fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
@@ -452,11 +453,45 @@ fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
 /// with the shared app session token, and the shell recomputes the signature
 /// locally to compare. The token itself never travels over the wire, and a
 /// captured response cannot be replayed against a different nonce.
+#[cfg(test)]
 fn app_session_challenge_signature(token: &str, nonce: &str) -> String {
     hmac_sha256_hex(
         token.as_bytes(),
         format!("vrcforge.app-session.v1\n{nonce}").as_bytes(),
     )
+}
+
+fn app_session_challenge_signature_matches(token: &str, nonce: &str, signature: &str) -> bool {
+    let Some(signature_bytes) = decode_hmac_sha256_hex(signature) else {
+        return false;
+    };
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC-SHA256 accepts any key");
+    mac.update(format!("vrcforge.app-session.v1\n{nonce}").as_bytes());
+    mac.verify_slice(&signature_bytes).is_ok()
+}
+
+fn decode_hmac_sha256_hex(value: &str) -> Option<[u8; 32]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn backend_port_open() -> bool {
@@ -482,6 +517,7 @@ fn existing_backend_accepts_session(token: &str) -> bool {
     let agent = ureq::builder()
         .timeout_connect(Duration::from_millis(350))
         .timeout(Duration::from_millis(1500))
+        .redirects(0)
         .build();
     let Ok(response) = agent
         .get(&format!("{BACKEND_ENDPOINT}/api/app/session-challenge"))
@@ -497,7 +533,7 @@ fn existing_backend_accepts_session(token: &str) -> bool {
     let Some(signature) = extract_challenge_signature(&payload) else {
         return false;
     };
-    signature == app_session_challenge_signature(token, &nonce)
+    app_session_challenge_signature_matches(token, &nonce, &signature)
 }
 
 fn extract_challenge_signature(payload: &serde_json::Value) -> Option<String> {
@@ -581,7 +617,8 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_session_challenge_signature, extract_challenge_signature, hmac_sha256_hex,
+        app_session_challenge_signature, app_session_challenge_signature_matches,
+        extract_challenge_signature, hmac_sha256_hex,
         prepare_runtime_files, try_ensure_agent_notes_file, validate_local_folder_to_open,
         validate_project_folder_to_open,
     };
@@ -665,6 +702,32 @@ mod tests {
             app_session_challenge_signature("session-token", "nonce-value"),
             app_session_challenge_signature("session-token", "other-nonce"),
         );
+    }
+
+    #[test]
+    fn session_challenge_signature_match_uses_valid_hex_hmac() {
+        let signature = app_session_challenge_signature("session-token", "nonce-value");
+
+        assert!(app_session_challenge_signature_matches(
+            "session-token",
+            "nonce-value",
+            &signature,
+        ));
+        assert!(app_session_challenge_signature_matches(
+            "session-token",
+            "nonce-value",
+            &signature.to_uppercase(),
+        ));
+        assert!(!app_session_challenge_signature_matches(
+            "session-token",
+            "other-nonce",
+            &signature,
+        ));
+        assert!(!app_session_challenge_signature_matches(
+            "session-token",
+            "nonce-value",
+            "not-a-valid-hmac",
+        ));
     }
 
     #[test]

@@ -842,6 +842,17 @@ class AgentMemoryClearRequest(BaseModel):
 class AgentApprovalRevisionRequest(BaseModel):
     reason: str = ""
     note: str = ""
+    expected_project_root: str | None = Field(default=None, alias="expectedProjectRoot")
+    global_only: bool = Field(default=False, alias="globalOnly")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentApprovalScopeRequest(BaseModel):
+    expected_project_root: str | None = Field(default=None, alias="expectedProjectRoot")
+    global_only: bool = Field(default=False, alias="globalOnly")
+
+    model_config = {"populate_by_name": True}
 
 
 class AgentPermissionRequest(BaseModel):
@@ -1584,6 +1595,7 @@ def read_agentic_app_bootstrap(refreshProjects: bool = False) -> dict[str, Any]:
 
 
 def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> dict[str, Any]:
+    selected_project = str(getattr(DASHBOARD_STATE, "selected_project_path", "") or "").strip()
     return {
         "ok": True,
         "app": {
@@ -1599,7 +1611,7 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
-        "approvals": safe_approval_list(),
+        "approvals": safe_approval_list(project_root=selected_project),
     }
 
 
@@ -2079,8 +2091,8 @@ async def app_clear_agent_memory(request: AgentMemoryClearRequest) -> dict[str, 
 
 
 @app.get("/api/app/agent/approvals")
-def app_agent_approvals() -> dict[str, Any]:
-    approvals = AGENT_GATEWAY.list_approvals()
+def app_agent_approvals(projectRoot: str = "", globalOnly: bool = False) -> dict[str, Any]:
+    approvals = AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=globalOnly)
     return {"ok": True, "approvals": approvals, "count": len(approvals)}
 
 
@@ -2349,9 +2361,19 @@ async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, 
 
 
 @app.post("/api/app/agent/approvals/{approval_id}/approve")
-async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
+async def app_agent_approve_and_execute(
+    approval_id: str,
+    request: AgentApprovalScopeRequest | None = None,
+) -> dict[str, Any]:
+    expected_project_root = (request.expected_project_root if request else "") or ""
+    global_only = bool(request.global_only if request else True)
+
     def approve_and_execute() -> dict[str, Any]:
-        approved = AGENT_GATEWAY.approve(approval_id)
+        approved = AGENT_GATEWAY.approve(
+            approval_id,
+            expected_project_root=expected_project_root,
+            global_only=global_only,
+        )
         execution = None
         approval = approved.get("approval") if isinstance(approved, dict) else None
         if isinstance(approval, dict) and approved.get("ok"):
@@ -2370,9 +2392,16 @@ async def app_agent_approve_and_execute(approval_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/app/agent/approvals/{approval_id}/reject")
-async def app_agent_reject(approval_id: str) -> dict[str, Any]:
+async def app_agent_reject(
+    approval_id: str,
+    request: AgentApprovalScopeRequest | None = None,
+) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.reject(approval_id)
+        payload = AGENT_GATEWAY.reject(
+            approval_id,
+            expected_project_root=((request.expected_project_root if request else "") or ""),
+            global_only=bool(request.global_only if request else True),
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
@@ -2382,7 +2411,13 @@ async def app_agent_reject(approval_id: str) -> dict[str, Any]:
 @app.post("/api/app/agent/approvals/{approval_id}/revision")
 async def app_agent_request_approval_revision(approval_id: str, request: AgentApprovalRevisionRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.request_approval_revision(approval_id, reason=request.reason, note=request.note)
+        payload = AGENT_GATEWAY.request_approval_revision(
+            approval_id,
+            reason=request.reason,
+            note=request.note,
+            expected_project_root=request.expected_project_root or "",
+            global_only=bool(request.global_only),
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
@@ -3967,9 +4002,9 @@ def safe_permission_state() -> dict[str, Any]:
         }
 
 
-def safe_approval_list() -> list[dict[str, Any]]:
+def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
     try:
-        return AGENT_GATEWAY.list_approvals(include_expired=False)
+        return AGENT_GATEWAY.list_approvals(include_expired=False, project_root=project_root)
     except Exception:  # noqa: BLE001
         return []
 
@@ -8502,7 +8537,7 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     reasoning = dict(response.reasoning or {})
     if int(reasoning.get("itemCount") or 0) > 0:
         AGENT_GATEWAY.llm_reasoning_trace = reasoning
-    return {"text": response.text, "usage": dict(response.usage or {})}
+    return {"text": response.text, "usage": dict(response.usage or {}), "reasoning": reasoning}
 
 
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
@@ -18229,7 +18264,15 @@ def add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def register_agent_gateway_tools() -> None:
-    AGENT_GATEWAY.register_tool("vrcforge_agent_observe", "Observe VRCForge agent runtime state.", "read/debug", lambda params: AGENT_GATEWAY.runtime_observe(str(params.get("session_id") or params.get("sessionId") or "")))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_agent_observe",
+        "Observe VRCForge agent runtime state.",
+        "read/debug",
+        lambda params: AGENT_GATEWAY.runtime_observe(
+            str(params.get("session_id") or params.get("sessionId") or ""),
+            project_root=str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or ""),
+        ),
+    )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)

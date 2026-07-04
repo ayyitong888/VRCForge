@@ -2110,7 +2110,8 @@ class AgentGateway:
         params["_runtimeAttachments"] = attachments
         if history:
             self._restore_runtime_session(session_id, history, now)
-        observe = self.runtime_observe(session_id=session_id)
+        project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        observe = self.runtime_observe(session_id=session_id, project_root=project_root)
         if attachments:
             observe["turn"] = {"attachments": attachments}
         # 图片附件 → 视觉委托：一轮最多分析一次，结果（或诚实提示）注入本轮。
@@ -2121,8 +2122,8 @@ class AgentGateway:
             turn_context = ensure_dict(observe.get("turn"))
             turn_context["visionAnalysis"] = vision_payload
             observe["turn"] = turn_context
-        self.llm_reasoning_trace = {}
-        self.llm_context_usage = {}
+        reasoning_trace: dict[str, Any] = {}
+        context_usage: dict[str, Any] = {}
         self._append_runtime_run(
             {
                 "event": "runtime_turn_started",
@@ -2136,7 +2137,7 @@ class AgentGateway:
                 "provider": params.get("provider") or "",
                 "providerLabel": params.get("providerLabel") or params.get("provider_label") or "",
                 "model": params.get("model") or "",
-                "projectRoot": params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "",
+                "projectRoot": project_root,
             }
         )
 
@@ -2185,7 +2186,15 @@ class AgentGateway:
                     "nextStep": "cancelled",
                 }
                 break
-            plan = self._plan_agent_turn(message, params, observe, history, loop_state=loop_state)
+            plan = self._plan_agent_turn(
+                message,
+                params,
+                observe,
+                history,
+                loop_state=loop_state,
+                context_usage=context_usage,
+                reasoning_trace=reasoning_trace,
+            )
             iterations += 1
             last_plan = plan
             if first_plan is None:
@@ -2305,8 +2314,8 @@ class AgentGateway:
             # 不静默收尾，下面在 reply 里诚实告知「到步数上限、先汇报、可继续」。
             cap_reached = True
 
-        reasoning_trace = ensure_dict(self.llm_reasoning_trace)
-        context_usage = ensure_dict(self.llm_context_usage)
+        reasoning_trace = ensure_dict(reasoning_trace)
+        context_usage = ensure_dict(context_usage)
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         top_plan = first_plan if iterations <= 1 else self._summarize_loop_plan(
@@ -2591,17 +2600,30 @@ class AgentGateway:
             }
             return len(turns)
 
-    def runtime_observe(self, session_id: str | None = None) -> dict[str, Any]:
+    def runtime_observe(self, session_id: str | None = None, project_root: str = "") -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
-        pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
         session = self._runtime_sessions.get(session_id or "")
+        project_root = str(project_root or "").strip()
+        pending = [
+            item
+            for item in self.list_approvals(include_expired=False, project_root=project_root)
+            if item.get("status") == "pending"
+        ]
         goals = [
             goal
-            for goal in self.list_agent_goals(limit=8, session_id=session_id or "").get("goals", [])
+            for goal in self.list_agent_goals(
+                limit=8,
+                session_id=session_id or "",
+                project_root=project_root,
+            ).get("goals", [])
             if str(goal.get("status") or "") in {"active", "paused"}
         ]
-        memories = self.list_agent_memory(limit=12).get("memories", [])
+        memories = self.list_agent_memory(
+            limit=12,
+            project_root=project_root,
+            scope="" if project_root else "user",
+        ).get("memories", [])
         return {
             "ok": True,
             "runtime": {
@@ -2798,6 +2820,16 @@ class AgentGateway:
         session_id = session_id.strip()
         project_root = project_root.strip()
         client_turn_id = client_turn_id.strip()
+        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
+
+        def project_matches(value: str) -> bool:
+            if not normalized_project_root:
+                return True
+            candidate = str(value or "").strip()
+            if not candidate:
+                return True
+            return normalize_filesystem_path(candidate) == normalized_project_root
+
         def event_approval_ids(event: dict[str, Any]) -> set[str]:
             ids = {str(event.get("approvalId") or "").strip()}
             ids.update(str(item).strip() for item in ensure_list(event.get("approvalIds")))
@@ -2818,7 +2850,7 @@ class AgentGateway:
                 continue
             if client_turn_id and str(event.get("clientTurnId") or "") != client_turn_id:
                 continue
-            if project_root and str(event.get("projectRoot") or "") not in {"", project_root}:
+            if not project_matches(str(event.get("projectRoot") or "")):
                 continue
             filtered_events.append(event)
             key = (
@@ -2886,11 +2918,13 @@ class AgentGateway:
 
     def list_desktop_actions(self, *, limit: int = 50, session_id: str = "", project_root: str = "") -> dict[str, Any]:
         events = self._read_jsonl(self.desktop_action_log_path, limit=max(limit, 50))
+        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         filtered = []
         for event in events:
             if session_id and str(event.get("sessionId") or "") != session_id:
                 continue
-            if project_root and str(event.get("projectRoot") or "") not in {"", project_root}:
+            event_project = str(event.get("projectRoot") or "").strip()
+            if normalized_project_root and event_project and normalize_filesystem_path(event_project) != normalized_project_root:
                 continue
             filtered.append(redact_sensitive(event))
         filtered = filtered[-max(1, min(limit, AGENT_DESKTOP_ACTION_MAX_ITEMS)) :]
@@ -2942,7 +2976,13 @@ class AgentGateway:
     def list_agent_goals(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
         goals = list(self._project_agent_goals().values())
         if project_root:
-            goals = [goal for goal in goals if str(goal.get("projectRoot") or "") in {"", project_root}]
+            normalized_project_root = normalize_filesystem_path(project_root)
+            goals = [
+                goal
+                for goal in goals
+                if not str(goal.get("projectRoot") or "").strip()
+                or normalize_filesystem_path(str(goal.get("projectRoot") or "")) == normalized_project_root
+            ]
         if session_id:
             goals = [goal for goal in goals if str(goal.get("sessionId") or "") in {"", session_id}]
         goals.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
@@ -2957,6 +2997,9 @@ class AgentGateway:
         scope = str(params.get("scope") or "project").strip().lower()
         if scope not in {"user", "project"}:
             raise AgentGatewayError("Memory scope must be user or project.", status_code=400)
+        project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        if scope == "project" and not project_root:
+            raise AgentGatewayError("Project memory requires projectRoot.", status_code=400)
         memory_id = f"mem_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         event = {
             "event": "memory_created",
@@ -2965,7 +3008,7 @@ class AgentGateway:
             "scope": scope,
             "kind": summarize_text(str(params.get("kind") or "preference"), 80),
             "text": text,
-            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+            "projectRoot": project_root,
             "source": summarize_text(str(params.get("source") or "user"), 120),
         }
         self._append_jsonl(self.agent_memory_log_path, "vrcforge.agent_memory.v1", event)
@@ -2991,11 +3034,13 @@ class AgentGateway:
     def clear_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         project_root = str(params.get("projectRoot") or params.get("project_root") or "").strip()
+        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         scope = str(params.get("scope") or "").strip().lower()
         current = self._project_agent_memory()
         cleared = 0
         for memory_id, memory in current.items():
-            if project_root and str(memory.get("projectRoot") or "") != project_root:
+            memory_project = str(memory.get("projectRoot") or "").strip()
+            if normalized_project_root and normalize_filesystem_path(memory_project) != normalized_project_root:
                 continue
             if scope and str(memory.get("scope") or "") != scope:
                 continue
@@ -3014,12 +3059,20 @@ class AgentGateway:
 
     def list_agent_memory(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> dict[str, Any]:
         memories = list(self._project_agent_memory().values())
+        project_root = str(project_root or "").strip()
+        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         if project_root:
             memories = [
                 memory
                 for memory in memories
-                if str(memory.get("scope") or "") == "user" or str(memory.get("projectRoot") or "") in {"", project_root}
+                if str(memory.get("scope") or "") == "user"
+                or (
+                    str(memory.get("scope") or "") == "project"
+                    and normalize_filesystem_path(str(memory.get("projectRoot") or "")) == normalized_project_root
+                )
             ]
+        else:
+            memories = [memory for memory in memories if str(memory.get("scope") or "") == "user"]
         if scope:
             memories = [memory for memory in memories if str(memory.get("scope") or "") == scope]
         memories.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
@@ -3508,9 +3561,30 @@ class AgentGateway:
                 payload["checkpoint"] = checkpoint
             return payload
 
-    def list_approvals(self, include_expired: bool = True) -> list[dict[str, Any]]:
+    def list_approvals(
+        self,
+        include_expired: bool = True,
+        project_root: str = "",
+        global_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
+
+        def project_matches(approval: dict[str, Any]) -> bool:
+            candidate = self._approval_project_root(approval)
+            if global_only and not normalized_project_root:
+                return not candidate
+            if not normalized_project_root:
+                return True
+            if not candidate:
+                return True
+            return normalize_filesystem_path(candidate) == normalized_project_root
+
         with self._lock:
-            approvals = [self._refresh_approval_expiry(dict(item)) for item in self._approvals.values()]
+            approvals = [
+                self._refresh_approval_expiry(dict(item))
+                for item in self._approvals.values()
+                if project_matches(dict(item))
+            ]
             if include_expired:
                 return [
                     redact_sensitive(item)
@@ -3523,11 +3597,33 @@ class AgentGateway:
             ]
             return [redact_sensitive(item) for item in filtered]
 
-    def approve(self, approval_id: str) -> dict[str, Any]:
-        return self._set_approval_status(approval_id, "approved")
+    def approve(
+        self,
+        approval_id: str,
+        *,
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> dict[str, Any]:
+        return self._set_approval_status(
+            approval_id,
+            "approved",
+            expected_project_root=expected_project_root,
+            global_only=global_only,
+        )
 
-    def reject(self, approval_id: str) -> dict[str, Any]:
-        return self._set_approval_status(approval_id, "rejected")
+    def reject(
+        self,
+        approval_id: str,
+        *,
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> dict[str, Any]:
+        return self._set_approval_status(
+            approval_id,
+            "rejected",
+            expected_project_root=expected_project_root,
+            global_only=global_only,
+        )
 
     def recent_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
         if not self.audit_log_path.exists():
@@ -6294,8 +6390,12 @@ class AgentGateway:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
             return []
+        if limit <= 0:
+            selected_lines = lines
+        else:
+            selected_lines = lines[-max(1, min(limit, 5000)) :]
         events: list[dict[str, Any]] = []
-        for line in lines[-max(1, min(limit, 5000)) :]:
+        for line in selected_lines:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -6327,7 +6427,7 @@ class AgentGateway:
     def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         memories: dict[str, dict[str, Any]] = {}
         deleted: set[str] = set()
-        for event in self._read_jsonl(self.agent_memory_log_path, limit=4000):
+        for event in self._read_jsonl(self.agent_memory_log_path, limit=0):
             memory_id = str(event.get("memoryId") or "").strip()
             if not memory_id:
                 continue
@@ -6849,6 +6949,8 @@ class AgentGateway:
         observe: dict[str, Any],
         history: list[dict[str, Any]] | None = None,
         loop_state: list[dict[str, Any]] | None = None,
+        context_usage: dict[str, Any] | None = None,
+        reasoning_trace: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         loop_state = loop_state or []
         local_plan = self._local_plan_agent_turn(message, params, observe, loop_state)
@@ -6864,7 +6966,14 @@ class AgentGateway:
         if local_plan.get("deterministicTerminal"):
             return local_plan
         # 本地规划没认出意图时，尝试 LLM 规划。
-        llm_plan = self._llm_plan_agent_turn(message, observe, history or [], loop_state)
+        llm_plan = self._llm_plan_agent_turn(
+            message,
+            observe,
+            history or [],
+            loop_state,
+            context_usage=context_usage,
+            reasoning_trace=reasoning_trace,
+        )
         if llm_plan is not None:
             return llm_plan
         # 走到这里：确定性兜底没认出意图，LLM 也没产出可执行规划。
@@ -7191,6 +7300,8 @@ class AgentGateway:
         observe: dict[str, Any],
         history: list[dict[str, Any]],
         loop_state: list[dict[str, Any]] | None = None,
+        context_usage: dict[str, Any] | None = None,
+        reasoning_trace: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         plan_fn = self.llm_plan_fn
         if plan_fn is None:
@@ -7198,8 +7309,13 @@ class AgentGateway:
         try:
             prompt = self._build_llm_plan_prompt(self._message_with_runtime_context(message, observe), history, loop_state or [], observe=observe)
             raw_response = plan_fn(prompt)
+            raw_mapping = raw_response if isinstance(raw_response, dict) else {}
+            provider_reasoning = ensure_dict(raw_mapping.get("reasoning") or self.llm_reasoning_trace)
+            if reasoning_trace is not None:
+                reasoning_trace.clear()
+                reasoning_trace.update(provider_reasoning)
             response_text, provider_usage = normalize_llm_plan_result(raw_response)
-            self._record_llm_context_usage(prompt, history, provider_usage)
+            self._record_llm_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
             payload = parse_llm_plan_response(response_text)
         except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
             return None
@@ -7272,24 +7388,26 @@ class AgentGateway:
 
     def _record_llm_context_usage(
         self,
+        current: dict[str, Any],
         prompt: str,
         history: list[dict[str, Any]],
         provider_usage: dict[str, Any] | None,
     ) -> None:
         usage = ensure_dict(provider_usage)
-        current = ensure_dict(self.llm_context_usage)
         if not current:
-            current = {
-                "schema": CONTEXT_USAGE_SCHEMA,
-                "source": "provider_usage",
-                "exact": True,
-                "requestCount": 0,
-                "inputTokens": 0,
-                "outputTokens": 0,
-                "totalTokens": 0,
-                "cacheReadTokens": 0,
-                "promptCharacterCount": 0,
-            }
+            current.update(
+                {
+                    "schema": CONTEXT_USAGE_SCHEMA,
+                    "source": "provider_usage",
+                    "exact": True,
+                    "requestCount": 0,
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "totalTokens": 0,
+                    "cacheReadTokens": 0,
+                    "promptCharacterCount": 0,
+                }
+            )
 
         current["requestCount"] = int(current.get("requestCount") or 0) + 1
         current["promptCharacterCount"] = int(current.get("promptCharacterCount") or 0) + len(prompt)
@@ -7328,8 +7446,6 @@ class AgentGateway:
         else:
             current["exact"] = False
             current["unavailableReason"] = str(usage.get("unavailableReason") or "provider_usage_missing")
-
-        self.llm_context_usage = current
 
     def _message_with_runtime_context(self, message: str, observe: dict[str, Any]) -> str:
         lines = [message]
@@ -8034,13 +8150,47 @@ class AgentGateway:
             self.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
         return redact_sensitive(dict(approval))
 
-    def _set_approval_status(self, approval_id: str, status: str) -> dict[str, Any]:
+    def _approval_project_root(self, approval: dict[str, Any]) -> str:
+        arguments = ensure_dict(approval.get("arguments"))
+        for key in ("projectRoot", "project_root", "projectPath", "project_path"):
+            value = str(arguments.get(key) or approval.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _ensure_approval_scope(
+        self,
+        approval: dict[str, Any],
+        *,
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> None:
+        candidate = self._approval_project_root(approval)
+        if global_only and candidate:
+            raise AgentGatewayError("Approval does not belong to the current no-project context.", status_code=409)
+        expected_key = normalize_filesystem_path(expected_project_root) if expected_project_root else ""
+        if expected_key and candidate and normalize_filesystem_path(candidate) != expected_key:
+            raise AgentGatewayError("Approval belongs to a different project.", status_code=409)
+
+    def _set_approval_status(
+        self,
+        approval_id: str,
+        status: str,
+        *,
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> dict[str, Any]:
         with self._lock:
             approval = self._approvals.get(approval_id)
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
+            self._ensure_approval_scope(
+                approval,
+                expected_project_root=expected_project_root,
+                global_only=global_only,
+            )
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") not in {"pending", "approved"} and status == "approved":
                 return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
@@ -8062,19 +8212,32 @@ class AgentGateway:
                     **permission_context,
                     "targetTool": approval.get("targetTool") or "",
                     "agent": approval.get("agentName") or "",
-                    "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
+                    "projectRoot": self._approval_project_root(approval),
                     "messageSummary": summarize_text(str(approval.get("reason") or "")),
                 }
             )
             return {"ok": True, "approval": redact_sensitive(dict(approval))}
 
-    def request_approval_revision(self, approval_id: str, *, reason: str = "", note: str = "") -> dict[str, Any]:
+    def request_approval_revision(
+        self,
+        approval_id: str,
+        *,
+        reason: str = "",
+        note: str = "",
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> dict[str, Any]:
         with self._lock:
             approval = self._approvals.get(approval_id)
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
+            self._ensure_approval_scope(
+                approval,
+                expected_project_root=expected_project_root,
+                global_only=global_only,
+            )
             approval = self._refresh_approval_expiry(approval)
             status = str(approval.get("status") or "")
             if status != "pending":
@@ -8093,7 +8256,7 @@ class AgentGateway:
                     "approvalIds": [approval_id],
                     "targetTool": approval.get("targetTool") or "",
                     "agent": approval.get("agentName") or "",
-                    "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
+                    "projectRoot": self._approval_project_root(approval),
                     "messageSummary": summarize_text(note or reason),
                 }
             )
