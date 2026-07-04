@@ -131,6 +131,7 @@ import {
   fetchWorkspaceDiff,
   fetchDiagnostics,
   fetchDoctor,
+  fetchDesktopRuntimeSnapshot,
   fetchExternalAgentConnectors,
   fetchInterruptedApplyRecoveries,
   fetchOptimizationPlan,
@@ -209,8 +210,6 @@ import { cn, formatCount } from "./lib/utils";
 
 type BackendStartResult = {
   endpoint: string;
-  app_session_token?: string;
-  appSessionToken?: string;
   started: boolean;
   already_running: boolean;
   mode: string;
@@ -1778,12 +1777,7 @@ export default function App() {
     if (!runtimeConnected) {
       setWorkspaceDiff(null);
       setWorkspaceDiffError("");
-      return;
     }
-    const timer = window.setTimeout(() => {
-      void refreshWorkspaceDiff(false);
-    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
-    return () => window.clearTimeout(timer);
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
@@ -1796,10 +1790,7 @@ export default function App() {
       setRuntimeRunsError("");
       return;
     }
-    const timer = window.setTimeout(() => {
-      void refreshRuntimeRuns(false);
-    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
-    return () => window.clearTimeout(timer);
+    void refreshRuntimeRuns(false);
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath]);
 
   useEffect(() => {
@@ -1807,18 +1798,8 @@ export default function App() {
       return;
     }
     const timer = window.setInterval(() => {
-      void refreshWorkspaceDiff(false);
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [runtimeConnected, endpoint, activeProjectPath, rightSidebarCollapsed]);
-
-  useEffect(() => {
-    if (!runtimeConnected || rightSidebarCollapsed || (!sending && pendingApprovals === 0)) {
-      return;
-    }
-    const timer = window.setInterval(() => {
       void refreshRuntimeRuns(false);
-    }, 2500);
+    }, sending || pendingApprovals > 0 ? 2500 : 5000);
     return () => window.clearInterval(timer);
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
@@ -1835,7 +1816,7 @@ export default function App() {
         void invoke("ensure_agent_notes_file").catch(() => undefined);
         const result = await invoke<BackendStartResult>("start_backend");
         targetEndpoint = result.endpoint;
-        setAppSessionToken(result.appSessionToken || result.app_session_token || "");
+        setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
         await refreshWithRetry(targetEndpoint, { refreshProjects: true });
@@ -1990,52 +1971,29 @@ export default function App() {
     }
     try {
       const projectRoot = requestProjectRoot || undefined;
-      const [approvalsResult, runsResult, actionsResult, goalsResult, memoryResult] = await Promise.allSettled([
-        fetchAgentApprovals(target, { projectRoot, globalOnly: !projectRoot }),
-        fetchAgentRuns(target, {
-          limit: 40,
-          sessionId: requestSessionId || undefined,
-          projectRoot,
-        }),
-        fetchAgentDesktopActions(target, { limit: 8, sessionId: requestSessionId || undefined, projectRoot }),
-        fetchAgentGoals(target, { limit: 8, sessionId: requestSessionId || undefined, projectRoot }),
-        fetchAgentMemory(target, { limit: 8, projectRoot }),
-      ]);
+      const snapshot = await fetchDesktopRuntimeSnapshot(target, {
+        sessionId: requestSessionId || undefined,
+        projectRoot,
+        globalOnly: !projectRoot,
+        includePatch: workspaceDiffReviewOpen,
+      });
       if (!isLatestRefresh()) {
         return;
       }
-      const errors: string[] = [];
-      if (approvalsResult.status === "fulfilled") {
-        setAgentApprovals(approvalsResult.value.approvals ?? []);
-      } else {
-        errors.push(approvalsResult.reason instanceof Error ? approvalsResult.reason.message : String(approvalsResult.reason));
+      if (snapshot.workspaceDiff) {
+        setWorkspaceDiff(snapshot.workspaceDiff);
+        setWorkspaceDiffError(snapshot.workspaceDiff.ok ? "" : snapshot.workspaceDiff.error || t("workspace.diffUnavailable"));
+        if (snapshot.workspaceDiff.fallbackFromProjectRoot) {
+          setRuntimeNotice(t("notice.projectNotGit"));
+        }
       }
-      if (runsResult.status === "fulfilled") {
-        setRuntimeRuns(runsResult.value.runs ?? []);
-      } else {
-        errors.push(runsResult.reason instanceof Error ? runsResult.reason.message : String(runsResult.reason));
-      }
-      if (actionsResult.status === "fulfilled") {
-        setDesktopActions(actionsResult.value.actions ?? []);
-      } else {
-        errors.push(actionsResult.reason instanceof Error ? actionsResult.reason.message : String(actionsResult.reason));
-      }
-      if (goalsResult.status === "fulfilled") {
-        setAgentGoals(goalsResult.value.goals ?? []);
-      } else {
-        errors.push(goalsResult.reason instanceof Error ? goalsResult.reason.message : String(goalsResult.reason));
-      }
-      if (memoryResult.status === "fulfilled") {
-        setAgentMemory(memoryResult.value.memories ?? []);
-      } else {
-        errors.push(memoryResult.reason instanceof Error ? memoryResult.reason.message : String(memoryResult.reason));
-      }
-      const message = errors.join("; ");
-      setRuntimeRunsError(message);
-      setWorkspaceStateError(message);
-      if (showError && message) {
-        setRuntimeNotice(message);
-      }
+      setAgentApprovals(snapshot.approvals?.approvals ?? []);
+      setRuntimeRuns(snapshot.runs?.runs ?? []);
+      setDesktopActions(snapshot.desktopActions?.actions ?? []);
+      setAgentGoals(snapshot.goals?.goals ?? []);
+      setAgentMemory(snapshot.memory?.memories ?? []);
+      setRuntimeRunsError("");
+      setWorkspaceStateError("");
     } catch (cause) {
       if (!isLatestRefresh()) {
         return;
@@ -11268,6 +11226,9 @@ function safeMarkdownUrlTransform(url: string): string {
   if (!trimmed) {
     return "";
   }
+  if (isInternalRuntimeUrl(trimmed)) {
+    return "";
+  }
   if (/^(?:https?:|mailto:|tel:|#|\/(?!\/))/i.test(trimmed)) {
     return defaultUrlTransform(trimmed);
   }
@@ -11275,6 +11236,29 @@ function safeMarkdownUrlTransform(url: string): string {
     return trimmed;
   }
   return "";
+}
+
+function isInternalRuntimeUrl(url: string): boolean {
+  const normalizedPath = normalizeRuntimePath(url);
+  if (/^\/(?:api|mcp)(?:\/|$)/i.test(normalizedPath)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const loopbackHost = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+    return parsed.protocol === "http:" && loopbackHost && parsed.port === "8757" && /^\/(?:api|mcp)(?:\/|$)/i.test(normalizeRuntimePath(parsed.pathname));
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRuntimePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
 }
 
 function MessageActions({
@@ -12188,9 +12172,15 @@ function proofImageUrl(endpoint: string, value: unknown): string {
     return "";
   }
   if (/^https?:\/\//i.test(raw)) {
+    if (isInternalRuntimeUrl(raw)) {
+      return "";
+    }
     return raw;
   }
   if (raw.startsWith("/")) {
+    if (isInternalRuntimeUrl(raw)) {
+      return "";
+    }
     return `${endpoint.replace(/\/$/, "")}${raw}`;
   }
   return raw;

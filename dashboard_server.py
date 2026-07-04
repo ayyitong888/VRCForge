@@ -1231,6 +1231,7 @@ app.add_middleware(
 )
 app.mount("/dashboard", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
 app.mount("/artifacts", StaticFiles(directory=str(DASHBOARD_ARTIFACTS_DIR)), name="artifacts")
+app.mount("/runtime-artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="runtime_artifacts")
 
 EVENT_BUS = DashboardEventBus()
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
@@ -1774,6 +1775,30 @@ def build_workspace_diff_summary(root: str = "", include_patch: bool = False) ->
 @app.get("/api/app/workspace/diff")
 def read_workspace_diff(root: str = "", includePatch: bool = False) -> dict[str, Any]:
     return build_workspace_diff_summary(root, include_patch=includePatch)
+
+
+@app.get("/api/app/runtime/snapshot")
+def read_app_runtime_snapshot(
+    sessionId: str = "",
+    projectRoot: str = "",
+    includePatch: bool = False,
+    globalOnly: bool = False,
+) -> dict[str, Any]:
+    effective_global_only = bool(globalOnly or not projectRoot)
+    workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
+    if projectRoot and not workspace_diff.get("ok") and workspace_diff.get("status") == "not_git":
+        workspace_diff = build_workspace_diff_summary("", include_patch=includePatch)
+        workspace_diff["fallbackFromProjectRoot"] = projectRoot
+    return {
+        "ok": True,
+        "schema": "vrcforge.desktop_runtime_snapshot.v1",
+        "workspaceDiff": workspace_diff,
+        "approvals": AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=effective_global_only),
+        "runs": AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot),
+        "desktopActions": AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot),
+        "goals": AGENT_GATEWAY.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot),
+        "memory": AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot),
+    }
 
 
 @app.post("/api/app/unity/readiness/refresh")
@@ -9471,6 +9496,12 @@ def artifact_signature(relative_path: str, expires: int) -> str:
     return hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
+def runtime_artifact_signature(relative_path: str, expires: int) -> str:
+    relative = normalize_artifact_relative_path(relative_path)
+    message = f"runtime-artifacts/{relative}\n{int(expires)}".encode("utf-8")
+    return hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
 def normalize_app_session_challenge_nonce(value: str) -> str:
     text = str(value or "").strip()
     if not 8 <= len(text) <= 128:
@@ -9495,6 +9526,14 @@ def signed_artifact_url(relative_path: str, cache_version: str = "") -> str:
     return f"/artifacts/{relative}?artifact_expires={expires}&artifact_sig={signature}{version}"
 
 
+def signed_runtime_artifact_url(relative_path: str, cache_version: str = "") -> str:
+    relative = normalize_artifact_relative_path(relative_path)
+    expires = artifact_url_expiry()
+    signature = runtime_artifact_signature(relative, expires)
+    version = f"&artifact_v={cache_version}" if cache_version else ""
+    return f"/runtime-artifacts/{relative}?artifact_expires={expires}&artifact_sig={signature}{version}"
+
+
 def strip_url_query_fragment(value: str) -> str:
     return str(value or "").split("?", 1)[0].split("#", 1)[0]
 
@@ -9508,6 +9547,19 @@ def to_artifact_url(path_value: str) -> str:
         except OSError:
             cache_version = ""
         return signed_artifact_url(relative, cache_version=cache_version)
+    except Exception:
+        return ""
+
+
+def to_runtime_artifact_url(path_value: str) -> str:
+    try:
+        path = resolve_local_path(path_value)
+        relative = path.relative_to(ARTIFACTS_DIR).as_posix()
+        try:
+            cache_version = str(path.stat().st_mtime_ns)
+        except OSError:
+            cache_version = ""
+        return signed_runtime_artifact_url(relative, cache_version=cache_version)
     except Exception:
         return ""
 
@@ -13143,7 +13195,7 @@ def app_route_requires_auth(request: Request) -> bool:
 
 def artifact_route_requires_auth(request: Request) -> bool:
     path = request.url.path
-    return path == "/artifacts" or path.startswith("/artifacts/")
+    return path == "/artifacts" or path.startswith("/artifacts/") or path == "/runtime-artifacts" or path.startswith("/runtime-artifacts/")
 
 
 def is_cors_preflight_request(request: Request) -> bool:
@@ -13183,7 +13235,11 @@ def authenticate_artifact_request(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Artifact origin is not allowed.")
     if not APP_AUTH_REQUIRED:
         return
-    relative = request.url.path[len("/artifacts/") :] if request.url.path.startswith("/artifacts/") else ""
+    runtime_artifact = request.url.path.startswith("/runtime-artifacts/")
+    if runtime_artifact:
+        relative = request.url.path[len("/runtime-artifacts/") :]
+    else:
+        relative = request.url.path[len("/artifacts/") :] if request.url.path.startswith("/artifacts/") else ""
     try:
         relative = normalize_artifact_relative_path(relative)
         expires = int(str(request.query_params.get("artifact_expires") or "0"))
@@ -13193,7 +13249,7 @@ def authenticate_artifact_request(request: Request) -> None:
     now = int(time.time())
     if expires < now or expires > now + ARTIFACT_URL_MAX_FUTURE_SECONDS:
         raise HTTPException(status_code=401, detail="Artifact URL has expired.")
-    expected = artifact_signature(relative, expires)
+    expected = runtime_artifact_signature(relative, expires) if runtime_artifact else artifact_signature(relative, expires)
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="Artifact URL signature is invalid.")
 
@@ -13210,10 +13266,16 @@ def validate_app_request_auth(client_host: str, origin: str, supplied_token: str
 
 
 def extract_bearer_token(request: Request) -> str:
-    return extract_bearer_token_from_values(request.headers, request.query_params)
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
 
 
 def extract_bearer_token_from_values(headers: Any, query_params: Any) -> str:
+    # WebSocket clients cannot set Authorization headers from browser code yet.
+    # Keep this only for the current /ws boundary until Tauri events or a
+    # one-time WebSocket ticket replaces loopback WebSocket auth.
     auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
@@ -16637,7 +16699,7 @@ def _optimizer_proof_visual_summary(report: dict[str, Any], run_id: str) -> dict
         }
         image_path = Path(str(entry.get("artifactImagePath") or "")) if entry.get("artifactImagePath") else None
         if image_path and image_path.exists() and _path_is_under(image_path, ARTIFACTS_DIR):
-            summarized["imageUrl"] = f"/api/app/optimization/proofs/{run_id}/screenshots/{stage_name}"
+            summarized["imageUrl"] = to_artifact_url(str(image_path)) or to_runtime_artifact_url(str(image_path))
         screenshot_summary[stage_name] = summarized
     return {
         "schema": visual.get("schema"),

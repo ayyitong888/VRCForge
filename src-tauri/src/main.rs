@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -44,16 +44,131 @@ impl Drop for BackendState {
 #[derive(Serialize)]
 struct BackendStartResult {
     endpoint: String,
-    app_session_token: String,
     started: bool,
     already_running: bool,
     mode: String,
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppApiRequest {
+    method: Option<String>,
+    path: String,
+    body: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppApiResponse {
+    status: u16,
+    ok: bool,
+    body: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopRuntimeSnapshotRequest {
+    session_id: Option<String>,
+    project_root: Option<String>,
+    include_patch: Option<bool>,
+    global_only: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
+}
+
+#[tauri::command]
+fn desktop_runtime_snapshot(
+    request: DesktopRuntimeSnapshotRequest,
+) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    if let Some(value) = request
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "sessionId={}",
+            percent_encode_query_component(value)
+        ));
+    }
+    if let Some(value) = request
+        .project_root
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "projectRoot={}",
+            percent_encode_query_component(value)
+        ));
+    }
+    if request.include_patch.unwrap_or(false) {
+        query.push("includePatch=true".to_string());
+    }
+    if request.global_only.unwrap_or(false) {
+        query.push("globalOnly=true".to_string());
+    }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    let response = app_api_request(AppApiRequest {
+        method: Some("GET".to_string()),
+        path: format!("/api/app/runtime/snapshot{suffix}"),
+        body: None,
+        timeout_ms: request.timeout_ms,
+    })?;
+    if response.ok {
+        Ok(response.body)
+    } else {
+        Err(response
+            .body
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Desktop runtime snapshot failed.")
+            .to_string())
+    }
+}
+
+#[tauri::command]
+fn app_api_request(request: AppApiRequest) -> Result<AppApiResponse, String> {
+    let method = request
+        .method
+        .unwrap_or_else(|| "GET".to_string())
+        .to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+        return Err("desktop IPC bridge rejected this HTTP method".to_string());
+    }
+    let path = normalize_app_api_path(&method, &request.path)?;
+    let user_data = user_data_dir()?;
+    let app_session_token = ensure_app_session_token(&user_data)?;
+    ensure_backend_session_verified(&app_session_token)?;
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30_000).clamp(1_000, 600_000));
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(timeout)
+        .redirects(0)
+        .build();
+    let url = format!("{BACKEND_ENDPOINT}{path}");
+    let http_request = agent
+        .request(&method, &url)
+        .set("Accept", "application/json")
+        .set("Origin", "tauri://localhost")
+        .set("Authorization", &format!("Bearer {app_session_token}"));
+    let response = if let Some(body) = request.body {
+        http_request
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+    } else {
+        http_request.call()
+    };
+    app_api_response_from_ureq(response)
 }
 
 #[tauri::command]
@@ -68,7 +183,6 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         }
         return Ok(BackendStartResult {
             endpoint: BACKEND_ENDPOINT.to_string(),
-            app_session_token,
             started: false,
             already_running: true,
             mode: "existing".to_string(),
@@ -141,7 +255,6 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
 
     Ok(BackendStartResult {
         endpoint: BACKEND_ENDPOINT.to_string(),
-        app_session_token,
         started: true,
         already_running: false,
         mode: "managed".to_string(),
@@ -471,6 +584,148 @@ fn app_session_challenge_signature_matches(token: &str, nonce: &str, signature: 
     mac.verify_slice(&signature_bytes).is_ok()
 }
 
+fn normalize_app_api_path(method: &str, path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if !trimmed.starts_with('/') {
+        return Err("desktop IPC bridge requires an app-relative API path".to_string());
+    }
+    if trimmed.contains('#') {
+        return Err("desktop IPC bridge rejected an unsafe API path".to_string());
+    }
+    let route = trimmed.split('?').next().unwrap_or(trimmed);
+    let decoded_route = percent_decode_route(route)?;
+    if decoded_route.contains("://") || decoded_route.contains('\\') || decoded_route.contains("..")
+    {
+        return Err("desktop IPC bridge rejected an unsafe API path".to_string());
+    }
+    if !decoded_route.starts_with("/api/") {
+        return Err(format!(
+            "desktop IPC bridge path is not enabled: {decoded_route}"
+        ));
+    }
+    if matches!(
+        decoded_route.as_str(),
+        "/api/app/session" | "/api/app/session-challenge"
+    ) {
+        return Err(format!(
+            "desktop IPC bridge path is not exposed to WebView: {decoded_route}"
+        ));
+    }
+    if decoded_route == "/api/agent" || decoded_route.starts_with("/api/agent/") {
+        return Err(format!(
+            "desktop IPC bridge keeps external agent API on its HTTP boundary: {decoded_route}"
+        ));
+    }
+    if !desktop_ipc_route_allowed(method, &decoded_route) {
+        return Err(format!(
+            "desktop IPC bridge path is not in the desktop allowlist: {decoded_route}"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
+    let normalized_method = method.to_ascii_uppercase();
+    if normalized_method == "GET" && route == "/api/health" {
+        return true;
+    }
+    if route == "/api/config" || route == "/api/config/vision" || route == "/api/models" {
+        return matches!(normalized_method.as_str(), "GET" | "POST");
+    }
+    if route == "/api/projects/refresh" {
+        return normalized_method == "POST";
+    }
+    if route == "/api/avatar-encryption/plan" || route == "/api/avatar-encryption/apply-request" {
+        return matches!(normalized_method.as_str(), "POST" | "GET");
+    }
+    route == "/api/app" || route.starts_with("/api/app/")
+}
+
+fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
+    if existing_backend_accepts_session(token) {
+        Ok(())
+    } else {
+        Err(
+            "VRCForge runtime session verification failed before an internal IPC request. Restart VRCForge if the local runtime was replaced.".to_string(),
+        )
+    }
+}
+
+fn percent_decode_route(route: &str) -> Result<String, String> {
+    let bytes = route.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("desktop IPC bridge rejected an invalid encoded API path".to_string());
+            }
+            let high = hex_nibble(bytes[index + 1]).ok_or_else(|| {
+                "desktop IPC bridge rejected an invalid encoded API path".to_string()
+            })?;
+            let low = hex_nibble(bytes[index + 2]).ok_or_else(|| {
+                "desktop IPC bridge rejected an invalid encoded API path".to_string()
+            })?;
+            output.push((high << 4) | low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output)
+        .map_err(|_| "desktop IPC bridge rejected a non-UTF8 API path".to_string())
+}
+
+fn percent_encode_query_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn app_api_response_from_ureq(
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<AppApiResponse, String> {
+    match result {
+        Ok(response) => app_api_response_from_parts(response.status(), response.into_string()),
+        Err(ureq::Error::Status(status, response)) => {
+            app_api_response_from_parts(status, response.into_string())
+        }
+        Err(ureq::Error::Transport(error)) => Err(format!(
+            "VRCForge runtime is not reachable at {BACKEND_ENDPOINT}: {error}"
+        )),
+    }
+}
+
+fn app_api_response_from_parts(
+    status: u16,
+    body_result: Result<String, std::io::Error>,
+) -> Result<AppApiResponse, String> {
+    let text = body_result.map_err(|error| format!("unable to read runtime response: {error}"))?;
+    let (body, ok) = if text.trim().is_empty() {
+        (serde_json::json!({}), (200..300).contains(&status))
+    } else {
+        match serde_json::from_str(&text) {
+            Ok(payload) => (payload, (200..300).contains(&status)),
+            Err(_) => (
+                serde_json::json!({
+                    "detail": format!("HTTP {status}: response was not JSON"),
+                    "excerpt": text.chars().take(300).collect::<String>(),
+                }),
+                false,
+            ),
+        }
+    };
+    Ok(AppApiResponse { status, ok, body })
+}
+
 fn decode_hmac_sha256_hex(value: &str) -> Option<[u8; 32]> {
     let bytes = value.as_bytes();
     if bytes.len() != 64 {
@@ -589,7 +844,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_api_request,
             backend_endpoint,
+            desktop_runtime_snapshot,
             start_backend,
             stop_backend,
             ensure_agent_notes_file,
@@ -618,9 +875,9 @@ fn show_main_window(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         app_session_challenge_signature, app_session_challenge_signature_matches,
-        extract_challenge_signature, hmac_sha256_hex,
-        prepare_runtime_files, try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open,
+        extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
+        percent_encode_query_component, prepare_runtime_files, try_ensure_agent_notes_file,
+        validate_local_folder_to_open, validate_project_folder_to_open,
     };
     use std::{
         env, fs,
@@ -739,6 +996,47 @@ mod tests {
         assert!(extract_challenge_signature(&serde_json::json!({"signature": 42})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!({})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!(null)).is_none());
+    }
+
+    #[test]
+    fn app_api_bridge_allows_api_paths_without_exposing_session_endpoints() {
+        assert_eq!(
+            normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").as_deref(),
+            Ok("/api/app/bootstrap?refreshProjects=true"),
+        );
+        assert_eq!(
+            normalize_app_api_path("POST", "/api/avatar-encryption/plan").as_deref(),
+            Ok("/api/avatar-encryption/plan"),
+        );
+        assert_eq!(
+            normalize_app_api_path("GET", "/api/health").as_deref(),
+            Ok("/api/health")
+        );
+
+        assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/%73ession").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/%2e%2e/health").is_err());
+        assert!(normalize_app_api_path("GET", "/api/agent/manifest").is_err());
+        assert!(normalize_app_api_path("GET", "/mcp").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/../health").is_err());
+        assert!(normalize_app_api_path("POST", "/api/blendshapes/apply").is_err());
+        assert!(normalize_app_api_path("POST", "/api/clothes/apply-fx").is_err());
+        assert!(normalize_app_api_path("POST", "/api/shader/apply").is_err());
+        assert!(normalize_app_api_path("POST", "/api/projects/install").is_err());
+    }
+
+    #[test]
+    fn query_component_encoding_handles_windows_paths() {
+        assert_eq!(
+            percent_encode_query_component(r"D:\VR Projects\Karin FT"),
+            "D%3A%5CVR%20Projects%5CKarin%20FT",
+        );
+        assert_eq!(
+            percent_encode_query_component("session_123-abc"),
+            "session_123-abc",
+        );
     }
 
     #[test]

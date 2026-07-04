@@ -527,6 +527,27 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("tracked.txt", patch_payload.get("patch", ""))
         self.assertFalse(patch_payload.get("patchTruncated", False))
 
+    def test_runtime_snapshot_combines_workspace_and_runtime_ledgers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "ProjectA"
+            project_root.mkdir()
+            with TestClient(dashboard_server.app) as client:
+                response = client.get(
+                    "/api/app/runtime/snapshot",
+                    params={"sessionId": "session-a", "projectRoot": str(project_root), "globalOnly": "false"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "vrcforge.desktop_runtime_snapshot.v1")
+        self.assertEqual(payload["workspaceDiff"].get("fallbackFromProjectRoot"), str(project_root))
+        self.assertIn("approvals", payload)
+        self.assertIn("runs", payload)
+        self.assertIn("desktopActions", payload)
+        self.assertIn("goals", payload)
+        self.assertIn("memory", payload)
+
     def test_agent_runtime_message_preserves_bounded_attachments(self) -> None:
         with TestClient(dashboard_server.app) as client:
             response = client.post(
@@ -1331,6 +1352,7 @@ class DashboardServerTests(unittest.TestCase):
                 health = client.get("/api/health")
                 authorized_health = client.get("/api/health", headers=headers)
                 missing_token_get = client.get("/api/projects")
+                query_token_get = client.get("/api/projects?app_token=test-app-session-token")
                 missing_token_post = client.post("/api/projects/install", json={})
                 authorized_get = client.get("/api/projects", headers=headers)
 
@@ -1344,6 +1366,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(authorized_health.status_code, 200)
             self.assertIn("components", authorized_health.json())
             self.assertEqual(missing_token_get.status_code, 401)
+            self.assertEqual(query_token_get.status_code, 401)
             self.assertEqual(missing_token_post.status_code, 401)
             self.assertEqual(authorized_get.status_code, 200)
         finally:
@@ -1356,6 +1379,7 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.APP_AUTH_REQUIRED = True
         dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
         artifact_path = dashboard_server.DASHBOARD_ARTIFACTS_DIR / "latest" / "signed-artifact-test.txt"
+        runtime_path = dashboard_server.ARTIFACTS_DIR / "optimizer-apply-smoke" / "runtime-signed-artifact-test.txt"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text("artifact-ok", encoding="utf-8")
         try:
@@ -1374,8 +1398,21 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(unsigned.status_code, 401)
             self.assertEqual(signed.status_code, 200)
             self.assertEqual(signed.text, "artifact-ok")
+
+            runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime_path.write_text("runtime-artifact-ok", encoding="utf-8")
+            runtime_url = dashboard_server.to_runtime_artifact_url(str(runtime_path))
+            self.assertTrue(runtime_url.startswith("/runtime-artifacts/optimizer-apply-smoke/runtime-signed-artifact-test.txt?"))
+            self.assertIn("artifact_sig=", runtime_url)
+            with TestClient(dashboard_server.app) as client:
+                runtime_unsigned = client.get("/runtime-artifacts/optimizer-apply-smoke/runtime-signed-artifact-test.txt")
+                runtime_signed = client.get(runtime_url)
+            self.assertEqual(runtime_unsigned.status_code, 401)
+            self.assertEqual(runtime_signed.status_code, 200)
+            self.assertEqual(runtime_signed.text, "runtime-artifact-ok")
         finally:
             artifact_path.unlink(missing_ok=True)
+            runtime_path.unlink(missing_ok=True)
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
 
@@ -8031,7 +8068,9 @@ namespace VRCForge.Editor
                 self.assertEqual(index_payload["proofs"][0]["runId"], run_id)
                 self.assertEqual(index_payload["proofs"][0]["profileDiff"]["pc"]["rankAfter"], "Medium")
                 self.assertEqual(index_payload["proofs"][0]["parameterBudgetDelta"]["syncedBitsDelta"], -12)
-                self.assertIn("/screenshots/before", index_payload["proofs"][0]["visualRegression"]["screenshots"]["before"]["imageUrl"])
+                image_url = index_payload["proofs"][0]["visualRegression"]["screenshots"]["before"]["imageUrl"]
+                self.assertTrue(image_url.startswith("/runtime-artifacts/optimizer-apply-smoke/"))
+                self.assertIn("artifact_sig=", image_url)
 
                 self.assertEqual(detail_response.status_code, 200)
                 detail_payload = detail_response.json()

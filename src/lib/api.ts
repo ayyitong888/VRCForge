@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 export type ExecutionMode = "approval" | "auto" | "roslyn_full_auto";
 
 export type PermissionState = {
@@ -239,6 +241,7 @@ export type WorkspaceDiffSummary = {
   patch?: string;
   patchTruncated?: boolean;
   error?: string;
+  fallbackFromProjectRoot?: string;
 };
 
 export type AgentMessageAttachment = {
@@ -500,6 +503,17 @@ export type AgentRuntimeRunLedger = {
   count: number;
 };
 
+export type DesktopRuntimeSnapshot = {
+  ok: boolean;
+  schema?: string;
+  workspaceDiff?: WorkspaceDiffSummary;
+  approvals?: { approvals?: AgentApproval[]; count?: number };
+  runs?: AgentRuntimeRunLedger;
+  desktopActions?: { actions?: AgentDesktopAction[]; count?: number };
+  goals?: { goals?: AgentGoal[]; count?: number };
+  memory?: { memories?: AgentMemory[]; count?: number };
+};
+
 export type AgentDesktopAction = {
   schema?: string;
   id?: string;
@@ -694,7 +708,7 @@ export async function fetchBootstrap(endpoint: string, options: { refreshProject
   if (options.refreshProjects) {
     url.searchParams.set("refreshProjects", "true");
   }
-  return requestJson<AppBootstrap>(url.toString());
+  return requestJson<AppBootstrap>(url.toString(), { preferTauriIpc: true });
 }
 
 export async function fetchAppHealth(endpoint: string): Promise<AppHealth> {
@@ -721,7 +735,7 @@ export async function fetchWorkspaceDiff(endpoint: string, root = "", includePat
   if (includePatch) {
     url.searchParams.set("includePatch", "true");
   }
-  return requestJson<WorkspaceDiffSummary>(url.toString());
+  return requestJson<WorkspaceDiffSummary>(url.toString(), { preferTauriIpc: true });
 }
 
 export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
@@ -2071,7 +2085,7 @@ export async function fetchAgentRuns(
     query.set("clientTurnId", params.clientTurnId);
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return requestJson<AgentRuntimeRunLedger>(`${endpoint}/api/app/agent/runs${suffix}`);
+  return requestJson<AgentRuntimeRunLedger>(`${endpoint}/api/app/agent/runs${suffix}`, { preferTauriIpc: true });
 }
 
 export async function requestAgentRunCancel(
@@ -2123,7 +2137,7 @@ export async function fetchAgentDesktopActions(
     query.set("projectRoot", params.projectRoot);
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/agent/desktop-actions${suffix}`);
+  return requestJson(`${endpoint}/api/app/agent/desktop-actions${suffix}`, { preferTauriIpc: true });
 }
 
 export async function requestAgentDesktopAction(
@@ -2153,7 +2167,7 @@ export async function fetchAgentGoals(
     query.set("projectRoot", params.projectRoot);
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/agent/goals${suffix}`);
+  return requestJson(`${endpoint}/api/app/agent/goals${suffix}`, { preferTauriIpc: true });
 }
 
 export async function createAgentGoal(
@@ -2194,7 +2208,7 @@ export async function fetchAgentMemory(
     query.set("scope", params.scope);
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/agent/memory${suffix}`);
+  return requestJson(`${endpoint}/api/app/agent/memory${suffix}`, { preferTauriIpc: true });
 }
 
 export async function createAgentMemory(
@@ -2255,6 +2269,38 @@ export async function approveAgentApproval(
   });
 }
 
+export async function fetchDesktopRuntimeSnapshot(
+  endpoint: string,
+  params: { sessionId?: string; projectRoot?: string; includePatch?: boolean; globalOnly?: boolean } = {},
+): Promise<DesktopRuntimeSnapshot> {
+  if (hasTauriInternals()) {
+    return invoke<DesktopRuntimeSnapshot>("desktop_runtime_snapshot", {
+      request: {
+        sessionId: params.sessionId,
+        projectRoot: params.projectRoot,
+        includePatch: params.includePatch,
+        globalOnly: params.globalOnly,
+        timeoutMs: 30000,
+      },
+    });
+  }
+  const query = new URLSearchParams();
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  if (params.includePatch) {
+    query.set("includePatch", "true");
+  }
+  if (params.globalOnly) {
+    query.set("globalOnly", "true");
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson<DesktopRuntimeSnapshot>(`${endpoint}/api/app/runtime/snapshot${suffix}`);
+}
+
 export async function fetchAgentApprovals(
   endpoint: string,
   params: { projectRoot?: string; globalOnly?: boolean } = {},
@@ -2267,7 +2313,7 @@ export async function fetchAgentApprovals(
     query.set("globalOnly", "1");
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/agent/approvals${suffix}`);
+  return requestJson(`${endpoint}/api/app/agent/approvals${suffix}`, { preferTauriIpc: true });
 }
 
 export async function rejectAgentApproval(
@@ -2305,7 +2351,7 @@ export async function fetchCheckpoints(
     params.set("projectRoot", projectRoot);
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/checkpoints${suffix}`);
+  return requestJson(`${endpoint}/api/app/checkpoints${suffix}`, { preferTauriIpc: true });
 }
 
 export async function previewRestoreCheckpoint(endpoint: string, checkpointId: string): Promise<AgentCheckpointPreview> {
@@ -2331,7 +2377,7 @@ export async function fetchInterruptedApplyRecoveries(
   if (options.projectRoot) params.set("projectRoot", options.projectRoot);
   if (options.includeResolved) params.set("includeResolved", "true");
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  return requestJson(`${endpoint}/api/app/recoveries${suffix}`);
+  return requestJson(`${endpoint}/api/app/recoveries${suffix}`, { preferTauriIpc: true });
 }
 
 export async function previewInterruptedApplyRecovery(
@@ -2462,7 +2508,13 @@ export async function previewAdjustmentCheckpoint(
   });
 }
 
-type JsonRequestInit = RequestInit & { timeoutMs?: number };
+type JsonRequestInit = RequestInit & { timeoutMs?: number; preferTauriIpc?: boolean };
+
+type TauriAppApiResponse = {
+  status: number;
+  ok: boolean;
+  body: unknown;
+};
 
 async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<T> {
   const controller = new AbortController();
@@ -2474,9 +2526,24 @@ async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<
   }
   let response: Response;
   try {
-    const { timeoutMs: _timeoutMs, ...fetchInit } = init;
+    const { timeoutMs: _timeoutMs, preferTauriIpc: _preferTauriIpc, ...fetchInit } = init;
+    const ipcBody = parseTauriJsonBody(fetchInit.body);
+    const tauriLocalApiRequest = isTauriLocalApiUrl(url);
+    const tauriApiRequest = tauriLocalApiRequest && canUseTauriAppApi(url, fetchInit);
+    if (tauriLocalApiRequest && !tauriApiRequest) {
+      throw new ApiError("Desktop WebView direct HTTP access to internal API paths is disabled on this branch.", 0);
+    }
+    if (tauriApiRequest && !ipcBody.supported) {
+      throw new ApiError("Desktop IPC bridge only accepts JSON API request bodies.", 0);
+    }
+    if (tauriApiRequest) {
+      return await requestJsonViaTauri<T>(url, fetchInit.method ?? "GET", ipcBody.body, timeoutMs, init.signal ?? undefined);
+    }
     response = await fetch(url, { ...fetchInit, headers, signal: init.signal ?? controller.signal });
   } catch (cause) {
+    if (cause instanceof ApiError) {
+      throw cause;
+    }
     if (cause instanceof DOMException && cause.name === "AbortError") {
       if (init.signal?.aborted) {
         throw new ApiError("Request cancelled.", 0);
@@ -2508,6 +2575,160 @@ async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<
     throw new ApiError(typeof detail === "string" ? detail : `HTTP ${response.status}`, response.status, detail);
   }
   return payload as T;
+}
+
+function isTauriLocalApiUrl(url: string): boolean {
+  if (!hasTauriInternals()) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" && parsed.hostname === "127.0.0.1" && parsed.port === "8757" && parsed.pathname.startsWith("/api/");
+  } catch {
+    return false;
+  }
+}
+
+function canUseTauriAppApi(url: string, init: RequestInit): boolean {
+  if (!hasTauriInternals()) {
+    return false;
+  }
+  const method = (init.method ?? "GET").toUpperCase();
+  if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || parsed.port !== "8757") {
+      return false;
+    }
+    return isTauriAppApiPath(method, parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function hasTauriInternals(): boolean {
+  return typeof window !== "undefined" && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+function isTauriAppApiPath(method: string, pathname: string): boolean {
+  let normalizedPathname = pathname;
+  try {
+    normalizedPathname = decodeURIComponent(pathname);
+  } catch {
+    return false;
+  }
+  if (!normalizedPathname.startsWith("/api/")) {
+    return false;
+  }
+  if (normalizedPathname === "/api/app/session" || normalizedPathname === "/api/app/session-challenge") {
+    return false;
+  }
+  if (normalizedPathname === "/api/agent" || normalizedPathname.startsWith("/api/agent/")) {
+    return false;
+  }
+  if (normalizedPathname.includes("://") || normalizedPathname.includes("\\") || normalizedPathname.includes("..")) {
+    return false;
+  }
+  return desktopIpcRouteAllowed(method, normalizedPathname);
+}
+
+function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+  if (normalizedMethod === "GET" && pathname === "/api/health") {
+    return true;
+  }
+  if (pathname === "/api/config" || pathname === "/api/config/vision" || pathname === "/api/models") {
+    return normalizedMethod === "GET" || normalizedMethod === "POST";
+  }
+  if (pathname === "/api/projects/refresh") {
+    return normalizedMethod === "POST";
+  }
+  if (pathname === "/api/avatar-encryption/plan" || pathname === "/api/avatar-encryption/apply-request") {
+    return normalizedMethod === "GET" || normalizedMethod === "POST";
+  }
+  return pathname === "/api/app" || pathname.startsWith("/api/app/");
+}
+
+function parseTauriJsonBody(body: BodyInit | null | undefined): { supported: boolean; body?: unknown } {
+  if (body === undefined || body === null) {
+    return { supported: true };
+  }
+  if (typeof body !== "string") {
+    return { supported: false };
+  }
+  try {
+    return { supported: true, body: JSON.parse(body) };
+  } catch {
+    return { supported: false };
+  }
+}
+
+async function requestJsonViaTauri<T>(url: string, method: string, body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  const parsed = new URL(url);
+  const path = `${parsed.pathname}${parsed.search}`;
+  let response: TauriAppApiResponse;
+  const request: { method: string; path: string; body?: unknown; timeoutMs: number } = {
+    method: method.toUpperCase(),
+    path,
+    timeoutMs,
+  };
+  if (body !== undefined) {
+    request.body = body;
+  }
+  try {
+    response = await invokeTauriWithAbort<TauriAppApiResponse>("app_api_request", { request }, signal);
+  } catch (cause) {
+    throw new ApiError(
+      `VRCForge desktop IPC bridge could not reach ${runtimeOriginFromUrl(url)}. Falling back is disabled for this internal request.`,
+      0,
+      cause instanceof Error ? cause.message : String(cause),
+    );
+  }
+  if (!response.ok) {
+    const payload = response.body;
+    const detail = typeof payload === "object" && payload ? (payload as { detail?: unknown }).detail : payload;
+    throw new ApiError(typeof detail === "string" ? detail : `HTTP ${response.status}`, response.status, detail);
+  }
+  return response.body as T;
+}
+
+function invokeTauriWithAbort<T>(command: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return invoke<T>(command, args);
+  }
+  if (signal.aborted) {
+    return Promise.reject(new ApiError("Request cancelled.", 0));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new ApiError("Request cancelled.", 0));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    invoke<T>(command, args)
+      .then((value) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve(value);
+        }
+      })
+      .catch((error) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(error);
+        }
+      });
+  });
 }
 
 function runtimeOriginFromUrl(url: string): string {
