@@ -778,6 +778,11 @@ export async function updatePermission(
   executionMode: PermissionState["executionMode"],
   acknowledgeRoslynRisk = false,
 ): Promise<{ ok: boolean; permission: PermissionState }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<{ ok: boolean; permission: PermissionState }>("update_permission_mode", {
+      request: { execution_mode: executionMode, acknowledge_roslyn_risk: acknowledgeRoslynRisk, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/permission`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -789,6 +794,11 @@ export async function updatePermission(
 }
 
 export async function updateApiConfig(endpoint: string, config: { provider: string; api_key: string; base_url?: string; model?: string }) {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<{ ok?: boolean; apiConfig: ApiConfig; visionConfig?: VisionConfig }>("update_api_config", {
+      request: { ...config, timeoutMs: 30000 },
+    });
+  }
   return requestJson<{ ok?: boolean; apiConfig: ApiConfig; visionConfig?: VisionConfig }>(`${endpoint}/api/config`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -800,6 +810,11 @@ export async function updateVisionConfig(
   endpoint: string,
   config: { provider: string; api_key: string; base_url?: string; model?: string; enabled: boolean },
 ) {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<{ ok?: boolean; apiConfig: ApiConfig; visionConfig: VisionConfig }>("update_vision_config", {
+      request: { ...config, timeoutMs: 30000 },
+    });
+  }
   return requestJson<{ ok?: boolean; apiConfig: ApiConfig; visionConfig: VisionConfig }>(`${endpoint}/api/config/vision`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1126,6 +1141,11 @@ export async function fetchProviderModels(
   endpoint: string,
   config: { provider: string; api_key?: string; base_url?: string; model?: string },
 ): Promise<ProviderModelList> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProviderModelList>("fetch_provider_models", {
+      request: { ...config, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1137,6 +1157,11 @@ export async function testProviderCapability(
   endpoint: string,
   request: { provider: string; api_key?: string; base_url?: string; model?: string; capability: "text" | "structured" | "vision" },
 ): Promise<ProviderTestResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProviderTestResult>("test_provider_capability", {
+      request: { ...request, timeoutMs: 30000 },
+    });
+  }
   return requestJson<ProviderTestResult>(`${endpoint}/api/app/provider/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2722,9 +2747,6 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
   if (normalizedMethod === "GET" && pathname === "/api/health") {
     return true;
   }
-  if (pathname === "/api/config" || pathname === "/api/config/vision" || pathname === "/api/models") {
-    return normalizedMethod === "GET" || normalizedMethod === "POST";
-  }
   if (pathname === "/api/projects/refresh") {
     return normalizedMethod === "POST";
   }
@@ -2763,6 +2785,18 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
 }
 
 function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string): boolean {
+  if (pathname === "/api/config" && (method === "GET" || method === "POST")) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    ["/api/config/vision", "/api/models", "/api/app/provider/test"].includes(pathname)
+  ) {
+    return true;
+  }
+  if (method === "POST" && pathname === "/api/app/permission") {
+    return true;
+  }
   if (method === "GET" && pathname === "/api/app/runtime/snapshot") {
     return true;
   }

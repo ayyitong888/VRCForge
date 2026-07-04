@@ -80,6 +80,54 @@ struct DesktopRuntimeSnapshotRequest {
 }
 
 #[derive(Deserialize)]
+struct DesktopProviderConfigRequest {
+    provider: String,
+    #[serde(default, alias = "apiKey")]
+    api_key: Option<String>,
+    #[serde(default, alias = "baseUrl")]
+    base_url: Option<String>,
+    model: Option<String>,
+    #[serde(default, alias = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DesktopVisionConfigRequest {
+    provider: String,
+    #[serde(default, alias = "apiKey")]
+    api_key: Option<String>,
+    #[serde(default, alias = "baseUrl")]
+    base_url: Option<String>,
+    model: Option<String>,
+    enabled: bool,
+    #[serde(default, alias = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DesktopProviderTestRequest {
+    provider: String,
+    #[serde(default, alias = "apiKey")]
+    api_key: Option<String>,
+    #[serde(default, alias = "baseUrl")]
+    base_url: Option<String>,
+    model: Option<String>,
+    capability: String,
+    #[serde(default, alias = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DesktopPermissionRequest {
+    #[serde(alias = "executionMode")]
+    execution_mode: String,
+    #[serde(default, alias = "acknowledgeRoslynRisk")]
+    acknowledge_roslyn_risk: bool,
+    #[serde(default, alias = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopAgentMessageRequest {
     message: String,
@@ -224,6 +272,93 @@ fn backend_json_request(
     }
 }
 
+fn remove_secret_response_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in [
+                "api_key",
+                "apiKey",
+                "authorization",
+                "Authorization",
+                "configPath",
+            ] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                remove_secret_response_fields(child);
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = sanitize_text_for_webview(text);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                remove_secret_response_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_webview_response(mut value: serde_json::Value) -> serde_json::Value {
+    remove_secret_response_fields(&mut value);
+    value
+}
+
+fn sanitize_text_for_webview(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("authorization")
+        || lower.contains("configpath")
+    {
+        return "[redacted]".to_string();
+    }
+    value.to_string()
+}
+
+fn sanitize_error_message(message: String, secrets: &[&str]) -> String {
+    let mut sanitized = sanitize_text_for_webview(&message);
+    for secret in secrets {
+        let secret = secret.trim();
+        if !secret.is_empty() {
+            sanitized = sanitized.replace(secret, "[redacted]");
+        }
+    }
+    sanitized
+}
+
+fn sanitize_provider_result(
+    result: Result<serde_json::Value, String>,
+    secrets: &[&str],
+) -> Result<serde_json::Value, String> {
+    result
+        .map(sanitize_webview_response)
+        .map_err(|message| sanitize_error_message(message, secrets))
+}
+
+fn provider_config_body(
+    provider: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("provider".to_string(), serde_json::Value::String(provider));
+    if let Some(api_key) = api_key {
+        body.insert("api_key".to_string(), serde_json::Value::String(api_key));
+    }
+    body.insert(
+        "base_url".to_string(),
+        base_url.map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    body.insert(
+        "model".to_string(),
+        model.map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    serde_json::Value::Object(body)
+}
+
 #[tauri::command]
 fn desktop_runtime_snapshot(
     request: DesktopRuntimeSnapshotRequest,
@@ -264,6 +399,113 @@ fn desktop_runtime_snapshot(
         "GET",
         format!("/api/app/runtime/snapshot{suffix}"),
         None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn update_api_config(request: DesktopProviderConfigRequest) -> Result<serde_json::Value, String> {
+    let secret = request.api_key.clone().unwrap_or_default();
+    sanitize_provider_result(
+        backend_json_request(
+            "POST",
+            "/api/config".to_string(),
+            Some(provider_config_body(
+                request.provider,
+                request.api_key,
+                request.base_url,
+                request.model,
+            )),
+            request.timeout_ms,
+        ),
+        &[secret.as_str()],
+    )
+}
+
+#[tauri::command]
+fn update_vision_config(request: DesktopVisionConfigRequest) -> Result<serde_json::Value, String> {
+    let secret = request.api_key.clone().unwrap_or_default();
+    let mut body = provider_config_body(
+        request.provider,
+        request.api_key,
+        request.base_url,
+        request.model,
+    );
+    if let serde_json::Value::Object(object) = &mut body {
+        object.insert(
+            "enabled".to_string(),
+            serde_json::Value::Bool(request.enabled),
+        );
+    }
+    sanitize_provider_result(
+        backend_json_request(
+            "POST",
+            "/api/config/vision".to_string(),
+            Some(body),
+            request.timeout_ms,
+        ),
+        &[secret.as_str()],
+    )
+}
+
+#[tauri::command]
+fn fetch_provider_models(
+    request: DesktopProviderConfigRequest,
+) -> Result<serde_json::Value, String> {
+    let secret = request.api_key.clone().unwrap_or_default();
+    sanitize_provider_result(
+        backend_json_request(
+            "POST",
+            "/api/models".to_string(),
+            Some(provider_config_body(
+                request.provider,
+                request.api_key,
+                request.base_url,
+                request.model,
+            )),
+            request.timeout_ms,
+        ),
+        &[secret.as_str()],
+    )
+}
+
+#[tauri::command]
+fn test_provider_capability(
+    request: DesktopProviderTestRequest,
+) -> Result<serde_json::Value, String> {
+    let secret = request.api_key.clone().unwrap_or_default();
+    let mut body = provider_config_body(
+        request.provider,
+        request.api_key,
+        request.base_url,
+        request.model,
+    );
+    if let serde_json::Value::Object(object) = &mut body {
+        object.insert(
+            "capability".to_string(),
+            serde_json::Value::String(request.capability),
+        );
+    }
+    sanitize_provider_result(
+        backend_json_request(
+            "POST",
+            "/api/app/provider/test".to_string(),
+            Some(body),
+            request.timeout_ms,
+        ),
+        &[secret.as_str()],
+    )
+}
+
+#[tauri::command]
+fn update_permission_mode(request: DesktopPermissionRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/permission".to_string(),
+        Some(serde_json::json!({
+            "execution_mode": request.execution_mode,
+            "acknowledge_roslyn_risk": request.acknowledge_roslyn_risk,
+        })),
         request.timeout_ms,
     )
 }
@@ -569,7 +811,10 @@ fn app_api_request(request: AppApiRequest) -> Result<AppApiResponse, String> {
     } else {
         http_request.call()
     };
-    app_api_response_from_ureq(response)
+    app_api_response_from_ureq(response).map(|mut response| {
+        response.body = sanitize_webview_response(response.body);
+        response
+    })
 }
 
 fn start_backend_event_bridge_once(
@@ -1201,9 +1446,6 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
     if normalized_method == "GET" && route == "/api/health" {
         return true;
     }
-    if route == "/api/config" || route == "/api/config/vision" || route == "/api/models" {
-        return matches!(normalized_method.as_str(), "GET" | "POST");
-    }
     if route == "/api/projects/refresh" {
         return normalized_method == "POST";
     }
@@ -1244,6 +1486,20 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
 }
 
 fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -> bool {
+    if route_path == "/api/config" && matches!(method, "GET" | "POST") {
+        return true;
+    }
+    if method == "POST"
+        && matches!(
+            route_path,
+            "/api/config/vision" | "/api/models" | "/api/app/provider/test"
+        )
+    {
+        return true;
+    }
+    if method == "POST" && route_path == "/api/app/permission" {
+        return true;
+    }
     if method == "GET" && route_path == "/api/app/runtime/snapshot" {
         return true;
     }
@@ -1493,6 +1749,7 @@ fn main() {
             backend_endpoint,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
+            fetch_provider_models,
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
             preview_interrupted_apply_recovery,
@@ -1505,6 +1762,10 @@ fn main() {
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
             send_agent_message,
+            test_provider_capability,
+            update_api_config,
+            update_permission_mode,
+            update_vision_config,
             start_backend,
             stop_backend,
             ensure_agent_notes_file,
@@ -1534,9 +1795,10 @@ mod tests {
     use super::{
         app_session_challenge_signature, app_session_challenge_signature_matches,
         extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
-        percent_encode_query_component, prepare_runtime_files, sanitize_backend_event,
-        try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        percent_encode_query_component, prepare_runtime_files, provider_config_body,
+        sanitize_backend_event, sanitize_webview_response, try_ensure_agent_notes_file,
+        validate_local_folder_to_open, validate_project_folder_to_open,
+        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -1681,6 +1943,12 @@ mod tests {
         assert!(normalize_app_api_path("GET", "/api/agent/manifest").is_err());
         assert!(normalize_app_api_path("GET", "/mcp").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/../health").is_err());
+        assert!(normalize_app_api_path("GET", "/api/config").is_err());
+        assert!(normalize_app_api_path("POST", "/api/config").is_err());
+        assert!(normalize_app_api_path("POST", "/api/config/vision").is_err());
+        assert!(normalize_app_api_path("POST", "/api/models").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/provider/test").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/permission").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/runtime/snapshot?sessionId=s1").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/agent/message").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/agent/runs/cancel").is_err());
@@ -1738,6 +2006,60 @@ mod tests {
     #[test]
     fn agent_message_timeout_keeps_long_turns_usable() {
         assert!(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS >= 600_000);
+    }
+
+    #[test]
+    fn webview_response_sanitizer_removes_secrets_before_webview() {
+        let sanitized = sanitize_webview_response(serde_json::json!({
+            "configPath": "local-config-path",
+            "apiConfig": {
+                "provider": "gemini",
+                "api_key": "main-secret",
+                "apiKeyPresent": true,
+                "Authorization": "Bearer main-secret"
+            },
+            "visionConfig": {
+                "provider": "openai",
+                "apiKey": "vision-secret",
+                "apiKeyPresent": true
+            },
+            "effective": {
+                "model": "test-model",
+                "message": "api_key=main-secret",
+                "markerText": "configPath=Q:/private/AppData/Local/VRCForge/config.json",
+                "projectPath": "Q:/projects/avatar"
+            }
+        }));
+
+        let text = sanitized.to_string();
+        assert!(!text.contains("main-secret"));
+        assert!(!text.contains("vision-secret"));
+        assert!(!text.contains("configPath"));
+        assert!(!text.contains("Authorization"));
+        assert!(!text.contains("Q:/private"));
+        assert!(text.contains("[redacted]"));
+        assert!(text.contains("Q:/projects/avatar"));
+        assert!(text.contains("apiKeyPresent"));
+    }
+
+    #[test]
+    fn provider_config_body_preserves_omitted_key_semantics() {
+        let without_key = provider_config_body(
+            "gemini".to_string(),
+            None,
+            Some("https://example.test".to_string()),
+            Some("model-a".to_string()),
+        );
+        assert!(without_key.get("api_key").is_none());
+
+        let with_blank_key =
+            provider_config_body("gemini".to_string(), Some(String::new()), None, None);
+        assert_eq!(
+            with_blank_key
+                .get("api_key")
+                .and_then(|value| value.as_str()),
+            Some("")
+        );
     }
 
     #[test]
