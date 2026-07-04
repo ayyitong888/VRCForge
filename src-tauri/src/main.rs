@@ -52,15 +52,6 @@ struct BackendStartResult {
     message: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppApiRequest {
-    method: Option<String>,
-    path: String,
-    body: Option<serde_json::Value>,
-    timeout_ms: Option<u64>,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppApiResponse {
@@ -1845,44 +1836,6 @@ fn uninstall_external_agent_connector(
     .map(sanitize_webview_response)
 }
 
-#[tauri::command]
-fn app_api_request(request: AppApiRequest) -> Result<AppApiResponse, String> {
-    let method = request
-        .method
-        .unwrap_or_else(|| "GET".to_string())
-        .to_ascii_uppercase();
-    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
-        return Err("desktop IPC bridge rejected this HTTP method".to_string());
-    }
-    let path = normalize_app_api_path(&method, &request.path)?;
-    let user_data = user_data_dir()?;
-    let app_session_token = ensure_app_session_token(&user_data)?;
-    ensure_backend_session_verified(&app_session_token)?;
-    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30_000).clamp(1_000, 600_000));
-    let agent = ureq::builder()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout(timeout)
-        .redirects(0)
-        .build();
-    let url = format!("{BACKEND_ENDPOINT}{path}");
-    let http_request = agent
-        .request(&method, &url)
-        .set("Accept", "application/json")
-        .set("Origin", "tauri://localhost")
-        .set("Authorization", &format!("Bearer {app_session_token}"));
-    let response = if let Some(body) = request.body {
-        http_request
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-    } else {
-        http_request.call()
-    };
-    app_api_response_from_ureq(response).map(|mut response| {
-        response.body = sanitize_webview_response(response.body);
-        response
-    })
-}
-
 fn start_backend_event_bridge_once(
     app_handle: tauri::AppHandle,
     state: &BackendState,
@@ -2139,19 +2092,6 @@ fn start_backend(
         mode: "managed".to_string(),
         message: "已启动桌面 App 管理的 VRCForge runtime".to_string(),
     })
-}
-
-#[tauri::command]
-fn stop_backend(state: State<'_, BackendState>) -> Result<(), String> {
-    let mut guard = state
-        .child
-        .lock()
-        .map_err(|_| "backend state lock poisoned".to_string())?;
-    if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -2463,229 +2403,6 @@ fn app_session_challenge_signature_matches(token: &str, nonce: &str, signature: 
     mac.verify_slice(&signature_bytes).is_ok()
 }
 
-fn normalize_app_api_path(method: &str, path: &str) -> Result<String, String> {
-    let trimmed = path.trim();
-    if !trimmed.starts_with('/') {
-        return Err("desktop IPC bridge requires an app-relative API path".to_string());
-    }
-    if trimmed.contains('#') {
-        return Err("desktop IPC bridge rejected an unsafe API path".to_string());
-    }
-    let route = trimmed.split('?').next().unwrap_or(trimmed);
-    let decoded_route = percent_decode_route(route)?;
-    if decoded_route.contains("://") || decoded_route.contains('\\') || decoded_route.contains("..")
-    {
-        return Err("desktop IPC bridge rejected an unsafe API path".to_string());
-    }
-    if !decoded_route.starts_with("/api/") {
-        return Err(format!(
-            "desktop IPC bridge path is not enabled: {decoded_route}"
-        ));
-    }
-    if matches!(
-        decoded_route.as_str(),
-        "/api/app/session" | "/api/app/session-challenge"
-    ) {
-        return Err(format!(
-            "desktop IPC bridge path is not exposed to WebView: {decoded_route}"
-        ));
-    }
-    if decoded_route == "/api/agent" || decoded_route.starts_with("/api/agent/") {
-        return Err(format!(
-            "desktop IPC bridge keeps external agent API on its HTTP boundary: {decoded_route}"
-        ));
-    }
-    if !desktop_ipc_route_allowed(method, &decoded_route) {
-        return Err(format!(
-            "desktop IPC bridge path is not in the desktop allowlist: {decoded_route}"
-        ));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
-    let normalized_method = method.to_ascii_uppercase();
-    let route_path = route.split('?').next().unwrap_or(route);
-    if desktop_ipc_route_migrated_to_typed_command(&normalized_method, route_path) {
-        return false;
-    }
-    if normalized_method == "GET" && route == "/api/health" {
-        return true;
-    }
-    if route == "/api/projects/refresh" {
-        return normalized_method == "POST";
-    }
-    let app_prefixes = [
-        "/api/app/adjustment-checkpoints",
-        "/api/app/agent",
-        "/api/app/agent-notes",
-        "/api/app/avatars",
-        "/api/app/bootstrap",
-        "/api/app/chats",
-        "/api/app/checkpoints",
-        "/api/app/diagnostics",
-        "/api/app/doctor",
-        "/api/app/external-agent",
-        "/api/app/optimization",
-        "/api/app/outfit-imports",
-        "/api/app/package-install",
-        "/api/app/path-to-skill",
-        "/api/app/permission",
-        "/api/app/project-index",
-        "/api/app/projects",
-        "/api/app/provider",
-        "/api/app/recoveries",
-        "/api/app/runtime",
-        "/api/app/skill-packages",
-        "/api/app/skills",
-        "/api/app/sub-agents",
-        "/api/app/support-bundle",
-        "/api/app/unity",
-        "/api/app/workspace",
-    ];
-    app_prefixes
-        .iter()
-        .any(|prefix| route == *prefix || route.starts_with(&format!("{prefix}/")))
-}
-
-fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -> bool {
-    if matches!(
-        route_path,
-        "/api/app/avatars"
-            | "/api/app/optimization/plan"
-            | "/api/app/optimization/apply-request"
-            | "/api/app/outfit-imports/plan"
-            | "/api/app/outfit-imports/request"
-            | "/api/app/package-install/request"
-            | "/api/avatar-encryption/plan"
-            | "/api/avatar-encryption/apply-request"
-    ) {
-        return true;
-    }
-    if method == "GET"
-        && matches!(
-            route_path,
-            "/api/health"
-                | "/api/app/bootstrap"
-                | "/api/app/workspace/diff"
-                | "/api/app/doctor"
-                | "/api/app/diagnostics"
-                | "/api/app/projects/prefs"
-        )
-    {
-        return true;
-    }
-    if method == "POST"
-        && matches!(
-            route_path,
-            "/api/projects/refresh"
-                | "/api/app/unity/readiness/refresh"
-                | "/api/app/doctor/unity-mcp/repair"
-                | "/api/app/diagnostics"
-                | "/api/app/support-bundle"
-                | "/api/app/projects/prefs"
-                | "/api/app/project-index/scan"
-        )
-    {
-        return true;
-    }
-    if route_path == "/api/app/adjustment-checkpoints"
-        || route_path.starts_with("/api/app/adjustment-checkpoints/")
-        || route_path == "/api/app/skill-packages"
-        || route_path.starts_with("/api/app/skill-packages/")
-        || route_path == "/api/app/path-to-skill"
-        || route_path.starts_with("/api/app/path-to-skill/")
-        || route_path == "/api/app/skills"
-        || route_path.starts_with("/api/app/skills/")
-        || route_path == "/api/app/sub-agents"
-        || route_path.starts_with("/api/app/sub-agents/")
-        || route_path == "/api/app/agent/runs"
-        || route_path.starts_with("/api/app/agent/runs/")
-        || route_path == "/api/app/agent/approvals"
-        || route_path.starts_with("/api/app/agent/approvals/")
-        || route_path == "/api/app/agent/desktop-actions"
-        || route_path.starts_with("/api/app/agent/desktop-actions/")
-        || route_path == "/api/app/agent/goals"
-        || route_path.starts_with("/api/app/agent/goals/")
-        || route_path == "/api/app/agent/memory"
-        || route_path.starts_with("/api/app/agent/memory/")
-        || route_path == "/api/app/agent/compact"
-        || route_path == "/api/app/agent-notes"
-        || route_path.starts_with("/api/app/agent-notes/")
-        || route_path == "/api/app/chats"
-        || route_path.starts_with("/api/app/chats/")
-        || route_path == "/api/app/optimization/proofs"
-        || route_path.starts_with("/api/app/optimization/proofs/")
-    {
-        return true;
-    }
-    if route_path == "/api/config" && matches!(method, "GET" | "POST") {
-        return true;
-    }
-    if method == "POST"
-        && matches!(
-            route_path,
-            "/api/config/vision" | "/api/models" | "/api/app/provider/test"
-        )
-    {
-        return true;
-    }
-    if method == "POST" && route_path == "/api/app/permission" {
-        return true;
-    }
-    if route_path == "/api/app/external-agent/connectors" && matches!(method, "GET" | "POST") {
-        return true;
-    }
-    if method == "POST"
-        && matches!(
-            route_path,
-            "/api/app/external-agent/gateway"
-                | "/api/app/external-agent/connectors/install"
-                | "/api/app/external-agent/connectors/uninstall"
-        )
-    {
-        return true;
-    }
-    if method == "GET" && route_path == "/api/app/runtime/snapshot" {
-        return true;
-    }
-    if method == "POST"
-        && matches!(
-            route_path,
-            "/api/app/agent/message" | "/api/app/agent/runs/cancel" | "/api/app/agent/runs/queue"
-        )
-    {
-        return true;
-    }
-    if method == "POST"
-        && route_path.starts_with("/api/app/agent/approvals/")
-        && (route_path.ends_with("/approve")
-            || route_path.ends_with("/reject")
-            || route_path.ends_with("/revision"))
-    {
-        return true;
-    }
-    if method == "GET" && matches!(route_path, "/api/app/checkpoints" | "/api/app/recoveries") {
-        return true;
-    }
-    if method == "POST"
-        && route_path.starts_with("/api/app/checkpoints/")
-        && (route_path.ends_with("/preview") || route_path.ends_with("/restore"))
-    {
-        return true;
-    }
-    if method == "POST"
-        && route_path.starts_with("/api/app/recoveries/")
-        && (route_path.ends_with("/preview")
-            || route_path.ends_with("/restore")
-            || route_path.ends_with("/resolve")
-            || route_path.ends_with("/incident-bundle"))
-    {
-        return true;
-    }
-    false
-}
-
 fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
     if existing_backend_accepts_session(token) {
         Ok(())
@@ -2694,32 +2411,6 @@ fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
             "VRCForge runtime session verification failed before an internal IPC request. Restart VRCForge if the local runtime was replaced.".to_string(),
         )
     }
-}
-
-fn percent_decode_route(route: &str) -> Result<String, String> {
-    let bytes = route.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return Err("desktop IPC bridge rejected an invalid encoded API path".to_string());
-            }
-            let high = hex_nibble(bytes[index + 1]).ok_or_else(|| {
-                "desktop IPC bridge rejected an invalid encoded API path".to_string()
-            })?;
-            let low = hex_nibble(bytes[index + 2]).ok_or_else(|| {
-                "desktop IPC bridge rejected an invalid encoded API path".to_string()
-            })?;
-            output.push((high << 4) | low);
-            index += 3;
-        } else {
-            output.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(output)
-        .map_err(|_| "desktop IPC bridge rejected a non-UTF8 API path".to_string())
 }
 
 fn percent_encode_query_component(value: &str) -> String {
@@ -2890,7 +2581,6 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_api_request,
             apply_adjustment_checkpoint,
             approve_agent_approval,
             backend_endpoint,
@@ -2985,7 +2675,6 @@ fn main() {
             save_project_prefs,
             scan_project_index,
             start_backend,
-            stop_backend,
             write_path_to_skill,
             ensure_agent_notes_file,
             open_folder,
@@ -3013,11 +2702,11 @@ fn show_main_window(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         app_session_challenge_signature, app_session_challenge_signature_matches,
-        extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
-        percent_encode_query_component, prepare_runtime_files, provider_config_body,
-        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
-        try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open, webview_error_message, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        extract_challenge_signature, hmac_sha256_hex, percent_encode_query_component,
+        prepare_runtime_files, provider_config_body, sanitize_backend_event,
+        sanitize_text_for_webview, sanitize_webview_response, try_ensure_agent_notes_file,
+        validate_local_folder_to_open, validate_project_folder_to_open, webview_error_message,
+        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -3136,139 +2825,6 @@ mod tests {
         assert!(extract_challenge_signature(&serde_json::json!({"signature": 42})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!({})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!(null)).is_none());
-    }
-
-    #[test]
-    fn app_api_bridge_allows_api_paths_without_exposing_session_endpoints() {
-        assert!(normalize_app_api_path("GET", "/api/health").is_err());
-        assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").is_err());
-        assert!(normalize_app_api_path("POST", "/api/projects/refresh").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/unity/readiness/refresh").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/workspace/diff?root=D%3A%5CProj").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/doctor").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/doctor/unity-mcp/repair").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/diagnostics").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/diagnostics").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/support-bundle").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/projects/prefs").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/projects/prefs").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/project-index/scan").is_err());
-        assert!(
-            normalize_app_api_path("GET", "/api/app/adjustment-checkpoints?kind=face").is_err()
-        );
-        assert!(normalize_app_api_path("POST", "/api/app/adjustment-checkpoints").is_err());
-        assert!(normalize_app_api_path("PUT", "/api/app/adjustment-checkpoints/a1").is_err());
-        assert!(normalize_app_api_path("DELETE", "/api/app/adjustment-checkpoints/a1").is_err());
-        assert!(
-            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/overwrite").is_err()
-        );
-        assert!(
-            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/select").is_err()
-        );
-        assert!(
-            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/apply").is_err()
-        );
-        assert!(
-            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/preview").is_err()
-        );
-        assert!(normalize_app_api_path("GET", "/api/app/skill-packages").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/skill-packages/import").is_err());
-        assert!(normalize_app_api_path("PUT", "/api/app/skill-packages/p1").is_err());
-        assert!(normalize_app_api_path("DELETE", "/api/app/skill-packages/p1").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/path-to-skill/preview").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/path-to-skill/write").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/skills").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/skills/check").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/skills").is_err());
-        assert!(normalize_app_api_path("PUT", "/api/app/skills/s1").is_err());
-        assert!(normalize_app_api_path("DELETE", "/api/app/skills/s1").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/avatars").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/optimization/plan").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/optimization/apply-request").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/outfit-imports/plan").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/outfit-imports/request").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/package-install/request").is_err());
-        assert!(normalize_app_api_path("POST", "/api/avatar-encryption/plan").is_err());
-        assert!(normalize_app_api_path("POST", "/api/avatar-encryption/apply-request").is_err());
-        assert!(normalize_app_api_path("GET", "/api/avatar-encryption/plan").is_err());
-        assert!(normalize_app_api_path("GET", "/api/avatar-encryption/apply-request").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/optimization/plan").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/optimization/proofs").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/optimization/proofs/r1").is_err());
-        assert!(normalize_app_api_path("PUT", "/api/app/outfit-imports/request").is_err());
-        assert!(normalize_app_api_path("DELETE", "/api/app/package-install/request").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/sub-agents").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/sub-agents").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/sub-agents/t1").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/sub-agents/t1/cancel").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/sub-agents/t1/retry").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent/runs").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent/approvals").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent/desktop-actions").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/desktop-actions").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent/goals").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/goals").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/goals/g1").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent/memory").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/memory").is_err());
-        assert!(normalize_app_api_path("DELETE", "/api/app/agent/memory/m1").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/memory/clear").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/compact").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/agent-notes").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent-notes").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/chats?projectPath=D%3A%5CProj").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/chats").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/%73ession").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/%2e%2e/health").is_err());
-        assert!(normalize_app_api_path("GET", "/api/agent/manifest").is_err());
-        assert!(normalize_app_api_path("GET", "/mcp").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/../health").is_err());
-        assert!(normalize_app_api_path("GET", "/api/config").is_err());
-        assert!(normalize_app_api_path("POST", "/api/config").is_err());
-        assert!(normalize_app_api_path("POST", "/api/config/vision").is_err());
-        assert!(normalize_app_api_path("POST", "/api/models").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/provider/test").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/permission").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/external-agent/connectors").is_err());
-        assert!(normalize_app_api_path(
-            "GET",
-            "/api/app/external-agent/connectors?projectPath=D%3A%5CProj"
-        )
-        .is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/external-agent/connectors").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/external-agent/gateway").is_err());
-        assert!(
-            normalize_app_api_path("POST", "/api/app/external-agent/connectors/install").is_err()
-        );
-        assert!(
-            normalize_app_api_path("POST", "/api/app/external-agent/connectors/uninstall").is_err()
-        );
-        assert!(normalize_app_api_path("GET", "/api/app/runtime/snapshot?sessionId=s1").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/message").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/runs/cancel").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/runs/queue").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/approve").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/reject").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/revision").is_err());
-        assert!(
-            normalize_app_api_path("GET", "/api/app/checkpoints?projectRoot=D%3A%5CProj").is_err()
-        );
-        assert!(normalize_app_api_path("POST", "/api/app/checkpoints/c1/preview").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/checkpoints/c1/restore").is_err());
-        assert!(normalize_app_api_path("GET", "/api/app/recoveries?includeResolved=true").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/preview").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/restore").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/resolve").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/incident-bundle").is_err());
-        assert!(normalize_app_api_path("POST", "/api/blendshapes/apply").is_err());
-        assert!(normalize_app_api_path("POST", "/api/clothes/apply-fx").is_err());
-        assert!(normalize_app_api_path("POST", "/api/shader/apply").is_err());
-        assert!(normalize_app_api_path("POST", "/api/projects/install").is_err());
-        assert!(normalize_app_api_path("POST", "/api/app/unlisted-future-route").is_err());
     }
 
     #[test]

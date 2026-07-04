@@ -2974,12 +2974,6 @@ export async function previewAdjustmentCheckpoint(
 
 type JsonRequestInit = RequestInit & { timeoutMs?: number; preferTauriIpc?: boolean };
 
-type TauriAppApiResponse = {
-  status: number;
-  ok: boolean;
-  body: unknown;
-};
-
 async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeoutMs = init.timeoutMs ?? 30000;
@@ -2991,17 +2985,9 @@ async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<
   let response: Response;
   try {
     const { timeoutMs: _timeoutMs, preferTauriIpc: _preferTauriIpc, ...fetchInit } = init;
-    const ipcBody = parseTauriJsonBody(fetchInit.body);
     const tauriLocalApiRequest = isTauriLocalApiUrl(url);
-    const tauriApiRequest = tauriLocalApiRequest && canUseTauriAppApi(url, fetchInit);
-    if (tauriLocalApiRequest && !tauriApiRequest) {
-      throw new ApiError("Desktop WebView direct HTTP access to internal API paths is disabled on this branch.", 0);
-    }
-    if (tauriApiRequest && !ipcBody.supported) {
-      throw new ApiError("Desktop IPC bridge only accepts JSON API request bodies.", 0);
-    }
-    if (tauriApiRequest) {
-      return await requestJsonViaTauri<T>(url, fetchInit.method ?? "GET", ipcBody.body, timeoutMs, init.signal ?? undefined);
+    if (tauriLocalApiRequest) {
+      throw new ApiError("This desktop route has not been migrated to a typed IPC command.", 0);
     }
     response = await fetch(url, { ...fetchInit, headers, signal: init.signal ?? controller.signal });
   } catch (cause) {
@@ -3047,26 +3033,9 @@ function isTauriLocalApiUrl(url: string): boolean {
   }
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "http:" && parsed.hostname === "127.0.0.1" && parsed.port === "8757" && parsed.pathname.startsWith("/api/");
-  } catch {
-    return false;
-  }
-}
-
-function canUseTauriAppApi(url: string, init: RequestInit): boolean {
-  if (!hasTauriInternals()) {
-    return false;
-  }
-  const method = (init.method ?? "GET").toUpperCase();
-  if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
-    return false;
-  }
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || parsed.port !== "8757") {
-      return false;
-    }
-    return isTauriAppApiPath(method, parsed.pathname);
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const isBackendLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+    return parsed.protocol === "http:" && isBackendLoopback && parsed.port === "8757" && (parsed.pathname === "/api" || parsed.pathname.startsWith("/api/"));
   } catch {
     return false;
   }
@@ -3074,212 +3043,6 @@ function canUseTauriAppApi(url: string, init: RequestInit): boolean {
 
 function hasTauriInternals(): boolean {
   return typeof window !== "undefined" && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-}
-
-function isTauriAppApiPath(method: string, pathname: string): boolean {
-  let normalizedPathname = pathname;
-  try {
-    normalizedPathname = decodeURIComponent(pathname);
-  } catch {
-    return false;
-  }
-  if (!normalizedPathname.startsWith("/api/")) {
-    return false;
-  }
-  if (normalizedPathname === "/api/app/session" || normalizedPathname === "/api/app/session-challenge") {
-    return false;
-  }
-  if (normalizedPathname === "/api/agent" || normalizedPathname.startsWith("/api/agent/")) {
-    return false;
-  }
-  if (normalizedPathname.includes("://") || normalizedPathname.includes("\\") || normalizedPathname.includes("..")) {
-    return false;
-  }
-  return desktopIpcRouteAllowed(method, normalizedPathname);
-}
-
-function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
-  const normalizedMethod = method.toUpperCase();
-  if (desktopIpcRouteMigratedToTypedCommand(normalizedMethod, pathname)) {
-    return false;
-  }
-  if (normalizedMethod === "GET" && pathname === "/api/health") {
-    return true;
-  }
-  if (pathname === "/api/projects/refresh") {
-    return normalizedMethod === "POST";
-  }
-  const appPrefixes = [
-    "/api/app/adjustment-checkpoints",
-    "/api/app/agent",
-    "/api/app/agent-notes",
-    "/api/app/avatars",
-    "/api/app/bootstrap",
-    "/api/app/chats",
-    "/api/app/checkpoints",
-    "/api/app/diagnostics",
-    "/api/app/doctor",
-    "/api/app/external-agent",
-    "/api/app/optimization",
-    "/api/app/outfit-imports",
-    "/api/app/package-install",
-    "/api/app/path-to-skill",
-    "/api/app/permission",
-    "/api/app/project-index",
-    "/api/app/projects",
-    "/api/app/provider",
-    "/api/app/recoveries",
-    "/api/app/runtime",
-    "/api/app/skill-packages",
-    "/api/app/skills",
-    "/api/app/sub-agents",
-    "/api/app/support-bundle",
-    "/api/app/unity",
-    "/api/app/workspace",
-  ];
-  return appPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
-}
-
-function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string): boolean {
-  if (
-    [
-      "/api/app/avatars",
-      "/api/app/optimization/plan",
-      "/api/app/optimization/apply-request",
-      "/api/app/outfit-imports/plan",
-      "/api/app/outfit-imports/request",
-      "/api/app/package-install/request",
-      "/api/avatar-encryption/plan",
-      "/api/avatar-encryption/apply-request",
-    ].includes(pathname)
-  ) {
-    return true;
-  }
-  if (method === "GET" && ["/api/health", "/api/app/bootstrap", "/api/app/workspace/diff", "/api/app/doctor", "/api/app/diagnostics", "/api/app/projects/prefs"].includes(pathname)) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    [
-      "/api/projects/refresh",
-      "/api/app/unity/readiness/refresh",
-      "/api/app/doctor/unity-mcp/repair",
-      "/api/app/diagnostics",
-      "/api/app/support-bundle",
-      "/api/app/projects/prefs",
-      "/api/app/project-index/scan",
-    ].includes(pathname)
-  ) {
-    return true;
-  }
-  if (pathname === "/api/app/adjustment-checkpoints" || pathname.startsWith("/api/app/adjustment-checkpoints/")) {
-    return true;
-  }
-  if (pathname === "/api/config" && (method === "GET" || method === "POST")) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    ["/api/config/vision", "/api/models", "/api/app/provider/test"].includes(pathname)
-  ) {
-    return true;
-  }
-  if (method === "POST" && pathname === "/api/app/permission") {
-    return true;
-  }
-  if (pathname === "/api/app/external-agent/connectors" && (method === "GET" || method === "POST")) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    [
-      "/api/app/external-agent/gateway",
-      "/api/app/external-agent/connectors/install",
-      "/api/app/external-agent/connectors/uninstall",
-    ].includes(pathname)
-  ) {
-    return true;
-  }
-  if (method === "GET" && pathname === "/api/app/runtime/snapshot") {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    ["/api/app/agent/message", "/api/app/agent/runs/cancel", "/api/app/agent/runs/queue"].includes(pathname)
-  ) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    pathname.startsWith("/api/app/agent/approvals/") &&
-    (pathname.endsWith("/approve") || pathname.endsWith("/reject") || pathname.endsWith("/revision"))
-  ) {
-    return true;
-  }
-  if (method === "GET" && (pathname === "/api/app/checkpoints" || pathname === "/api/app/recoveries")) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    pathname.startsWith("/api/app/checkpoints/") &&
-    (pathname.endsWith("/preview") || pathname.endsWith("/restore"))
-  ) {
-    return true;
-  }
-  if (
-    method === "POST" &&
-    pathname.startsWith("/api/app/recoveries/") &&
-    (pathname.endsWith("/preview") ||
-      pathname.endsWith("/restore") ||
-      pathname.endsWith("/resolve") ||
-      pathname.endsWith("/incident-bundle"))
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function parseTauriJsonBody(body: BodyInit | null | undefined): { supported: boolean; body?: unknown } {
-  if (body === undefined || body === null) {
-    return { supported: true };
-  }
-  if (typeof body !== "string") {
-    return { supported: false };
-  }
-  try {
-    return { supported: true, body: JSON.parse(body) };
-  } catch {
-    return { supported: false };
-  }
-}
-
-async function requestJsonViaTauri<T>(url: string, method: string, body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
-  const parsed = new URL(url);
-  const path = `${parsed.pathname}${parsed.search}`;
-  let response: TauriAppApiResponse;
-  const request: { method: string; path: string; body?: unknown; timeoutMs: number } = {
-    method: method.toUpperCase(),
-    path,
-    timeoutMs,
-  };
-  if (body !== undefined) {
-    request.body = body;
-  }
-  try {
-    response = await invokeTauriWithAbort<TauriAppApiResponse>("app_api_request", { request }, signal);
-  } catch (cause) {
-    throw new ApiError(
-      `VRCForge desktop IPC bridge could not reach ${runtimeOriginFromUrl(url)}. Falling back is disabled for this internal request.`,
-      0,
-      cause instanceof Error ? cause.message : String(cause),
-    );
-  }
-  if (!response.ok) {
-    const payload = response.body;
-    const detail = typeof payload === "object" && payload ? (payload as { detail?: unknown }).detail : payload;
-    throw new ApiError(typeof detail === "string" ? detail : `HTTP ${response.status}`, response.status, detail);
-  }
-  return response.body as T;
 }
 
 function invokeTauriWithAbort<T>(command: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
