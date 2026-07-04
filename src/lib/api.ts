@@ -2048,21 +2048,36 @@ export async function sendAgentMessage(
   agentName?: string,
   options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
+  const request = {
+    agentName: agentName || "desktop-agent",
+    sessionId: sessionId || undefined,
+    clientTurnId: options.clientTurnId || undefined,
+    message,
+    history: history ?? [],
+    attachments: options.attachments ?? [],
+    projectPath: options.projectPath || undefined,
+    provider: options.provider || undefined,
+    providerLabel: options.providerLabel || undefined,
+    model: options.model || undefined,
+  };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal);
+  }
   return requestJson(`${endpoint}/api/app/agent/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: options.signal,
     body: JSON.stringify({
-      agent_name: agentName || "desktop-agent",
-      session_id: sessionId || null,
-      clientTurnId: options.clientTurnId || undefined,
-      message,
-      history: history ?? [],
-      attachments: options.attachments ?? [],
-      projectPath: options.projectPath || undefined,
-      provider: options.provider || undefined,
-      providerLabel: options.providerLabel || undefined,
-      model: options.model || undefined,
+      agent_name: request.agentName,
+      session_id: request.sessionId || null,
+      clientTurnId: request.clientTurnId,
+      message: request.message,
+      history: request.history,
+      attachments: request.attachments,
+      projectPath: request.projectPath,
+      provider: request.provider,
+      providerLabel: request.providerLabel,
+      model: request.model,
     }),
   });
 }
@@ -2092,6 +2107,9 @@ export async function requestAgentRunCancel(
   endpoint: string,
   payload: { sessionId?: string; turnId?: string; clientTurnId?: string; reason?: string },
 ): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_agent_run_cancel", { request: { ...payload, timeoutMs: 30000 } });
+  }
   return requestJson(`${endpoint}/api/app/agent/runs/cancel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2114,6 +2132,9 @@ export async function recordAgentRunQueued(
     projectRoot?: string;
   },
 ): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("record_agent_run_queued", { request: { ...payload, timeoutMs: 30000 } });
+  }
   return requestJson(`${endpoint}/api/app/agent/runs/queue`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2261,6 +2282,11 @@ export async function approveAgentApproval(
   approvalId: string,
   scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("approve_agent_approval", {
+      request: { approvalId, ...scope, timeoutMs: 180000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2321,6 +2347,11 @@ export async function rejectAgentApproval(
   approvalId: string,
   scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("reject_agent_approval", {
+      request: { approvalId, ...scope, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2334,6 +2365,11 @@ export async function requestApprovalRevision(
   approvalId: string,
   payload: { reason?: string; note?: string; expectedProjectRoot?: string; globalOnly?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_approval_revision", {
+      request: { approvalId, ...payload, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/agent/approvals/${encodeURIComponent(approvalId)}/revision`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2346,6 +2382,11 @@ export async function fetchCheckpoints(
   endpoint: string,
   projectRoot?: string,
 ): Promise<{ ok: boolean; checkpoints: AgentCheckpoint[]; count: number }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_checkpoints", {
+      request: { projectRoot: projectRoot || undefined, timeoutMs: 30000 },
+    });
+  }
   const params = new URLSearchParams();
   if (projectRoot) {
     params.set("projectRoot", projectRoot);
@@ -2355,6 +2396,11 @@ export async function fetchCheckpoints(
 }
 
 export async function previewRestoreCheckpoint(endpoint: string, checkpointId: string): Promise<AgentCheckpointPreview> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("preview_restore_checkpoint", {
+      request: { checkpointId, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/preview`, {
     method: "POST",
   });
@@ -2364,6 +2410,11 @@ export async function requestRestoreCheckpoint(
   endpoint: string,
   checkpointId: string,
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_restore_checkpoint", {
+      request: { checkpointId, timeoutMs: 180000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/checkpoints/${encodeURIComponent(checkpointId)}/restore`, {
     method: "POST",
   });
@@ -2373,6 +2424,15 @@ export async function fetchInterruptedApplyRecoveries(
   endpoint: string,
   options: { projectRoot?: string; includeResolved?: boolean } = {},
 ): Promise<{ ok: boolean; recoveries: InterruptedApplyRecovery[]; count: number }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_interrupted_apply_recoveries", {
+      request: {
+        projectRoot: options.projectRoot || undefined,
+        includeResolved: options.includeResolved || undefined,
+        timeoutMs: 30000,
+      },
+    });
+  }
   const params = new URLSearchParams();
   if (options.projectRoot) params.set("projectRoot", options.projectRoot);
   if (options.includeResolved) params.set("includeResolved", "true");
@@ -2384,6 +2444,11 @@ export async function previewInterruptedApplyRecovery(
   endpoint: string,
   recoveryId: string,
 ): Promise<InterruptedApplyRecoveryPreview> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("preview_interrupted_apply_recovery", {
+      request: { recoveryId, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/preview`, {
     method: "POST",
   });
@@ -2393,6 +2458,11 @@ export async function requestRestoreInterruptedApplyRecovery(
   endpoint: string,
   recoveryId: string,
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_restore_interrupted_apply_recovery", {
+      request: { recoveryId, timeoutMs: 180000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/restore`, {
     method: "POST",
   });
@@ -2403,6 +2473,11 @@ export async function resolveInterruptedApplyRecovery(
   recoveryId: string,
   body: { confirmResolved: boolean; note?: string },
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; result?: unknown; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("resolve_interrupted_apply_recovery", {
+      request: { recoveryId, ...body, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/resolve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2414,6 +2489,11 @@ export async function exportInterruptedApplyIncidentBundle(
   endpoint: string,
   recoveryId: string,
 ): Promise<{ ok: boolean; bundlePath?: string; path?: string; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("export_interrupted_apply_incident_bundle", {
+      request: { recoveryId, timeoutMs: 30000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/recoveries/${encodeURIComponent(recoveryId)}/incident-bundle`, {
     method: "POST",
   });
@@ -2636,6 +2716,9 @@ function isTauriAppApiPath(method: string, pathname: string): boolean {
 
 function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
   const normalizedMethod = method.toUpperCase();
+  if (desktopIpcRouteMigratedToTypedCommand(normalizedMethod, pathname)) {
+    return false;
+  }
   if (normalizedMethod === "GET" && pathname === "/api/health") {
     return true;
   }
@@ -2677,6 +2760,46 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
     "/api/app/workspace",
   ];
   return appPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string): boolean {
+  if (method === "GET" && pathname === "/api/app/runtime/snapshot") {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    ["/api/app/agent/message", "/api/app/agent/runs/cancel", "/api/app/agent/runs/queue"].includes(pathname)
+  ) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    pathname.startsWith("/api/app/agent/approvals/") &&
+    (pathname.endsWith("/approve") || pathname.endsWith("/reject") || pathname.endsWith("/revision"))
+  ) {
+    return true;
+  }
+  if (method === "GET" && (pathname === "/api/app/checkpoints" || pathname === "/api/app/recoveries")) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    pathname.startsWith("/api/app/checkpoints/") &&
+    (pathname.endsWith("/preview") || pathname.endsWith("/restore"))
+  ) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    pathname.startsWith("/api/app/recoveries/") &&
+    (pathname.endsWith("/preview") ||
+      pathname.endsWith("/restore") ||
+      pathname.endsWith("/resolve") ||
+      pathname.endsWith("/incident-bundle"))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function parseTauriJsonBody(body: BodyInit | null | undefined): { supported: boolean; body?: unknown } {

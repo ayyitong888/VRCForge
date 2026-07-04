@@ -23,6 +23,7 @@ use tauri::{
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8757;
 const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
+const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -78,9 +79,149 @@ struct DesktopRuntimeSnapshotRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAgentMessageRequest {
+    message: String,
+    session_id: Option<String>,
+    history: Option<Vec<serde_json::Value>>,
+    agent_name: Option<String>,
+    attachments: Option<Vec<serde_json::Value>>,
+    project_path: Option<String>,
+    provider: Option<String>,
+    provider_label: Option<String>,
+    model: Option<String>,
+    client_turn_id: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAgentRunCancelRequest {
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    client_turn_id: Option<String>,
+    reason: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAgentRunQueuedRequest {
+    session_id: Option<String>,
+    client_turn_id: String,
+    message: Option<String>,
+    attachments: Option<Vec<serde_json::Value>>,
+    provider: Option<String>,
+    provider_label: Option<String>,
+    model: Option<String>,
+    project_path: Option<String>,
+    project_root: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopApprovalScopeRequest {
+    approval_id: String,
+    expected_project_root: Option<String>,
+    global_only: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopApprovalRevisionRequest {
+    approval_id: String,
+    reason: Option<String>,
+    note: Option<String>,
+    expected_project_root: Option<String>,
+    global_only: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCheckpointsRequest {
+    project_root: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCheckpointIdRequest {
+    checkpoint_id: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopRecoveriesRequest {
+    project_root: Option<String>,
+    include_resolved: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopRecoveryIdRequest {
+    recovery_id: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopResolveRecoveryRequest {
+    recovery_id: String,
+    confirm_resolved: bool,
+    note: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
+}
+
+fn backend_json_request(
+    method: &str,
+    path: String,
+    body: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let user_data = user_data_dir()?;
+    let app_session_token = ensure_app_session_token(&user_data)?;
+    ensure_backend_session_verified(&app_session_token)?;
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 600_000));
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(timeout)
+        .redirects(0)
+        .build();
+    let url = format!("{BACKEND_ENDPOINT}{path}");
+    let http_request = agent
+        .request(method, &url)
+        .set("Accept", "application/json")
+        .set("Origin", "tauri://localhost")
+        .set("Authorization", &format!("Bearer {app_session_token}"));
+    let response = if let Some(body) = body {
+        http_request
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+    } else {
+        http_request.call()
+    };
+    let response = app_api_response_from_ureq(response)?;
+    if response.ok {
+        Ok(response.body)
+    } else {
+        Err(response
+            .body
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .unwrap_or("VRCForge runtime request failed.")
+            .to_string())
+    }
 }
 
 #[tauri::command]
@@ -119,22 +260,281 @@ fn desktop_runtime_snapshot(
     } else {
         format!("?{}", query.join("&"))
     };
-    let response = app_api_request(AppApiRequest {
-        method: Some("GET".to_string()),
-        path: format!("/api/app/runtime/snapshot{suffix}"),
-        body: None,
-        timeout_ms: request.timeout_ms,
-    })?;
-    if response.ok {
-        Ok(response.body)
-    } else {
-        Err(response
-            .body
-            .get("detail")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Desktop runtime snapshot failed.")
-            .to_string())
+    backend_json_request(
+        "GET",
+        format!("/api/app/runtime/snapshot{suffix}"),
+        None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn send_agent_message(request: DesktopAgentMessageRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/agent/message".to_string(),
+        Some(serde_json::json!({
+            "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
+            "session_id": request.session_id,
+            "clientTurnId": request.client_turn_id,
+            "message": request.message,
+            "history": request.history.unwrap_or_default(),
+            "attachments": request.attachments.unwrap_or_default(),
+            "projectPath": request.project_path,
+            "provider": request.provider,
+            "providerLabel": request.provider_label,
+            "model": request.model,
+        })),
+        request
+            .timeout_ms
+            .or(Some(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS)),
+    )
+}
+
+#[tauri::command]
+fn request_agent_run_cancel(
+    request: DesktopAgentRunCancelRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/agent/runs/cancel".to_string(),
+        Some(serde_json::json!({
+            "sessionId": request.session_id,
+            "turnId": request.turn_id,
+            "clientTurnId": request.client_turn_id,
+            "reason": request.reason,
+        })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+}
+
+#[tauri::command]
+fn record_agent_run_queued(
+    request: DesktopAgentRunQueuedRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/agent/runs/queue".to_string(),
+        Some(serde_json::json!({
+            "sessionId": request.session_id,
+            "clientTurnId": request.client_turn_id,
+            "message": request.message,
+            "attachments": request.attachments.unwrap_or_default(),
+            "provider": request.provider,
+            "providerLabel": request.provider_label,
+            "model": request.model,
+            "projectPath": request.project_path,
+            "projectRoot": request.project_root,
+        })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+}
+
+fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serde_json::Value {
+    serde_json::json!({
+        "expectedProjectRoot": request.expected_project_root,
+        "globalOnly": request.global_only,
+    })
+}
+
+#[tauri::command]
+fn approve_agent_approval(
+    request: DesktopApprovalScopeRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/approvals/{}/approve",
+            percent_encode_query_component(&request.approval_id)
+        ),
+        Some(approval_scope_body(&request)),
+        request.timeout_ms.or(Some(180_000)),
+    )
+}
+
+#[tauri::command]
+fn reject_agent_approval(
+    request: DesktopApprovalScopeRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/approvals/{}/reject",
+            percent_encode_query_component(&request.approval_id)
+        ),
+        Some(approval_scope_body(&request)),
+        request.timeout_ms.or(Some(60_000)),
+    )
+}
+
+#[tauri::command]
+fn request_approval_revision(
+    request: DesktopApprovalRevisionRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/approvals/{}/revision",
+            percent_encode_query_component(&request.approval_id)
+        ),
+        Some(serde_json::json!({
+            "reason": request.reason,
+            "note": request.note,
+            "expectedProjectRoot": request.expected_project_root,
+            "globalOnly": request.global_only,
+        })),
+        request.timeout_ms.or(Some(60_000)),
+    )
+}
+
+#[tauri::command]
+fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    if let Some(value) = request
+        .project_root
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "projectRoot={}",
+            percent_encode_query_component(value)
+        ));
     }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/checkpoints{suffix}"),
+        None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn preview_restore_checkpoint(
+    request: DesktopCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/checkpoints/{}/preview",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn request_restore_checkpoint(
+    request: DesktopCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/checkpoints/{}/restore",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        None,
+        request.timeout_ms.or(Some(180_000)),
+    )
+}
+
+#[tauri::command]
+fn fetch_interrupted_apply_recoveries(
+    request: DesktopRecoveriesRequest,
+) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    if let Some(value) = request
+        .project_root
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "projectRoot={}",
+            percent_encode_query_component(value)
+        ));
+    }
+    if request.include_resolved.unwrap_or(false) {
+        query.push("includeResolved=true".to_string());
+    }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/recoveries{suffix}"),
+        None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn preview_interrupted_apply_recovery(
+    request: DesktopRecoveryIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/recoveries/{}/preview",
+            percent_encode_query_component(&request.recovery_id)
+        ),
+        None,
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn request_restore_interrupted_apply_recovery(
+    request: DesktopRecoveryIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/recoveries/{}/restore",
+            percent_encode_query_component(&request.recovery_id)
+        ),
+        None,
+        request.timeout_ms.or(Some(180_000)),
+    )
+}
+
+#[tauri::command]
+fn resolve_interrupted_apply_recovery(
+    request: DesktopResolveRecoveryRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/recoveries/{}/resolve",
+            percent_encode_query_component(&request.recovery_id)
+        ),
+        Some(serde_json::json!({
+            "confirmResolved": request.confirm_resolved,
+            "note": request.note,
+        })),
+        request.timeout_ms,
+    )
+}
+
+#[tauri::command]
+fn export_interrupted_apply_incident_bundle(
+    request: DesktopRecoveryIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/recoveries/{}/incident-bundle",
+            percent_encode_query_component(&request.recovery_id)
+        ),
+        None,
+        request.timeout_ms,
+    )
 }
 
 #[tauri::command]
@@ -794,6 +1194,10 @@ fn normalize_app_api_path(method: &str, path: &str) -> Result<String, String> {
 
 fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
     let normalized_method = method.to_ascii_uppercase();
+    let route_path = route.split('?').next().unwrap_or(route);
+    if desktop_ipc_route_migrated_to_typed_command(&normalized_method, route_path) {
+        return false;
+    }
     if normalized_method == "GET" && route == "/api/health" {
         return true;
     }
@@ -837,6 +1241,47 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
     app_prefixes
         .iter()
         .any(|prefix| route == *prefix || route.starts_with(&format!("{prefix}/")))
+}
+
+fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -> bool {
+    if method == "GET" && route_path == "/api/app/runtime/snapshot" {
+        return true;
+    }
+    if method == "POST"
+        && matches!(
+            route_path,
+            "/api/app/agent/message" | "/api/app/agent/runs/cancel" | "/api/app/agent/runs/queue"
+        )
+    {
+        return true;
+    }
+    if method == "POST"
+        && route_path.starts_with("/api/app/agent/approvals/")
+        && (route_path.ends_with("/approve")
+            || route_path.ends_with("/reject")
+            || route_path.ends_with("/revision"))
+    {
+        return true;
+    }
+    if method == "GET" && matches!(route_path, "/api/app/checkpoints" | "/api/app/recoveries") {
+        return true;
+    }
+    if method == "POST"
+        && route_path.starts_with("/api/app/checkpoints/")
+        && (route_path.ends_with("/preview") || route_path.ends_with("/restore"))
+    {
+        return true;
+    }
+    if method == "POST"
+        && route_path.starts_with("/api/app/recoveries/")
+        && (route_path.ends_with("/preview")
+            || route_path.ends_with("/restore")
+            || route_path.ends_with("/resolve")
+            || route_path.ends_with("/incident-bundle"))
+    {
+        return true;
+    }
+    false
 }
 
 fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
@@ -1044,8 +1489,22 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_api_request,
+            approve_agent_approval,
             backend_endpoint,
             desktop_runtime_snapshot,
+            export_interrupted_apply_incident_bundle,
+            fetch_checkpoints,
+            fetch_interrupted_apply_recoveries,
+            preview_interrupted_apply_recovery,
+            preview_restore_checkpoint,
+            record_agent_run_queued,
+            reject_agent_approval,
+            request_agent_run_cancel,
+            request_approval_revision,
+            request_restore_checkpoint,
+            request_restore_interrupted_apply_recovery,
+            resolve_interrupted_apply_recovery,
+            send_agent_message,
             start_backend,
             stop_backend,
             ensure_agent_notes_file,
@@ -1077,7 +1536,7 @@ mod tests {
         extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
         percent_encode_query_component, prepare_runtime_files, sanitize_backend_event,
         try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open,
+        validate_project_folder_to_open, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -1222,6 +1681,23 @@ mod tests {
         assert!(normalize_app_api_path("GET", "/api/agent/manifest").is_err());
         assert!(normalize_app_api_path("GET", "/mcp").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/../health").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/runtime/snapshot?sessionId=s1").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/message").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/runs/cancel").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/runs/queue").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/approve").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/reject").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/approvals/a1/revision").is_err());
+        assert!(
+            normalize_app_api_path("GET", "/api/app/checkpoints?projectRoot=D%3A%5CProj").is_err()
+        );
+        assert!(normalize_app_api_path("POST", "/api/app/checkpoints/c1/preview").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/checkpoints/c1/restore").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/recoveries?includeResolved=true").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/preview").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/restore").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/resolve").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/recoveries/r1/incident-bundle").is_err());
         assert!(normalize_app_api_path("POST", "/api/blendshapes/apply").is_err());
         assert!(normalize_app_api_path("POST", "/api/clothes/apply-fx").is_err());
         assert!(normalize_app_api_path("POST", "/api/shader/apply").is_err());
@@ -1257,6 +1733,11 @@ mod tests {
         }
 
         assert!(sanitize_backend_event(serde_json::json!({"payload": {}})).is_none());
+    }
+
+    #[test]
+    fn agent_message_timeout_keeps_long_turns_usable() {
+        assert!(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS >= 600_000);
     }
 
     #[test]
