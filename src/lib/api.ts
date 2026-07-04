@@ -1894,6 +1894,11 @@ export async function fetchOptimizationPlan(
     maxErrors?: number;
   },
 ): Promise<OptimizationPlannerReport> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OptimizationPlannerReport>("fetch_optimization_plan", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<OptimizationPlannerReport>(`${endpoint}/api/app/optimization/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1952,6 +1957,11 @@ export async function fetchAvatars(
   endpoint: string,
   request: { projectPath?: string } = {},
 ): Promise<AvatarListResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AvatarListResult>("fetch_avatars", {
+      request: { body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<AvatarListResult>(`${endpoint}/api/app/avatars`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1974,6 +1984,11 @@ export async function planAvatarEncryption(
     confirmCreatorOwnedAssets?: boolean;
   },
 ): Promise<AvatarEncryptionPlanResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AvatarEncryptionPlanResult>("plan_avatar_encryption", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<AvatarEncryptionPlanResult>(`${endpoint}/api/avatar-encryption/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1998,6 +2013,11 @@ export async function requestAvatarEncryptionApply(
     saveAssets?: boolean;
   },
 ): Promise<AvatarEncryptionApplyRequestResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AvatarEncryptionApplyRequestResult>("request_avatar_encryption_apply", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<AvatarEncryptionApplyRequestResult>(`${endpoint}/api/avatar-encryption/apply-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2016,6 +2036,11 @@ export async function requestPackageInstall(
     includePrerelease?: boolean;
   },
 ): Promise<PackageInstallRequestResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<PackageInstallRequestResult>("request_package_install", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<PackageInstallRequestResult>(`${endpoint}/api/app/package-install/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2037,6 +2062,11 @@ export async function requestOptimizationApply(
     includePrerelease?: boolean;
   },
 ): Promise<OptimizationApplyRequestResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OptimizationApplyRequestResult>("request_optimization_apply", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<OptimizationApplyRequestResult>(`${endpoint}/api/app/optimization/apply-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2056,6 +2086,11 @@ export async function planOutfitImport(
     maxEntries?: number;
   },
 ): Promise<OutfitImportPlanResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OutfitImportPlanResult>("plan_outfit_import", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<OutfitImportPlanResult>(`${endpoint}/api/app/outfit-imports/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2075,6 +2110,11 @@ export async function requestOutfitImport(
     maxEntries?: number;
   },
 ): Promise<{ ok: boolean; approval?: AgentApproval; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_outfit_import", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/outfit-imports/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2877,9 +2917,6 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
   if (pathname === "/api/projects/refresh") {
     return normalizedMethod === "POST";
   }
-  if (pathname === "/api/avatar-encryption/plan" || pathname === "/api/avatar-encryption/apply-request") {
-    return normalizedMethod === "GET" || normalizedMethod === "POST";
-  }
   const appPrefixes = [
     "/api/app/adjustment-checkpoints",
     "/api/app/agent",
@@ -2912,6 +2949,20 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
 }
 
 function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string): boolean {
+  if (
+    [
+      "/api/app/avatars",
+      "/api/app/optimization/plan",
+      "/api/app/optimization/apply-request",
+      "/api/app/outfit-imports/plan",
+      "/api/app/outfit-imports/request",
+      "/api/app/package-install/request",
+      "/api/avatar-encryption/plan",
+      "/api/avatar-encryption/apply-request",
+    ].includes(pathname)
+  ) {
+    return true;
+  }
   if (method === "GET" && ["/api/health", "/api/app/bootstrap", "/api/app/workspace/diff", "/api/app/doctor", "/api/app/diagnostics", "/api/app/projects/prefs"].includes(pathname)) {
     return true;
   }

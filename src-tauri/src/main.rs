@@ -341,6 +341,13 @@ struct DesktopAdjustmentCheckpointIdRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopJsonBodyRequest {
+    body: serde_json::Value,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -378,12 +385,7 @@ fn backend_json_request(
     if response.ok {
         Ok(response.body)
     } else {
-        Err(response
-            .body
-            .get("detail")
-            .and_then(|value| value.as_str())
-            .unwrap_or("VRCForge runtime request failed.")
-            .to_string())
+        Err(webview_error_message(&response.body))
     }
 }
 
@@ -427,11 +429,36 @@ fn sanitize_text_for_webview(value: &str) -> String {
         || lower.contains("apikey")
         || lower.contains("configpath")
         || lower.contains("backuppath")
+        || (lower.contains("bearer ") && !is_env_placeholder_template(value))
         || (lower.contains("authorization") && !is_env_placeholder_template(value))
     {
         return "[redacted]".to_string();
     }
     value.to_string()
+}
+
+fn webview_error_message(body: &serde_json::Value) -> String {
+    let Some(detail) = body.get("detail") else {
+        return "VRCForge runtime request failed.".to_string();
+    };
+    match detail {
+        serde_json::Value::String(text) => sanitize_text_for_webview(text),
+        serde_json::Value::Object(_) => {
+            let sanitized = sanitize_webview_response(detail.clone());
+            for key in ["error", "message", "detail", "reason"] {
+                if let Some(text) = sanitized.get(key).and_then(|value| value.as_str()) {
+                    return sanitize_text_for_webview(text);
+                }
+            }
+            if let Some(status) = sanitized.get("status") {
+                if status.is_string() || status.is_number() || status.is_boolean() {
+                    return format!("VRCForge runtime request failed: {status}");
+                }
+            }
+            "VRCForge runtime request failed.".to_string()
+        }
+        _ => "VRCForge runtime request failed.".to_string(),
+    }
 }
 
 fn is_env_placeholder_template(value: &str) -> bool {
@@ -1241,6 +1268,64 @@ fn preview_adjustment_checkpoint(
     .map(sanitize_webview_response)
 }
 
+fn post_json_body_command(
+    path: &str,
+    request: DesktopJsonBodyRequest,
+    default_timeout_ms: u64,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        path.to_string(),
+        Some(request.body),
+        request.timeout_ms.or(Some(default_timeout_ms)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/avatars", request, 60_000)
+}
+
+#[tauri::command]
+fn fetch_optimization_plan(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/optimization/plan", request, 120_000)
+}
+
+#[tauri::command]
+fn request_optimization_apply(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/optimization/apply-request", request, 120_000)
+}
+
+#[tauri::command]
+fn plan_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/outfit-imports/plan", request, 120_000)
+}
+
+#[tauri::command]
+fn request_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/outfit-imports/request", request, 120_000)
+}
+
+#[tauri::command]
+fn request_package_install(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/package-install/request", request, 120_000)
+}
+
+#[tauri::command]
+fn plan_avatar_encryption(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/avatar-encryption/plan", request, 120_000)
+}
+
+#[tauri::command]
+fn request_avatar_encryption_apply(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/avatar-encryption/apply-request", request, 120_000)
+}
+
 #[tauri::command]
 fn fetch_external_agent_connectors(
     request: DesktopExternalAgentConnectorsRequest,
@@ -1982,9 +2067,6 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
     if route == "/api/projects/refresh" {
         return normalized_method == "POST";
     }
-    if route == "/api/avatar-encryption/plan" || route == "/api/avatar-encryption/apply-request" {
-        return matches!(normalized_method.as_str(), "POST" | "GET");
-    }
     let app_prefixes = [
         "/api/app/adjustment-checkpoints",
         "/api/app/agent",
@@ -2019,6 +2101,19 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
 }
 
 fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -> bool {
+    if matches!(
+        route_path,
+        "/api/app/avatars"
+            | "/api/app/optimization/plan"
+            | "/api/app/optimization/apply-request"
+            | "/api/app/outfit-imports/plan"
+            | "/api/app/outfit-imports/request"
+            | "/api/app/package-install/request"
+            | "/api/avatar-encryption/plan"
+            | "/api/avatar-encryption/apply-request"
+    ) {
+        return true;
+    }
     if method == "GET"
         && matches!(
             route_path,
@@ -2334,9 +2429,11 @@ fn main() {
             fetch_adjustment_checkpoints,
             fetch_app_bootstrap,
             fetch_app_health,
+            fetch_avatars,
             fetch_diagnostics,
             fetch_doctor,
             fetch_external_agent_connectors,
+            fetch_optimization_plan,
             fetch_provider_models,
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
@@ -2344,6 +2441,8 @@ fn main() {
             fetch_workspace_diff,
             install_external_agent_connector,
             overwrite_adjustment_checkpoint,
+            plan_avatar_encryption,
+            plan_outfit_import,
             preview_interrupted_apply_recovery,
             preview_adjustment_checkpoint,
             preview_restore_checkpoint,
@@ -2352,8 +2451,12 @@ fn main() {
             refresh_projects,
             refresh_unity_readiness,
             repair_unity_mcp_bridge,
+            request_avatar_encryption_apply,
             request_agent_run_cancel,
             request_approval_revision,
+            request_optimization_apply,
+            request_outfit_import,
+            request_package_install,
             request_restore_checkpoint,
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
@@ -2399,9 +2502,9 @@ mod tests {
         app_session_challenge_signature, app_session_challenge_signature_matches,
         extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
         percent_encode_query_component, prepare_runtime_files, provider_config_body,
-        sanitize_backend_event, sanitize_webview_response, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_project_folder_to_open,
-        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
+        try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open, webview_error_message, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -2528,11 +2631,6 @@ mod tests {
             normalize_app_api_path("GET", "/api/app/skills").as_deref(),
             Ok("/api/app/skills"),
         );
-        assert_eq!(
-            normalize_app_api_path("POST", "/api/avatar-encryption/plan").as_deref(),
-            Ok("/api/avatar-encryption/plan"),
-        );
-
         assert!(normalize_app_api_path("GET", "/api/health").is_err());
         assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").is_err());
@@ -2565,6 +2663,19 @@ mod tests {
         assert!(
             normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/preview").is_err()
         );
+        assert!(normalize_app_api_path("POST", "/api/app/avatars").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/optimization/plan").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/optimization/apply-request").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/outfit-imports/plan").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/outfit-imports/request").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/package-install/request").is_err());
+        assert!(normalize_app_api_path("POST", "/api/avatar-encryption/plan").is_err());
+        assert!(normalize_app_api_path("POST", "/api/avatar-encryption/apply-request").is_err());
+        assert!(normalize_app_api_path("GET", "/api/avatar-encryption/plan").is_err());
+        assert!(normalize_app_api_path("GET", "/api/avatar-encryption/apply-request").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/optimization/plan").is_err());
+        assert!(normalize_app_api_path("PUT", "/api/app/outfit-imports/request").is_err());
+        assert!(normalize_app_api_path("DELETE", "/api/app/package-install/request").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());
@@ -2699,6 +2810,43 @@ mod tests {
         assert!(text.contains("apiKeyPresent"));
         assert!(text.contains("CUSTOM_VRCFORGE_TOKEN"));
         assert!(text.contains("Bearer"));
+    }
+
+    #[test]
+    fn webview_text_sanitizer_redacts_error_details() {
+        assert_eq!(
+            sanitize_text_for_webview(
+                "request failed with Authorization: Bearer real-secret and api_key=real-secret"
+            ),
+            "[redacted]"
+        );
+        assert_eq!(
+            sanitize_text_for_webview("request failed with Bearer real-secret"),
+            "[redacted]"
+        );
+        assert_eq!(
+            sanitize_text_for_webview(
+                "{\"headers\":{\"Authorization\":\"Bearer ${CUSTOM_VRCFORGE_TOKEN}\"}}"
+            ),
+            "{\"headers\":{\"Authorization\":\"Bearer ${CUSTOM_VRCFORGE_TOKEN}\"}}"
+        );
+        assert_eq!(
+            webview_error_message(&serde_json::json!({
+                "detail": {
+                    "message": "Unity MCP bridge is offline",
+                    "configPath": "Q:/private/AppData/Local/VRCForge/config.json"
+                }
+            })),
+            "Unity MCP bridge is offline"
+        );
+        assert_eq!(
+            webview_error_message(&serde_json::json!({
+                "detail": {
+                    "message": "request failed with Bearer real-secret"
+                }
+            })),
+            "[redacted]"
+        );
     }
 
     #[test]
