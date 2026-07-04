@@ -315,6 +315,32 @@ struct DesktopProjectIndexScanRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAdjustmentCheckpointsRequest {
+    kind: Option<String>,
+    project_root: Option<String>,
+    avatar_path: Option<String>,
+    include_deleted: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAdjustmentCheckpointBodyRequest {
+    body: serde_json::Value,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAdjustmentCheckpointIdRequest {
+    checkpoint_id: String,
+    body: Option<serde_json::Value>,
+    hard_delete: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -1052,6 +1078,165 @@ fn scan_project_index(
             "maxFiles": request.max_files,
         })),
         request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_adjustment_checkpoints(
+    request: DesktopAdjustmentCheckpointsRequest,
+) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    if let Some(value) = request.kind.as_deref().filter(|value| !value.is_empty()) {
+        query.push(format!("kind={}", percent_encode_query_component(value)));
+    }
+    if let Some(value) = request
+        .project_root
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "projectRoot={}",
+            percent_encode_query_component(value)
+        ));
+    }
+    if let Some(value) = request
+        .avatar_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        query.push(format!(
+            "avatarPath={}",
+            percent_encode_query_component(value)
+        ));
+    }
+    if request.include_deleted.unwrap_or(false) {
+        query.push("includeDeleted=true".to_string());
+    }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/adjustment-checkpoints{suffix}"),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn create_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointBodyRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/adjustment-checkpoints".to_string(),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn update_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "PUT",
+        format!(
+            "/api/app/adjustment-checkpoints/{}",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn delete_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    let suffix = if request.hard_delete.unwrap_or(false) {
+        "?hardDelete=true"
+    } else {
+        ""
+    };
+    backend_json_request(
+        "DELETE",
+        format!(
+            "/api/app/adjustment-checkpoints/{}{suffix}",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        None,
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn overwrite_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/adjustment-checkpoints/{}/overwrite",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn select_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/adjustment-checkpoints/{}/select",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        Some(request.body.unwrap_or_else(|| serde_json::json!({}))),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn apply_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/adjustment-checkpoints/{}/apply",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        None,
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn preview_adjustment_checkpoint(
+    request: DesktopAdjustmentCheckpointIdRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/adjustment-checkpoints/{}/preview",
+            percent_encode_query_component(&request.checkpoint_id)
+        ),
+        None,
+        request.timeout_ms.or(Some(60_000)),
     )
     .map(sanitize_webview_response)
 }
@@ -1861,6 +2046,11 @@ fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -
     {
         return true;
     }
+    if route_path == "/api/app/adjustment-checkpoints"
+        || route_path.starts_with("/api/app/adjustment-checkpoints/")
+    {
+        return true;
+    }
     if route_path == "/api/config" && matches!(method, "GET" | "POST") {
         return true;
     }
@@ -2133,11 +2323,15 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_api_request,
+            apply_adjustment_checkpoint,
             approve_agent_approval,
             backend_endpoint,
+            create_adjustment_checkpoint,
+            delete_adjustment_checkpoint,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
             export_support_bundle,
+            fetch_adjustment_checkpoints,
             fetch_app_bootstrap,
             fetch_app_health,
             fetch_diagnostics,
@@ -2149,7 +2343,9 @@ fn main() {
             fetch_project_prefs,
             fetch_workspace_diff,
             install_external_agent_connector,
+            overwrite_adjustment_checkpoint,
             preview_interrupted_apply_recovery,
+            preview_adjustment_checkpoint,
             preview_restore_checkpoint,
             record_agent_run_queued,
             reject_agent_approval,
@@ -2161,9 +2357,11 @@ fn main() {
             request_restore_checkpoint,
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
+            select_adjustment_checkpoint,
             send_agent_message,
             test_provider_capability,
             uninstall_external_agent_connector,
+            update_adjustment_checkpoint,
             update_api_config,
             update_diagnostics,
             update_external_agent_gateway,
@@ -2349,6 +2547,24 @@ mod tests {
         assert!(normalize_app_api_path("GET", "/api/app/projects/prefs").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/projects/prefs").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/project-index/scan").is_err());
+        assert!(
+            normalize_app_api_path("GET", "/api/app/adjustment-checkpoints?kind=face").is_err()
+        );
+        assert!(normalize_app_api_path("POST", "/api/app/adjustment-checkpoints").is_err());
+        assert!(normalize_app_api_path("PUT", "/api/app/adjustment-checkpoints/a1").is_err());
+        assert!(normalize_app_api_path("DELETE", "/api/app/adjustment-checkpoints/a1").is_err());
+        assert!(
+            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/overwrite").is_err()
+        );
+        assert!(
+            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/select").is_err()
+        );
+        assert!(
+            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/apply").is_err()
+        );
+        assert!(
+            normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/preview").is_err()
+        );
         assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());

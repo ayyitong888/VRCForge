@@ -2615,6 +2615,11 @@ export async function fetchAdjustmentCheckpoints(
   endpoint: string,
   options: { kind?: "face" | "shader"; projectRoot?: string; avatarPath?: string; includeDeleted?: boolean } = {},
 ): Promise<{ ok: boolean; checkpoints: AdjustmentCheckpoint[]; count: number }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_adjustment_checkpoints", {
+      request: { ...options, timeoutMs: 30000 },
+    });
+  }
   const params = new URLSearchParams();
   if (options.kind) params.set("kind", options.kind);
   if (options.projectRoot) params.set("projectRoot", options.projectRoot);
@@ -2628,6 +2633,11 @@ export async function createAdjustmentCheckpoint(
   endpoint: string,
   body: Partial<AdjustmentCheckpoint> & { kind: "face" | "shader"; overwrite?: boolean },
 ): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; baseCheckpoint?: AgentCheckpoint }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("create_adjustment_checkpoint", {
+      request: { body, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2640,6 +2650,11 @@ export async function updateAdjustmentCheckpoint(
   checkpointId: string,
   body: Partial<AdjustmentCheckpoint>,
 ): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("update_adjustment_checkpoint", {
+      request: { checkpointId, body, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -2652,6 +2667,11 @@ export async function deleteAdjustmentCheckpoint(
   checkpointId: string,
   hardDelete = false,
 ): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; hardDelete: boolean }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("delete_adjustment_checkpoint", {
+      request: { checkpointId, hardDelete, timeoutMs: 60000 },
+    });
+  }
   const suffix = hardDelete ? "?hardDelete=true" : "";
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}${suffix}`, {
     method: "DELETE",
@@ -2663,6 +2683,11 @@ export async function overwriteAdjustmentCheckpoint(
   checkpointId: string,
   body: Partial<AdjustmentCheckpoint> = {},
 ): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; baseCheckpoint?: AgentCheckpoint }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("overwrite_adjustment_checkpoint", {
+      request: { checkpointId, body, timeoutMs: 120000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/overwrite`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2675,6 +2700,11 @@ export async function selectAdjustmentCheckpoint(
   checkpointId: string,
   body: { slot?: "A" | "B" | "current"; compareGroup?: string } = {},
 ): Promise<{ ok: boolean; checkpoint: AdjustmentCheckpoint; selection: Record<string, unknown> }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("select_adjustment_checkpoint", {
+      request: { checkpointId, body, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/select`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2686,6 +2716,11 @@ export async function applyAdjustmentCheckpoint(
   endpoint: string,
   checkpointId: string,
 ): Promise<{ ok: boolean; status?: string; approval?: AgentApproval; error?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("apply_adjustment_checkpoint", {
+      request: { checkpointId, timeoutMs: 120000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/apply`, {
     method: "POST",
   });
@@ -2695,6 +2730,11 @@ export async function previewAdjustmentCheckpoint(
   endpoint: string,
   checkpointId: string,
 ): Promise<AgentCheckpointPreview & { adjustmentCheckpoint?: AdjustmentCheckpoint }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("preview_adjustment_checkpoint", {
+      request: { checkpointId, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/adjustment-checkpoints/${encodeURIComponent(checkpointId)}/preview`, {
     method: "POST",
   });
@@ -2887,6 +2927,9 @@ function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string)
       "/api/app/project-index/scan",
     ].includes(pathname)
   ) {
+    return true;
+  }
+  if (pathname === "/api/app/adjustment-checkpoints" || pathname.startsWith("/api/app/adjustment-checkpoints/")) {
     return true;
   }
   if (pathname === "/api/config" && (method === "GET" || method === "POST")) {
