@@ -369,6 +369,20 @@ struct DesktopAgentListRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopChatListRequest {
+    project_paths: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopOptimizationProofsRequest {
+    limit: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -1690,6 +1704,77 @@ fn compact_agent_history(request: DesktopJsonBodyRequest) -> Result<serde_json::
 }
 
 #[tauri::command]
+fn fetch_agent_notes() -> Result<serde_json::Value, String> {
+    backend_json_request("GET", "/api/app/agent-notes".to_string(), None, None)
+        .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn save_agent_notes(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/agent-notes", request, 60_000)
+}
+
+#[tauri::command]
+fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    for project_path in request.project_paths.unwrap_or_default() {
+        if !project_path.trim().is_empty() {
+            query.push(format!(
+                "projectPath={}",
+                percent_encode_query_component(project_path.trim())
+            ));
+        }
+    }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/chats{suffix}"),
+        None,
+        request.timeout_ms,
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn save_chats(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/chats", request, 60_000)
+}
+
+#[tauri::command]
+fn fetch_optimization_proofs(
+    request: DesktopOptimizationProofsRequest,
+) -> Result<serde_json::Value, String> {
+    let limit = request.limit.unwrap_or(8);
+    backend_json_request(
+        "GET",
+        format!("/api/app/optimization/proofs?limit={limit}"),
+        None,
+        request.timeout_ms,
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_optimization_proof(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "GET",
+        format!(
+            "/api/app/optimization/proofs/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        None,
+        request.timeout_ms,
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
 fn fetch_external_agent_connectors(
     request: DesktopExternalAgentConnectorsRequest,
 ) -> Result<serde_json::Value, String> {
@@ -2512,6 +2597,25 @@ fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -
         || route_path.starts_with("/api/app/path-to-skill/")
         || route_path == "/api/app/skills"
         || route_path.starts_with("/api/app/skills/")
+        || route_path == "/api/app/sub-agents"
+        || route_path.starts_with("/api/app/sub-agents/")
+        || route_path == "/api/app/agent/runs"
+        || route_path.starts_with("/api/app/agent/runs/")
+        || route_path == "/api/app/agent/approvals"
+        || route_path.starts_with("/api/app/agent/approvals/")
+        || route_path == "/api/app/agent/desktop-actions"
+        || route_path.starts_with("/api/app/agent/desktop-actions/")
+        || route_path == "/api/app/agent/goals"
+        || route_path.starts_with("/api/app/agent/goals/")
+        || route_path == "/api/app/agent/memory"
+        || route_path.starts_with("/api/app/agent/memory/")
+        || route_path == "/api/app/agent/compact"
+        || route_path == "/api/app/agent-notes"
+        || route_path.starts_with("/api/app/agent-notes/")
+        || route_path == "/api/app/chats"
+        || route_path.starts_with("/api/app/chats/")
+        || route_path == "/api/app/optimization/proofs"
+        || route_path.starts_with("/api/app/optimization/proofs/")
     {
         return true;
     }
@@ -2791,22 +2895,38 @@ fn main() {
             approve_agent_approval,
             backend_endpoint,
             block_skill_package,
+            cancel_sub_agent,
             check_skills,
+            clear_agent_memory,
+            compact_agent_history,
             create_adjustment_checkpoint,
+            create_agent_goal,
+            create_agent_memory,
             create_skill,
+            create_sub_agent,
             delete_adjustment_checkpoint,
+            delete_agent_memory,
             delete_skill,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
             export_skill_package,
             export_support_bundle,
+            fetch_agent_approvals,
+            fetch_agent_desktop_actions,
+            fetch_agent_goals,
+            fetch_agent_memory,
+            fetch_agent_notes,
+            fetch_agent_runs,
             fetch_adjustment_checkpoints,
             fetch_app_bootstrap,
             fetch_app_health,
             fetch_avatars,
+            fetch_chats,
             fetch_diagnostics,
             fetch_doctor,
             fetch_external_agent_connectors,
+            fetch_optimization_proof,
+            fetch_optimization_proofs,
             fetch_optimization_plan,
             fetch_provider_models,
             fetch_checkpoints,
@@ -2814,6 +2934,8 @@ fn main() {
             fetch_project_prefs,
             fetch_skill_packages,
             fetch_skills,
+            fetch_sub_agent,
+            fetch_sub_agents,
             fetch_workspace_diff,
             import_skill_package,
             install_external_agent_connector,
@@ -2831,6 +2953,7 @@ fn main() {
             refresh_unity_readiness,
             repair_unity_mcp_bridge,
             request_avatar_encryption_apply,
+            request_agent_desktop_action,
             request_agent_run_cancel,
             request_approval_revision,
             request_optimization_apply,
@@ -2839,7 +2962,10 @@ fn main() {
             request_restore_checkpoint,
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
+            retry_sub_agent,
             revoke_skill_package_signer,
+            save_agent_notes,
+            save_chats,
             select_adjustment_checkpoint,
             set_skill_package_enabled,
             set_skill_package_safe_mode,
@@ -2849,6 +2975,7 @@ fn main() {
             uninstall_skill_package,
             uninstall_external_agent_connector,
             update_adjustment_checkpoint,
+            update_agent_goal,
             update_api_config,
             update_diagnostics,
             update_external_agent_gateway,
@@ -3067,8 +3194,31 @@ mod tests {
         assert!(normalize_app_api_path("GET", "/api/avatar-encryption/plan").is_err());
         assert!(normalize_app_api_path("GET", "/api/avatar-encryption/apply-request").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/optimization/plan").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/optimization/proofs").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/optimization/proofs/r1").is_err());
         assert!(normalize_app_api_path("PUT", "/api/app/outfit-imports/request").is_err());
         assert!(normalize_app_api_path("DELETE", "/api/app/package-install/request").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/sub-agents").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/sub-agents").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/sub-agents/t1").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/sub-agents/t1/cancel").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/sub-agents/t1/retry").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent/runs").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent/approvals").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent/desktop-actions").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/desktop-actions").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent/goals").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/goals").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/goals/g1").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent/memory").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/memory").is_err());
+        assert!(normalize_app_api_path("DELETE", "/api/app/agent/memory/m1").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/memory/clear").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent/compact").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/agent-notes").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/agent-notes").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/chats?projectPath=D%3A%5CProj").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/chats").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());

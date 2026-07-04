@@ -1470,10 +1470,18 @@ export async function writePathToSkill(
 }
 
 export async function fetchAgentNotes(endpoint: string): Promise<AgentNotes> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentNotes>("fetch_agent_notes", {});
+  }
   return requestJson<AgentNotes>(`${endpoint}/api/app/agent-notes`);
 }
 
 export async function saveAgentNotes(endpoint: string, content: string): Promise<{ ok: boolean; path: string; bytes: number }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("save_agent_notes", {
+      request: { body: { content }, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/agent-notes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1498,6 +1506,11 @@ export async function fetchChats<T>(endpoint: string, projectPaths: string[] = [
     }
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<StoredChats<T>>("fetch_chats", {
+      request: { projectPaths, timeoutMs: 60000 },
+    });
+  }
   return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats${suffix}`);
 }
 
@@ -1505,6 +1518,11 @@ export async function saveChats<T>(
   endpoint: string,
   chats: T[],
 ): Promise<{ ok: boolean; path: string; count: number; appCount?: number; projectPaths?: Array<Record<string, unknown>> }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("save_chats", {
+      request: { body: { chats }, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/chats`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2004,10 +2022,20 @@ export type OptimizationProofDetail = {
 };
 
 export async function fetchOptimizationProofs(endpoint: string, limit = 8): Promise<OptimizationProofList> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OptimizationProofList>("fetch_optimization_proofs", {
+      request: { limit, timeoutMs: 30000 },
+    });
+  }
   return requestJson<OptimizationProofList>(`${endpoint}/api/app/optimization/proofs?limit=${encodeURIComponent(String(limit))}`);
 }
 
 export async function fetchOptimizationProof(endpoint: string, runId: string): Promise<OptimizationProofDetail> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OptimizationProofDetail>("fetch_optimization_proof", {
+      request: { id: runId, body: {}, timeoutMs: 30000 },
+    });
+  }
   return requestJson<OptimizationProofDetail>(`${endpoint}/api/app/optimization/proofs/${encodeURIComponent(runId)}`);
 }
 
