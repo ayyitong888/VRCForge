@@ -704,6 +704,11 @@ export function setAppSessionToken(token: string) {
 }
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AppBootstrap>("fetch_app_bootstrap", {
+      request: { refreshProjects: Boolean(options.refreshProjects), timeoutMs: 30000 },
+    });
+  }
   const url = new URL(`${endpoint}/api/app/bootstrap`);
   if (options.refreshProjects) {
     url.searchParams.set("refreshProjects", "true");
@@ -712,14 +717,29 @@ export async function fetchBootstrap(endpoint: string, options: { refreshProject
 }
 
 export async function fetchAppHealth(endpoint: string): Promise<AppHealth> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AppHealth>("fetch_app_health", {
+      request: { timeoutMs: 20000 },
+    });
+  }
   return requestJson<AppHealth>(`${endpoint}/api/health`, { timeoutMs: 20000 });
 }
 
 export async function refreshProjects(endpoint: string): Promise<ProjectSnapshot> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProjectSnapshot>("refresh_projects", {
+      request: { timeoutMs: 30000 },
+    });
+  }
   return requestJson<ProjectSnapshot>(`${endpoint}/api/projects/refresh`, { method: "POST", timeoutMs: 30000 });
 }
 
 export async function refreshUnityReadiness(endpoint: string): Promise<UnityReadinessRefresh> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<UnityReadinessRefresh>("refresh_unity_readiness", {
+      request: { timeoutMs: 20000 },
+    });
+  }
   return requestJson<UnityReadinessRefresh>(`${endpoint}/api/app/unity/readiness/refresh`, { method: "POST", timeoutMs: 20000 });
 }
 
@@ -728,6 +748,11 @@ export async function fetchAppSession(endpoint: string): Promise<AppSessionHands
 }
 
 export async function fetchWorkspaceDiff(endpoint: string, root = "", includePatch = false): Promise<WorkspaceDiffSummary> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<WorkspaceDiffSummary>("fetch_workspace_diff", {
+      request: { root: root.trim() || undefined, includePatch, timeoutMs: 30000 },
+    });
+  }
   const url = new URL(`${endpoint}/api/app/workspace/diff`);
   if (root.trim()) {
     url.searchParams.set("root", root.trim());
@@ -739,6 +764,11 @@ export async function fetchWorkspaceDiff(endpoint: string, root = "", includePat
 }
 
 export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DoctorReport>("fetch_doctor", {
+      request: { timeoutMs: 30000 },
+    });
+  }
   return requestJson<DoctorReport>(`${endpoint}/api/app/doctor`);
 }
 
@@ -746,6 +776,11 @@ export async function repairUnityMcpBridge(
   endpoint: string,
   request: { projectPath?: string; allowUnityRelaunch?: boolean; waitSeconds?: number; closeTimeoutSeconds?: number } = {},
 ): Promise<UnityMcpRepairResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<UnityMcpRepairResult>("repair_unity_mcp_bridge", {
+      request: { ...request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<UnityMcpRepairResult>(`${endpoint}/api/app/doctor/unity-mcp/repair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -754,10 +789,20 @@ export async function repairUnityMcpBridge(
 }
 
 export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DiagnosticsStatus>("fetch_diagnostics", {
+      request: { timeoutMs: 30000 },
+    });
+  }
   return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`);
 }
 
 export async function updateDiagnostics(endpoint: string, request: { debugLogging: boolean }): Promise<DiagnosticsStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DiagnosticsStatus>("update_diagnostics", {
+      request: { ...request, timeoutMs: 30000 },
+    });
+  }
   return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -766,6 +811,11 @@ export async function updateDiagnostics(endpoint: string, request: { debugLoggin
 }
 
 export async function exportSupportBundle(endpoint: string, request: { includeFullPaths?: boolean; logLimit?: number } = {}): Promise<SupportBundleResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SupportBundleResult>("export_support_bundle", {
+      request: { ...request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<SupportBundleResult>(`${endpoint}/api/app/support-bundle`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1787,6 +1837,12 @@ export type SubAgentTaskList = {
 };
 
 export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs> {
+  if (hasTauriInternals()) {
+    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>("fetch_project_prefs", {
+      request: { timeoutMs: 30000 },
+    });
+    return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+  }
   const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
   );
@@ -1794,6 +1850,12 @@ export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs>
 }
 
 export async function saveProjectPrefs(endpoint: string, prefs: ProjectPrefs): Promise<ProjectPrefs> {
+  if (hasTauriInternals()) {
+    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>("save_project_prefs", {
+      request: { customPaths: prefs.customPaths, hiddenPaths: prefs.hiddenPaths, timeoutMs: 30000 },
+    });
+    return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+  }
   const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
     {
@@ -1809,6 +1871,11 @@ export async function scanProjectIndex(
   endpoint: string,
   request: { projectPath: string; maxFiles?: number },
 ): Promise<ProjectIndexScanResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProjectIndexScanResult>("scan_project_index", {
+      request: { ...request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<ProjectIndexScanResult>(`${endpoint}/api/app/project-index/scan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2805,6 +2872,23 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
 }
 
 function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string): boolean {
+  if (method === "GET" && ["/api/health", "/api/app/bootstrap", "/api/app/workspace/diff", "/api/app/doctor", "/api/app/diagnostics", "/api/app/projects/prefs"].includes(pathname)) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    [
+      "/api/projects/refresh",
+      "/api/app/unity/readiness/refresh",
+      "/api/app/doctor/unity-mcp/repair",
+      "/api/app/diagnostics",
+      "/api/app/support-bundle",
+      "/api/app/projects/prefs",
+      "/api/app/project-index/scan",
+    ].includes(pathname)
+  ) {
+    return true;
+  }
   if (pathname === "/api/config" && (method === "GET" || method === "POST")) {
     return true;
   }

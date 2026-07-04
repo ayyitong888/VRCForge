@@ -253,6 +253,68 @@ struct DesktopExternalAgentConnectorActionRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopBootstrapRequest {
+    refresh_projects: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopTimeoutRequest {
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopWorkspaceDiffRequest {
+    root: Option<String>,
+    include_patch: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopUnityMcpRepairRequest {
+    project_path: Option<String>,
+    allow_unity_relaunch: Option<bool>,
+    wait_seconds: Option<u64>,
+    close_timeout_seconds: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopDiagnosticsUpdateRequest {
+    debug_logging: bool,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSupportBundleRequest {
+    include_full_paths: Option<bool>,
+    log_limit: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProjectPrefsRequest {
+    custom_paths: Option<Vec<String>>,
+    hidden_paths: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProjectIndexScanRequest {
+    project_path: String,
+    max_files: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -813,6 +875,185 @@ fn export_interrupted_apply_incident_bundle(
         None,
         request.timeout_ms,
     )
+}
+
+#[tauri::command]
+fn fetch_app_bootstrap(request: DesktopBootstrapRequest) -> Result<serde_json::Value, String> {
+    let suffix = if request.refresh_projects.unwrap_or(false) {
+        "?refreshProjects=true"
+    } else {
+        ""
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/bootstrap{suffix}"),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_app_health(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request("GET", "/api/health".to_string(), None, request.timeout_ms)
+        .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn refresh_projects(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/projects/refresh".to_string(),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn refresh_unity_readiness(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/unity/readiness/refresh".to_string(),
+        None,
+        request.timeout_ms.or(Some(20_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_workspace_diff(request: DesktopWorkspaceDiffRequest) -> Result<serde_json::Value, String> {
+    let mut query = Vec::new();
+    if let Some(value) = request.root.as_deref().filter(|value| !value.is_empty()) {
+        query.push(format!("root={}", percent_encode_query_component(value)));
+    }
+    if request.include_patch.unwrap_or(false) {
+        query.push("includePatch=true".to_string());
+    }
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    backend_json_request(
+        "GET",
+        format!("/api/app/workspace/diff{suffix}"),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_doctor(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "GET",
+        "/api/app/doctor".to_string(),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn repair_unity_mcp_bridge(
+    request: DesktopUnityMcpRepairRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/doctor/unity-mcp/repair".to_string(),
+        Some(serde_json::json!({
+            "projectPath": request.project_path,
+            "allowUnityRelaunch": request.allow_unity_relaunch,
+            "waitSeconds": request.wait_seconds,
+            "closeTimeoutSeconds": request.close_timeout_seconds,
+        })),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_diagnostics(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "GET",
+        "/api/app/diagnostics".to_string(),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn update_diagnostics(
+    request: DesktopDiagnosticsUpdateRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/diagnostics".to_string(),
+        Some(serde_json::json!({
+            "debugLogging": request.debug_logging,
+        })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn export_support_bundle(
+    request: DesktopSupportBundleRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/support-bundle".to_string(),
+        Some(serde_json::json!({
+            "includeFullPaths": request.include_full_paths,
+            "logLimit": request.log_limit,
+        })),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn fetch_project_prefs(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "GET",
+        "/api/app/projects/prefs".to_string(),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn save_project_prefs(request: DesktopProjectPrefsRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/projects/prefs".to_string(),
+        Some(serde_json::json!({
+            "customPaths": request.custom_paths.unwrap_or_default(),
+            "hiddenPaths": request.hidden_paths.unwrap_or_default(),
+        })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn scan_project_index(
+    request: DesktopProjectIndexScanRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/project-index/scan".to_string(),
+        Some(serde_json::json!({
+            "projectPath": request.project_path,
+            "maxFiles": request.max_files,
+        })),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
 }
 
 #[tauri::command]
@@ -1593,6 +1834,33 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
 }
 
 fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -> bool {
+    if method == "GET"
+        && matches!(
+            route_path,
+            "/api/health"
+                | "/api/app/bootstrap"
+                | "/api/app/workspace/diff"
+                | "/api/app/doctor"
+                | "/api/app/diagnostics"
+                | "/api/app/projects/prefs"
+        )
+    {
+        return true;
+    }
+    if method == "POST"
+        && matches!(
+            route_path,
+            "/api/projects/refresh"
+                | "/api/app/unity/readiness/refresh"
+                | "/api/app/doctor/unity-mcp/repair"
+                | "/api/app/diagnostics"
+                | "/api/app/support-bundle"
+                | "/api/app/projects/prefs"
+                | "/api/app/project-index/scan"
+        )
+    {
+        return true;
+    }
     if route_path == "/api/config" && matches!(method, "GET" | "POST") {
         return true;
     }
@@ -1869,15 +2137,25 @@ fn main() {
             backend_endpoint,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
+            export_support_bundle,
+            fetch_app_bootstrap,
+            fetch_app_health,
+            fetch_diagnostics,
+            fetch_doctor,
             fetch_external_agent_connectors,
             fetch_provider_models,
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
+            fetch_project_prefs,
+            fetch_workspace_diff,
             install_external_agent_connector,
             preview_interrupted_apply_recovery,
             preview_restore_checkpoint,
             record_agent_run_queued,
             reject_agent_approval,
+            refresh_projects,
+            refresh_unity_readiness,
+            repair_unity_mcp_bridge,
             request_agent_run_cancel,
             request_approval_revision,
             request_restore_checkpoint,
@@ -1887,9 +2165,12 @@ fn main() {
             test_provider_capability,
             uninstall_external_agent_connector,
             update_api_config,
+            update_diagnostics,
             update_external_agent_gateway,
             update_permission_mode,
             update_vision_config,
+            save_project_prefs,
+            scan_project_index,
             start_backend,
             stop_backend,
             ensure_agent_notes_file,
@@ -2046,19 +2327,28 @@ mod tests {
     #[test]
     fn app_api_bridge_allows_api_paths_without_exposing_session_endpoints() {
         assert_eq!(
-            normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").as_deref(),
-            Ok("/api/app/bootstrap?refreshProjects=true"),
+            normalize_app_api_path("GET", "/api/app/skills").as_deref(),
+            Ok("/api/app/skills"),
         );
         assert_eq!(
             normalize_app_api_path("POST", "/api/avatar-encryption/plan").as_deref(),
             Ok("/api/avatar-encryption/plan"),
         );
-        assert_eq!(
-            normalize_app_api_path("GET", "/api/health").as_deref(),
-            Ok("/api/health")
-        );
 
+        assert!(normalize_app_api_path("GET", "/api/health").is_err());
         assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").is_err());
+        assert!(normalize_app_api_path("POST", "/api/projects/refresh").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/unity/readiness/refresh").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/workspace/diff?root=D%3A%5CProj").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/doctor").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/doctor/unity-mcp/repair").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/diagnostics").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/diagnostics").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/support-bundle").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/projects/prefs").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/projects/prefs").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/project-index/scan").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());
