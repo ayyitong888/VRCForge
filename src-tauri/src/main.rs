@@ -1,12 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
-    io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -239,48 +239,23 @@ fn validate_local_folder_to_open(path: &str) -> Result<PathBuf, String> {
 fn select_folder_dialog(initial_path: Option<&str>) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
-        let mut script = String::from(
-            r#"
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Select checkpoint archive directory'
-$dialog.ShowNewFolderButton = $true
-"#,
-        );
+        // Native folder picker via `rfd` (IFileDialog on Windows). Replaces the
+        // old PowerShell FolderBrowserDialog subprocess: no child process, no
+        // script injection surface, and non-ASCII paths survive without
+        // encoding tricks.
+        let mut dialog = rfd::FileDialog::new().set_title("Select checkpoint archive directory");
         if let Some(path) = initial_path {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
-                let escaped = trimmed.replace('\'', "''");
-                script.push_str(&format!("$dialog.SelectedPath = '{}'\n", escaped));
+                let candidate = PathBuf::from(trimmed);
+                if candidate.is_dir() {
+                    dialog = dialog.set_directory(candidate);
+                }
             }
         }
-        script.push_str(
-            r#"
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  Write-Output $dialog.SelectedPath
-}
-"#,
-        );
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-STA", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|error| format!("unable to open folder picker: {error}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if stderr.is_empty() {
-                "folder picker failed".to_string()
-            } else {
-                stderr
-            });
-        }
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if selected.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(selected))
-        }
+        Ok(dialog
+            .pick_folder()
+            .map(|folder| folder.display().to_string()))
     }
 
     #[cfg(not(windows))]
@@ -458,38 +433,25 @@ fn generate_session_token() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// HMAC-SHA256 hex digest backed by the audited RustCrypto `hmac` crate
+/// (replaces a hand-rolled ipad/opad implementation with identical output —
+/// see the known-vector test below).
 fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
-    const BLOCK_SIZE: usize = 64;
-    let mut key_block = [0u8; BLOCK_SIZE];
-    if key.len() > BLOCK_SIZE {
-        let digest = Sha256::digest(key);
-        key_block[..digest.len()].copy_from_slice(&digest);
-    } else {
-        key_block[..key.len()].copy_from_slice(key);
-    }
-
-    let mut inner_pad = [0x36u8; BLOCK_SIZE];
-    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
-    for index in 0..BLOCK_SIZE {
-        inner_pad[index] ^= key_block[index];
-        outer_pad[index] ^= key_block[index];
-    }
-
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner_hash = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner_hash);
-    outer
-        .finalize()
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(message);
+    mac.finalize()
+        .into_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
+/// Nonce-challenge design (kept intentionally): the shell generates a fresh
+/// random nonce per probe, the backend signs "vrcforge.app-session.v1\n{nonce}"
+/// with the shared app session token, and the shell recomputes the signature
+/// locally to compare. The token itself never travels over the wire, and a
+/// captured response cannot be replayed against a different nonce.
 fn app_session_challenge_signature(token: &str, nonce: &str) -> String {
     hmac_sha256_hex(
         token.as_bytes(),
@@ -513,69 +475,32 @@ fn existing_backend_accepts_session(token: &str) -> bool {
     let Ok(nonce) = generate_session_token() else {
         return false;
     };
-    let addrs = (BACKEND_HOST, BACKEND_PORT).to_socket_addrs();
-    let Ok(mut addrs) = addrs else {
+    // Plain-HTTP probe via `ureq` (sync, no tokio/reqwest, no startup wait).
+    // Fail-fast semantics match the old hand-rolled TcpStream client: short
+    // timeouts, no retries, and any non-200 status or malformed body means
+    // "this runtime does not accept our session".
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_millis(350))
+        .timeout(Duration::from_millis(1500))
+        .build();
+    let Ok(response) = agent
+        .get(&format!("{BACKEND_ENDPOINT}/api/app/session-challenge"))
+        .set("Origin", "tauri://localhost")
+        .query("nonce", &nonce)
+        .call()
+    else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
+    let Ok(payload) = response.into_json::<serde_json::Value>() else {
         return false;
     };
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(350)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
-    let request = format!(
-        "GET /api/app/session-challenge?nonce={nonce} HTTP/1.1\r\nHost: {BACKEND_HOST}:{BACKEND_PORT}\r\nOrigin: tauri://localhost\r\nConnection: close\r\n\r\n"
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let Some(response) = read_bounded_http_response(&mut stream, 8192) else {
-        return false;
-    };
-    let Some(signature) = parse_session_challenge_signature(&response) else {
+    let Some(signature) = extract_challenge_signature(&payload) else {
         return false;
     };
     signature == app_session_challenge_signature(token, &nonce)
 }
 
-fn parse_http_status_ok(response: &[u8]) -> bool {
-    response.starts_with(b"HTTP/1.1 200 ") || response.starts_with(b"HTTP/1.0 200 ")
-}
-
-fn read_bounded_http_response(stream: &mut TcpStream, max_bytes: usize) -> Option<Vec<u8>> {
-    let mut response = Vec::new();
-    let mut buffer = [0u8; 1024];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(size) => {
-                response.extend_from_slice(&buffer[..size]);
-                if response.len() >= max_bytes {
-                    break;
-                }
-            }
-            Err(_) if !response.is_empty() => break,
-            Err(_) => return None,
-        }
-    }
-    if response.is_empty() {
-        None
-    } else {
-        Some(response)
-    }
-}
-
-fn parse_session_challenge_signature(response: &[u8]) -> Option<String> {
-    if !parse_http_status_ok(response) {
-        return None;
-    }
-    let body_start = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)?;
-    let payload: serde_json::Value = serde_json::from_slice(&response[body_start..]).ok()?;
+fn extract_challenge_signature(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("signature")
         .and_then(|value| value.as_str())
@@ -656,9 +581,9 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_session_challenge_signature, hmac_sha256_hex, parse_http_status_ok,
-        parse_session_challenge_signature, prepare_runtime_files, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_project_folder_to_open,
+        app_session_challenge_signature, extract_challenge_signature, hmac_sha256_hex,
+        prepare_runtime_files, try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open,
     };
     use std::{
         env, fs,
@@ -729,16 +654,9 @@ mod tests {
     }
 
     #[test]
-    fn existing_backend_probe_only_accepts_success_status() {
-        assert!(parse_http_status_ok(b"HTTP/1.1 200 OK\r\n"));
-        assert!(parse_http_status_ok(b"HTTP/1.0 200 OK\r\n"));
-        assert!(!parse_http_status_ok(b"HTTP/1.1 401 Unauthorized\r\n"));
-        assert!(!parse_http_status_ok(b"HTTP/1.1 404 Not Found\r\n"));
-        assert!(!parse_http_status_ok(b"not http"));
-    }
-
-    #[test]
     fn hmac_sha256_matches_known_vector() {
+        // RFC-style known vector: proves the RustCrypto-backed implementation
+        // is byte-identical to the previous hand-rolled HMAC.
         assert_eq!(
             hmac_sha256_hex(b"key", b"The quick brown fox jumps over the lazy dog"),
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
@@ -750,19 +668,14 @@ mod tests {
     }
 
     #[test]
-    fn session_challenge_parser_requires_success_json_signature() {
+    fn session_challenge_signature_extraction_requires_string_field() {
         assert_eq!(
-            parse_session_challenge_signature(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"signature\":\"abc123\"}"
-            )
-            .as_deref(),
+            extract_challenge_signature(&serde_json::json!({"signature": "abc123"})).as_deref(),
             Some("abc123"),
         );
-        assert!(parse_session_challenge_signature(
-            b"HTTP/1.1 401 Unauthorized\r\n\r\n{\"signature\":\"abc123\"}"
-        )
-        .is_none());
-        assert!(parse_session_challenge_signature(b"HTTP/1.1 200 OK\r\n\r\nnot-json").is_none());
+        assert!(extract_challenge_signature(&serde_json::json!({"signature": 42})).is_none());
+        assert!(extract_challenge_signature(&serde_json::json!({})).is_none());
+        assert!(extract_challenge_signature(&serde_json::json!(null)).is_none());
     }
 
     #[test]
