@@ -1285,6 +1285,9 @@ export async function uninstallExternalAgentConnector(
 }
 
 export async function fetchSkillPackages(endpoint: string): Promise<SkillPackageList> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageList>("fetch_skill_packages", {});
+  }
   return requestJson<SkillPackageList>(`${endpoint}/api/app/skill-packages`);
 }
 
@@ -1292,6 +1295,11 @@ export async function preflightSkillPackage(
   endpoint: string,
   request: { packagePath: string; allowDowngrade?: boolean; devMode?: boolean; projectToUserSkills?: boolean },
 ): Promise<SkillPackagePreflight> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackagePreflight>("preflight_skill_package", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<SkillPackagePreflight>(`${endpoint}/api/app/skill-packages/preflight`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1303,6 +1311,11 @@ export async function importSkillPackage(
   endpoint: string,
   request: { packagePath: string; allowDowngrade?: boolean; devMode?: boolean; projectToUserSkills?: boolean; dryRun?: boolean },
 ): Promise<SkillPackageImportResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageImportResult>("import_skill_package", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<SkillPackageImportResult>(`${endpoint}/api/app/skill-packages/import`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1314,6 +1327,11 @@ export async function setSkillPackageSafeMode(
   endpoint: string,
   request: { enabled: boolean; reason?: string },
 ): Promise<SkillPackageGovernanceActionResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageGovernanceActionResult>("set_skill_package_safe_mode", {
+      request: { body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<SkillPackageGovernanceActionResult>(`${endpoint}/api/app/skill-packages/safe-mode`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1325,6 +1343,11 @@ export async function trustSkillPackageSigner(
   endpoint: string,
   request: { signerFingerprint: string; reason?: string },
 ): Promise<SkillPackageGovernanceActionResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageGovernanceActionResult>("trust_skill_package_signer", {
+      request: { body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<SkillPackageGovernanceActionResult>(`${endpoint}/api/app/skill-packages/trust-signer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1336,6 +1359,11 @@ export async function revokeSkillPackageSigner(
   endpoint: string,
   request: { signerFingerprint: string; reason?: string },
 ): Promise<SkillPackageGovernanceActionResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageGovernanceActionResult>("revoke_skill_package_signer", {
+      request: { body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<SkillPackageGovernanceActionResult>(`${endpoint}/api/app/skill-packages/revoke-signer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1347,6 +1375,11 @@ export async function blockSkillPackage(
   endpoint: string,
   request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string },
 ): Promise<SkillPackageGovernanceActionResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageGovernanceActionResult>("block_skill_package", {
+      request: { body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<SkillPackageGovernanceActionResult>(`${endpoint}/api/app/skill-packages/block-package`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1359,6 +1392,11 @@ export async function setSkillPackageEnabled(
   skillPackageId: string,
   request: { enabled: boolean; syncProjectedSkill?: boolean },
 ): Promise<SkillPackageStateResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageStateResult>("set_skill_package_enabled", {
+      request: { id: skillPackageId, body: request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<SkillPackageStateResult>(`${endpoint}/api/app/skill-packages/${encodeURIComponent(skillPackageId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -1371,6 +1409,11 @@ export async function uninstallSkillPackage(
   skillPackageId: string,
   request: { removeProjectedSkill?: boolean } = {},
 ): Promise<SkillPackageUninstallResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageUninstallResult>("uninstall_skill_package", {
+      request: { id: skillPackageId, body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<SkillPackageUninstallResult>(`${endpoint}/api/app/skill-packages/${encodeURIComponent(skillPackageId)}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
@@ -1382,6 +1425,11 @@ export async function exportSkillPackage(
   endpoint: string,
   request: { skillName: string; outputPath: string; release?: boolean; privateKeyPath?: string; privateKeyPem?: string },
 ): Promise<SkillPackageExportResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SkillPackageExportResult>("export_skill_package", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<SkillPackageExportResult>(`${endpoint}/api/app/skill-packages/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1393,6 +1441,11 @@ export async function previewPathToSkill(
   endpoint: string,
   request: PathToSkillCaptureRequest,
 ): Promise<PathToSkillCaptureResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<PathToSkillCaptureResult>("preview_path_to_skill", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<PathToSkillCaptureResult>(`${endpoint}/api/app/path-to-skill/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1404,6 +1457,11 @@ export async function writePathToSkill(
   endpoint: string,
   request: PathToSkillCaptureRequest,
 ): Promise<PathToSkillCaptureResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<PathToSkillCaptureResult>("write_path_to_skill", {
+      request: { body: request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<PathToSkillCaptureResult>(`${endpoint}/api/app/path-to-skill/write`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2158,14 +2216,25 @@ export async function retrySubAgent(endpoint: string, taskId: string): Promise<{
 }
 
 export async function fetchSkills(endpoint: string): Promise<AgentSkillRegistry> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentSkillRegistry>("fetch_skills", {});
+  }
   return requestJson<AgentSkillRegistry>(`${endpoint}/api/app/skills`);
 }
 
 export async function checkSkills(endpoint: string): Promise<AgentSkillCheck> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentSkillCheck>("check_skills", {});
+  }
   return requestJson<AgentSkillCheck>(`${endpoint}/api/app/skills/check`);
 }
 
 export async function createSkill(endpoint: string, skill: Partial<AgentSkill>): Promise<AgentSkillRegistry & { skill: AgentSkill }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentSkillRegistry & { skill: AgentSkill }>("create_skill", {
+      request: { body: skill, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/skills`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2174,6 +2243,11 @@ export async function createSkill(endpoint: string, skill: Partial<AgentSkill>):
 }
 
 export async function updateSkill(endpoint: string, skillId: string, skill: Partial<AgentSkill>): Promise<AgentSkillRegistry & { skill: AgentSkill }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentSkillRegistry & { skill: AgentSkill }>("update_skill", {
+      request: { id: skillId, body: skill, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/skills/${encodeURIComponent(skillId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -2182,6 +2256,11 @@ export async function updateSkill(endpoint: string, skillId: string, skill: Part
 }
 
 export async function deleteSkill(endpoint: string, skillId: string): Promise<AgentSkillRegistry> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentSkillRegistry>("delete_skill", {
+      request: { id: skillId, body: {}, timeoutMs: 60000 },
+    });
+  }
   return requestJson(`${endpoint}/api/app/skills/${encodeURIComponent(skillId)}`, {
     method: "DELETE",
   });

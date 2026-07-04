@@ -348,6 +348,14 @@ struct DesktopJsonBodyRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopIdJsonBodyRequest {
+    id: String,
+    body: serde_json::Value,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -1273,8 +1281,17 @@ fn post_json_body_command(
     request: DesktopJsonBodyRequest,
     default_timeout_ms: u64,
 ) -> Result<serde_json::Value, String> {
+    json_body_command("POST", path, request, default_timeout_ms)
+}
+
+fn json_body_command(
+    method: &str,
+    path: &str,
+    request: DesktopJsonBodyRequest,
+    default_timeout_ms: u64,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
-        "POST",
+        method,
         path.to_string(),
         Some(request.body),
         request.timeout_ms.or(Some(default_timeout_ms)),
@@ -1324,6 +1341,138 @@ fn request_avatar_encryption_apply(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/avatar-encryption/apply-request", request, 120_000)
+}
+
+#[tauri::command]
+fn fetch_skill_packages() -> Result<serde_json::Value, String> {
+    backend_json_request("GET", "/api/app/skill-packages".to_string(), None, None)
+        .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn preflight_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/preflight", request, 120_000)
+}
+
+#[tauri::command]
+fn import_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/import", request, 120_000)
+}
+
+#[tauri::command]
+fn set_skill_package_safe_mode(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/safe-mode", request, 60_000)
+}
+
+#[tauri::command]
+fn trust_skill_package_signer(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/trust-signer", request, 60_000)
+}
+
+#[tauri::command]
+fn revoke_skill_package_signer(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/revoke-signer", request, 60_000)
+}
+
+#[tauri::command]
+fn block_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/block-package", request, 60_000)
+}
+
+#[tauri::command]
+fn export_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skill-packages/export", request, 120_000)
+}
+
+#[tauri::command]
+fn set_skill_package_enabled(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "PUT",
+        format!(
+            "/api/app/skill-packages/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn uninstall_skill_package(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "DELETE",
+        format!(
+            "/api/app/skill-packages/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn preview_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/path-to-skill/preview", request, 120_000)
+}
+
+#[tauri::command]
+fn write_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/path-to-skill/write", request, 120_000)
+}
+
+#[tauri::command]
+fn fetch_skills() -> Result<serde_json::Value, String> {
+    backend_json_request("GET", "/api/app/skills".to_string(), None, None)
+        .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn check_skills() -> Result<serde_json::Value, String> {
+    backend_json_request("GET", "/api/app/skills/check".to_string(), None, None)
+        .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn create_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/skills", request, 60_000)
+}
+
+#[tauri::command]
+fn update_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "PUT",
+        format!(
+            "/api/app/skills/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn delete_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "DELETE",
+        format!(
+            "/api/app/skills/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
 }
 
 #[tauri::command]
@@ -2143,6 +2292,12 @@ fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -
     }
     if route_path == "/api/app/adjustment-checkpoints"
         || route_path.starts_with("/api/app/adjustment-checkpoints/")
+        || route_path == "/api/app/skill-packages"
+        || route_path.starts_with("/api/app/skill-packages/")
+        || route_path == "/api/app/path-to-skill"
+        || route_path.starts_with("/api/app/path-to-skill/")
+        || route_path == "/api/app/skills"
+        || route_path.starts_with("/api/app/skills/")
     {
         return true;
     }
@@ -2421,10 +2576,15 @@ fn main() {
             apply_adjustment_checkpoint,
             approve_agent_approval,
             backend_endpoint,
+            block_skill_package,
+            check_skills,
             create_adjustment_checkpoint,
+            create_skill,
             delete_adjustment_checkpoint,
+            delete_skill,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
+            export_skill_package,
             export_support_bundle,
             fetch_adjustment_checkpoints,
             fetch_app_bootstrap,
@@ -2438,11 +2598,16 @@ fn main() {
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
             fetch_project_prefs,
+            fetch_skill_packages,
+            fetch_skills,
             fetch_workspace_diff,
+            import_skill_package,
             install_external_agent_connector,
             overwrite_adjustment_checkpoint,
             plan_avatar_encryption,
             plan_outfit_import,
+            preflight_skill_package,
+            preview_path_to_skill,
             preview_interrupted_apply_recovery,
             preview_adjustment_checkpoint,
             preview_restore_checkpoint,
@@ -2460,9 +2625,14 @@ fn main() {
             request_restore_checkpoint,
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
+            revoke_skill_package_signer,
             select_adjustment_checkpoint,
+            set_skill_package_enabled,
+            set_skill_package_safe_mode,
             send_agent_message,
             test_provider_capability,
+            trust_skill_package_signer,
+            uninstall_skill_package,
             uninstall_external_agent_connector,
             update_adjustment_checkpoint,
             update_api_config,
@@ -2470,10 +2640,12 @@ fn main() {
             update_external_agent_gateway,
             update_permission_mode,
             update_vision_config,
+            update_skill,
             save_project_prefs,
             scan_project_index,
             start_backend,
             stop_backend,
+            write_path_to_skill,
             ensure_agent_notes_file,
             open_folder,
             open_local_folder,
@@ -2627,10 +2799,6 @@ mod tests {
 
     #[test]
     fn app_api_bridge_allows_api_paths_without_exposing_session_endpoints() {
-        assert_eq!(
-            normalize_app_api_path("GET", "/api/app/skills").as_deref(),
-            Ok("/api/app/skills"),
-        );
         assert!(normalize_app_api_path("GET", "/api/health").is_err());
         assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/bootstrap?refreshProjects=true").is_err());
@@ -2663,6 +2831,17 @@ mod tests {
         assert!(
             normalize_app_api_path("POST", "/api/app/adjustment-checkpoints/a1/preview").is_err()
         );
+        assert!(normalize_app_api_path("GET", "/api/app/skill-packages").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/skill-packages/import").is_err());
+        assert!(normalize_app_api_path("PUT", "/api/app/skill-packages/p1").is_err());
+        assert!(normalize_app_api_path("DELETE", "/api/app/skill-packages/p1").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/path-to-skill/preview").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/path-to-skill/write").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/skills").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/skills/check").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/skills").is_err());
+        assert!(normalize_app_api_path("PUT", "/api/app/skills/s1").is_err());
+        assert!(normalize_app_api_path("DELETE", "/api/app/skills/s1").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/avatars").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/optimization/plan").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/optimization/apply-request").is_err());
