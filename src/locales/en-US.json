@@ -184,7 +184,27 @@
     "checkpointArchiveDeleted": "Deleted {{count}} archive(s).",
     "checkpointArchiveDeleteFailed": "Could not delete archives: {{reason}}",
     "unlimited": "Unlimited",
-    "limitOn": "Limit on"
+    "limitOn": "Limit on",
+    "visionProfile": "Vision Model",
+    "visionProfileDesc": "When the main model cannot read images (e.g. DeepSeek), image attachments are automatically delegated to this vision model and the analysis is injected as a labeled run step. Vision tokens never count toward the chat context bar."
+  },
+  "vision": {
+    "notConfigured": "Not configured",
+    "enabledLabel": "Enable image delegation",
+    "clearProfile": "Clear profile",
+    "statusActive": "Active",
+    "statusDisabled": "Disabled",
+    "stepTitle": "Image analysis ({{model}})",
+    "stepTitleSkipped": "Images not analyzed",
+    "stepAnalyzed": "{{count}} image(s) analyzed",
+    "stepUnconfigured": "No vision model",
+    "images": "Images",
+    "source": "Routed via",
+    "sourceMain": "Main model (vision-capable)",
+    "sourceProfile": "Vision profile",
+    "tokens": "Vision tokens",
+    "analysis": "Analysis",
+    "reason": "Reason"
   },
   "onboarding": {
     "welcome": "Welcome to VRCForge",

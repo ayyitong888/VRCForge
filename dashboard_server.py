@@ -444,6 +444,20 @@ class ApiModelListRequest(ApiConfigRequest):
     pass
 
 
+class VisionConfigRequest(BaseModel):
+    """Standalone vision-model profile (independent from the chat provider).
+
+    Follows the same key storage/redaction rules as the main API config.
+    `enabled=False` keeps the saved profile but turns off delegation.
+    """
+
+    provider: str = ""
+    api_key: str = ""
+    base_url: str | None = None
+    model: str | None = None
+    enabled: bool = True
+
+
 class DiagnosticsConfigRequest(BaseModel):
     debug_logging: bool = Field(default=False, alias="debugLogging")
 
@@ -1090,6 +1104,19 @@ class DashboardApiConfig:
 
 
 @dataclass
+class DashboardVisionConfig:
+    provider: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    enabled: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.provider and self.model)
+
+
+@dataclass
 class DashboardState:
     settings_path: Path
     project_roots: list[Path] = field(default_factory=list)
@@ -1218,6 +1245,7 @@ STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
+DASHBOARD_VISION_CONFIG: DashboardVisionConfig | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
@@ -1567,6 +1595,7 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
         },
         "health": build_bootstrap_app_health(refresh_projects=refresh_projects),
         "apiConfig": serialize_app_api_config(),
+        "visionConfig": serialize_app_vision_config(),
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
@@ -4960,6 +4989,7 @@ def read_api_config() -> dict[str, Any]:
     return {
         "configPath": str(CONFIG_PATH),
         "apiConfig": serialize_api_config(include_secret=True),
+        "visionConfig": serialize_vision_config(include_secret=True),
         "effective": build_effective_model_summary(),
     }
 
@@ -4983,6 +5013,7 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     payload = {
         "configPath": str(CONFIG_PATH),
         "apiConfig": serialize_api_config(include_secret=True),
+        "visionConfig": serialize_vision_config(include_secret=True),
         "effective": build_effective_model_summary(),
     }
     await EVENT_BUS.broadcast("config", payload)
@@ -4994,6 +5025,41 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
             "provider": DASHBOARD_API_CONFIG.provider,
             "model": DASHBOARD_API_CONFIG.model,
             "baseUrl": DASHBOARD_API_CONFIG.base_url or "(official endpoint)",
+        },
+    )
+    return payload
+
+
+@app.post("/api/config/vision")
+async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
+    config = normalize_vision_config_request(request)
+    if config.provider and not config.api_key.strip():
+        # 与 /api/config 相同的"留空即沿用已存密钥"约定。
+        saved = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+        if saved and saved.provider == config.provider and saved.api_key.strip():
+            config = DashboardVisionConfig(
+                provider=config.provider,
+                api_key=saved.api_key,
+                base_url=config.base_url,
+                model=config.model,
+                enabled=config.enabled,
+            )
+    save_dashboard_vision_config(config)
+    payload = {
+        "configPath": str(CONFIG_PATH),
+        "apiConfig": serialize_api_config(include_secret=True),
+        "visionConfig": serialize_vision_config(include_secret=True),
+        "effective": build_effective_model_summary(),
+    }
+    await EVENT_BUS.broadcast("config", payload)
+    await emit_log_async(
+        "success",
+        "config",
+        "Vision profile saved." if config.provider else "Vision profile cleared.",
+        {
+            "provider": config.provider or "(none)",
+            "model": config.model or "(none)",
+            "enabled": config.enabled,
         },
     )
     return payload
@@ -8440,6 +8506,72 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
 
 
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
+
+
+def _agent_gateway_vision_analyze(message: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+    """Vision-analysis hook for the agent gateway (visionProfile routing).
+
+    Routing matrix (docs/ROADMAP.local.md):
+    1. Main model is vision-capable -> analyze with the main provider config
+       (source "main").
+    2. Otherwise, a configured + enabled vision profile -> delegate to it
+       (source "visionProfile").
+    3. Otherwise -> return status "unconfigured" so the gateway stays honest.
+       Image bytes are NEVER sent to a text-only model.
+
+    The returned usage belongs to the labeled vision run step only; the
+    gateway must never merge it into the chat context meter.
+    Provider errors are raised; the gateway converts them into an honest
+    "error" vision step.
+    """
+    main = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    main_key_ok = bool(main.api_key.strip()) or not provider_requires_api_key(main.provider)
+    if main.model and main_key_ok and provider_model_supports_vision(main.provider, main.model):
+        config = main
+        source = "main"
+    else:
+        vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+        if not vision.configured:
+            return {
+                "status": "unconfigured",
+                "reason": "Main model is not vision-capable and no vision profile is configured.",
+            }
+        if not vision.enabled:
+            return {
+                "status": "unconfigured",
+                "reason": "The configured vision profile is disabled in settings.",
+            }
+        if provider_requires_api_key(vision.provider) and not vision.api_key.strip():
+            return {
+                "status": "unconfigured",
+                "reason": f"The vision profile ({provider_display_name(vision.provider)}) has no API key.",
+            }
+        # 用户显式配置的视觉档案视为"用户声明可识图"，不再套用主模型的
+        # 保守启发式（避免误伤自定义端点上的多模态模型）。
+        config = DashboardApiConfig(
+            provider=vision.provider,
+            api_key=vision.api_key,
+            base_url=vision.base_url,
+            model=vision.model,
+        )
+        source = "visionProfile"
+
+    prompt = build_vision_analysis_prompt(message, images)
+    text, usage = _run_provider_vision_analysis(config, prompt, images)
+    if not text.strip():
+        raise RuntimeError(f"{provider_display_name(config.provider)} returned an empty vision analysis.")
+    return {
+        "status": "analyzed",
+        "text": text,
+        "provider": config.provider,
+        "providerLabel": provider_display_name(config.provider),
+        "model": config.model,
+        "source": source,
+        "usage": usage,
+    }
+
+
+AGENT_GATEWAY.vision_analyze_fn = _agent_gateway_vision_analyze
 
 
 def load_dashboard_export_payload(
@@ -12223,6 +12355,40 @@ def load_initial_dashboard_api_config() -> DashboardApiConfig:
     )
 
 
+def load_initial_dashboard_vision_config() -> DashboardVisionConfig:
+    vision_section = load_config_document().get("vision") or {}
+    if not isinstance(vision_section, dict):
+        return DashboardVisionConfig()
+    provider = str(vision_section.get("provider") or "").strip()
+    if not provider:
+        return DashboardVisionConfig()
+    provider = normalize_provider_name(provider)
+    defaults = get_provider_defaults(provider)
+    return DashboardVisionConfig(
+        provider=provider,
+        api_key=str(vision_section.get("api_key") or "").strip(),
+        base_url=normalize_base_url(vision_section.get("base_url"), provider, defaults["base_url"]),
+        model=str(vision_section.get("model") or "").strip(),
+        enabled=bool(vision_section.get("enabled", True)),
+    )
+
+
+def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVisionConfig:
+    provider = str(request.provider or "").strip()
+    if not provider:
+        # 空 provider = 清除视觉档案。
+        return DashboardVisionConfig()
+    provider = normalize_provider_name(provider)
+    defaults = get_provider_defaults(provider)
+    return DashboardVisionConfig(
+        provider=provider,
+        api_key=request.api_key.strip(),
+        base_url=normalize_base_url(request.base_url, provider, defaults["base_url"]),
+        model=str(request.model or "").strip(),
+        enabled=bool(request.enabled),
+    )
+
+
 def load_config_document() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {}
@@ -12371,6 +12537,220 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
         return ""
     message = getattr(choices[0], "message", None)
     return str(getattr(message, "content", "") or "")
+
+
+# 主模型视觉能力判定：保守白名单——判错的代价是"该走委托的没走"（仍有诚实提示），
+# 绝不允许反向判错把图片字节发给纯文本模型。DeepSeek 官方 chat/reasoner 均为纯文本。
+VISION_CAPABLE_MODEL_MARKERS = (
+    "gpt-4o",
+    "gpt-4.1",
+    "gpt-4-turbo",
+    "gpt-5",
+    "chatgpt-4o",
+    "omni",
+    "vision",
+    "llava",
+    "gemini",
+    "claude",
+    "pixtral",
+    "internvl",
+    "minicpm-v",
+    "moondream",
+    "glm-4v",
+    "glm-4.5v",
+    "gemma-3",
+    "qwen-vl",
+    "qwen2-vl",
+    "qwen2.5-vl",
+    "qwen3-vl",
+    "kimi-vl",
+    "step-1v",
+    "yi-vision",
+    "phi-3-vision",
+    "phi-3.5-vision",
+    "llama-3.2-11b",
+    "llama-3.2-90b",
+    "llama-4",
+)
+VISION_CAPABLE_MODEL_RE = re.compile(r"(^|[-_/.])(o[134])([-_.]|$)|(^|[-_/.])vl([-_.]|$)")
+
+
+def provider_model_supports_vision(provider: str, model: str) -> bool:
+    provider = normalize_provider_name(provider)
+    model_id = str(model or "").strip().lower()
+    if provider in {"gemini", "vertexai"}:
+        # Gemini 系列原生多模态。
+        return True
+    if provider == "anthropic":
+        # Claude 3 起全系支持图像输入。
+        return True
+    if provider == "deepseek":
+        return False
+    return any(marker in model_id for marker in VISION_CAPABLE_MODEL_MARKERS) or bool(
+        VISION_CAPABLE_MODEL_RE.search(model_id)
+    )
+
+
+def split_image_data_url(data_url: str) -> tuple[str, str]:
+    """Split `data:image/png;base64,...` into (mime, base64_payload)."""
+    value = str(data_url or "")
+    if not value.startswith("data:"):
+        raise RuntimeError("Attachment payload is not a data URL.")
+    header, _, payload = value.partition(",")
+    if not payload:
+        raise RuntimeError("Attachment data URL has no payload.")
+    mime = header[5:].split(";", 1)[0].strip().lower() or "image/png"
+    if not mime.startswith("image/"):
+        raise RuntimeError(f"Attachment data URL is not an image ({mime}).")
+    if "base64" not in header:
+        raise RuntimeError("Attachment data URL is not base64-encoded.")
+    return mime, payload
+
+
+def build_vision_analysis_prompt(message: str, images: list[dict[str, Any]]) -> str:
+    names = ", ".join(str(item.get("name") or "image") for item in images[:8])
+    user_context = str(message or "").strip()
+    lines = [
+        "You are the image-analysis assistant of VRCForge, a VRChat avatar tool.",
+        f"Describe the attached image(s) ({names}) precisely and concisely for a text-only",
+        "planning model that cannot see them. Focus on what is visually present:",
+        "UI state, error text, avatar/mesh/material details, colors, layout, and any",
+        "readable text (transcribe it exactly). Do not speculate beyond the image.",
+        "Answer in the same language as the user request below.",
+    ]
+    if user_context:
+        lines.append(f"\nUser request (for context): {user_context[:2000]}")
+    return "\n".join(lines)
+
+
+def _extract_openai_usage(response: Any) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return {"exact": False, "unavailableReason": "provider_usage_missing"}
+    payload: dict[str, Any] = {"exact": True}
+    if prompt_tokens is not None:
+        payload["inputTokens"] = int(prompt_tokens)
+    if completion_tokens is not None:
+        payload["outputTokens"] = int(completion_tokens)
+    if total_tokens is not None:
+        payload["totalTokens"] = int(total_tokens)
+    return payload
+
+
+def _run_provider_vision_analysis(
+    config: DashboardApiConfig,
+    prompt: str,
+    images: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """One multimodal request: bounded image payloads + analysis prompt.
+
+    Returns (analysis_text, usage). Usage belongs to the vision run step only
+    and must never be merged into the chat context meter.
+    """
+    decoded: list[tuple[str, str]] = []
+    for item in images:
+        mime, payload = split_image_data_url(str(item.get("dataUrl") or ""))
+        decoded.append((mime, payload))
+    if not decoded:
+        raise RuntimeError("No image payloads to analyze.")
+
+    if config.provider in {"gemini", "vertexai"}:
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+        except ImportError as exc:
+            raise RuntimeError("The google-genai package is not installed.") from exc
+        if config.provider == "vertexai":
+            project, location = resolve_vertex_project_location(config.base_url)
+            client = genai.Client(vertexai=True, project=project, location=location)
+        else:
+            client = genai.Client(api_key=config.api_key)
+        contents: list[Any] = [
+            genai_types.Part.from_bytes(data=base64.b64decode(payload), mime_type=mime)
+            for mime, payload in decoded
+        ]
+        contents.append(prompt)
+        response = client.models.generate_content(model=config.model, contents=contents)
+        text = str(getattr(response, "text", "") or "").strip()
+        metadata = getattr(response, "usage_metadata", None)
+        prompt_tokens = getattr(metadata, "prompt_token_count", None)
+        output_tokens = getattr(metadata, "candidates_token_count", None)
+        total_tokens = getattr(metadata, "total_token_count", None)
+        if prompt_tokens is None and output_tokens is None and total_tokens is None:
+            usage: dict[str, Any] = {"exact": False, "unavailableReason": "provider_usage_missing"}
+        else:
+            usage = {"exact": True}
+            if prompt_tokens is not None:
+                usage["inputTokens"] = int(prompt_tokens)
+            if output_tokens is not None:
+                usage["outputTokens"] = int(output_tokens)
+            if total_tokens is not None:
+                usage["totalTokens"] = int(total_tokens)
+        return text, usage
+
+    if config.provider == "anthropic":
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError("The anthropic package is not installed.") from exc
+        client = anthropic.Anthropic(api_key=config.api_key)
+        content: list[dict[str, Any]] = [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": payload},
+            }
+            for mime, payload in decoded
+        ]
+        content.append({"type": "text", "text": prompt})
+        response = client.messages.create(
+            model=config.model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": content}],
+        )
+        parts = getattr(response, "content", []) or []
+        text = "\n".join(str(getattr(part, "text", "") or "") for part in parts).strip()
+        usage_obj = getattr(response, "usage", None)
+        input_tokens = getattr(usage_obj, "input_tokens", None)
+        output_tokens = getattr(usage_obj, "output_tokens", None)
+        if input_tokens is None and output_tokens is None:
+            usage = {"exact": False, "unavailableReason": "provider_usage_missing"}
+        else:
+            usage = {"exact": True}
+            if input_tokens is not None:
+                usage["inputTokens"] = int(input_tokens)
+            if output_tokens is not None:
+                usage["outputTokens"] = int(output_tokens)
+            if input_tokens is not None and output_tokens is not None:
+                usage["totalTokens"] = int(input_tokens) + int(output_tokens)
+        return text, usage
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("The openai package is not installed.") from exc
+    if not config.base_url.strip() and config.provider not in {"openai"}:
+        raise RuntimeError("Base URL is empty.")
+    message_content: list[dict[str, Any]] = [
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{payload}"}}
+        for mime, payload in decoded
+    ]
+    message_content.append({"type": "text", "text": prompt})
+    client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url or None, timeout=60.0)
+    response = client.chat.completions.create(
+        model=config.model,
+        messages=[{"role": "user", "content": message_content}],
+        temperature=0,
+        max_tokens=1024,
+    )
+    choices = getattr(response, "choices", []) or []
+    text = ""
+    if choices:
+        message_obj = getattr(choices[0], "message", None)
+        text = str(getattr(message_obj, "content", "") or "").strip()
+    return text, _extract_openai_usage(response)
 
 
 def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
@@ -12552,16 +12932,43 @@ def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
     return info
 
 
-def save_dashboard_api_config(config: DashboardApiConfig) -> None:
-    payload = {
+def save_dashboard_config_document() -> None:
+    """Persist both the api and vision sections in one atomic write.
+
+    单文件双段：任何一段保存都重写整个文档，避免旧的"只写 api 段"行为把
+    vision 段冲掉。
+    """
+    api = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+    payload: dict[str, Any] = {
         "api": {
-            "provider": config.provider,
-            "api_key": config.api_key,
-            "base_url": config.base_url,
-            "model": config.model,
+            "provider": api.provider,
+            "api_key": api.api_key,
+            "base_url": api.base_url,
+            "model": api.model,
         }
     }
+    if vision.provider:
+        payload["vision"] = {
+            "provider": vision.provider,
+            "api_key": vision.api_key,
+            "base_url": vision.base_url,
+            "model": vision.model,
+            "enabled": vision.enabled,
+        }
     atomic_write_json(CONFIG_PATH, payload)
+
+
+def save_dashboard_api_config(config: DashboardApiConfig) -> None:
+    global DASHBOARD_API_CONFIG
+    DASHBOARD_API_CONFIG = config
+    save_dashboard_config_document()
+
+
+def save_dashboard_vision_config(config: DashboardVisionConfig) -> None:
+    global DASHBOARD_VISION_CONFIG
+    DASHBOARD_VISION_CONFIG = config
+    save_dashboard_config_document()
 
 
 def serialize_api_config(include_secret: bool) -> dict[str, Any]:
@@ -12577,6 +12984,28 @@ def serialize_api_config(include_secret: bool) -> dict[str, Any]:
         "authHeader": provider_auth_label(config.provider),
         "apiKeyRequired": provider_requires_api_key(config.provider),
     }
+
+
+def serialize_vision_config(include_secret: bool) -> dict[str, Any]:
+    config = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+    return {
+        "provider": config.provider,
+        "providerLabel": provider_display_name(config.provider) if config.provider else "",
+        "api_key": (config.api_key if include_secret else mask_secret(config.api_key)),
+        "apiKeyPresent": bool(config.api_key),
+        "base_url": config.base_url,
+        "model": config.model,
+        "enabled": config.enabled,
+        "configured": config.configured,
+        "apiKeyRequired": provider_requires_api_key(config.provider) if config.provider else False,
+    }
+
+
+def serialize_app_vision_config() -> dict[str, Any]:
+    # Bootstrap/app 面永远不携带密钥（与 serialize_app_api_config 同规）。
+    config = serialize_vision_config(include_secret=False)
+    config.pop("api_key", None)
+    return config
 
 
 def build_effective_model_summary() -> dict[str, Any]:

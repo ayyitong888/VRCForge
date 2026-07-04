@@ -184,7 +184,27 @@
     "checkpointArchiveDeleted": "已删除 {{count}} 个归档。",
     "checkpointArchiveDeleteFailed": "无法删除归档：{{reason}}",
     "unlimited": "不限制",
-    "limitOn": "已限制"
+    "limitOn": "已限制",
+    "visionProfile": "识图模型",
+    "visionProfileDesc": "当主模型无法识图（如 DeepSeek）时，图片附件会自动委托给这里配置的视觉模型分析，结果以带标签的执行步骤注入对话。视觉调用的 token 不会计入聊天上下文条。"
+  },
+  "vision": {
+    "notConfigured": "未配置",
+    "enabledLabel": "启用图片委托分析",
+    "clearProfile": "清除档案",
+    "statusActive": "已启用",
+    "statusDisabled": "已停用",
+    "stepTitle": "识图分析（{{model}}）",
+    "stepTitleSkipped": "图片未被分析",
+    "stepAnalyzed": "已分析 {{count}} 张图片",
+    "stepUnconfigured": "无可用视觉模型",
+    "images": "图片",
+    "source": "路由",
+    "sourceMain": "主模型（支持视觉）",
+    "sourceProfile": "识图模型档案",
+    "tokens": "视觉 token",
+    "analysis": "分析结果",
+    "reason": "原因"
   },
   "onboarding": {
     "welcome": "欢迎使用 VRCForge",

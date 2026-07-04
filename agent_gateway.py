@@ -255,6 +255,9 @@ SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(
 RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
 RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
+# 视觉委托分析结果的展示/回灌上限：这是"给规划器看的图片描述"，不是原始载荷，
+# 必须保持有界，避免一次识图把上下文塞爆。
+RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
 AGENT_MEMORY_MAX_ITEMS = 120
 AGENT_GOAL_MAX_ITEMS = 60
 AGENT_DESKTOP_ACTION_MAX_ITEMS = 120
@@ -1502,6 +1505,15 @@ class AgentGateway:
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
         self.llm_plan_fn: Callable[[str], Any] | None = None
+        # Optional vision-analysis hook injected by the host server. Receives
+        # (message, image_attachments) and returns a dict:
+        #   {"status": "analyzed", "text", "provider", "providerLabel",
+        #    "model", "source", "usage"}
+        # or {"status": "unconfigured", "reason"}. The vision call is a
+        # separate provider request: its token usage is recorded on the vision
+        # run step only and must NEVER be merged into llm_context_usage
+        # (the chat context meter).
+        self.vision_analyze_fn: Callable[[str, list[dict[str, Any]]], Any] | None = None
         # 由宿主在配置/调用 LLM 时更新，例如 "DeepSeek · deepseek-chat"。
         # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
         self.llm_planner_label: str = ""
@@ -2004,6 +2016,79 @@ class AgentGateway:
                 "error": str(exc),
             }
 
+    def _run_vision_analysis(
+        self,
+        message: str,
+        image_attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Delegate image attachments to the host-configured vision model.
+
+        路由矩阵（见 docs/ROADMAP.local.md「Dedicated Vision Model Profile」）：
+        - hook 返回 analyzed → 结果作为带标签的 vision run step 注入本轮；
+        - hook 返回 unconfigured / hook 缺失 → 诚实提示（绝不静默丢弃附件，
+          也绝不把图片原始字节发给不支持视觉的模型）；
+        - hook 抛错 → error 状态 + 有界错误信息，同样以提示收尾。
+        视觉调用的 token 用量只记录在返回的 payload/step 上，绝不写入
+        llm_context_usage（聊天上下文条）。
+        """
+        names = [
+            summarize_text(str(item.get("name") or "image"), 120)
+            for item in image_attachments[:RUNTIME_ATTACHMENT_MAX_ITEMS]
+        ]
+        base: dict[str, Any] = {
+            "schema": "vrcforge.vision_analysis.v1",
+            "imageCount": len(image_attachments),
+            "imageNames": names,
+        }
+        hook = self.vision_analyze_fn
+        if hook is None:
+            return {
+                **base,
+                "status": "unconfigured",
+                "reason": "vision_hook_missing",
+                "notice": (
+                    "（当前主模型无法识图：本轮附带的图片没有被读取。"
+                    "可在 设置 > 模型与 Provider 里配置一个视觉模型，之后图片会自动交给它分析。）"
+                ),
+            }
+        try:
+            raw = hook(message, image_attachments)
+        except Exception as exc:  # noqa: BLE001 - 视觉委托失败必须诚实上报，不静默。
+            return {
+                **base,
+                "status": "error",
+                "error": summarize_text(str(exc), 500),
+                "notice": (
+                    "（视觉模型调用失败，图片内容未能分析："
+                    f"{summarize_text(str(exc), 200)}。图片没有被静默丢弃，可稍后重试或检查视觉模型配置。）"
+                ),
+            }
+        result = ensure_dict(raw)
+        status = str(result.get("status") or "").strip() or "error"
+        if status == "analyzed":
+            text = summarize_text(str(result.get("text") or ""), RUNTIME_VISION_ANALYSIS_MAX_CHARS)
+            usage = ensure_dict(result.get("usage"))
+            return {
+                **base,
+                "status": "analyzed",
+                "text": text,
+                "provider": str(result.get("provider") or ""),
+                "providerLabel": str(result.get("providerLabel") or result.get("provider_label") or ""),
+                "model": str(result.get("model") or ""),
+                "source": str(result.get("source") or "visionProfile"),
+                "usage": usage,
+            }
+        reason = str(result.get("reason") or "no_vision_model")
+        return {
+            **base,
+            "status": "unconfigured",
+            "reason": reason,
+            "notice": (
+                "（当前主模型无法识图，也没有配置可用的视觉模型：本轮附带的图片没有被读取。"
+                "可在 设置 > 模型与 Provider 里配置一个视觉模型，之后图片会自动交给它分析。）"
+            ),
+        }
+
     def runtime_message(
         self,
         params: dict[str, Any] | None = None,
@@ -2028,6 +2113,14 @@ class AgentGateway:
         observe = self.runtime_observe(session_id=session_id)
         if attachments:
             observe["turn"] = {"attachments": attachments}
+        # 图片附件 → 视觉委托：一轮最多分析一次，结果（或诚实提示）注入本轮。
+        vision_payload: dict[str, Any] | None = None
+        image_attachments = runtime_image_attachments(attachments)
+        if image_attachments:
+            vision_payload = self._run_vision_analysis(message, image_attachments)
+            turn_context = ensure_dict(observe.get("turn"))
+            turn_context["visionAnalysis"] = vision_payload
+            observe["turn"] = turn_context
         self.llm_reasoning_trace = {}
         self.llm_context_usage = {}
         self._append_runtime_run(
@@ -2055,6 +2148,24 @@ class AgentGateway:
         param_command = str(params.get("shell_command") or params.get("shellCommand") or "").strip()
         loop_state: list[dict[str, Any]] = []
         steps: list[dict[str, Any]] = []
+        if vision_payload is not None:
+            # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
+            # 调用自己的 token 用量（不进聊天 contextUsage）。
+            steps.append(
+                {
+                    "index": 0,
+                    "kind": "vision",
+                    "tool": "vision_analysis",
+                    "summary": summarize_text(str(vision_payload.get("text") or vision_payload.get("notice") or ""), 240),
+                    "status": vision_payload.get("status") or "",
+                    "provider": vision_payload.get("provider") or "",
+                    "providerLabel": vision_payload.get("providerLabel") or "",
+                    "model": vision_payload.get("model") or "",
+                    "source": vision_payload.get("source") or "",
+                    "usage": ensure_dict(vision_payload.get("usage")),
+                    "imageCount": vision_payload.get("imageCount") or 0,
+                }
+            )
         seen_actions: set[tuple[str, str]] = set()
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
@@ -2167,7 +2278,8 @@ class AgentGateway:
 
             steps.append(
                 {
-                    "index": step_index,
+                    # len(steps)：有视觉前置步时循环步顺延，无视觉步时与 step_index 一致。
+                    "index": len(steps),
                     "kind": action_kind,
                     "tool": step_tool,
                     "summary": plan.get("summary") or "",
@@ -2210,6 +2322,18 @@ class AgentGateway:
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
 
+        # 视觉委托失败/未配置 → 诚实提示必须出现在给用户的回复里（不静默丢图）。
+        if (
+            vision_payload is not None
+            and str(vision_payload.get("status") or "") != "analyzed"
+            and isinstance(top_plan, dict)
+        ):
+            vision_notice = str(vision_payload.get("notice") or "").strip()
+            base_reply = str(top_plan.get("reply") or "").rstrip()
+            if vision_notice and vision_notice not in base_reply:
+                top_plan["reply"] = f"{base_reply}\n\n{vision_notice}".strip() if base_reply else vision_notice
+            top_plan["visionStatus"] = vision_payload.get("status")
+
         turn = {
             "id": turn_id,
             "createdAt": now,
@@ -2221,6 +2345,8 @@ class AgentGateway:
             turn["clientTurnId"] = client_turn_id
         if attachments:
             turn["attachments"] = attachments
+        if vision_payload is not None:
+            turn["vision"] = vision_payload
         if steps:
             turn["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
@@ -2298,6 +2424,8 @@ class AgentGateway:
             payload["clientTurnId"] = client_turn_id
         if attachments:
             payload["attachments"] = attachments
+        if vision_payload is not None:
+            payload["vision"] = vision_payload
         if steps:
             payload["steps"] = steps
         if int(reasoning_trace.get("itemCount") or 0) > 0:
@@ -7217,6 +7345,30 @@ class AgentGateway:
                     lines.append(f"- {name} (text): {summarize_text(str(attachment.get('text') or ''), 1200)}")
                 else:
                     lines.append(f"- {name} ({kind}, {attachment.get('type') or 'file'}, {attachment.get('size') or 0} bytes)")
+        vision = ensure_dict((observe.get("turn") or {}).get("visionAnalysis"))
+        if vision:
+            # 文本规划器本身看不到图片：这里回灌的是"带标签的委托分析结果"，
+            # 标签必须写明是哪个视觉模型产出的，避免规划器把它当成自己看到的。
+            if str(vision.get("status") or "") == "analyzed" and vision.get("text"):
+                label = " · ".join(
+                    part
+                    for part in (
+                        str(vision.get("providerLabel") or vision.get("provider") or "").strip(),
+                        str(vision.get("model") or "").strip(),
+                    )
+                    if part
+                )
+                lines.append(
+                    f"\nImage analysis (delegated to vision model {label or 'unknown'}; "
+                    "you cannot see the images yourself, this analysis is your only view of them):"
+                )
+                lines.append(summarize_text(str(vision.get("text") or ""), RUNTIME_VISION_ANALYSIS_MAX_CHARS))
+            else:
+                lines.append(
+                    "\nImage attachments are present, but no vision-capable model is available, "
+                    "so you cannot see the images. Be honest about this in your reply and suggest "
+                    "configuring a vision model in Settings; do not pretend to have seen them."
+                )
         memories = ensure_list(ensure_dict(observe.get("memory")).get("items"))
         if memories:
             lines.append("\nExplicit memory (user-visible and user-clearable):")
@@ -7298,13 +7450,13 @@ class AgentGateway:
             step_lines.append(line)
         steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
         return (
-            "你是 VRCForge 桌面智能体的规划器，负责把用户的中文/英文请求转换成下一步动作。\n"
+            "你是 VRCForge 桌面智能体的规划器，负责把用户的请求转换成下一步动作。\n"
             "这是一个多步循环：你每次只产出一个动作；工具执行后结果会回灌给你，由你决定下一步，"
             "直到信息足够后再用 reply 收尾。\n"
             "可选动作：\n"
             '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
             '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
-            '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<中文回答>"}\n'
+            '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<回答>"}\n'
             "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
             "写操作类工具会进入审批流程，可以放心规划；"
             "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
@@ -7314,7 +7466,8 @@ class AgentGateway:
             "换个工具或思路能绕过就绕过；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
             "绝不能在没真正做完时假装已完成（严禁「做了做了」式的虚假收尾）；"
             "拿不准时选 reply 并说明你需要什么信息。\n"
-            "reply 字段是直接展示给用户的对话内容：用第一人称中文，自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」），不要复述 JSON 或工具名。\n\n"
+            "reply 字段是直接展示给用户的对话内容：用第一人称，回复语言必须跟随用户实际使用的语言——用户用哪种语言提问就用哪种语言回复，用户中途换语言也跟着换；"
+            "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
             f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
             f"最近对话：\n{history_block}\n\n"
             f"本轮已执行步骤+结果：\n{steps_block}\n\n"
@@ -8278,6 +8431,27 @@ def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:
             item["replayable"] = False
         attachments.append(item)
     return attachments
+
+
+def runtime_image_attachments(attachments: Any) -> list[dict[str, Any]]:
+    """Return the subset of normalized attachments that are inline images.
+
+    Only bounded data-url payloads with an image MIME type qualify: metadata
+    or text attachments never trigger vision delegation, and nothing here
+    reads project files on its own (attaching an image stays an explicit
+    user action).
+    """
+    images: list[dict[str, Any]] = []
+    for attachment in ensure_list(attachments):
+        if not isinstance(attachment, dict):
+            continue
+        if str(attachment.get("payloadKind") or "") != "data_url":
+            continue
+        data_url = str(attachment.get("dataUrl") or "")
+        mime = str(attachment.get("type") or "").strip().lower()
+        if mime.startswith("image/") or data_url.startswith("data:image/"):
+            images.append(attachment)
+    return images
 
 
 def truncate_text(text: str, limit: int = 12000) -> str:

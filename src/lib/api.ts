@@ -127,6 +127,18 @@ export type ApiConfig = {
   apiKeyRequired: boolean;
 };
 
+export type VisionConfig = {
+  provider: string;
+  providerLabel?: string;
+  api_key?: string;
+  apiKeyPresent: boolean;
+  base_url?: string;
+  model?: string;
+  enabled: boolean;
+  configured: boolean;
+  apiKeyRequired: boolean;
+};
+
 export type ProviderModelInfo = {
   id: string;
   label: string;
@@ -356,6 +368,22 @@ export type AgentContextUsage = {
   unavailableReason?: string;
 };
 
+export type AgentVisionAnalysis = {
+  schema?: string;
+  status: "analyzed" | "unconfigured" | "error" | string;
+  imageCount?: number;
+  imageNames?: string[];
+  text?: string;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  source?: "main" | "visionProfile" | string;
+  usage?: AgentContextUsage;
+  reason?: string;
+  error?: string;
+  notice?: string;
+};
+
 export type AgentRuntimeResponse = {
   ok: boolean;
   session_id: string;
@@ -411,6 +439,7 @@ export type AgentRuntimeResponse = {
   };
   skill?: AgentSkillResult;
   result?: AgentShellResult;
+  vision?: AgentVisionAnalysis;
 };
 
 export type AgentRuntimeRun = {
@@ -454,6 +483,12 @@ export type AgentRuntimeRun = {
     tool?: string;
     summary?: string;
     status?: string;
+    provider?: string;
+    providerLabel?: string;
+    model?: string;
+    source?: string;
+    usage?: AgentContextUsage;
+    imageCount?: number;
   }>;
 };
 
@@ -612,6 +647,7 @@ export type AppBootstrap = {
   };
   agentManifest: AgentManifest;
   apiConfig?: ApiConfig;
+  visionConfig?: VisionConfig;
   agentHealth: {
     ok: boolean;
     enabled: boolean;
@@ -739,7 +775,18 @@ export async function updatePermission(
 }
 
 export async function updateApiConfig(endpoint: string, config: { provider: string; api_key: string; base_url?: string; model?: string }) {
-  return requestJson<{ ok?: boolean; apiConfig: ApiConfig }>(`${endpoint}/api/config`, {
+  return requestJson<{ ok?: boolean; apiConfig: ApiConfig; visionConfig?: VisionConfig }>(`${endpoint}/api/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function updateVisionConfig(
+  endpoint: string,
+  config: { provider: string; api_key: string; base_url?: string; model?: string; enabled: boolean },
+) {
+  return requestJson<{ ok?: boolean; apiConfig: ApiConfig; visionConfig: VisionConfig }>(`${endpoint}/api/config/vision`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),

@@ -194,6 +194,7 @@ import {
   trustSkillPackageSigner,
   updateAdjustmentCheckpoint,
   updateApiConfig,
+  updateVisionConfig,
   updateDiagnostics,
   updateExternalAgentGateway,
   updatePermission,
@@ -1032,6 +1033,12 @@ export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [savingApiConfig, setSavingApiConfig] = useState(false);
+  const [visionProvider, setVisionProvider] = useState("");
+  const [visionApiKey, setVisionApiKey] = useState("");
+  const [visionBaseUrl, setVisionBaseUrl] = useState("");
+  const [visionModel, setVisionModel] = useState("");
+  const [visionEnabled, setVisionEnabled] = useState(true);
+  const [savingVisionConfig, setSavingVisionConfig] = useState(false);
   const [modelOptions, setModelOptions] = useState<ProviderModelInfo[]>([]);
   const [modelOptionsScope, setModelOptionsScope] = useState<ModelOptionsScope | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -1098,6 +1105,7 @@ export default function App() {
   const permission = bootstrap?.permission;
   const currentPermissionVisual = permissionVisualState(permission);
   const apiConfig = bootstrap?.apiConfig;
+  const visionConfig = bootstrap?.visionConfig;
   const healthComponents = bootstrap?.health.components ?? {};
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
@@ -1667,6 +1675,16 @@ export default function App() {
     setModelOptions([]);
     setModelOptionsScope(null);
   }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model]);
+
+  useEffect(() => {
+    if (!visionConfig) {
+      return;
+    }
+    setVisionProvider(visionConfig.provider || "");
+    setVisionBaseUrl(visionConfig.base_url || "");
+    setVisionModel(visionConfig.model || "");
+    setVisionEnabled(visionConfig.enabled !== false);
+  }, [visionConfig?.provider, visionConfig?.base_url, visionConfig?.model, visionConfig?.enabled]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -4480,6 +4498,66 @@ export default function App() {
     setModelsError("");
   }
 
+  function handleVisionProviderChange(provider: string) {
+    setVisionProvider(provider);
+    setVisionModel(provider ? defaultModelForProvider(provider) : "");
+    setVisionBaseUrl(provider ? defaultBaseUrlForProvider(provider) : "");
+  }
+
+  async function saveVisionProfile(event?: FormEvent) {
+    event?.preventDefault();
+    const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
+    if (visionProvider && !visionModel.trim()) {
+      return;
+    }
+    if (visionProvider && providerNeedsApiKey(visionProvider) && !visionApiKey.trim() && !visionKeySaved) {
+      return;
+    }
+    setSavingVisionConfig(true);
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      await updateVisionConfig(targetEndpoint, {
+        provider: visionProvider,
+        api_key: visionApiKey.trim(),
+        base_url: visionBaseUrl.trim(),
+        model: visionModel.trim(),
+        enabled: visionEnabled,
+      });
+      setVisionApiKey("");
+      await refresh(targetEndpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingVisionConfig(false);
+    }
+  }
+
+  async function clearVisionProfile() {
+    setSavingVisionConfig(true);
+    setError("");
+    try {
+      await updateVisionConfig(endpoint, { provider: "", api_key: "", base_url: "", model: "", enabled: false });
+      setVisionProvider("");
+      setVisionApiKey("");
+      setVisionBaseUrl("");
+      setVisionModel("");
+      setVisionEnabled(true);
+      await refresh(endpoint);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingVisionConfig(false);
+    }
+  }
+
   async function loadModels() {
     if (loadingModels) {
       return;
@@ -5146,6 +5224,40 @@ export default function App() {
                       onBaseUrlChange={setApiBaseUrl}
                       onModelChange={setApiModel}
                       onSubmit={saveApiProvider}
+                    />
+                  </div>
+                </section>
+
+                <section className="mt-12">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h2 className="text-base font-semibold">
+                      <Eye className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
+                      {t("settings.visionProfile")}
+                    </h2>
+                    {visionConfig?.configured ? (
+                      <Badge tone={visionConfig.enabled ? "ok" : "muted"} className="shrink-0">
+                        {visionConfig.enabled ? t("vision.statusActive") : t("vision.statusDisabled")}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.visionProfileDesc")}</p>
+                  <div className="mt-4">
+                    <VisionProfileSetup
+                      provider={visionProvider}
+                      apiKey={visionApiKey}
+                      baseUrl={visionBaseUrl}
+                      model={visionModel}
+                      enabled={visionEnabled}
+                      saving={savingVisionConfig}
+                      keySaved={Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider)}
+                      configured={Boolean(visionConfig?.configured)}
+                      onProviderChange={handleVisionProviderChange}
+                      onApiKeyChange={setVisionApiKey}
+                      onBaseUrlChange={setVisionBaseUrl}
+                      onModelChange={setVisionModel}
+                      onEnabledChange={setVisionEnabled}
+                      onSubmit={saveVisionProfile}
+                      onClear={() => void clearVisionProfile()}
                     />
                   </div>
                 </section>
@@ -7295,6 +7407,126 @@ function ProviderSetup({
           Vision
         </Button>
         <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {i18n.t("common.save")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function VisionProfileSetup({
+  provider,
+  apiKey,
+  baseUrl,
+  model,
+  enabled,
+  saving,
+  keySaved = false,
+  configured = false,
+  onProviderChange,
+  onApiKeyChange,
+  onBaseUrlChange,
+  onModelChange,
+  onEnabledChange,
+  onSubmit,
+  onClear,
+}: {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  saving: boolean;
+  keySaved?: boolean;
+  configured?: boolean;
+  onProviderChange: (value: string) => void;
+  onApiKeyChange: (value: string) => void;
+  onBaseUrlChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  onEnabledChange: (value: boolean) => void;
+  onSubmit: (event?: FormEvent) => void;
+  onClear: () => void;
+}) {
+  const requiresBaseUrl = ["openai", "deepseek", "openrouter", "ollama", "vertexai", "custom"].includes(provider);
+  const saveDisabled =
+    saving || !provider || !model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved);
+
+  return (
+    <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+      <div className="grid gap-4">
+        <FieldLabel label={i18n.t("provider.apiProvider")}>
+          <select
+            value={provider}
+            onChange={(event) => onProviderChange(event.target.value)}
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+          >
+            <option value="">{i18n.t("vision.notConfigured")}</option>
+            <option value="gemini">Google AI Studio</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+            <option value="vertexai">Vertex AI</option>
+            <option value="custom">{i18n.t("provider.customEndpoint")}</option>
+          </select>
+        </FieldLabel>
+        {provider ? (
+          <>
+            <FieldLabel label={i18n.t("provider.apiKey")}>
+              {providerNeedsApiKey(provider) ? (
+                <input
+                  value={apiKey}
+                  onChange={(event) => onApiKeyChange(event.target.value)}
+                  type="password"
+                  placeholder={keySaved ? i18n.t("provider.savedKeyHint") : i18n.t("provider.apiKeyPlaceholder")}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+                  autoComplete="off"
+                />
+              ) : (
+                <input
+                  value={i18n.t("provider.noKeyNeeded")}
+                  readOnly
+                  className="h-10 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground outline-none"
+                />
+              )}
+            </FieldLabel>
+            {requiresBaseUrl ? (
+              <FieldLabel label={i18n.t("provider.baseUrl")}>
+                <input
+                  value={baseUrl}
+                  onChange={(event) => onBaseUrlChange(event.target.value)}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+                />
+              </FieldLabel>
+            ) : null}
+            <FieldLabel label={i18n.t("provider.model")}>
+              <input
+                value={model}
+                onChange={(event) => onModelChange(event.target.value)}
+                placeholder={i18n.t("provider.modelPlaceholder")}
+                className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+              />
+            </FieldLabel>
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(event) => onEnabledChange(event.target.checked)}
+                className="h-4 w-4 accent-primary"
+              />
+              {i18n.t("vision.enabledLabel")}
+            </label>
+          </>
+        ) : null}
+      </div>
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        {configured ? (
+          <Button type="button" variant="outline" disabled={saving} onClick={onClear}>
+            {i18n.t("vision.clearProfile")}
+          </Button>
+        ) : null}
+        <Button disabled={saveDisabled} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>
@@ -10690,6 +10922,7 @@ function ConversationCard({
   const response = item.response;
   const shell = response.shell;
   const skill = response.skill;
+  const vision = response.vision;
   const awaitingApproval = shell?.status === "pending_approval";
   const localIdle =
     response.plan.planner === "deterministic-local" &&
@@ -10762,6 +10995,40 @@ function ConversationCard({
           fallbackLabel={item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}
           elapsedSeconds={item.elapsedSeconds}
         />
+
+        {vision ? (
+          <RunRow
+            icon="vision"
+            title={
+              vision.status === "analyzed"
+                ? t("vision.stepTitle", {
+                    model: [vision.providerLabel || vision.provider, vision.model].filter(Boolean).join(" · ") || "vision",
+                  })
+                : t("vision.stepTitleSkipped")
+            }
+            statusTone={vision.status === "analyzed" ? "ok" : vision.status === "error" ? "danger" : "warn"}
+            statusLabel={
+              vision.status === "analyzed"
+                ? t("vision.stepAnalyzed", { count: vision.imageCount ?? 0 })
+                : vision.status === "error"
+                  ? t("skillStatus.failed")
+                  : t("vision.stepUnconfigured")
+            }
+          >
+            {vision.imageNames && vision.imageNames.length > 0 ? (
+              <DataLine label={t("vision.images")} value={vision.imageNames.join(", ")} />
+            ) : null}
+            {vision.source ? (
+              <DataLine label={t("vision.source")} value={vision.source === "main" ? t("vision.sourceMain") : t("vision.sourceProfile")} />
+            ) : null}
+            {vision.status === "analyzed" && vision.usage?.totalTokens ? (
+              <DataLine label={t("vision.tokens")} value={String(vision.usage.totalTokens)} />
+            ) : null}
+            {vision.text ? <OutputBlock label={t("vision.analysis")} value={vision.text} /> : null}
+            {vision.error ? <DataLine label={t("skills.error")} value={vision.error} /> : null}
+            {vision.reason && vision.status !== "analyzed" ? <DataLine label={t("vision.reason")} value={vision.reason} /> : null}
+          </RunRow>
+        ) : null}
 
         {shell?.classification ? (
           <RunRow
@@ -11132,14 +11399,14 @@ function RunRow({
   statusLabel,
   children,
 }: {
-  icon: "shell" | "skill" | "plan";
+  icon: "shell" | "skill" | "plan" | "vision";
   title: string;
   statusTone: "ok" | "warn" | "danger" | "muted";
   statusLabel: string;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : ListChecks;
+  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
   return (
     <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
       <button

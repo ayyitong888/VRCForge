@@ -184,7 +184,27 @@
     "checkpointArchiveDeleted": "{{count}} 件のアーカイブを削除しました。",
     "checkpointArchiveDeleteFailed": "アーカイブを削除できませんでした：{{reason}}",
     "unlimited": "無制限",
-    "limitOn": "上限あり"
+    "limitOn": "上限あり",
+    "visionProfile": "画像認識モデル",
+    "visionProfileDesc": "メインモデルが画像を認識できない場合（DeepSeek など）、画像添付はここで設定したビジョンモデルに自動委任され、結果はラベル付き実行ステップとして会話に挿入されます。ビジョン呼び出しのトークンはチャットのコンテキストバーに計上されません。"
+  },
+  "vision": {
+    "notConfigured": "未設定",
+    "enabledLabel": "画像の委任分析を有効化",
+    "clearProfile": "プロファイルを削除",
+    "statusActive": "有効",
+    "statusDisabled": "無効",
+    "stepTitle": "画像分析（{{model}}）",
+    "stepTitleSkipped": "画像は分析されませんでした",
+    "stepAnalyzed": "{{count}} 枚の画像を分析しました",
+    "stepUnconfigured": "利用可能なビジョンモデルなし",
+    "images": "画像",
+    "source": "ルーティング",
+    "sourceMain": "メインモデル（ビジョン対応）",
+    "sourceProfile": "画像認識プロファイル",
+    "tokens": "ビジョントークン",
+    "analysis": "分析結果",
+    "reason": "理由"
   },
   "onboarding": {
     "welcome": "VRCForge へようこそ",

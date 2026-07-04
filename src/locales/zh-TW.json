@@ -184,7 +184,27 @@
     "checkpointArchiveDeleted": "已刪除 {{count}} 個封存。",
     "checkpointArchiveDeleteFailed": "無法刪除封存：{{reason}}",
     "unlimited": "不限制",
-    "limitOn": "已限制"
+    "limitOn": "已限制",
+    "visionProfile": "識圖模型",
+    "visionProfileDesc": "當主模型無法識圖（如 DeepSeek）時，圖片附件會自動委託給這裡設定的視覺模型分析，結果以帶標籤的執行步驟注入對話。視覺呼叫的 token 不會計入聊天上下文條。"
+  },
+  "vision": {
+    "notConfigured": "未設定",
+    "enabledLabel": "啟用圖片委託分析",
+    "clearProfile": "清除設定檔",
+    "statusActive": "已啟用",
+    "statusDisabled": "已停用",
+    "stepTitle": "識圖分析（{{model}}）",
+    "stepTitleSkipped": "圖片未被分析",
+    "stepAnalyzed": "已分析 {{count}} 張圖片",
+    "stepUnconfigured": "無可用視覺模型",
+    "images": "圖片",
+    "source": "路由",
+    "sourceMain": "主模型（支援視覺）",
+    "sourceProfile": "識圖模型設定檔",
+    "tokens": "視覺 token",
+    "analysis": "分析結果",
+    "reason": "原因"
   },
   "onboarding": {
     "welcome": "歡迎使用 VRCForge",
