@@ -514,14 +514,6 @@ export type DesktopRuntimeSnapshot = {
   memory?: { memories?: AgentMemory[]; count?: number };
 };
 
-export type WebSocketTicket = {
-  ok: boolean;
-  schema?: string;
-  ticket: string;
-  expiresAt?: string;
-  expiresInSeconds?: number;
-};
-
 export type AgentDesktopAction = {
   schema?: string;
   id?: string;
@@ -763,10 +755,6 @@ export async function repairUnityMcpBridge(
 
 export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsStatus> {
   return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`);
-}
-
-export async function issueWebSocketTicket(endpoint: string): Promise<WebSocketTicket> {
-  return requestJson<WebSocketTicket>(`${endpoint}/api/app/ws-ticket`, { method: "POST" });
 }
 
 export async function updateDiagnostics(endpoint: string, request: { debugLogging: boolean }): Promise<DiagnosticsStatus> {
@@ -2687,7 +2675,6 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
     "/api/app/support-bundle",
     "/api/app/unity",
     "/api/app/workspace",
-    "/api/app/ws-ticket",
   ];
   return appPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }

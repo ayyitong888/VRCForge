@@ -17,7 +17,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, State,
+    Emitter, Manager, State,
 };
 
 const BACKEND_HOST: &str = "127.0.0.1";
@@ -28,6 +28,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct BackendState {
     child: Mutex<Option<Child>>,
+    event_bridge_started: Mutex<bool>,
 }
 
 impl Drop for BackendState {
@@ -171,8 +172,173 @@ fn app_api_request(request: AppApiRequest) -> Result<AppApiResponse, String> {
     app_api_response_from_ureq(response)
 }
 
+fn start_backend_event_bridge_once(
+    app_handle: tauri::AppHandle,
+    state: &BackendState,
+    app_session_token: String,
+) -> Result<(), String> {
+    let mut started = state
+        .event_bridge_started
+        .lock()
+        .map_err(|_| "backend event bridge state lock poisoned".to_string())?;
+    if *started {
+        return Ok(());
+    }
+    *started = true;
+    thread::spawn(move || backend_event_bridge_loop(app_handle, app_session_token));
+    Ok(())
+}
+
+fn backend_event_bridge_loop(app_handle: tauri::AppHandle, app_session_token: String) {
+    loop {
+        match issue_backend_event_ticket(&app_session_token).and_then(connect_backend_event_socket)
+        {
+            Ok(mut socket) => {
+                let _ = app_handle.emit(
+                    "vrcforge-backend-event-status",
+                    serde_json::json!({"ok": true, "status": "connected"}),
+                );
+                loop {
+                    match socket.read() {
+                        Ok(message) if message.is_text() => match message.into_text() {
+                            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                                Ok(payload) => {
+                                    if let Some(event) = sanitize_backend_event(payload) {
+                                        let _ = app_handle.emit("vrcforge-backend-event", event);
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = app_handle.emit(
+                                        "vrcforge-backend-event-status",
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "status": "invalid_event",
+                                            "error": error.to_string()
+                                        }),
+                                    );
+                                }
+                            },
+                            Err(error) => {
+                                let _ = app_handle.emit(
+                                    "vrcforge-backend-event-status",
+                                    serde_json::json!({
+                                        "ok": false,
+                                        "status": "invalid_text",
+                                        "error": error.to_string()
+                                    }),
+                                );
+                            }
+                        },
+                        Ok(message) if message.is_close() => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            let _ = app_handle.emit(
+                                "vrcforge-backend-event-status",
+                                serde_json::json!({
+                                    "ok": false,
+                                    "status": "disconnected",
+                                    "error": error.to_string()
+                                }),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = app_handle.emit(
+                    "vrcforge-backend-event-status",
+                    serde_json::json!({
+                        "ok": false,
+                        "status": "connect_failed",
+                        "error": error
+                    }),
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(1500));
+    }
+}
+
+fn issue_backend_event_ticket(app_session_token: &str) -> Result<String, String> {
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(Duration::from_secs(8))
+        .redirects(0)
+        .build();
+    let response = app_api_response_from_ureq(
+        agent
+            .post(&format!("{BACKEND_ENDPOINT}/api/app/ws-ticket"))
+            .set("Accept", "application/json")
+            .set("Origin", "tauri://localhost")
+            .set("Authorization", &format!("Bearer {app_session_token}"))
+            .call(),
+    )?;
+    if !response.ok {
+        return Err(response
+            .body
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Backend event ticket request failed.")
+            .to_string());
+    }
+    response
+        .body
+        .get("ticket")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Backend event ticket response did not include a ticket.".to_string())
+}
+
+fn connect_backend_event_socket(
+    ticket: String,
+) -> Result<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>, String> {
+    let url = format!(
+        "ws://{BACKEND_HOST}:{BACKEND_PORT}/ws?ws_ticket={}",
+        percent_encode_query_component(&ticket)
+    );
+    let (socket, _) = tungstenite::connect(url.as_str())
+        .map_err(|error| format!("unable to connect backend event socket: {error}"))?;
+    Ok(socket)
+}
+
+fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde_json::Value> {
+    let event_type = payload.get("type")?.as_str()?;
+    if !desktop_backend_event_allowed(event_type) {
+        return None;
+    }
+    let mut event = serde_json::json!({ "type": event_type });
+    if let Some(timestamp) = payload.get("timestamp") {
+        event["timestamp"] = timestamp.clone();
+    }
+    Some(event)
+}
+
+fn desktop_backend_event_allowed(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "agentApprovals"
+            | "agentDesktopActions"
+            | "agentGoals"
+            | "agentMemory"
+            | "agentPermission"
+            | "agentRuntimeCancel"
+            | "agentRuntimeQueue"
+            | "agentRuntimeRuns"
+            | "agentRuntimeTurn"
+            | "hello"
+            | "projects"
+            | "subAgentTasks"
+            | "unity_status"
+    )
+}
+
 #[tauri::command]
-fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, String> {
+fn start_backend(
+    app_handle: tauri::AppHandle,
+    state: State<'_, BackendState>,
+) -> Result<BackendStartResult, String> {
     let user_data = user_data_dir()?;
     let app_session_token = ensure_app_session_token(&user_data)?;
     if backend_port_open() {
@@ -181,6 +347,7 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
                 "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
             );
         }
+        start_backend_event_bridge_once(app_handle, &state, app_session_token.clone())?;
         return Ok(BackendStartResult {
             endpoint: BACKEND_ENDPOINT.to_string(),
             started: false,
@@ -253,6 +420,7 @@ fn start_backend(state: State<'_, BackendState>) -> Result<BackendStartResult, S
         ));
     }
 
+    start_backend_event_bridge_once(app_handle, &state, app_session_token.clone())?;
     Ok(BackendStartResult {
         endpoint: BACKEND_ENDPOINT.to_string(),
         started: true,
@@ -665,7 +833,6 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
         "/api/app/support-bundle",
         "/api/app/unity",
         "/api/app/workspace",
-        "/api/app/ws-ticket",
     ];
     app_prefixes
         .iter()
@@ -844,6 +1011,7 @@ fn main() {
     tauri::Builder::default()
         .manage(BackendState {
             child: Mutex::new(None),
+            event_bridge_started: Mutex::new(false),
         })
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "显示 VRCForge", true, None::<&str>)?;
@@ -907,8 +1075,9 @@ mod tests {
     use super::{
         app_session_challenge_signature, app_session_challenge_signature_matches,
         extract_challenge_signature, hmac_sha256_hex, normalize_app_api_path,
-        percent_encode_query_component, prepare_runtime_files, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_project_folder_to_open,
+        percent_encode_query_component, prepare_runtime_files, sanitize_backend_event,
+        try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open,
     };
     use std::{
         env, fs,
@@ -1040,10 +1209,6 @@ mod tests {
             Ok("/api/avatar-encryption/plan"),
         );
         assert_eq!(
-            normalize_app_api_path("POST", "/api/app/ws-ticket").as_deref(),
-            Ok("/api/app/ws-ticket"),
-        );
-        assert_eq!(
             normalize_app_api_path("GET", "/api/health").as_deref(),
             Ok("/api/health")
         );
@@ -1051,6 +1216,7 @@ mod tests {
         assert!(normalize_app_api_path("GET", "http://127.0.0.1:8757/api/app/bootstrap").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/session-challenge").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/ws-ticket").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/%73ession").is_err());
         assert!(normalize_app_api_path("GET", "/api/app/%2e%2e/health").is_err());
         assert!(normalize_app_api_path("GET", "/api/agent/manifest").is_err());
@@ -1061,6 +1227,36 @@ mod tests {
         assert!(normalize_app_api_path("POST", "/api/shader/apply").is_err());
         assert!(normalize_app_api_path("POST", "/api/projects/install").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/unlisted-future-route").is_err());
+    }
+
+    #[test]
+    fn backend_event_sanitizer_only_forwards_safe_desktop_events() {
+        let safe = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeRuns",
+            "payload": {
+                "runs": [],
+                "secret": "should-not-reach-webview",
+                "state": {"path": "C:\\Users\\Example\\AppData\\Local\\VRCForge"},
+                "config": {"apiKey": "hidden"},
+                "configPath": "C:\\Users\\Example\\AppData\\Local\\VRCForge\\settings.json",
+                "logsDir": "C:\\Users\\Example\\AppData\\Local\\VRCForge\\logs"
+            },
+            "timestamp": 1.0
+        }));
+        assert_eq!(
+            safe,
+            Some(serde_json::json!({"type": "agentRuntimeRuns", "timestamp": 1.0}))
+        );
+
+        for event_type in ["config", "log", "state", "agentNotesUpdated"] {
+            assert!(sanitize_backend_event(serde_json::json!({
+                "type": event_type,
+                "payload": {"secret": "should-not-reach-webview"}
+            }))
+            .is_none());
+        }
+
+        assert!(sanitize_backend_event(serde_json::json!({"payload": {}})).is_none());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -214,6 +215,11 @@ type BackendStartResult = {
   already_running: boolean;
   mode: string;
   message: string;
+};
+
+type BackendEventMessage = {
+  type?: string;
+  payload?: unknown;
 };
 
 const CONNECTOR_CLIENT_LABELS: Record<ExternalAgentConnectorClient, string> = {
@@ -1102,6 +1108,9 @@ export default function App() {
   const runtimeStartingRef = useRef(false);
   const healthRefreshInFlightRef = useRef(false);
   const runtimeRefreshSeqRef = useRef(0);
+  const desktopEventBootstrapTimerRef = useRef<number | null>(null);
+  const desktopEventRuntimeTimerRef = useRef<number | null>(null);
+  const desktopEventSubAgentTimerRef = useRef<number | null>(null);
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const permission = bootstrap?.permission;
@@ -1690,11 +1699,117 @@ export default function App() {
   }, [visionConfig?.provider, visionConfig?.base_url, visionConfig?.model, visionConfig?.enabled]);
 
   useEffect(() => {
+    const intervalMs = isTauriRuntime() ? 30000 : 5000;
     const timer = window.setInterval(() => {
       void refreshSilently();
-    }, 5000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
   }, [endpoint]);
+
+  useEffect(() => {
+    if (!runtimeConnected || !isTauriRuntime()) {
+      return;
+    }
+    let active = true;
+    let unlistenBackendEvent: (() => void) | null = null;
+    let unlistenBackendStatus: (() => void) | null = null;
+    const runtimeEvents = new Set([
+      "agentApprovals",
+      "agentDesktopActions",
+      "agentGoals",
+      "agentMemory",
+      "agentPermission",
+      "agentRuntimeCancel",
+      "agentRuntimeQueue",
+      "agentRuntimeRuns",
+      "agentRuntimeTurn",
+    ]);
+    const bootstrapEvents = new Set(["agentPermission", "hello", "projects", "unity_status"]);
+    const scheduleBootstrapRefresh = () => {
+      if (desktopEventBootstrapTimerRef.current !== null) {
+        window.clearTimeout(desktopEventBootstrapTimerRef.current);
+      }
+      desktopEventBootstrapTimerRef.current = window.setTimeout(() => {
+        desktopEventBootstrapTimerRef.current = null;
+        if (active) {
+          void refreshSilently();
+        }
+      }, 200);
+    };
+    const scheduleRuntimeRefresh = () => {
+      if (desktopEventRuntimeTimerRef.current !== null) {
+        window.clearTimeout(desktopEventRuntimeTimerRef.current);
+      }
+      desktopEventRuntimeTimerRef.current = window.setTimeout(() => {
+        desktopEventRuntimeTimerRef.current = null;
+        if (active) {
+          void refreshRuntimeRuns(false);
+        }
+      }, 150);
+    };
+    const scheduleSubAgentRefresh = () => {
+      if (desktopEventSubAgentTimerRef.current !== null) {
+        window.clearTimeout(desktopEventSubAgentTimerRef.current);
+      }
+      desktopEventSubAgentTimerRef.current = window.setTimeout(() => {
+        desktopEventSubAgentTimerRef.current = null;
+        if (active) {
+          void loadSubAgents(false);
+        }
+      }, 200);
+    };
+    void listen<BackendEventMessage>("vrcforge-backend-event", (event) => {
+      const eventType = typeof event.payload?.type === "string" ? event.payload.type : "";
+      if (!eventType) {
+        return;
+      }
+      if (bootstrapEvents.has(eventType)) {
+        scheduleBootstrapRefresh();
+      }
+      if (runtimeEvents.has(eventType)) {
+        scheduleRuntimeRefresh();
+      }
+      if (eventType === "subAgentTasks") {
+        scheduleSubAgentRefresh();
+      }
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenBackendEvent = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
+    void listen("vrcforge-backend-event-status", () => {
+      // Status is intentionally quiet; the normal runtime banner remains the user-facing signal.
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenBackendStatus = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unlistenBackendEvent?.();
+      unlistenBackendStatus?.();
+      if (desktopEventBootstrapTimerRef.current !== null) {
+        window.clearTimeout(desktopEventBootstrapTimerRef.current);
+        desktopEventBootstrapTimerRef.current = null;
+      }
+      if (desktopEventRuntimeTimerRef.current !== null) {
+        window.clearTimeout(desktopEventRuntimeTimerRef.current);
+        desktopEventRuntimeTimerRef.current = null;
+      }
+      if (desktopEventSubAgentTimerRef.current !== null) {
+        window.clearTimeout(desktopEventSubAgentTimerRef.current);
+        desktopEventSubAgentTimerRef.current = null;
+      }
+    };
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen]);
 
   useEffect(() => {
     if (!runtimeConnected) {
@@ -1797,9 +1912,10 @@ export default function App() {
     if (!runtimeConnected || rightSidebarCollapsed) {
       return;
     }
+    const intervalMs = isTauriRuntime() ? (sending || pendingApprovals > 0 ? 5000 : 15000) : sending || pendingApprovals > 0 ? 2500 : 5000;
     const timer = window.setInterval(() => {
       void refreshRuntimeRuns(false);
-    }, sending || pendingApprovals > 0 ? 2500 : 5000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
