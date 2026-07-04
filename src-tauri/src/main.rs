@@ -226,6 +226,33 @@ struct DesktopResolveRecoveryRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopExternalAgentConnectorsRequest {
+    project_path: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopExternalAgentGatewayRequest {
+    enabled: Option<bool>,
+    allow_write_requests: Option<bool>,
+    revoke_token: Option<bool>,
+    checkpoint_archive_max_size_mb: Option<i64>,
+    delete_checkpoint_archive_ids: Option<Vec<String>>,
+    checkpoint_archive_directory: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopExternalAgentConnectorActionRequest {
+    client: String,
+    project_path: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
 #[tauri::command]
 fn backend_endpoint() -> String {
     BACKEND_ENDPOINT.to_string()
@@ -281,6 +308,7 @@ fn remove_secret_response_fields(value: &mut serde_json::Value) {
                 "authorization",
                 "Authorization",
                 "configPath",
+                "backupPath",
             ] {
                 object.remove(key);
             }
@@ -309,12 +337,20 @@ fn sanitize_text_for_webview(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
     if lower.contains("api_key")
         || lower.contains("apikey")
-        || lower.contains("authorization")
         || lower.contains("configpath")
+        || lower.contains("backuppath")
+        || (lower.contains("authorization") && !is_env_placeholder_template(value))
     {
         return "[redacted]".to_string();
     }
     value.to_string()
+}
+
+fn is_env_placeholder_template(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("${")
+        && lower.contains('}')
+        && (lower.contains("token") || lower.contains("api_key") || lower.contains("apikey"))
 }
 
 fn sanitize_error_message(message: String, secrets: &[&str]) -> String {
@@ -777,6 +813,77 @@ fn export_interrupted_apply_incident_bundle(
         None,
         request.timeout_ms,
     )
+}
+
+#[tauri::command]
+fn fetch_external_agent_connectors(
+    request: DesktopExternalAgentConnectorsRequest,
+) -> Result<serde_json::Value, String> {
+    let suffix = request
+        .project_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("?projectPath={}", percent_encode_query_component(value)))
+        .unwrap_or_default();
+    backend_json_request(
+        "GET",
+        format!("/api/app/external-agent/connectors{suffix}"),
+        None,
+        request.timeout_ms.or(Some(30_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn update_external_agent_gateway(
+    request: DesktopExternalAgentGatewayRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/external-agent/gateway".to_string(),
+        Some(serde_json::json!({
+            "enabled": request.enabled,
+            "allowWriteRequests": request.allow_write_requests,
+            "revokeToken": request.revoke_token.unwrap_or(false),
+            "checkpointArchiveMaxSizeMb": request.checkpoint_archive_max_size_mb,
+            "deleteCheckpointArchiveIds": request.delete_checkpoint_archive_ids,
+            "checkpointArchiveDirectory": request.checkpoint_archive_directory,
+        })),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn install_external_agent_connector(
+    request: DesktopExternalAgentConnectorActionRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/external-agent/connectors/install".to_string(),
+        Some(serde_json::json!({
+            "client": request.client,
+            "projectPath": request.project_path,
+        })),
+        request.timeout_ms.or(Some(120_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+fn uninstall_external_agent_connector(
+    request: DesktopExternalAgentConnectorActionRequest,
+) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        "/api/app/external-agent/connectors/uninstall".to_string(),
+        Some(serde_json::json!({
+            "client": request.client,
+            "projectPath": request.project_path,
+        })),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
 }
 
 #[tauri::command]
@@ -1500,6 +1607,19 @@ fn desktop_ipc_route_migrated_to_typed_command(method: &str, route_path: &str) -
     if method == "POST" && route_path == "/api/app/permission" {
         return true;
     }
+    if route_path == "/api/app/external-agent/connectors" && matches!(method, "GET" | "POST") {
+        return true;
+    }
+    if method == "POST"
+        && matches!(
+            route_path,
+            "/api/app/external-agent/gateway"
+                | "/api/app/external-agent/connectors/install"
+                | "/api/app/external-agent/connectors/uninstall"
+        )
+    {
+        return true;
+    }
     if method == "GET" && route_path == "/api/app/runtime/snapshot" {
         return true;
     }
@@ -1749,9 +1869,11 @@ fn main() {
             backend_endpoint,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
+            fetch_external_agent_connectors,
             fetch_provider_models,
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
+            install_external_agent_connector,
             preview_interrupted_apply_recovery,
             preview_restore_checkpoint,
             record_agent_run_queued,
@@ -1763,7 +1885,9 @@ fn main() {
             resolve_interrupted_apply_recovery,
             send_agent_message,
             test_provider_capability,
+            uninstall_external_agent_connector,
             update_api_config,
+            update_external_agent_gateway,
             update_permission_mode,
             update_vision_config,
             start_backend,
@@ -1949,6 +2073,20 @@ mod tests {
         assert!(normalize_app_api_path("POST", "/api/models").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/provider/test").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/permission").is_err());
+        assert!(normalize_app_api_path("GET", "/api/app/external-agent/connectors").is_err());
+        assert!(normalize_app_api_path(
+            "GET",
+            "/api/app/external-agent/connectors?projectPath=D%3A%5CProj"
+        )
+        .is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/external-agent/connectors").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/external-agent/gateway").is_err());
+        assert!(
+            normalize_app_api_path("POST", "/api/app/external-agent/connectors/install").is_err()
+        );
+        assert!(
+            normalize_app_api_path("POST", "/api/app/external-agent/connectors/uninstall").is_err()
+        );
         assert!(normalize_app_api_path("GET", "/api/app/runtime/snapshot?sessionId=s1").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/agent/message").is_err());
         assert!(normalize_app_api_path("POST", "/api/app/agent/runs/cancel").is_err());
@@ -2023,23 +2161,38 @@ mod tests {
                 "apiKey": "vision-secret",
                 "apiKeyPresent": true
             },
+            "lastConnectorAction": {
+                "backupPath": "Q:/private/AppData/Local/VRCForge/backup.json"
+            },
+            "clientConfigs": {
+                "claudeCode": {
+                    "text": "{\"headers\":{\"Authorization\":\"Bearer ${CUSTOM_VRCFORGE_TOKEN}\"}}"
+                }
+            },
             "effective": {
                 "model": "test-model",
                 "message": "api_key=main-secret",
+                "backupMarker": "backupPath=Q:/private/AppData/Local/VRCForge/backup.json",
                 "markerText": "configPath=Q:/private/AppData/Local/VRCForge/config.json",
                 "projectPath": "Q:/projects/avatar"
             }
         }));
 
+        assert!(sanitized
+            .get("apiConfig")
+            .and_then(|value| value.get("Authorization"))
+            .is_none());
         let text = sanitized.to_string();
         assert!(!text.contains("main-secret"));
         assert!(!text.contains("vision-secret"));
         assert!(!text.contains("configPath"));
-        assert!(!text.contains("Authorization"));
+        assert!(!text.contains("backupPath"));
         assert!(!text.contains("Q:/private"));
         assert!(text.contains("[redacted]"));
         assert!(text.contains("Q:/projects/avatar"));
         assert!(text.contains("apiKeyPresent"));
+        assert!(text.contains("CUSTOM_VRCFORGE_TOKEN"));
+        assert!(text.contains("Bearer"));
     }
 
     #[test]

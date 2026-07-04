@@ -1170,6 +1170,11 @@ export async function testProviderCapability(
 }
 
 export async function fetchExternalAgentConnectors(endpoint: string, projectPath?: string): Promise<ExternalAgentConnectorStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ExternalAgentConnectorStatus>("fetch_external_agent_connectors", {
+      request: { projectPath: projectPath || undefined, timeoutMs: 30000 },
+    });
+  }
   const query = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : "";
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors${query}`);
 }
@@ -1185,6 +1190,11 @@ export async function updateExternalAgentGateway(
     checkpointArchiveDirectory?: string;
   },
 ): Promise<ExternalAgentConnectorStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ExternalAgentConnectorStatus>("update_external_agent_gateway", {
+      request: { ...request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/gateway`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1196,6 +1206,11 @@ export async function installExternalAgentConnector(
   endpoint: string,
   request: { client: ExternalAgentConnectorClient; projectPath?: string },
 ): Promise<ExternalAgentConnectorStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ExternalAgentConnectorStatus>("install_external_agent_connector", {
+      request: { ...request, timeoutMs: 120000 },
+    });
+  }
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors/install`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1207,6 +1222,11 @@ export async function uninstallExternalAgentConnector(
   endpoint: string,
   request: { client: ExternalAgentConnectorClient; projectPath?: string },
 ): Promise<ExternalAgentConnectorStatus> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ExternalAgentConnectorStatus>("uninstall_external_agent_connector", {
+      request: { ...request, timeoutMs: 60000 },
+    });
+  }
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors/uninstall`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2795,6 +2815,19 @@ function desktopIpcRouteMigratedToTypedCommand(method: string, pathname: string)
     return true;
   }
   if (method === "POST" && pathname === "/api/app/permission") {
+    return true;
+  }
+  if (pathname === "/api/app/external-agent/connectors" && (method === "GET" || method === "POST")) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    [
+      "/api/app/external-agent/gateway",
+      "/api/app/external-agent/connectors/install",
+      "/api/app/external-agent/connectors/uninstall",
+    ].includes(pathname)
+  ) {
     return true;
   }
   if (method === "GET" && pathname === "/api/app/runtime/snapshot") {
