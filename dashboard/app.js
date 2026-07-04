@@ -413,9 +413,26 @@ function bindEvents() {
   });
 }
 
-function connectSocket() {
+async function issueWebSocketTicket() {
+  const payload = await postJson("/api/app/ws-ticket");
+  if (!payload?.ticket) {
+    throw new Error("WebSocket ticket was not returned.");
+  }
+  return payload.ticket;
+}
+
+async function connectSocket() {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${scheme}://${window.location.host}/ws`);
+  let ticket = "";
+  try {
+    ticket = await issueWebSocketTicket();
+  } catch (error) {
+    const message = error.message || String(error);
+    setSocketStatus("Offline", false, `WebSocket ticket unavailable: ${message}`);
+    setTimeout(connectSocket, 3000);
+    return;
+  }
+  const socket = new WebSocket(`${scheme}://${window.location.host}/ws?ws_ticket=${encodeURIComponent(ticket)}`);
   state.socket = socket;
   setSocketStatus("Connecting", false, "正在连接 dashboard websocket");
 

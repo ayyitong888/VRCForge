@@ -223,6 +223,10 @@ def app_auth_disabled_for_test_process() -> bool:
 
 APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
+APP_WS_TICKET_TTL_SECONDS = 30
+APP_WS_TICKETS: dict[str, float] = {}
+APP_WS_TICKET_LOCK = Lock()
+APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
@@ -1490,7 +1494,9 @@ async def on_shutdown() -> None:
 
 @app.get("/")
 def read_dashboard() -> FileResponse:
-    return FileResponse(DASHBOARD_DIR / "index.html")
+    response = FileResponse(DASHBOARD_DIR / "index.html")
+    attach_dashboard_session_cookie(response)
+    return response
 
 
 @app.get("/dashboard")
@@ -1587,6 +1593,26 @@ def read_app_session_challenge(request: Request, nonce: str = "") -> dict[str, A
         "ok": True,
         "schema": "vrcforge.app_session_challenge.v1",
         "signature": app_session_challenge_signature(nonce_value),
+    }
+
+
+@app.post("/api/app/ws-ticket")
+def issue_app_websocket_ticket(request: Request) -> dict[str, Any]:
+    authenticate_websocket_ticket_request(request)
+    ticket = secrets.token_urlsafe(32)
+    expires = time.time() + APP_WS_TICKET_TTL_SECONDS
+    with APP_WS_TICKET_LOCK:
+        now = time.time()
+        expired = [value for value, expiry in APP_WS_TICKETS.items() if expiry < now]
+        for value in expired:
+            APP_WS_TICKETS.pop(value, None)
+        APP_WS_TICKETS[ticket] = expires
+    return {
+        "ok": True,
+        "schema": "vrcforge.ws_ticket.v1",
+        "ticket": ticket,
+        "expiresAt": datetime.fromtimestamp(expires, tz=timezone.utc).isoformat(),
+        "expiresInSeconds": APP_WS_TICKET_TTL_SECONDS,
     }
 
 
@@ -1785,19 +1811,30 @@ def read_app_runtime_snapshot(
     globalOnly: bool = False,
 ) -> dict[str, Any]:
     effective_global_only = bool(globalOnly or not projectRoot)
+    scoped_ledgers = bool(str(sessionId or "").strip() or str(projectRoot or "").strip())
     workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
     if projectRoot and not workspace_diff.get("ok") and workspace_diff.get("status") == "not_git":
         workspace_diff = build_workspace_diff_summary("", include_patch=includePatch)
         workspace_diff["fallbackFromProjectRoot"] = projectRoot
+    if scoped_ledgers:
+        runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
+        desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
+        goals = AGENT_GATEWAY.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
+        memory = AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot)
+    else:
+        runs = {"ok": True, "schema": "vrcforge.runtime_runs.v1", "runs": [], "events": [], "count": 0}
+        desktop_actions = {"ok": True, "schema": "vrcforge.desktop_actions.v1", "actions": [], "count": 0}
+        goals = {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [], "count": 0}
+        memory = {"ok": True, "schema": "vrcforge.agent_memory_list.v1", "memories": [], "count": 0}
     return {
         "ok": True,
         "schema": "vrcforge.desktop_runtime_snapshot.v1",
         "workspaceDiff": workspace_diff,
         "approvals": AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=effective_global_only),
-        "runs": AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot),
-        "desktopActions": AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot),
-        "goals": AGENT_GATEWAY.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot),
-        "memory": AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot),
+        "runs": runs,
+        "desktopActions": desktop_actions,
+        "goals": goals,
+        "memory": memory,
     }
 
 
@@ -4982,7 +5019,7 @@ def read_agent_logs(request: Request, limit: int = 100) -> dict[str, Any]:
 async def dashboard_socket(websocket: WebSocket) -> None:
     client_host = websocket.client.host if websocket.client else ""
     origin = websocket.headers.get("origin", "").strip()
-    supplied = extract_bearer_token_from_values(websocket.headers, websocket.query_params)
+    supplied = extract_websocket_auth_token(websocket.headers, websocket.query_params)
     try:
         validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
     except HTTPException as exc:
@@ -13177,7 +13214,7 @@ def authenticate_agent_approval_request(request: Request):
 
 
 APP_AUTH_PREFIXES = ("/api",)
-APP_AUTH_EXEMPT_PATHS = {"/api/health", "/api/app/session", "/api/app/session-challenge"}
+APP_AUTH_EXEMPT_PATHS = {"/api/health", "/api/app/session", "/api/app/session-challenge", "/api/app/ws-ticket"}
 APP_AUTH_EXEMPT_PREFIXES = ("/api/agent",)
 APP_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
@@ -13210,6 +13247,26 @@ def authenticate_app_request(request: Request) -> None:
     client_host = request.client.host if request.client else ""
     origin = request.headers.get("origin", "").strip()
     supplied = extract_bearer_token(request)
+    validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
+
+
+def attach_dashboard_session_cookie(response: FileResponse) -> None:
+    if not APP_SESSION_TOKEN:
+        return
+    response.set_cookie(
+        APP_DASHBOARD_SESSION_COOKIE,
+        APP_SESSION_TOKEN,
+        httponly=True,
+        samesite="strict",
+        max_age=3600,
+        path="/",
+    )
+
+
+def authenticate_websocket_ticket_request(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    origin = request.headers.get("origin", "").strip()
+    supplied = extract_bearer_token(request) or str(request.cookies.get(APP_DASHBOARD_SESSION_COOKIE) or "")
     validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
 
 
@@ -13272,14 +13329,18 @@ def extract_bearer_token(request: Request) -> str:
     return ""
 
 
-def extract_bearer_token_from_values(headers: Any, query_params: Any) -> str:
-    # WebSocket clients cannot set Authorization headers from browser code yet.
-    # Keep this only for the current /ws boundary until Tauri events or a
-    # one-time WebSocket ticket replaces loopback WebSocket auth.
-    auth = headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return str(query_params.get("app_token") or "")
+def extract_websocket_auth_token(headers: Any, query_params: Any) -> str:
+    ticket = str(query_params.get("ws_ticket") or "").strip()
+    if not ticket:
+        return ""
+    return APP_SESSION_TOKEN if consume_app_websocket_ticket(ticket) else ""
+
+
+def consume_app_websocket_ticket(ticket: str) -> bool:
+    now = time.time()
+    with APP_WS_TICKET_LOCK:
+        expires = APP_WS_TICKETS.pop(ticket, None)
+    return bool(expires and expires >= now)
 
 
 def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:

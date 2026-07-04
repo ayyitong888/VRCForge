@@ -125,6 +125,63 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("unityStatus", message["payload"])
                 self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
 
+    def test_websocket_uses_one_time_ticket_instead_of_query_token(self) -> None:
+        original_required = dashboard_server.APP_AUTH_REQUIRED
+        original_token = dashboard_server.APP_SESSION_TOKEN
+        original_tickets = dict(dashboard_server.APP_WS_TICKETS)
+        dashboard_server.APP_AUTH_REQUIRED = True
+        dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
+        dashboard_server.APP_WS_TICKETS.clear()
+        headers = {"Authorization": "Bearer test-app-session-token"}
+        try:
+            with TestClient(dashboard_server.app) as client:
+                missing_ticket_response = client.post("/api/app/ws-ticket")
+                self.assertEqual(missing_ticket_response.status_code, 401)
+
+                ticket_response = client.post("/api/app/ws-ticket", headers=headers)
+                self.assertEqual(ticket_response.status_code, 200)
+                ticket = ticket_response.json()["ticket"]
+
+                with client.websocket_connect(f"/ws?ws_ticket={ticket}") as websocket:
+                    message = websocket.receive_json()
+                    self.assertEqual(message["type"], "hello")
+
+                with self.assertRaises(dashboard_server.WebSocketDisconnect):
+                    with client.websocket_connect(f"/ws?ws_ticket={ticket}") as websocket:
+                        websocket.receive_json()
+
+                with self.assertRaises(dashboard_server.WebSocketDisconnect):
+                    with client.websocket_connect("/ws?app_token=test-app-session-token") as websocket:
+                        websocket.receive_json()
+
+                with self.assertRaises(dashboard_server.WebSocketDisconnect):
+                    with client.websocket_connect("/ws", headers=headers) as websocket:
+                        websocket.receive_json()
+
+                dashboard_response = client.get("/")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("httponly", dashboard_response.headers.get("set-cookie", "").lower())
+                cookie_ticket_response = client.post("/api/app/ws-ticket")
+                self.assertEqual(cookie_ticket_response.status_code, 200)
+                cookie_ticket = cookie_ticket_response.json()["ticket"]
+                with client.websocket_connect(f"/ws?ws_ticket={cookie_ticket}") as websocket:
+                    message = websocket.receive_json()
+                    self.assertEqual(message["type"], "hello")
+
+                bad_origin_ticket = client.post("/api/app/ws-ticket", headers={"Origin": "https://example.invalid"})
+                self.assertEqual(bad_origin_ticket.status_code, 403)
+        finally:
+            dashboard_server.APP_AUTH_REQUIRED = original_required
+            dashboard_server.APP_SESSION_TOKEN = original_token
+            dashboard_server.APP_WS_TICKETS.clear()
+            dashboard_server.APP_WS_TICKETS.update(original_tickets)
+
+    def test_legacy_dashboard_websocket_uses_ticket(self) -> None:
+        app_js = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("/api/app/ws-ticket", app_js)
+        self.assertIn("ws_ticket", app_js)
+        self.assertNotIn("new WebSocket(`${scheme}://${window.location.host}/ws`)", app_js)
+
     def test_chat_transcripts_split_temporary_and_project_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -547,6 +604,29 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("desktopActions", payload)
         self.assertIn("goals", payload)
         self.assertIn("memory", payload)
+
+    def test_runtime_snapshot_without_scope_does_not_return_ledgers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.record_runtime_queue_event({"clientTurnId": "turn-a", "sessionId": "session-a", "message": "queued"})
+            gateway.request_desktop_action({"action": "browser", "sessionId": "session-a", "message": "open"})
+            gateway.create_agent_goal({"title": "Scoped goal", "sessionId": "session-a"})
+            gateway.create_agent_memory({"scope": "user", "text": "user memory", "kind": "preference"})
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            try:
+                dashboard_server.AGENT_GATEWAY = gateway
+                with TestClient(dashboard_server.app) as client:
+                    response = client.get("/api/app/runtime/snapshot")
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["runs"]["count"], 0)
+        self.assertEqual(payload["desktopActions"]["count"], 0)
+        self.assertEqual(payload["goals"]["count"], 0)
+        self.assertEqual(payload["memory"]["count"], 0)
 
     def test_agent_runtime_message_preserves_bounded_attachments(self) -> None:
         with TestClient(dashboard_server.app) as client:

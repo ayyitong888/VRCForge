@@ -514,6 +514,14 @@ export type DesktopRuntimeSnapshot = {
   memory?: { memories?: AgentMemory[]; count?: number };
 };
 
+export type WebSocketTicket = {
+  ok: boolean;
+  schema?: string;
+  ticket: string;
+  expiresAt?: string;
+  expiresInSeconds?: number;
+};
+
 export type AgentDesktopAction = {
   schema?: string;
   id?: string;
@@ -755,6 +763,10 @@ export async function repairUnityMcpBridge(
 
 export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsStatus> {
   return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`);
+}
+
+export async function issueWebSocketTicket(endpoint: string): Promise<WebSocketTicket> {
+  return requestJson<WebSocketTicket>(`${endpoint}/api/app/ws-ticket`, { method: "POST" });
 }
 
 export async function updateDiagnostics(endpoint: string, request: { debugLogging: boolean }): Promise<DiagnosticsStatus> {
@@ -2648,7 +2660,36 @@ function desktopIpcRouteAllowed(method: string, pathname: string): boolean {
   if (pathname === "/api/avatar-encryption/plan" || pathname === "/api/avatar-encryption/apply-request") {
     return normalizedMethod === "GET" || normalizedMethod === "POST";
   }
-  return pathname === "/api/app" || pathname.startsWith("/api/app/");
+  const appPrefixes = [
+    "/api/app/adjustment-checkpoints",
+    "/api/app/agent",
+    "/api/app/agent-notes",
+    "/api/app/avatars",
+    "/api/app/bootstrap",
+    "/api/app/chats",
+    "/api/app/checkpoints",
+    "/api/app/diagnostics",
+    "/api/app/doctor",
+    "/api/app/external-agent",
+    "/api/app/optimization",
+    "/api/app/outfit-imports",
+    "/api/app/package-install",
+    "/api/app/path-to-skill",
+    "/api/app/permission",
+    "/api/app/project-index",
+    "/api/app/projects",
+    "/api/app/provider",
+    "/api/app/recoveries",
+    "/api/app/runtime",
+    "/api/app/skill-packages",
+    "/api/app/skills",
+    "/api/app/sub-agents",
+    "/api/app/support-bundle",
+    "/api/app/unity",
+    "/api/app/workspace",
+    "/api/app/ws-ticket",
+  ];
+  return appPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 function parseTauriJsonBody(body: BodyInit | null | undefined): { supported: boolean; body?: unknown } {

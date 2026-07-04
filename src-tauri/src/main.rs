@@ -638,7 +638,38 @@ fn desktop_ipc_route_allowed(method: &str, route: &str) -> bool {
     if route == "/api/avatar-encryption/plan" || route == "/api/avatar-encryption/apply-request" {
         return matches!(normalized_method.as_str(), "POST" | "GET");
     }
-    route == "/api/app" || route.starts_with("/api/app/")
+    let app_prefixes = [
+        "/api/app/adjustment-checkpoints",
+        "/api/app/agent",
+        "/api/app/agent-notes",
+        "/api/app/avatars",
+        "/api/app/bootstrap",
+        "/api/app/chats",
+        "/api/app/checkpoints",
+        "/api/app/diagnostics",
+        "/api/app/doctor",
+        "/api/app/external-agent",
+        "/api/app/optimization",
+        "/api/app/outfit-imports",
+        "/api/app/package-install",
+        "/api/app/path-to-skill",
+        "/api/app/permission",
+        "/api/app/project-index",
+        "/api/app/projects",
+        "/api/app/provider",
+        "/api/app/recoveries",
+        "/api/app/runtime",
+        "/api/app/skill-packages",
+        "/api/app/skills",
+        "/api/app/sub-agents",
+        "/api/app/support-bundle",
+        "/api/app/unity",
+        "/api/app/workspace",
+        "/api/app/ws-ticket",
+    ];
+    app_prefixes
+        .iter()
+        .any(|prefix| route == *prefix || route.starts_with(&format!("{prefix}/")))
 }
 
 fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
@@ -1009,6 +1040,10 @@ mod tests {
             Ok("/api/avatar-encryption/plan"),
         );
         assert_eq!(
+            normalize_app_api_path("POST", "/api/app/ws-ticket").as_deref(),
+            Ok("/api/app/ws-ticket"),
+        );
+        assert_eq!(
             normalize_app_api_path("GET", "/api/health").as_deref(),
             Ok("/api/health")
         );
@@ -1025,6 +1060,7 @@ mod tests {
         assert!(normalize_app_api_path("POST", "/api/clothes/apply-fx").is_err());
         assert!(normalize_app_api_path("POST", "/api/shader/apply").is_err());
         assert!(normalize_app_api_path("POST", "/api/projects/install").is_err());
+        assert!(normalize_app_api_path("POST", "/api/app/unlisted-future-route").is_err());
     }
 
     #[test]
