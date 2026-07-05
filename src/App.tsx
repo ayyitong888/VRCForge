@@ -217,6 +217,13 @@ type BackendStartResult = {
   message: string;
 };
 
+type BackendStartStatus = {
+  ok?: boolean;
+  status?: string;
+  error?: string;
+  logDir?: string;
+};
+
 type BackendEventMessage = {
   type?: string;
   payload?: unknown;
@@ -1107,6 +1114,14 @@ export default function App() {
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
+  const backendReadyStatusRef = useRef<"idle" | "starting" | "ready" | "error">("idle");
+  const backendReadyEndpointRef = useRef(endpoint);
+  const backendReadyWaitersRef = useRef<
+    Array<{
+      resolve: (endpoint: string) => void;
+      reject: (error: Error) => void;
+    }>
+  >([]);
   const healthRefreshInFlightRef = useRef(false);
   const runtimeRefreshSeqRef = useRef(0);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
@@ -1167,6 +1182,10 @@ export default function App() {
     : !chatAvailable
       ? t("chat.providerNotConfigured", { provider: savedProviderLabel })
       : "";
+
+  useEffect(() => {
+    backendReadyEndpointRef.current = endpoint;
+  }, [endpoint]);
   const composerActions = useMemo<ComposerAction[]>(
     () => {
       const actions: ComposerAction[] = [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
@@ -1614,51 +1633,34 @@ export default function App() {
   }, [showOnboarding, onboardingMinimized, onboardingStep, runtimeConnected, apiConfig?.apiKeyPresent, projectItems.length]);
 
   useEffect(() => {
-    void startRuntime({ waitForBootstrap: false });
-  }, []);
-
-  useEffect(() => {
     if (!isTauriRuntime()) {
+      void startRuntime({ waitForBootstrap: false });
       return;
     }
     let active = true;
     let unlistenStartStatus: (() => void) | null = null;
-    void listen<{ ok?: boolean; status?: string; error?: string; logDir?: string }>("vrcforge-backend-start-status", (event) => {
+    void listen<BackendStartStatus>("vrcforge-backend-start-status", (event) => {
       if (!active) {
         return;
       }
-      if (event.payload?.ok) {
-        const readyAt = performance.now();
-        const startedAt = startupLaunchStartedAtRef.current;
-        const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
-        metrics.backendReadyEventMs = startedAt === null ? null : Math.round(readyAt - startedAt);
-        metrics.backendReadyMode = event.payload.status || "ready";
-        refreshStartupInBackground(endpoint, { refreshProjects: true });
-        return;
-      }
-      const message =
-        event.payload?.error ||
-        (event.payload?.status === "timeout"
-          ? `VRCForge runtime startup timed out. Logs: ${event.payload?.logDir || "unknown"}`
-          : "");
-      if (message) {
-        setError(message);
-        setStartupIssue(message);
-      }
+      handleBackendStartStatus(event.payload);
     })
       .then((unlisten) => {
         if (active) {
           unlistenStartStatus = unlisten;
+          void startRuntime({ waitForBootstrap: false });
         } else {
           unlisten();
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        void startRuntime({ waitForBootstrap: false });
+      });
     return () => {
       active = false;
       unlistenStartStatus?.();
     };
-  }, [endpoint]);
+  }, []);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -2000,8 +2002,78 @@ export default function App() {
       });
   }
 
+  function resolveBackendReady(target: string, status?: string) {
+    backendReadyStatusRef.current = "ready";
+    backendReadyEndpointRef.current = target;
+    const startedAt = startupLaunchStartedAtRef.current;
+    const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+    metrics.backendReadyEventMs = startedAt === null ? null : Math.round(performance.now() - startedAt);
+    metrics.backendReadyMode = status || "ready";
+    const waiters = backendReadyWaitersRef.current.splice(0);
+    waiters.forEach((waiter) => waiter.resolve(target));
+  }
+
+  function rejectBackendReady(message: string) {
+    backendReadyStatusRef.current = "error";
+    const error = new Error(message);
+    const waiters = backendReadyWaitersRef.current.splice(0);
+    waiters.forEach((waiter) => waiter.reject(error));
+  }
+
+  function waitForBackendReady(target = backendReadyEndpointRef.current): Promise<string> {
+    if (!isTauriRuntime() || backendReadyStatusRef.current === "ready") {
+      return Promise.resolve(target);
+    }
+    return new Promise((resolve, reject) => {
+      let timeoutId = 0;
+      const waiter = {
+        resolve: (readyEndpoint: string) => {
+          window.clearTimeout(timeoutId);
+          resolve(readyEndpoint || target);
+        },
+        reject: (error: Error) => {
+          window.clearTimeout(timeoutId);
+          reject(error);
+        },
+      };
+      timeoutId = window.setTimeout(() => {
+        backendReadyWaitersRef.current = backendReadyWaitersRef.current.filter((item) => item !== waiter);
+        reject(new Error("VRCForge runtime startup timed out."));
+      }, 20000);
+      backendReadyWaitersRef.current.push(waiter);
+    });
+  }
+
+  function handleBackendStartStatus(payload: BackendStartStatus | undefined, target = backendReadyEndpointRef.current) {
+    if (payload?.ok) {
+      resolveBackendReady(target, payload.status);
+      refreshStartupInBackground(target, { refreshProjects: true });
+      return;
+    }
+    const message =
+      payload?.error ||
+      (payload?.status === "timeout" ? `VRCForge runtime startup timed out. Logs: ${payload?.logDir || "unknown"}` : "");
+    if (message) {
+      rejectBackendReady(message);
+      setError(message);
+      setStartupIssue(message);
+    }
+  }
+
   async function startRuntime(options: { waitForBootstrap?: boolean } = {}): Promise<string | null> {
     if (runtimeStartingRef.current) {
+      if (options.waitForBootstrap ?? true) {
+        try {
+          const readyEndpoint = await waitForBackendReady();
+          await refreshWithRetry(readyEndpoint, { refreshProjects: true });
+          return readyEndpoint;
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setError(message);
+          setStartupIssue(message);
+          return null;
+        }
+      }
       return endpoint;
     }
     const waitForBootstrap = options.waitForBootstrap ?? true;
@@ -2014,6 +2086,7 @@ export default function App() {
         void invoke("ensure_agent_notes_file").catch(() => undefined);
         const startedAt = performance.now();
         startupLaunchStartedAtRef.current = startedAt;
+        backendReadyStatusRef.current = "starting";
         const result = await invoke<BackendStartResult>("start_backend");
         const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
         metrics.startBackendInvokeMs = Math.round(performance.now() - startedAt);
@@ -2021,12 +2094,18 @@ export default function App() {
         metrics.startBackendStarted = result.started;
         metrics.startBackendAlreadyRunning = result.already_running;
         targetEndpoint = result.endpoint;
+        backendReadyEndpointRef.current = targetEndpoint;
         setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
         if (result.mode === "starting") {
           setStartupIssue("");
+          if (waitForBootstrap) {
+            await waitForBackendReady(targetEndpoint);
+            await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+          }
         } else {
+          resolveBackendReady(targetEndpoint, result.mode);
           await refreshWithRetry(targetEndpoint, { refreshProjects: true });
         }
       } else {
@@ -5418,6 +5497,7 @@ export default function App() {
                       modelsError={modelsError}
                       testingProvider={testingProvider}
                       providerTestMessage={providerTestMessage}
+                      runtimeConnected={runtimeConnected}
                       keySaved={apiKeySaved}
                       onLoadModels={() => void loadModels()}
                       onTestProvider={(capability) => void runProviderTest(capability)}
@@ -5451,6 +5531,7 @@ export default function App() {
                       model={visionModel}
                       enabled={visionEnabled}
                       saving={savingVisionConfig}
+                      runtimeConnected={runtimeConnected}
                       keySaved={Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider)}
                       configured={Boolean(visionConfig?.configured)}
                       onProviderChange={handleVisionProviderChange}
@@ -7469,6 +7550,7 @@ function ProviderSetup({
   modelsError,
   testingProvider,
   providerTestMessage,
+  runtimeConnected,
   keySaved = false,
   onLoadModels,
   onTestProvider,
@@ -7488,6 +7570,7 @@ function ProviderSetup({
   modelsError: string;
   testingProvider: string;
   providerTestMessage: string;
+  runtimeConnected: boolean;
   keySaved?: boolean;
   onLoadModels: () => void;
   onTestProvider: (capability: "text" | "structured" | "vision") => void;
@@ -7586,7 +7669,7 @@ function ProviderSetup({
               variant="outline"
               className="h-10 shrink-0 gap-2 px-3 text-sm"
               onClick={onLoadModels}
-              disabled={loadingModels || saving}
+              disabled={!runtimeConnected || loadingModels || saving}
             >
               {loadingModels ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               {i18n.t("provider.refreshModels")}
@@ -7600,19 +7683,19 @@ function ProviderSetup({
         </FieldLabel>
       </div>
       <div className="mt-5 flex flex-wrap justify-end gap-2">
-        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
           Text
         </Button>
-        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("structured")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("structured")}>
           {testingProvider === "structured" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
           JSON
         </Button>
-        <Button type="button" variant="outline" disabled={saving || Boolean(testingProvider)} onClick={() => onTestProvider("vision")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("vision")}>
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
           Vision
         </Button>
-        <Button disabled={saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
+        <Button disabled={!runtimeConnected || saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>
@@ -7628,6 +7711,7 @@ function VisionProfileSetup({
   model,
   enabled,
   saving,
+  runtimeConnected,
   keySaved = false,
   configured = false,
   onProviderChange,
@@ -7644,6 +7728,7 @@ function VisionProfileSetup({
   model: string;
   enabled: boolean;
   saving: boolean;
+  runtimeConnected: boolean;
   keySaved?: boolean;
   configured?: boolean;
   onProviderChange: (value: string) => void;
@@ -7656,7 +7741,7 @@ function VisionProfileSetup({
 }) {
   const requiresBaseUrl = ["openai", "deepseek", "openrouter", "ollama", "vertexai", "custom"].includes(provider);
   const saveDisabled =
-    saving || !provider || !model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved);
+    !runtimeConnected || saving || !provider || !model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved);
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -7728,7 +7813,7 @@ function VisionProfileSetup({
       </div>
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         {configured ? (
-          <Button type="button" variant="outline" disabled={saving} onClick={onClear}>
+          <Button type="button" variant="outline" disabled={!runtimeConnected || saving} onClick={onClear}>
             {i18n.t("vision.clearProfile")}
           </Button>
         ) : null}
