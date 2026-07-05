@@ -223,6 +223,8 @@ try {
     Copy-Item -LiteralPath .\VERSION -Destination (Join-Path $payloadRoot "VERSION") -Force
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
+    Get-ChildItem -LiteralPath (Join-Path $payloadRoot "tools") -Recurse -Filter "*.ps1" -ErrorAction SilentlyContinue |
+        Remove-Item -Force
     $legacyLauncherPayloadRoot = Join-Path $payloadRoot "tools\legacy-launcher"
     New-Item -ItemType Directory -Force -Path $legacyLauncherPayloadRoot | Out-Null
     Copy-Item -Path (Join-Path $legacyLauncherBuildRoot "*") -Destination $legacyLauncherPayloadRoot -Recurse -Force

@@ -24,6 +24,7 @@ import zipfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 from threading import Lock, Thread
 from typing import Any, Callable, Literal
@@ -34,6 +35,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+try:
+    import psutil
+except Exception:  # pragma: no cover - source installs may not include psutil.
+    psutil = None  # type: ignore[assignment]
 
 from agent_gateway import (
     AgentGateway,
@@ -171,7 +177,6 @@ SHADER_TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_history.js
 SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.json"
 SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
 TOOLS_DIR = ROOT_DIR / "tools"
-INSTALL_SCRIPT_PATH = TOOLS_DIR / "install-unity-project.ps1"
 CONFIG_PATH = resolve_runtime_path("VRCFORGE_CONFIG_PATH", CONFIG_DIR / "config.json")
 RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     "VRCFORGE_SETTINGS_PATH",
@@ -223,14 +228,14 @@ def app_auth_disabled_for_test_process() -> bool:
 
 APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
-APP_WS_TICKET_TTL_SECONDS = 30
-APP_WS_TICKETS: dict[str, float] = {}
-APP_WS_TICKET_LOCK = Lock()
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
     "https://tauri.localhost",
+    "http://127.0.0.1:8757",
+    "http://localhost:8757",
+    "http://[::1]:8757",
     "http://127.0.0.1:1420",
     "http://localhost:1420",
 }
@@ -423,8 +428,10 @@ class ProjectActionRequest(BaseModel):
 
 
 class ProjectInstallRequest(BaseModel):
-    project_path: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
     launch_unity: bool = False
+
+    model_config = {"populate_by_name": True}
 
 
 class UnityMcpRepairRequest(BaseModel):
@@ -1593,26 +1600,6 @@ def read_app_session_challenge(request: Request, nonce: str = "") -> dict[str, A
         "ok": True,
         "schema": "vrcforge.app_session_challenge.v1",
         "signature": app_session_challenge_signature(nonce_value),
-    }
-
-
-@app.post("/api/app/ws-ticket")
-def issue_app_websocket_ticket(request: Request) -> dict[str, Any]:
-    authenticate_websocket_ticket_request(request)
-    ticket = secrets.token_urlsafe(32)
-    expires = time.time() + APP_WS_TICKET_TTL_SECONDS
-    with APP_WS_TICKET_LOCK:
-        now = time.time()
-        expired = [value for value, expiry in APP_WS_TICKETS.items() if expiry < now]
-        for value in expired:
-            APP_WS_TICKETS.pop(value, None)
-        APP_WS_TICKETS[ticket] = expires
-    return {
-        "ok": True,
-        "schema": "vrcforge.ws_ticket.v1",
-        "ticket": ticket,
-        "expiresAt": datetime.fromtimestamp(expires, tz=timezone.utc).isoformat(),
-        "expiresInSeconds": APP_WS_TICKET_TTL_SECONDS,
     }
 
 
@@ -5019,7 +5006,7 @@ def read_agent_logs(request: Request, limit: int = 100) -> dict[str, Any]:
 async def dashboard_socket(websocket: WebSocket) -> None:
     client_host = websocket.client.host if websocket.client else ""
     origin = websocket.headers.get("origin", "").strip()
-    supplied = extract_websocket_auth_token(websocket.headers, websocket.query_params)
+    supplied = extract_websocket_auth_token(websocket.headers)
     try:
         validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
     except HTTPException as exc:
@@ -5223,44 +5210,212 @@ async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
     return await asyncio.to_thread(run_provider_test_sync, request)
 
 
+def _resolve_install_source_assets() -> Path:
+    candidates = [
+        ROOT_DIR / "Assets" / "VRCForge",
+        ROOT_DIR / "unity_plugin" / "Assets" / "VRCForge",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise RuntimeError("Source Assets/VRCForge folder was not found in the source tree or packaged payload.")
+
+
+def _resolve_install_source_mcp_package() -> Path | None:
+    candidates = [
+        ROOT_DIR / "third_party" / "com.coplaydev.unity-mcp",
+        ROOT_DIR / "unity_plugin" / "Packages" / "com.coplaydev.unity-mcp",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
+def _new_install_backup_path(backup_root: Path, prefix: str) -> Path:
+    backup_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = backup_root / f"{prefix}_{timestamp}"
+    suffix = 1
+    while candidate.exists() or candidate.with_suffix(candidate.suffix + ".meta").exists():
+        candidate = backup_root / f"{prefix}_{timestamp}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _remove_path_with_meta(path: Path) -> None:
+    if path.exists():
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    meta = Path(str(path) + ".meta")
+    if meta.exists():
+        if meta.is_dir():
+            shutil.rmtree(meta)
+        else:
+            meta.unlink()
+
+
+def _move_path_with_meta(source: Path, destination: Path) -> None:
+    shutil.move(str(source), str(destination))
+    meta = Path(str(source) + ".meta")
+    if meta.exists():
+        shutil.move(str(meta), str(Path(str(destination) + ".meta")))
+
+
+def _copy_tree_clean_with_meta(source: Path, destination: Path) -> None:
+    _remove_path_with_meta(destination)
+    shutil.copytree(source, destination)
+    source_meta = Path(str(source) + ".meta")
+    destination_meta = Path(str(destination) + ".meta")
+    if source_meta.exists() and not destination_meta.exists():
+        if source_meta.is_dir():
+            shutil.copytree(source_meta, destination_meta)
+        else:
+            shutil.copy2(source_meta, destination_meta)
+
+
+def _restore_install_backup(backup_path: Path | None, target_path: Path) -> None:
+    if backup_path is None or not backup_path.exists():
+        return
+    _remove_path_with_meta(target_path)
+    _move_path_with_meta(backup_path, target_path)
+
+
+def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
+    resolved_project = project_root.expanduser().resolve()
+    target_assets_root = resolved_project / "Assets"
+    target_packages_root = resolved_project / "Packages"
+    target_manifest = target_packages_root / "manifest.json"
+    target_project_version = resolved_project / "ProjectSettings" / "ProjectVersion.txt"
+    target_vrcforge = target_assets_root / "VRCForge"
+    legacy_target = target_assets_root / "VRCAutoRig"
+    state_root = resolved_project / ".vrcforge"
+    backup_root = state_root / "backups"
+    mcp_package_name = "com.coplaydev.unity-mcp"
+    mcp_package_value = "file:Packages/com.coplaydev.unity-mcp"
+    target_mcp_package = target_packages_root / mcp_package_name
+    source_assets = _resolve_install_source_assets()
+    source_mcp_package = _resolve_install_source_mcp_package()
+
+    for required, label in (
+        (target_assets_root, "Assets"),
+        (target_manifest, "Packages/manifest.json"),
+        (target_project_version, "ProjectSettings/ProjectVersion.txt"),
+    ):
+        if not required.exists():
+            raise RuntimeError(f"Target Unity project is missing {label}: {required}")
+
+    backups: dict[str, str] = {}
+    installed_vrcforge = False
+    installed_mcp = False
+    should_configure_mcp = source_mcp_package is not None or target_mcp_package.exists()
+    legacy_backup: Path | None = None
+    vrcforge_backup: Path | None = None
+    mcp_backup: Path | None = None
+    try:
+        backup_root.mkdir(parents=True, exist_ok=True)
+        if legacy_target.exists():
+            legacy_backup = _new_install_backup_path(backup_root, "VRCAutoRig")
+            _move_path_with_meta(legacy_target, legacy_backup)
+            backups["legacy"] = str(legacy_backup)
+
+        if target_vrcforge.exists():
+            vrcforge_backup = _new_install_backup_path(backup_root, "VRCForge")
+            _move_path_with_meta(target_vrcforge, vrcforge_backup)
+            backups["vrcforge"] = str(vrcforge_backup)
+
+        try:
+            _copy_tree_clean_with_meta(source_assets, target_vrcforge)
+            installed_vrcforge = True
+        except Exception:
+            _restore_install_backup(vrcforge_backup, target_vrcforge)
+            raise
+
+        if source_mcp_package is not None:
+            if target_mcp_package.exists():
+                mcp_backup = _new_install_backup_path(backup_root, mcp_package_name)
+                _move_path_with_meta(target_mcp_package, mcp_backup)
+                backups["mcp"] = str(mcp_backup)
+            try:
+                _copy_tree_clean_with_meta(source_mcp_package, target_mcp_package)
+                installed_mcp = True
+                should_configure_mcp = True
+            except Exception:
+                _restore_install_backup(mcp_backup, target_mcp_package)
+                raise
+
+        manifest_backup = _new_install_backup_path(backup_root, "manifest").with_suffix(".json")
+        shutil.copy2(target_manifest, manifest_backup)
+        backups["manifest"] = str(manifest_backup)
+        if should_configure_mcp:
+            try:
+                manifest = json.loads(target_manifest.read_text(encoding="utf-8-sig"))
+                if not isinstance(manifest, dict):
+                    raise RuntimeError("manifest root is not an object")
+                dependencies = manifest.setdefault("dependencies", {})
+                if not isinstance(dependencies, dict):
+                    dependencies = {}
+                    manifest["dependencies"] = dependencies
+                if dependencies.get(mcp_package_name) != mcp_package_value:
+                    dependencies[mcp_package_name] = mcp_package_value
+                    target_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    json.loads(target_manifest.read_text(encoding="utf-8-sig"))
+            except Exception as exc:
+                shutil.copy2(manifest_backup, target_manifest)
+                raise RuntimeError(f"Failed to update Packages/manifest.json. Restored backup from {manifest_backup}. Error: {exc}") from exc
+    except Exception:
+        if legacy_backup is not None:
+            _restore_install_backup(legacy_backup, legacy_target)
+        if vrcforge_backup is not None:
+            _restore_install_backup(vrcforge_backup, target_vrcforge)
+        elif installed_vrcforge:
+            _remove_path_with_meta(target_vrcforge)
+        if mcp_backup is not None:
+            _restore_install_backup(mcp_backup, target_mcp_package)
+        elif installed_mcp:
+            _remove_path_with_meta(target_mcp_package)
+        raise
+
+    summary_parts = [
+        f"Installed Assets/VRCForge into: {resolved_project}",
+        f"Project backups are under: {backup_root}",
+    ]
+    if should_configure_mcp:
+        summary_parts.append(f"Unity MCP package dependency uses: {mcp_package_value}")
+    if source_mcp_package:
+        summary_parts.append(f"Copied Unity MCP package into: {target_mcp_package}")
+    return {
+        "summary": "\n".join(summary_parts),
+        "projectPath": str(resolved_project),
+        "sourceAssets": str(source_assets),
+        "sourceMcpPackage": str(source_mcp_package) if source_mcp_package else "",
+        "backupRoot": str(backup_root),
+        "backups": backups,
+        "installedMcp": installed_mcp,
+        "configuredMcp": should_configure_mcp,
+    }
+
+
 @app.post("/api/projects/install")
 async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
     project_path = resolve_target_project(request.project_path)
-    command = [
-        "powershell",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(INSTALL_SCRIPT_PATH),
-        "-ProjectPath",
-        project_path,
-    ]
-
-    if request.launch_unity and DASHBOARD_STATE.unity_editor_path:
-        command.extend(["-UnityEditorPath", DASHBOARD_STATE.unity_editor_path, "-LaunchUnity"])
-
     await emit_log_async("info", "project", "Installing VRCForge into Unity project.", {"projectPath": project_path})
-    completed = await asyncio.to_thread(
-        subprocess.run,
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=120,
-        cwd=str(ROOT_DIR),
-    )
-
-    output = (completed.stdout or "").strip()
-    error = (completed.stderr or "").strip()
-    if completed.returncode != 0:
-        await emit_log_async("error", "project", "Project installation failed.", {"projectPath": project_path, "error": error or output})
-        raise HTTPException(status_code=500, detail=error or output or f"Installer exited with code {completed.returncode}")
+    try:
+        install_result = await asyncio.to_thread(install_vrcforge_into_unity_project, Path(project_path))
+        if request.launch_unity and DASHBOARD_STATE.unity_editor_path:
+            launch_unity_subprocess([DASHBOARD_STATE.unity_editor_path, "-projectPath", project_path], Path(DASHBOARD_STATE.unity_editor_path), Path(project_path))
+            install_result["launchedUnity"] = True
+    except Exception as exc:  # noqa: BLE001
+        await emit_log_async("error", "project", "Project installation failed.", {"projectPath": project_path, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     payload = {
         "ok": True,
         "projectPath": project_path,
-        "output": output,
+        "output": install_result["summary"],
+        "details": install_result,
     }
     await EVENT_BUS.broadcast("projects", project_snapshot_payload(use_cache=True, refresh_async=False))
     await emit_log_async("success", "project", "VRCForge installed into Unity project.", {"projectPath": project_path})
@@ -10615,52 +10770,57 @@ def _repair_process_kwargs() -> dict[str, Any]:
     return {}
 
 
-def _powershell_json(script: str, timeout_seconds: int = 10) -> tuple[bool, Any, str]:
+def _process_cmdline_text(process: Any) -> str:
     try:
-        completed = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            cwd=str(ROOT_DIR),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            **_repair_process_kwargs(),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return False, None, str(exc)
+        cmdline = process.info.get("cmdline") if hasattr(process, "info") else process.cmdline()
+    except Exception:  # noqa: BLE001 - process metadata can disappear while enumerating.
+        return ""
+    if isinstance(cmdline, (list, tuple)):
+        return " ".join(str(part) for part in cmdline if part is not None)
+    return str(cmdline or "")
 
-    raw = (completed.stdout or "").strip()
-    parsed = try_parse_json(raw) if raw else None
-    if completed.returncode != 0:
-        return False, parsed, (completed.stderr or completed.stdout or f"PowerShell exited {completed.returncode}").strip()
-    return True, parsed, ""
+
+def _process_exe_text(process: Any) -> str:
+    try:
+        value = process.info.get("exe") if hasattr(process, "info") else process.exe()
+    except Exception:  # noqa: BLE001
+        return ""
+    return normalize_path_string(str(value or ""))
+
+
+def _process_name_text(process: Any) -> str:
+    try:
+        value = process.info.get("name") if hasattr(process, "info") else process.name()
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(value or "")
+
+
+def _iter_processes() -> list[Any]:
+    if psutil is None:
+        return []
+    try:
+        return list(psutil.process_iter(["pid", "name", "exe", "cmdline"]))
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def list_running_unity_processes() -> list[dict[str, Any]]:
     if os.name != "nt":
         return []
-    ok, payload, _error = _powershell_json(
-        "@(Get-CimInstance Win32_Process -Filter \"Name = 'Unity.exe'\" "
-        "| Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Depth 4",
-        timeout_seconds=10,
-    )
-    if not ok or payload is None:
-        return []
-    raw_items = payload if isinstance(payload, list) else [payload]
     processes: list[dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
+    for process in _iter_processes():
+        if _process_name_text(process).casefold() != "unity.exe":
             continue
         try:
-            process_id = int(item.get("ProcessId"))
+            process_id = int(process.info.get("pid") if hasattr(process, "info") else process.pid)
         except (TypeError, ValueError):
             continue
         processes.append(
             {
                 "processId": process_id,
-                "executablePath": normalize_path_string(str(item.get("ExecutablePath") or "")),
-                "commandLine": str(item.get("CommandLine") or ""),
+                "executablePath": _process_exe_text(process),
+                "commandLine": _process_cmdline_text(process),
             }
         )
     return processes
@@ -10728,16 +10888,9 @@ def unity_instance_matches_project(instance: dict[str, Any], project_root: Path)
     return any(str(candidate or "").strip().casefold() == project_name for candidate in candidates)
 
 
-def find_mcp_for_unity_executable() -> Path | None:
-    candidates: list[Path] = []
-    appdata = os.environ.get("APPDATA", "").strip()
-    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
-    if appdata:
-        candidates.extend(sorted(Path(appdata).glob("Python/Python*/Scripts/mcp-for-unity.exe")))
-        candidates.append(Path(appdata) / "Python" / "Python314" / "Scripts" / "mcp-for-unity.exe")
-    if local_appdata:
-        candidates.extend(sorted(Path(local_appdata).glob("Programs/Python/Python*/Scripts/mcp-for-unity.exe")))
-    for command_name in ("mcp-for-unity.exe", "mcp-for-unity"):
+def _existing_command_path_candidates(command_names: tuple[str, ...], extra_candidates: list[Path] | None = None) -> Path | None:
+    candidates = list(extra_candidates or [])
+    for command_name in command_names:
         resolved = shutil.which(command_name)
         if resolved:
             candidates.append(Path(resolved))
@@ -10747,6 +10900,90 @@ def find_mcp_for_unity_executable() -> Path | None:
                 return candidate.resolve()
         except OSError:
             continue
+    return None
+
+
+def configured_unity_mcp_command_prefix(settings: Settings) -> list[str] | None:
+    command = [str(item).strip() for item in getattr(settings, "unity_mcp_command", []) or [] if str(item).strip()]
+    if not command:
+        return None
+    lowered = [item.casefold() for item in command]
+    legacy_script = "." + "ps1"
+    if any(item in {"power" + "shell", "power" + "shell.exe", "pw" + "sh", "pw" + "sh.exe"} for item in lowered):
+        return None
+    if any(legacy_script in item or "unity-mcp-cli" in item for item in lowered):
+        return None
+    for marker in ("--transport", "--http-url", "--project-scoped-tools"):
+        if marker in lowered:
+            return command[: lowered.index(marker)]
+    return command
+
+
+def find_unity_mcp_executable() -> Path | None:
+    candidates: list[Path] = []
+    virtual_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    if virtual_env:
+        candidates.append(Path(virtual_env) / "Scripts" / "unity-mcp.exe")
+    candidates.append(Path(sys.executable).parent / "Scripts" / "unity-mcp.exe")
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        candidates.extend(
+            [
+                Path(appdata) / "Python" / "Python314" / "Scripts" / "unity-mcp.exe",
+                Path(appdata) / "Python" / "Scripts" / "unity-mcp.exe",
+            ]
+        )
+    localappdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if localappdata:
+        candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "unity-mcp.exe")
+    return _existing_command_path_candidates(("unity-mcp.exe", "unity-mcp"), candidates)
+
+
+def find_mcp_for_unity_executable() -> Path | None:
+    candidates: list[Path] = []
+    appdata = os.environ.get("APPDATA", "").strip()
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if appdata:
+        candidates.extend(sorted(Path(appdata).glob("Python/Python*/Scripts/mcp-for-unity.exe")))
+        candidates.append(Path(appdata) / "Python" / "Python314" / "Scripts" / "mcp-for-unity.exe")
+    if local_appdata:
+        candidates.extend(sorted(Path(local_appdata).glob("Programs/Python/Python*/Scripts/mcp-for-unity.exe")))
+    return _existing_command_path_candidates(("mcp-for-unity.exe", "mcp-for-unity"), candidates)
+
+
+def find_unity_mcp_command_prefix() -> list[str] | None:
+    unity_mcp_executable = find_unity_mcp_executable()
+    if unity_mcp_executable is not None:
+        return [str(unity_mcp_executable)]
+    uvx_candidates: list[Path] = [
+        ROOT_DIR / "tools" / "uv" / "uvx.exe",
+    ]
+    virtual_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    if virtual_env:
+        uvx_candidates.append(Path(virtual_env) / "Scripts" / "uvx.exe")
+    uvx_resolved = shutil.which("uvx.exe") or shutil.which("uvx")
+    if uvx_resolved:
+        uvx_candidates.append(Path(uvx_resolved))
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        uvx_candidates.extend(
+            [
+                Path(appdata) / "Python" / "Python314" / "Scripts" / "uvx.exe",
+                Path(appdata) / "Python" / "Scripts" / "uvx.exe",
+            ]
+        )
+    localappdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if localappdata:
+        uvx_candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "uvx.exe")
+    for candidate in uvx_candidates:
+        try:
+            if candidate.exists():
+                return [str(candidate.resolve()), "--from", "mcpforunityserver", "unity-mcp"]
+        except OSError:
+            continue
+    legacy_mcp_executable = find_mcp_for_unity_executable()
+    if legacy_mcp_executable is not None:
+        return [str(legacy_mcp_executable)]
     return None
 
 
@@ -10766,47 +11003,48 @@ def ensure_unity_mcp_server_running(
     wait_seconds: int,
     *,
     force_start: bool = False,
-    preferred_executable: Path | None = None,
+    preferred_command: list[str] | None = None,
 ) -> bool:
     ok, _payload, error, _status_code = fetch_unity_http_json(settings, "/health")
     if ok and not force_start:
         phases.append(_repair_phase("mcp_server", "ok", "MCP server is already reachable.", {"url": f"{unity_http_base(settings)}/health"}))
         return True
 
-    mcp_exe = preferred_executable if preferred_executable and preferred_executable.exists() else find_mcp_for_unity_executable()
-    if mcp_exe is None:
+    command_prefix = preferred_command or configured_unity_mcp_command_prefix(settings) or find_unity_mcp_command_prefix()
+    if not command_prefix:
         phases.append(
             _repair_phase(
                 "mcp_server",
                 "error",
-                "MCP server is not reachable and mcp-for-unity.exe was not found.",
+                "MCP server is not reachable and neither unity-mcp nor uvx was found.",
                 {"error": error},
             )
         )
         return False
 
+    command = [
+        *command_prefix,
+        "--transport",
+        "http",
+        "--http-url",
+        unity_http_base(settings),
+        "--project-scoped-tools",
+    ]
     try:
         subprocess.Popen(
-            [
-                str(mcp_exe),
-                "--transport",
-                "http",
-                "--http-url",
-                unity_http_base(settings),
-                "--project-scoped-tools",
-            ],
+            command,
             cwd=str(ROOT_DIR),
             **_repair_process_kwargs(),
         )
     except Exception as exc:  # noqa: BLE001
-        phases.append(_repair_phase("mcp_server", "error", f"Failed to start MCP server: {exc}", {"executable": str(mcp_exe)}))
+        phases.append(_repair_phase("mcp_server", "error", f"Failed to start MCP server: {exc}", {"command": command_prefix}))
         return False
 
     if wait_for_mcp_health(settings, min(max(wait_seconds, 5), 45)):
-        phases.append(_repair_phase("mcp_server", "ok", "MCP server started and is reachable.", {"executable": str(mcp_exe)}))
+        phases.append(_repair_phase("mcp_server", "ok", "MCP server started and is reachable.", {"command": command_prefix}))
         return True
 
-    phases.append(_repair_phase("mcp_server", "error", "MCP server was started but did not become reachable.", {"executable": str(mcp_exe)}))
+    phases.append(_repair_phase("mcp_server", "error", "MCP server was started but did not become reachable.", {"command": command_prefix}))
     return False
 
 
@@ -10814,46 +11052,47 @@ def list_running_unity_mcp_processes(settings: Settings) -> list[dict[str, Any]]
     if os.name != "nt":
         return []
     port = int(settings.unity_mcp_port or 8080)
-    script = (
-        "$port = "
-        f"{port}; "
-        "@(Get-CimInstance Win32_Process | Where-Object { "
-        "$_.Name -notlike 'powershell*' -and "
-        "$_.CommandLine -like '*mcp-for-unity*' -and "
-        "$_.CommandLine -like ('*--http-url*:' + $port + '*') "
-        "} | Select-Object ProcessId,Name,ExecutablePath,CommandLine) | ConvertTo-Json -Depth 4"
-    )
-    ok, payload, _error = _powershell_json(script, timeout_seconds=10)
-    if not ok or payload is None:
-        return []
-    raw_items = payload if isinstance(payload, list) else [payload]
     processes: list[dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
+    for process in _iter_processes():
+        name = _process_name_text(process)
+        command_line = _process_cmdline_text(process)
+        lowered = command_line.casefold()
+        if not any(marker in lowered for marker in ("mcp-for-unity", "unity-mcp", "mcpforunityserver")):
+            continue
+        if "--http-url" not in lowered or f":{port}" not in lowered:
             continue
         try:
-            process_id = int(item.get("ProcessId"))
+            process_id = int(process.info.get("pid") if hasattr(process, "info") else process.pid)
         except (TypeError, ValueError):
             continue
         processes.append(
             {
                 "processId": process_id,
-                "name": str(item.get("Name") or ""),
-                "executablePath": normalize_path_string(str(item.get("ExecutablePath") or "")),
-                "commandLine": str(item.get("CommandLine") or ""),
+                "name": name,
+                "executablePath": _process_exe_text(process),
+                "commandLine": command_line,
             }
         )
     return processes
 
 
-def _preferred_mcp_executable_from_processes(processes: list[dict[str, Any]]) -> Path | None:
+def _preferred_mcp_command_from_processes(processes: list[dict[str, Any]]) -> list[str] | None:
     for process in processes:
         executable = str(process.get("executablePath") or "").strip()
-        if executable and Path(executable).name.casefold() == "mcp-for-unity.exe":
+        command_line = str(process.get("commandLine") or "").casefold()
+        name = Path(executable).name.casefold() if executable else ""
+        if executable and name in {"mcp-for-unity.exe", "unity-mcp.exe"}:
             candidate = Path(executable)
             try:
                 if candidate.exists():
-                    return candidate.resolve()
+                    return [str(candidate.resolve())]
+            except OSError:
+                continue
+        if executable and name == "uvx.exe" and "mcpforunityserver" in command_line and "unity-mcp" in command_line:
+            candidate = Path(executable)
+            try:
+                if candidate.exists():
+                    return [str(candidate.resolve()), "--from", "mcpforunityserver", "unity-mcp"]
             except OSError:
                 continue
     return None
@@ -10863,22 +11102,73 @@ def stop_unity_mcp_processes(processes: list[dict[str, Any]]) -> tuple[bool, dic
     ids = sorted({int(process["processId"]) for process in processes if process.get("processId")})
     if not ids:
         return True, {"stopped": [], "stillRunning": []}, ""
-    id_literal = ",".join(str(process_id) for process_id in ids)
-    script = (
-        f"$ids = @({id_literal}); "
-        "$stopped = @(); "
-        "foreach ($id in $ids) { "
-        "  $proc = Get-Process -Id $id -ErrorAction SilentlyContinue; "
-        "  if ($null -ne $proc) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue; $stopped += $id } "
-        "}; "
-        "Start-Sleep -Milliseconds 800; "
-        "$still = @(); "
-        "foreach ($id in $ids) { if ($null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $still += $id } }; "
-        "[pscustomobject]@{ ok=($still.Count -eq 0); stopped=$stopped; stillRunning=$still } | ConvertTo-Json -Depth 4; "
-        "if ($still.Count -ne 0) { exit 2 }"
-    )
-    ok, payload, error = _powershell_json(script, timeout_seconds=20)
-    return ok, payload if isinstance(payload, dict) else {"stopped": ids, "stillRunning": []}, error
+    if psutil is None:
+        return False, {"stopped": [], "stillRunning": ids}, "psutil is unavailable."
+    stopped: list[int] = []
+    still_running: list[int] = []
+    errors: list[str] = []
+    for process_id in ids:
+        try:
+            process = psutil.Process(process_id)
+            process.kill()
+            stopped.append(process_id)
+        except psutil.NoSuchProcess:
+            stopped.append(process_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{process_id}: {exc}")
+            still_running.append(process_id)
+    time.sleep(0.8)
+    for process_id in ids:
+        try:
+            if psutil.pid_exists(process_id):
+                still_running.append(process_id)
+        except Exception:  # noqa: BLE001
+            continue
+    still_running = sorted(set(still_running))
+    payload = {"stopped": sorted(set(stopped)), "stillRunning": still_running}
+    return not still_running and not errors, payload, "; ".join(errors)
+
+
+def request_windows_process_close(process_id: int) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return False
+    found_window = False
+    enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _enum_window(hwnd: int, _lparam: int) -> bool:
+        nonlocal found_window
+        window_pid = ctypes.c_ulong()
+        try:
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+            if int(window_pid.value) == int(process_id) and user32.IsWindowVisible(hwnd):
+                found_window = True
+                user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        except Exception:  # noqa: BLE001
+            return True
+        return True
+
+    try:
+        user32.EnumWindows(enum_proc_type(_enum_window), 0)
+    except Exception:  # noqa: BLE001
+        return False
+    return found_window
+
+
+def wait_for_process_exit(process_id: int, timeout_seconds: int) -> bool:
+    if psutil is None:
+        return False
+    try:
+        process = psutil.Process(process_id)
+        process.wait(timeout=max(1, int(timeout_seconds)))
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def start_project_mcp_terminal_script(project_root: Path, settings: Settings, phases: list[dict[str, Any]], wait_seconds: int) -> bool | None:
@@ -10924,7 +11214,7 @@ def start_project_mcp_terminal_script(project_root: Path, settings: Settings, ph
 
 def restart_unity_mcp_server(settings: Settings, phases: list[dict[str, Any]], wait_seconds: int, project_root: Path | None = None) -> bool:
     processes = list_running_unity_mcp_processes(settings)
-    preferred_executable = _preferred_mcp_executable_from_processes(processes)
+    preferred_command = _preferred_mcp_command_from_processes(processes)
     if processes:
         stopped, stop_detail, stop_error = stop_unity_mcp_processes(processes)
         phases.append(
@@ -10952,7 +11242,7 @@ def restart_unity_mcp_server(settings: Settings, phases: list[dict[str, Any]], w
         phases,
         max(wait_seconds, 15),
         force_start=True,
-        preferred_executable=preferred_executable,
+        preferred_command=preferred_command,
     )
 
 
@@ -11179,21 +11469,12 @@ def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> 
     results: list[dict[str, Any]] = []
     for process in matching:
         process_id = int(process["processId"])
-        ok, payload, error = _powershell_json(
-            "$proc = Get-Process -Id "
-            f"{process_id} "
-            "-ErrorAction SilentlyContinue; "
-            "if ($null -eq $proc) { [pscustomobject]@{ ok=$true; exited=$true; reason='not_running' } | ConvertTo-Json -Depth 3; exit 0 }; "
-            "$closed = $proc.CloseMainWindow(); "
-            f"$exited = $proc.WaitForExit({max(1, int(timeout_seconds)) * 1000}); "
-            "[pscustomobject]@{ ok=$exited; closeRequested=$closed; exited=$exited; pid=$proc.Id } | ConvertTo-Json -Depth 3; "
-            "if (-not $exited) { exit 2 }",
-            timeout_seconds=max(10, int(timeout_seconds) + 5),
-        )
-        result = payload if isinstance(payload, dict) else {"pid": process_id, "ok": ok, "error": error}
+        close_requested = request_windows_process_close(process_id)
+        exited = wait_for_process_exit(process_id, timeout_seconds)
+        result = {"pid": process_id, "ok": exited, "closeRequested": close_requested, "exited": exited}
         results.append(result)
-        if not ok or not bool(result.get("exited")):
-            return False, "Unity did not exit after a normal close request. Save or close Unity manually, then Retry.", {"processes": results, "error": error}
+        if not exited:
+            return False, "Unity did not exit after a normal close request. Save or close Unity manually, then Retry.", {"processes": results}
 
     return True, "Unity closed cleanly.", {"processes": results}
 
@@ -13214,7 +13495,7 @@ def authenticate_agent_approval_request(request: Request):
 
 
 APP_AUTH_PREFIXES = ("/api",)
-APP_AUTH_EXEMPT_PATHS = {"/api/health", "/api/app/session", "/api/app/session-challenge", "/api/app/ws-ticket"}
+APP_AUTH_EXEMPT_PATHS = {"/api/health", "/api/app/session", "/api/app/session-challenge"}
 APP_AUTH_EXEMPT_PREFIXES = ("/api/agent",)
 APP_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
@@ -13261,13 +13542,6 @@ def attach_dashboard_session_cookie(response: FileResponse) -> None:
         max_age=3600,
         path="/",
     )
-
-
-def authenticate_websocket_ticket_request(request: Request) -> None:
-    client_host = request.client.host if request.client else ""
-    origin = request.headers.get("origin", "").strip()
-    supplied = extract_bearer_token(request) or str(request.cookies.get(APP_DASHBOARD_SESSION_COOKIE) or "")
-    validate_app_request_auth(client_host=client_host, origin=origin, supplied_token=supplied)
 
 
 def validate_app_session_handshake_request(request: Request, *, dev_only: bool) -> None:
@@ -13323,24 +13597,30 @@ def validate_app_request_auth(client_host: str, origin: str, supplied_token: str
 
 
 def extract_bearer_token(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
+    return extract_bearer_token_from_headers(request.headers)
+
+
+def extract_bearer_token_from_headers(headers: Any) -> str:
+    auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return ""
 
 
-def extract_websocket_auth_token(headers: Any, query_params: Any) -> str:
-    ticket = str(query_params.get("ws_ticket") or "").strip()
-    if not ticket:
+def extract_websocket_auth_token(headers: Any) -> str:
+    bearer = extract_bearer_token_from_headers(headers)
+    if bearer:
+        return bearer
+    raw_cookie = str(headers.get("cookie") or "")
+    if not raw_cookie:
         return ""
-    return APP_SESSION_TOKEN if consume_app_websocket_ticket(ticket) else ""
-
-
-def consume_app_websocket_ticket(ticket: str) -> bool:
-    now = time.time()
-    with APP_WS_TICKET_LOCK:
-        expires = APP_WS_TICKETS.pop(ticket, None)
-    return bool(expires and expires >= now)
+    try:
+        cookie = SimpleCookie()
+        cookie.load(raw_cookie)
+    except Exception:  # noqa: BLE001
+        return ""
+    morsel = cookie.get(APP_DASHBOARD_SESSION_COOKIE)
+    return morsel.value if morsel is not None else ""
 
 
 def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:
@@ -18881,6 +19161,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             cli=True,
             no_start=False,
             start_runtime=False,
+            cleanup_user_data=False,
+            cleanup_user_data_root="",
             cli_args=raw_args[cli_index + 1 :],
         )
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
@@ -18892,7 +19174,78 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag for preflight JSON output.")
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
+    parser.add_argument("--cleanup-user-data", action="store_true", help="Installer helper: remove VRCForge user data and known project chat transcripts.")
+    parser.add_argument("--cleanup-user-data-root", default="", help="Installer helper override for the VRCForge user data root.")
     return parser.parse_args(raw_args)
+
+
+def cleanup_user_data_root(user_data_root: Path) -> dict[str, Any]:
+    root = user_data_root.expanduser().resolve()
+    if root.name.casefold() != "agentic-app" or root.parent.name.casefold() != "vrcforge":
+        raise RuntimeError("Refusing to clean a path outside the VRCForge agentic-app data directory.")
+    projects: set[Path] = set()
+
+    def add_project(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        try:
+            path = Path(text).expanduser()
+            if path.is_absolute():
+                projects.add(path.resolve())
+        except OSError:
+            return
+
+    def read_json(path: Path) -> Any:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - uninstall cleanup is best-effort.
+            return None
+
+    index_payload = read_json(root / "chat-projects.json")
+    if isinstance(index_payload, dict):
+        for item in index_payload.get("projectPaths") or []:
+            add_project(item)
+
+    custom_payload = read_json(root / "custom-projects.json")
+    if isinstance(custom_payload, dict):
+        for item in list(custom_payload.get("customPaths") or []) + list(custom_payload.get("hiddenPaths") or []):
+            add_project(item)
+
+    legacy_payload = read_json(root / "chat-transcripts.json")
+    if isinstance(legacy_payload, dict):
+        for chat in legacy_payload.get("chats") or []:
+            if isinstance(chat, dict):
+                add_project(chat.get("projectPath"))
+
+    removed_project_transcripts: list[str] = []
+    for project in sorted(projects, key=lambda path: str(path).casefold()):
+        transcript = project / ".vrcforge" / "chat-transcripts.json"
+        try:
+            if transcript.exists():
+                transcript.unlink()
+                removed_project_transcripts.append(str(transcript))
+            metadata_dir = transcript.parent
+            if metadata_dir.exists() and not any(metadata_dir.iterdir()):
+                metadata_dir.rmdir()
+        except OSError:
+            continue
+
+    root_removed = False
+    try:
+        if root.exists():
+            shutil.rmtree(root)
+            root_removed = True
+    except OSError:
+        root_removed = False
+
+    return {
+        "ok": True,
+        "schema": "vrcforge.installer_cleanup.v1",
+        "userDataRoot": str(root),
+        "rootRemoved": root_removed,
+        "projectTranscriptCount": len(removed_project_transcripts),
+    }
 
 
 def main() -> int:
@@ -18901,6 +19254,10 @@ def main() -> int:
         from tools.vrcforge_cli import main as cli_main
 
         return cli_main(args.cli_args)
+    if args.cleanup_user_data:
+        root = Path(args.cleanup_user_data_root).expanduser() if str(args.cleanup_user_data_root or "").strip() else USER_DATA_DIR
+        print(json.dumps(cleanup_user_data_root(root), ensure_ascii=False, sort_keys=True))
+        return 0
     if args.agent_mcp_stdio:
         from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge, run_stdio_server
 

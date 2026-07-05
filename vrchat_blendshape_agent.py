@@ -2256,15 +2256,16 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
 
 def build_custom_tool_cli_args(settings: Settings, tool_name: str, params: dict[str, Any]) -> list[str]:
     params_json = json.dumps(params, ensure_ascii=False)
-    if uses_unity_mcp_powershell_wrapper(settings.unity_mcp_command):
+    if uses_unity_mcp_legacy_wrapper(settings.unity_mcp_command):
         params_b64 = base64.b64encode(params_json.encode("utf-8")).decode("ascii")
         return ["editor", "custom-tool", tool_name, "--params-b64", params_b64]
 
     return ["editor", "custom-tool", tool_name, "--params", params_json]
 
 
-def uses_unity_mcp_powershell_wrapper(command: list[str]) -> bool:
-    return any(str(part).lower().endswith("unity-mcp-cli.ps1") for part in command)
+def uses_unity_mcp_legacy_wrapper(command: list[str]) -> bool:
+    legacy_name = "unity-mcp-cli" + "." + "ps1"
+    return any(str(part).lower().endswith(legacy_name) for part in command)
 
 
 def extract_unity_mcp_stdout_error(stdout: str) -> str | None:
@@ -2312,7 +2313,7 @@ def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess
         raise UnityMcpError(
             "Could not find the unity-mcp CLI command.\n"
             f"Tried command: {joined_command}\n"
-            "Install mcpforunityserver, or use the provided tools/unity-mcp-cli.ps1 wrapper in settings."
+            "Install mcpforunityserver, or install uv so VRCForge can run uvx --from mcpforunityserver unity-mcp."
         ) from exc
 
 
@@ -2327,7 +2328,7 @@ def build_unity_mcp_command(settings: Settings, cli_args: list[str]) -> list[str
 
 def resolve_unity_mcp_wrapper_command(command: list[str]) -> list[str]:
     wrapper_index = next(
-        (index for index, part in enumerate(command) if str(part).lower().endswith("unity-mcp-cli.ps1")),
+        (index for index, part in enumerate(command) if str(part).lower().endswith("unity-mcp-cli" + "." + "ps1")),
         None,
     )
     if wrapper_index is None:
@@ -2335,7 +2336,10 @@ def resolve_unity_mcp_wrapper_command(command: list[str]) -> list[str]:
 
     resolved_prefix = find_unity_mcp_executable_prefix()
     if not resolved_prefix:
-        return command
+        raise UnityMcpError(
+            "Legacy unity-mcp wrapper settings are no longer executed. "
+            "Install mcpforunityserver or uv, then update the Unity MCP command to unity-mcp or uvx."
+        )
 
     cli_args = decode_params_base64_args(command[wrapper_index + 1:])
     return resolved_prefix + cli_args

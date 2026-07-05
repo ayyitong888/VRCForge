@@ -125,62 +125,58 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertIn("unityStatus", message["payload"])
                 self.assertNotIn("api_key", json.dumps(message["payload"]).lower())
 
-    def test_websocket_uses_one_time_ticket_instead_of_query_token(self) -> None:
+    def test_websocket_uses_header_or_cookie_instead_of_query_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN
-        original_tickets = dict(dashboard_server.APP_WS_TICKETS)
         dashboard_server.APP_AUTH_REQUIRED = True
         dashboard_server.APP_SESSION_TOKEN = "test-app-session-token"
-        dashboard_server.APP_WS_TICKETS.clear()
         headers = {"Authorization": "Bearer test-app-session-token"}
         try:
             with TestClient(dashboard_server.app) as client:
-                missing_ticket_response = client.post("/api/app/ws-ticket")
-                self.assertEqual(missing_ticket_response.status_code, 401)
-
-                ticket_response = client.post("/api/app/ws-ticket", headers=headers)
-                self.assertEqual(ticket_response.status_code, 200)
-                ticket = ticket_response.json()["ticket"]
-
-                with client.websocket_connect(f"/ws?ws_ticket={ticket}") as websocket:
-                    message = websocket.receive_json()
-                    self.assertEqual(message["type"], "hello")
-
                 with self.assertRaises(dashboard_server.WebSocketDisconnect):
-                    with client.websocket_connect(f"/ws?ws_ticket={ticket}") as websocket:
+                    with client.websocket_connect("/ws?ws_ticket=test-app-session-token") as websocket:
                         websocket.receive_json()
 
                 with self.assertRaises(dashboard_server.WebSocketDisconnect):
                     with client.websocket_connect("/ws?app_token=test-app-session-token") as websocket:
                         websocket.receive_json()
 
-                with self.assertRaises(dashboard_server.WebSocketDisconnect):
-                    with client.websocket_connect("/ws", headers=headers) as websocket:
-                        websocket.receive_json()
+                with client.websocket_connect("/ws", headers=headers) as websocket:
+                    message = websocket.receive_json()
+                    self.assertEqual(message["type"], "hello")
+
+                with client.websocket_connect(
+                    "/ws",
+                    headers={
+                        "Authorization": "Bearer test-app-session-token",
+                        "Origin": "http://127.0.0.1:8757",
+                    },
+                ) as websocket:
+                    message = websocket.receive_json()
+                    self.assertEqual(message["type"], "hello")
 
                 dashboard_response = client.get("/")
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("httponly", dashboard_response.headers.get("set-cookie", "").lower())
-                cookie_ticket_response = client.post("/api/app/ws-ticket")
-                self.assertEqual(cookie_ticket_response.status_code, 200)
-                cookie_ticket = cookie_ticket_response.json()["ticket"]
-                with client.websocket_connect(f"/ws?ws_ticket={cookie_ticket}") as websocket:
+                with client.websocket_connect("/ws") as websocket:
                     message = websocket.receive_json()
                     self.assertEqual(message["type"], "hello")
 
-                bad_origin_ticket = client.post("/api/app/ws-ticket", headers={"Origin": "https://example.invalid"})
-                self.assertEqual(bad_origin_ticket.status_code, 403)
+                with self.assertRaises(dashboard_server.WebSocketDisconnect):
+                    with client.websocket_connect(
+                        "/ws",
+                        headers={"Authorization": "Bearer test-app-session-token", "Origin": "https://example.invalid"},
+                    ) as websocket:
+                        websocket.receive_json()
         finally:
             dashboard_server.APP_AUTH_REQUIRED = original_required
             dashboard_server.APP_SESSION_TOKEN = original_token
-            dashboard_server.APP_WS_TICKETS.clear()
-            dashboard_server.APP_WS_TICKETS.update(original_tickets)
 
-    def test_legacy_dashboard_websocket_uses_ticket(self) -> None:
+    def test_legacy_dashboard_websocket_avoids_query_tokens(self) -> None:
         app_js = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("/api/app/ws-ticket", app_js)
-        self.assertIn("ws_ticket", app_js)
-        self.assertNotIn("new WebSocket(`${scheme}://${window.location.host}/ws`)", app_js)
+        self.assertNotIn("/api/app/ws-ticket", app_js)
+        self.assertNotIn("ws_ticket", app_js)
+        self.assertIn("new WebSocket(`${scheme}://${window.location.host}/ws`)", app_js)
 
     def test_chat_transcripts_split_temporary_and_project_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5772,11 +5768,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn(f"[{old_brand}", combined)
         self.assertNotIn(f"Assets/{old_brand}", combined)
 
-        installer = (Path(__file__).resolve().parents[1] / "tools" / "install-unity-project.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("Move-DirectoryWithMeta", installer)
-        self.assertIn("VRCAutoRig.meta", installer)
+        self.assertTrue(callable(dashboard_server.install_vrcforge_into_unity_project))
 
     def test_unity_instance_session_id_is_resolved_to_cli_hash(self) -> None:
         settings = SimpleNamespace(
@@ -6513,6 +6505,7 @@ namespace VRCForge.Editor
         self.assertIn("Build-TauriDesktopApp", build_script)
         self.assertIn("vrcforge-agentic-app.exe", build_script)
         self.assertIn('Join-Path $payloadRoot "VRCForge.exe"', build_script)
+        self.assertIn('Get-ChildItem -LiteralPath (Join-Path $payloadRoot "tools") -Recurse -Filter "*.ps1"', build_script)
         self.assertIn('Join-Path $payloadRoot "tools\\legacy-launcher"', build_script)
         self.assertIn('Remove-Item -LiteralPath (Join-Path $legacyLauncherBuildRoot "VRCForge.pdb")', build_script)
         self.assertIn("Resolve-DotNetExe", build_script)
@@ -6554,12 +6547,44 @@ namespace VRCForge.Editor
             self.assertIn(shortcut_name, web_nsis)
         self.assertIn("清除用户数据和历史对话", offline_nsis)
         self.assertIn("Clear user data and chat history", web_nsis)
-        self.assertIn("chat-projects.json", offline_nsis)
-        self.assertIn("chat-projects.json", web_nsis)
-        self.assertIn(".vrcforge\\chat-transcripts.json", offline_nsis)
-        self.assertIn(".vrcforge\\chat-transcripts.json", web_nsis)
+        self.assertIn("--cleanup-user-data", offline_nsis)
+        self.assertIn("--cleanup-user-data", web_nsis)
+        self.assertNotIn("powershell -NoProfile", offline_nsis)
+        self.assertNotIn("powershell -NoProfile", web_nsis)
+        self.assertNotIn("NSISdl::download", web_nsis)
+        self.assertIn("certutil -urlcache -f", web_nsis)
+        self.assertIn("certutil -hashfile", web_nsis)
+        self.assertIn("Pop $0", offline_nsis)
+        self.assertIn("Pop $0", web_nsis)
         self.assertIn("Call un.ClearUserDataIfRequested", offline_nsis)
         self.assertIn("Call un.ClearUserDataIfRequested", web_nsis)
+
+    def test_cleanup_user_data_root_removes_appdata_and_known_project_transcripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "VRCForge" / "agentic-app"
+            project = Path(temp_dir) / "AvatarProject"
+            project_transcript = project / ".vrcforge" / "chat-transcripts.json"
+            project_transcript.parent.mkdir(parents=True)
+            project_transcript.write_text("{}", encoding="utf-8")
+            root.mkdir(parents=True)
+            (root / "chat-projects.json").write_text(json.dumps({"projectPaths": [str(project)]}), encoding="utf-8")
+
+            payload = dashboard_server.cleanup_user_data_root(root)
+
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["rootRemoved"])
+            self.assertEqual(payload["projectTranscriptCount"], 1)
+            self.assertFalse(root.exists())
+            self.assertFalse(project_transcript.exists())
+
+    def test_cleanup_user_data_root_rejects_unrelated_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(RuntimeError, "outside the VRCForge agentic-app"):
+                dashboard_server.cleanup_user_data_root(Path(temp_dir) / "not-vrcforge")
+
+    def test_project_install_request_accepts_camel_case_project_path(self) -> None:
+        request = dashboard_server.ProjectInstallRequest(projectPath="C:/AvatarProject")
+        self.assertEqual(request.project_path, "C:/AvatarProject")
 
     def test_coplaydev_mcp_distribution_notes_are_present(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -6608,18 +6633,107 @@ namespace VRCForge.Editor
         self.assertNotIn("外部 Agent 接入 / 打开 Dashboard", main_form)
         self.assertIn("backend\\vrcforge_backend.exe", start_cmd)
         self.assertIn("VRCFORGE_DASHBOARD_DIR", start_cmd)
+        self.assertNotIn("start-dashboard.ps1", start_cmd)
+        self.assertNotIn("powershell", start_cmd.lower())
 
-    def test_unity_install_script_uses_project_backups_and_local_mcp(self) -> None:
-        script = (Path(__file__).resolve().parents[1] / "tools" / "install-unity-project.ps1").read_text(encoding="utf-8-sig")
+    def test_unity_project_install_uses_project_backups_and_local_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            (project / "Assets" / "VRCAutoRig").mkdir(parents=True)
+            (project / "Packages").mkdir(parents=True)
+            (project / "ProjectSettings").mkdir(parents=True)
+            (project / "Packages" / "manifest.json").write_text('{"dependencies":{}}\n', encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
 
-        self.assertIn(".vrcforge", script)
-        self.assertIn("backups", script)
-        self.assertIn("VRCAutoRig", script)
-        self.assertIn("file:Packages/com.coplaydev.unity-mcp", script)
-        self.assertIn('New-BackupPath $backupRoot "manifest"', script)
-        self.assertIn("Restored backup", script)
-        self.assertNotIn("Library\\VRCForge\\LegacyAssets", script)
-        self.assertNotIn("https://github.com/CoplayDev/unity-mcp", script)
+            payload = dashboard_server.install_vrcforge_into_unity_project(project)
+
+            self.assertIn(".vrcforge", payload["backupRoot"])
+            self.assertTrue((project / "Assets" / "VRCForge").is_dir())
+            self.assertFalse((project / "Assets" / "VRCAutoRig").exists())
+            self.assertIn("legacy", payload["backups"])
+            manifest = json.loads((project / "Packages" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["dependencies"]["com.coplaydev.unity-mcp"], "file:Packages/com.coplaydev.unity-mcp")
+            self.assertTrue((project / "Packages" / "com.coplaydev.unity-mcp").is_dir())
+
+    def test_unity_project_install_rolls_back_when_manifest_update_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            legacy = project / "Assets" / "VRCAutoRig"
+            legacy.mkdir(parents=True)
+            (legacy / "legacy.txt").write_text("before", encoding="utf-8")
+            (project / "Packages").mkdir(parents=True)
+            (project / "ProjectSettings").mkdir(parents=True)
+            (project / "Packages" / "manifest.json").write_text("[]", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "manifest root is not an object"):
+                dashboard_server.install_vrcforge_into_unity_project(project)
+
+            self.assertTrue((project / "Assets" / "VRCAutoRig" / "legacy.txt").is_file())
+            self.assertFalse((project / "Assets" / "VRCForge").exists())
+            self.assertFalse((project / "Packages" / "com.coplaydev.unity-mcp").exists())
+            self.assertEqual((project / "Packages" / "manifest.json").read_text(encoding="utf-8"), "[]")
+
+    def test_unity_mcp_restart_reuses_uvx_unity_mcp_command(self) -> None:
+        phases: list[dict[str, object]] = []
+        settings = SimpleNamespace(unity_mcp_host="127.0.0.1", unity_mcp_port=8080, unity_mcp_command=[])
+        processes = [
+            {
+                "processId": 123,
+                "name": "uvx.exe",
+                "executablePath": "C:\\Tools\\uvx.exe",
+                "commandLine": "uvx --from mcpforunityserver unity-mcp --transport http --http-url http://127.0.0.1:8080",
+            }
+        ]
+        popen_calls: list[list[str]] = []
+
+        def fake_popen(command, **_kwargs):
+            popen_calls.append(list(command))
+            return SimpleNamespace(pid=456)
+
+        with (
+            patch("dashboard_server.list_running_unity_mcp_processes", return_value=processes),
+            patch("dashboard_server.stop_unity_mcp_processes", return_value=(True, {"stopped": [123], "stillRunning": []}, "")),
+            patch("dashboard_server.fetch_unity_http_json", return_value=(False, None, "offline", None)),
+            patch("dashboard_server.Path.exists", return_value=True),
+            patch("dashboard_server.subprocess.Popen", side_effect=fake_popen),
+            patch("dashboard_server.wait_for_mcp_health", return_value=True),
+        ):
+            self.assertTrue(dashboard_server.restart_unity_mcp_server(settings, phases, 1))
+
+        self.assertTrue(popen_calls)
+        self.assertEqual(popen_calls[0][:4], ["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"])
+
+    def test_unity_mcp_fresh_start_prefers_configured_command_over_legacy_exe(self) -> None:
+        phases: list[dict[str, object]] = []
+        settings = SimpleNamespace(
+            unity_mcp_host="127.0.0.1",
+            unity_mcp_port=8080,
+            unity_mcp_command=["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"],
+        )
+        popen_calls: list[list[str]] = []
+
+        def fake_popen(command, **_kwargs):
+            popen_calls.append(list(command))
+            return SimpleNamespace(pid=456)
+
+        with (
+            patch("dashboard_server.fetch_unity_http_json", return_value=(False, None, "offline", None)),
+            patch("dashboard_server.find_unity_mcp_command_prefix", return_value=["C:\\Old\\mcp-for-unity.exe"]),
+            patch("dashboard_server.subprocess.Popen", side_effect=fake_popen),
+            patch("dashboard_server.wait_for_mcp_health", return_value=True),
+        ):
+            self.assertTrue(dashboard_server.ensure_unity_mcp_server_running(settings, phases, 1, force_start=True))
+
+        self.assertTrue(popen_calls)
+        self.assertEqual(popen_calls[0][:4], ["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"])
+
+    def test_unity_mcp_discovery_prefers_current_cli_over_legacy_exe(self) -> None:
+        with (
+            patch("dashboard_server.find_unity_mcp_executable", return_value=Path("C:/Tools/unity-mcp.exe")),
+            patch("dashboard_server.find_mcp_for_unity_executable", return_value=Path("C:/Old/mcp-for-unity.exe")),
+        ):
+            self.assertEqual(dashboard_server.find_unity_mcp_command_prefix(), ["C:\\Tools\\unity-mcp.exe"])
 
     def test_recent_log_snapshot_keeps_only_last_24_hours(self) -> None:
         dashboard_server.RECENT_LOGS.clear()

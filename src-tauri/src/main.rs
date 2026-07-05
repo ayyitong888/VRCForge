@@ -19,6 +19,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, State,
 };
+use tungstenite::client::IntoClientRequest;
+use tungstenite::http::HeaderValue;
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8757;
@@ -379,11 +381,6 @@ struct DesktopChatListRequest {
 struct DesktopOptimizationProofsRequest {
     limit: Option<u64>,
     timeout_ms: Option<u64>,
-}
-
-#[tauri::command]
-fn backend_endpoint() -> String {
-    BACKEND_ENDPOINT.to_string()
 }
 
 fn backend_json_request(
@@ -1924,8 +1921,7 @@ fn start_backend_event_bridge_once(
 
 fn backend_event_bridge_loop(app_handle: tauri::AppHandle, app_session_token: String) {
     loop {
-        match issue_backend_event_ticket(&app_session_token).and_then(connect_backend_event_socket)
-        {
+        match connect_backend_event_socket(&app_session_token) {
             Ok(mut socket) => {
                 let _ = app_handle.emit(
                     "vrcforge-backend-event-status",
@@ -1993,45 +1989,22 @@ fn backend_event_bridge_loop(app_handle: tauri::AppHandle, app_session_token: St
     }
 }
 
-fn issue_backend_event_ticket(app_session_token: &str) -> Result<String, String> {
-    let agent = ureq::builder()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout(Duration::from_secs(8))
-        .redirects(0)
-        .build();
-    let response = app_api_response_from_ureq(
-        agent
-            .post(&format!("{BACKEND_ENDPOINT}/api/app/ws-ticket"))
-            .set("Accept", "application/json")
-            .set("Origin", "tauri://localhost")
-            .set("Authorization", &format!("Bearer {app_session_token}"))
-            .call(),
-    )?;
-    if !response.ok {
-        return Err(response
-            .body
-            .get("detail")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Backend event ticket request failed.")
-            .to_string());
-    }
-    response
-        .body
-        .get("ticket")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "Backend event ticket response did not include a ticket.".to_string())
-}
-
 fn connect_backend_event_socket(
-    ticket: String,
+    app_session_token: &str,
 ) -> Result<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>, String> {
-    let url = format!(
-        "ws://{BACKEND_HOST}:{BACKEND_PORT}/ws?ws_ticket={}",
-        percent_encode_query_component(&ticket)
+    let url = format!("ws://{BACKEND_HOST}:{BACKEND_PORT}/ws");
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| format!("unable to build backend event socket request: {error}"))?;
+    request
+        .headers_mut()
+        .insert("Origin", HeaderValue::from_static("tauri://localhost"));
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {app_session_token}"))
+            .map_err(|error| error.to_string())?,
     );
-    let (socket, _) = tungstenite::connect(url.as_str())
+    let (socket, _) = tungstenite::connect(request)
         .map_err(|error| format!("unable to connect backend event socket: {error}"))?;
     Ok(socket)
 }
@@ -2292,10 +2265,9 @@ fn validate_local_folder_to_open(path: &str) -> Result<PathBuf, String> {
 fn select_folder_dialog(initial_path: Option<&str>) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
-        // Native folder picker via `rfd` (IFileDialog on Windows). Replaces the
-        // old PowerShell FolderBrowserDialog subprocess: no child process, no
-        // script injection surface, and non-ASCII paths survive without
-        // encoding tricks.
+        // Native folder picker via `rfd` (IFileDialog on Windows): no child
+        // process, no script injection surface, and non-ASCII paths survive
+        // without encoding tricks.
         let mut dialog = rfd::FileDialog::new().set_title("Select checkpoint archive directory");
         if let Some(path) = initial_path {
             let trimmed = path.trim();
@@ -2393,7 +2365,7 @@ fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(), String> {
                 "thinking_level": ""
             },
             "unity_mcp": {
-                "command": ["powershell", "-ExecutionPolicy", "Bypass", "-File", "tools/unity-mcp-cli.ps1"],
+                "command": ["uvx", "--from", "mcpforunityserver", "unity-mcp"],
                 "host": "127.0.0.1",
                 "port": 8080,
                 "instance": "",
@@ -2731,7 +2703,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             apply_adjustment_checkpoint,
             approve_agent_approval,
-            backend_endpoint,
             block_skill_package,
             cancel_sub_agent,
             check_skills,

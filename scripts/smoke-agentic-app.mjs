@@ -29,7 +29,7 @@ if (!fs.existsSync(settingsPath)) {
           thinking_level: "",
         },
         unity_mcp: {
-          command: ["powershell", "-ExecutionPolicy", "Bypass", "-File", "tools/unity-mcp-cli.ps1"],
+          command: ["uvx", "--from", "mcpforunityserver", "unity-mcp"],
           host: "127.0.0.1",
           port: 8080,
           instance: "",

@@ -134,7 +134,15 @@ FunctionEnd
 Function un.ClearUserDataIfRequested
   ${If} $ClearUserData == ${BST_CHECKED}
     DetailPrint "$(ClearingUserDataText)"
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; $$root = Join-Path $$env:LOCALAPPDATA ''VRCForge\agentic-app''; $$projects = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase); function AddProject($$p) { if ($$p -and [System.IO.Path]::IsPathRooted([string]$$p)) { [void]$$projects.Add([string]$$p) } }; $$idx = Join-Path $$root ''chat-projects.json''; if (Test-Path -LiteralPath $$idx) { $$j = Get-Content -LiteralPath $$idx -Raw | ConvertFrom-Json; foreach ($$p in @($$j.projectPaths)) { AddProject $$p } }; $$prefs = Join-Path $$root ''custom-projects.json''; if (Test-Path -LiteralPath $$prefs) { $$j = Get-Content -LiteralPath $$prefs -Raw | ConvertFrom-Json; foreach ($$p in @($$j.customPaths + $$j.hiddenPaths)) { AddProject $$p } }; $$legacy = Join-Path $$root ''chat-transcripts.json''; if (Test-Path -LiteralPath $$legacy) { $$j = Get-Content -LiteralPath $$legacy -Raw | ConvertFrom-Json; foreach ($$c in @($$j.chats)) { AddProject $$c.projectPath } }; foreach ($$p in $$projects) { $$file = Join-Path $$p ''.vrcforge\chat-transcripts.json''; Remove-Item -LiteralPath $$file -Force; $$dir = Join-Path $$p ''.vrcforge''; if ((Test-Path -LiteralPath $$dir) -and -not (Get-ChildItem -LiteralPath $$dir -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $$dir -Force } }; Remove-Item -LiteralPath $$root -Recurse -Force"'
+    ${If} ${FileExists} "$INSTDIR\backend\vrcforge_backend.exe"
+      nsExec::ExecToLog '"$INSTDIR\backend\vrcforge_backend.exe" --cleanup-user-data --cleanup-user-data-root "$LOCALAPPDATA\VRCForge\agentic-app"'
+      Pop $0
+      ${If} $0 != 0
+        RMDir /r "$LOCALAPPDATA\VRCForge\agentic-app"
+      ${EndIf}
+    ${Else}
+      RMDir /r "$LOCALAPPDATA\VRCForge\agentic-app"
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -182,12 +190,12 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\VRCForge\解除安裝 VRCForge.lnk"
   Delete "$SMPROGRAMS\VRCForge\VRCForge をアンインストール.lnk"
   RMDir "$SMPROGRAMS\VRCForge"
+  Call un.ClearUserDataIfRequested
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge"
   ; Remove the persisted installer language last; it was already read in un.onInit.
   DeleteRegValue HKCU "Software\VRCForge" "InstallerLanguage"
   DeleteRegKey /ifempty HKCU "Software\VRCForge"
-  Call un.ClearUserDataIfRequested
   ${If} $ClearUserData == ${BST_CHECKED}
     MessageBox MB_OK "$(UninstallClearedUserData)"
   ${Else}

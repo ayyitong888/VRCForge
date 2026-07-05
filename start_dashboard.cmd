@@ -20,5 +20,7 @@ if exist "%REPO_ROOT%backend\vrcforge_backend.exe" (
   "%REPO_ROOT%backend\vrcforge_backend.exe" --host 127.0.0.1 --port 8757 %*
   exit /b %ERRORLEVEL%
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO_ROOT%tools\start-dashboard.ps1" %*
+echo Packaged VRCForge backend was not found at "%REPO_ROOT%backend\vrcforge_backend.exe".
+echo Rebuild or reinstall VRCForge, then try again.
+exit /b 1
 endlocal

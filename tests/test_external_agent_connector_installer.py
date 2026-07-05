@@ -272,25 +272,18 @@ def test_connector_status_prefers_configured_codex_cli_over_broken_path(monkeypa
     assert statuses["codexCli"]["cliSource"].startswith("config:")
 
 
-def test_appx_package_probe_reports_installed_desktop_app(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_which(command: str) -> str | None:
-        if command == "powershell":
-            return "powershell.exe"
-        return None
+        raise AssertionError(f"unexpected command lookup: {command}")
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert "Get-AppxPackage" in command[-1]
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout="C:\\Program Files\\WindowsApps\\Claude_1.0.0.0_x64__example\n",
-            stderr="",
-        )
+        raise AssertionError(f"unexpected subprocess: {command}")
 
     monkeypatch.setattr("external_agent_connector_installer.shutil.which", fake_which)
     monkeypatch.setattr("external_agent_connector_installer.subprocess.run", fake_run)
 
     probe = _probe_appx_package("Claude")
 
-    assert probe["ok"] is True
-    assert probe["matches"] == ["C:\\Program Files\\WindowsApps\\Claude_1.0.0.0_x64__example"]
+    assert probe["ok"] is False
+    assert probe["matches"] == []
+    assert "WindowsApps" in probe["error"]

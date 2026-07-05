@@ -847,34 +847,13 @@ def _probe_windows_app(name_fragment: str) -> dict[str, Any]:
 
 
 def _probe_appx_package(name_fragment: str) -> dict[str, Any]:
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if not powershell:
-        return {"found": False, "ok": False, "matches": [], "error": "PowerShell was not found."}
-    escaped = name_fragment.replace("'", "''")
-    command = (
-        "$ErrorActionPreference='SilentlyContinue'; "
-        f"Get-AppxPackage -Name '*{escaped}*' | "
-        "ForEach-Object { $_.InstallLocation } | "
-        "Where-Object { $_ } | "
-        "Select-Object -First 10"
-    )
-    try:
-        completed = subprocess.run(
-            [powershell, "-NoProfile", "-Command", command],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-        )
-    except Exception as exc:  # noqa: BLE001 - user-facing diagnostic detail.
-        return {"found": False, "ok": False, "matches": [], "error": str(exc)}
-    matches = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
-    error = "" if completed.returncode == 0 else (completed.stderr or completed.stdout or "").strip()
-    return {"found": bool(matches), "ok": bool(matches), "matches": matches[:10], "error": error}
+    _ = name_fragment
+    return {
+        "found": False,
+        "ok": False,
+        "matches": [],
+        "error": "App package registry probing is not used; PATH and WindowsApps directories were checked instead.",
+    }
 
 
 def _probe_error(probe: dict[str, Any]) -> str:
