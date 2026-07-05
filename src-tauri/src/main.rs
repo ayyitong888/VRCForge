@@ -32,14 +32,18 @@ struct BackendState {
     event_bridge_started: Mutex<bool>,
 }
 
+impl BackendState {
+    fn new() -> Self {
+        Self {
+            child: Mutex::new(None),
+            event_bridge_started: Mutex::new(false),
+        }
+    }
+}
+
 impl Drop for BackendState {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.child.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
+        stop_managed_backend_child(self);
     }
 }
 
@@ -2545,12 +2549,25 @@ fn wait_for_backend(timeout: Duration) -> bool {
     false
 }
 
+fn stop_managed_backend_child(state: &BackendState) {
+    let Ok(mut guard) = state.child.lock() else {
+        return;
+    };
+    let Some(mut child) = guard.take() else {
+        return;
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn shutdown_managed_backend(app: &tauri::AppHandle) {
+    let state = app.state::<BackendState>();
+    stop_managed_backend_child(&state);
+}
+
 fn main() {
     tauri::Builder::default()
-        .manage(BackendState {
-            child: Mutex::new(None),
-            event_bridge_started: Mutex::new(false),
-        })
+        .manage(BackendState::new())
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "显示 VRCForge", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 VRCForge", true, None::<&str>)?;
@@ -2561,7 +2578,10 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        shutdown_managed_backend(app);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -2684,7 +2704,9 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle();
+                shutdown_managed_backend(app);
+                app.exit(0);
             }
         })
         .run(tauri::generate_context!())
