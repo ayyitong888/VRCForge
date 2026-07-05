@@ -420,6 +420,15 @@ fn backend_json_request(
     }
 }
 
+async fn blocking_backend_json_request<F>(operation: F) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("VRCForge runtime worker failed: {error}"))?
+}
+
 fn remove_secret_response_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
@@ -542,47 +551,50 @@ fn provider_config_body(
 }
 
 #[tauri::command]
-fn desktop_runtime_snapshot(
+async fn desktop_runtime_snapshot(
     request: DesktopRuntimeSnapshotRequest,
 ) -> Result<serde_json::Value, String> {
-    let mut query = Vec::new();
-    if let Some(value) = request
-        .session_id
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        query.push(format!(
-            "sessionId={}",
-            percent_encode_query_component(value)
-        ));
-    }
-    if let Some(value) = request
-        .project_root
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        query.push(format!(
-            "projectRoot={}",
-            percent_encode_query_component(value)
-        ));
-    }
-    if request.include_patch.unwrap_or(false) {
-        query.push("includePatch=true".to_string());
-    }
-    if request.global_only.unwrap_or(false) {
-        query.push("globalOnly=true".to_string());
-    }
-    let suffix = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", query.join("&"))
-    };
-    backend_json_request(
-        "GET",
-        format!("/api/app/runtime/snapshot{suffix}"),
-        None,
-        request.timeout_ms,
-    )
+    blocking_backend_json_request(move || {
+        let mut query = Vec::new();
+        if let Some(value) = request
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!(
+                "sessionId={}",
+                percent_encode_query_component(value)
+            ));
+        }
+        if let Some(value) = request
+            .project_root
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!(
+                "projectRoot={}",
+                percent_encode_query_component(value)
+            ));
+        }
+        if request.include_patch.unwrap_or(false) {
+            query.push("includePatch=true".to_string());
+        }
+        if request.global_only.unwrap_or(false) {
+            query.push("globalOnly=true".to_string());
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        backend_json_request(
+            "GET",
+            format!("/api/app/runtime/snapshot{suffix}"),
+            None,
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -962,70 +974,91 @@ fn export_interrupted_apply_incident_bundle(
 }
 
 #[tauri::command]
-fn fetch_app_bootstrap(request: DesktopBootstrapRequest) -> Result<serde_json::Value, String> {
-    let suffix = if request.refresh_projects.unwrap_or(false) {
-        "?refreshProjects=true"
-    } else {
-        ""
-    };
-    backend_json_request(
-        "GET",
-        format!("/api/app/bootstrap{suffix}"),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
-}
-
-#[tauri::command]
-fn fetch_app_health(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request("GET", "/api/health".to_string(), None, request.timeout_ms)
+async fn fetch_app_bootstrap(
+    request: DesktopBootstrapRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        let suffix = if request.refresh_projects.unwrap_or(false) {
+            "?refreshProjects=true"
+        } else {
+            ""
+        };
+        backend_json_request(
+            "GET",
+            format!("/api/app/bootstrap{suffix}"),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
         .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-fn refresh_projects(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/projects/refresh".to_string(),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+async fn fetch_app_health(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", "/api/health".to_string(), None, request.timeout_ms)
+            .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-fn refresh_unity_readiness(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/unity/readiness/refresh".to_string(),
-        None,
-        request.timeout_ms.or(Some(20_000)),
-    )
-    .map(sanitize_webview_response)
+async fn refresh_projects(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/projects/refresh".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-fn fetch_workspace_diff(request: DesktopWorkspaceDiffRequest) -> Result<serde_json::Value, String> {
-    let mut query = Vec::new();
-    if let Some(value) = request.root.as_deref().filter(|value| !value.is_empty()) {
-        query.push(format!("root={}", percent_encode_query_component(value)));
-    }
-    if request.include_patch.unwrap_or(false) {
-        query.push("includePatch=true".to_string());
-    }
-    let suffix = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", query.join("&"))
-    };
-    backend_json_request(
-        "GET",
-        format!("/api/app/workspace/diff{suffix}"),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+async fn refresh_unity_readiness(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/unity/readiness/refresh".to_string(),
+            None,
+            request.timeout_ms.or(Some(20_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn fetch_workspace_diff(
+    request: DesktopWorkspaceDiffRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        let mut query = Vec::new();
+        if let Some(value) = request.root.as_deref().filter(|value| !value.is_empty()) {
+            query.push(format!("root={}", percent_encode_query_component(value)));
+        }
+        if request.include_patch.unwrap_or(false) {
+            query.push("includePatch=true".to_string());
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        backend_json_request(
+            "GET",
+            format!("/api/app/workspace/diff{suffix}"),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1100,14 +1133,17 @@ fn export_support_bundle(
 }
 
 #[tauri::command]
-fn fetch_project_prefs(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        "/api/app/projects/prefs".to_string(),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+async fn fetch_project_prefs(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/projects/prefs".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1527,14 +1563,17 @@ fn delete_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-fn fetch_sub_agents(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!("/api/app/sub-agents{}", agent_list_query(&request)),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+async fn fetch_sub_agents(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/sub-agents{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1585,41 +1624,52 @@ fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Valu
 }
 
 #[tauri::command]
-fn fetch_agent_runs(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!("/api/app/agent/runs{}", agent_list_query(&request)),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+async fn fetch_agent_runs(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/runs{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-fn fetch_agent_approvals(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!("/api/app/agent/approvals{}", agent_list_query(&request)),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
-}
-
-#[tauri::command]
-fn fetch_agent_desktop_actions(
+async fn fetch_agent_approvals(
     request: DesktopAgentListRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!(
-            "/api/app/agent/desktop-actions{}",
-            agent_list_query(&request)
-        ),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/approvals{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn fetch_agent_desktop_actions(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!(
+                "/api/app/agent/desktop-actions{}",
+                agent_list_query(&request)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1630,14 +1680,17 @@ fn request_agent_desktop_action(
 }
 
 #[tauri::command]
-fn fetch_agent_goals(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!("/api/app/agent/goals{}", agent_list_query(&request)),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+async fn fetch_agent_goals(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/goals{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1660,14 +1713,17 @@ fn update_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Va
 }
 
 #[tauri::command]
-fn fetch_agent_memory(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!("/api/app/agent/memory{}", agent_list_query(&request)),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+async fn fetch_agent_memory(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/memory{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1700,9 +1756,12 @@ fn compact_agent_history(request: DesktopJsonBodyRequest) -> Result<serde_json::
 }
 
 #[tauri::command]
-fn fetch_agent_notes() -> Result<serde_json::Value, String> {
-    backend_json_request("GET", "/api/app/agent-notes".to_string(), None, None)
-        .map(sanitize_webview_response)
+async fn fetch_agent_notes() -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", "/api/app/agent-notes".to_string(), None, None)
+            .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1711,28 +1770,31 @@ fn save_agent_notes(request: DesktopJsonBodyRequest) -> Result<serde_json::Value
 }
 
 #[tauri::command]
-fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::Value, String> {
-    let mut query = Vec::new();
-    for project_path in request.project_paths.unwrap_or_default() {
-        if !project_path.trim().is_empty() {
-            query.push(format!(
-                "projectPath={}",
-                percent_encode_query_component(project_path.trim())
-            ));
+async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        let mut query = Vec::new();
+        for project_path in request.project_paths.unwrap_or_default() {
+            if !project_path.trim().is_empty() {
+                query.push(format!(
+                    "projectPath={}",
+                    percent_encode_query_component(project_path.trim())
+                ));
+            }
         }
-    }
-    let suffix = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", query.join("&"))
-    };
-    backend_json_request(
-        "GET",
-        format!("/api/app/chats{suffix}"),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        backend_json_request(
+            "GET",
+            format!("/api/app/chats{suffix}"),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
