@@ -482,6 +482,7 @@
   "thinking": {
     "reasoning": "Reasoning",
     "thinking": "Thinking",
+    "summary": "Thought",
     "workingOnIt": "Working on it",
     "provider": "Provider",
     "model": "Model",

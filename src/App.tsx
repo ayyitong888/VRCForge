@@ -1151,12 +1151,8 @@ export default function App() {
   }, [skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
-  const vrcForgeSkillsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
-  const agentModeLabel = !runtimeConnected
-    ? t("agent.modeLabel.notConnected")
-    : vrcForgeSkillsReady
-      ? t("agent.modeLabel.skillsReady", { count: vrcForgeToolsCount })
-      : t("agent.modeLabel.basicMode");
+  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
+  const agentModeLabel = runtimeConnected ? t("agent.modeLabel.basicMode") : t("agent.modeLabel.notConnected");
   const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
   const savedProvider = apiConfig?.provider || apiProvider;
   const savedProviderLabel = apiConfig?.providerLabel || providerDisplayName(savedProvider);
@@ -1173,7 +1169,7 @@ export default function App() {
   const composerActions = useMemo<ComposerAction[]>(
     () => {
       const actions: ComposerAction[] = [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
-      if (vrcForgeSkillsReady) {
+      if (vrcForgeToolsReady) {
         actions.push({
           id: "screenshot",
           label: t("composerAction.screenshot"),
@@ -1187,7 +1183,7 @@ export default function App() {
       });
       return actions;
     },
-    [t, vrcForgeSkillsReady],
+    [t, vrcForgeToolsReady],
   );
   const providerSnapshot: ProviderSnapshot = {
     provider: savedProvider,
@@ -1443,7 +1439,7 @@ export default function App() {
     : unityBridgeComponent?.status === "ok"
       ? t("workspace.unityBridgeOnline")
       : localizeHealthMessage(unityBridgeComponent?.message) || t("workspace.unityNotConnected");
-  const unityToolsLabel = vrcForgeSkillsReady
+  const unityToolsLabel = vrcForgeToolsReady
     ? t("workspace.vrcTools", { count: formatCount(vrcForgeToolsCount) })
     : localizeHealthMessage(unityToolsComponent?.message) || (runtimeConnected ? t("workspace.avatarToolsNotReady") : t("workspace.coreOffline"));
   const providerCompactLabel = `${providerSnapshot.providerLabel}${providerSnapshot.model ? ` / ${providerSnapshot.model}` : ""}`;
@@ -5844,23 +5840,27 @@ export default function App() {
                   title={t("workspace.changes")}
                   collapsed={rightRuntimeSectionsCollapsed.diff}
                   onToggle={() => toggleRightRuntimeSection("diff")}
+                  action={
+                    <button
+                      type="button"
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void refreshWorkspaceDiff();
+                      }}
+                      title={t("workspace.refreshChanges")}
+                      aria-label={t("workspace.refreshChanges")}
+                      disabled={!runtimeConnected || loadingWorkspaceDiff}
+                    >
+                      <RefreshCw className={cn("h-3.5 w-3.5", loadingWorkspaceDiff && "animate-spin")} />
+                    </button>
+                  }
                   count={
                     <Badge tone={workspaceDiffChanged ? "warn" : "muted"}>
                       {workspaceDiffChanged ? formatCount(workspaceDiff?.fileCount || 0) : workspaceDiff?.status || "idle"}
                     </Badge>
                   }
                 >
-                <div className="mb-2 flex justify-end">
-                  <button
-                    type="button"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
-                    onClick={() => void refreshWorkspaceDiff()}
-                    title={t("workspace.refreshChanges")}
-                    disabled={!runtimeConnected || loadingWorkspaceDiff}
-                  >
-                    <RefreshCw className={cn("h-3.5 w-3.5", loadingWorkspaceDiff && "animate-spin")} />
-                  </button>
-                </div>
                 {workspaceDiffFiles.length ? (
                   <div className="space-y-2">
                     <button
@@ -11486,7 +11486,7 @@ function ReasoningTracePanel({
   if (!items.length) {
     return null;
   }
-  const status = thinkingStatusForModelLabel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
+  const status = thinkingTraceLabel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
   const provider = trace?.providerLabel || trace?.provider || fallbackLabel || "model";
   const model = trace?.model || "";
   const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
@@ -11959,25 +11959,30 @@ function runtimeRunStatusClass(status: string) {
 function RuntimeSection({
   title,
   count,
+  action,
   collapsed,
   onToggle,
   children,
 }: {
   title: string;
   count?: ReactNode;
+  action?: ReactNode;
   collapsed?: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
   return (
     <section className="border-b border-border py-3">
-      <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 text-left" onClick={onToggle}>
-        <span className="flex min-w-0 items-center gap-1.5">
+      <div className="mb-2 flex w-full items-center justify-between gap-2">
+        <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={onToggle}>
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
           <span className="truncate text-xs font-semibold uppercase text-muted-foreground">{title}</span>
+        </button>
+        <span className="flex shrink-0 items-center gap-1">
+          {action}
+          {count ? <span className="shrink-0">{count}</span> : null}
         </span>
-        {count ? <span className="shrink-0">{count}</span> : null}
-      </button>
+      </div>
       {collapsed ? null : children}
     </section>
   );
@@ -12654,6 +12659,14 @@ function thinkingStatusForModelLabel(provider: string, model: string): string {
     return i18n.t("thinking.workingOnIt");
   }
   return i18n.t("thinking.workingOnIt");
+}
+
+function thinkingTraceLabel(provider: string, model: string): string {
+  const key = `${provider || ""} ${model || ""}`.toLowerCase();
+  if (/(deepseek-reasoner|deepseek-r1|\br1\b|\bo[134](?:-|$)|reason|thinking)/.test(key)) {
+    return i18n.t("thinking.reasoning");
+  }
+  return i18n.t("thinking.summary");
 }
 
 function emptySkillDraft(): Partial<AgentSkill> {
