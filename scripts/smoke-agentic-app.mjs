@@ -101,14 +101,16 @@ try {
   assert(Array.isArray(doctor.json.checks) && doctor.json.checks.length > 0, "Doctor should return checks.");
   assert(!JSON.stringify(doctor.json).toLowerCase().includes("approval_token"), "Doctor must not expose approval tokens.");
 
-  const blocked = await postJson(`${endpoint}/api/app/permission`, { execution_mode: "roslyn_full_auto" });
-  assert(blocked.status === 409, "Roslyn full-auto should require the one-time warning acknowledgement.");
+  const directFull = await postJson(`${endpoint}/api/app/permission`, { execution_mode: "roslyn_full_auto" });
+  assert(directFull.status === 200, "Full permission mode should switch on without a one-time warning acknowledgement.");
+  assert(directFull.json.permission.fullPermission === true, "Full permission flag should be recorded.");
+  assert(!("unityAcknowledgement" in directFull.json), "Full permission switching must not wait for Unity acknowledgement.");
 
   const enabled = await postJson(`${endpoint}/api/app/permission`, {
     execution_mode: "roslyn_full_auto",
     acknowledge_roslyn_risk: true,
   });
-  assert(enabled.status === 200, "Acknowledged Roslyn mode switch should succeed.");
+  assert(enabled.status === 200, "Acknowledged full permission mode switch should still be accepted for compatibility.");
   assert(enabled.json.permission.roslynRiskAcknowledged === true, "Risk acknowledgement should persist true.");
 
   const approval = await postJson(`${endpoint}/api/app/permission`, { execution_mode: "approval" });

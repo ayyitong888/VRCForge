@@ -236,6 +236,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $unityPluginRoot "Assets\VRCForge"),(Join-Path $unityPluginRoot "Packages") | Out-Null
     Copy-Item -LiteralPath .\Assets\VRCForge\Editor -Destination (Join-Path $unityPluginRoot "Assets\VRCForge\Editor") -Recurse -Force
     Copy-Item -LiteralPath $CoplayDevPackagePath -Destination (Join-Path $unityPluginRoot "Packages\com.coplaydev.unity-mcp") -Recurse -Force
+    $unityMcpPayloadRoot = Join-Path $unityPluginRoot "Packages\com.coplaydev.unity-mcp"
+    $vrcforgeExcludedUnityMcpFiles = @(
+        "Editor\Setup\RoslynInstaller.cs",
+        "Editor\Tools\ExecuteCode.cs"
+    )
+    foreach ($relativePath in $vrcforgeExcludedUnityMcpFiles) {
+        Remove-Item -LiteralPath (Join-Path $unityMcpPayloadRoot $relativePath) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $unityMcpPayloadRoot "$relativePath.meta") -Force -ErrorAction SilentlyContinue
+    }
 
     if ([string]::IsNullOrWhiteSpace($UnityPackagePath)) {
         $UnityPackagePath = Join-Path $releaseRoot "VRCForge.unitypackage"

@@ -93,9 +93,9 @@ namespace MCPForUnity.Editor.Dependencies.PlatformDetectors
    - Microsoft Store: Search for 'Python 3.10' or higher
    - Direct download: https://python.org/downloads/windows/
 
-2. uv Package Manager: Install via PowerShell
-   - Run: powershell -ExecutionPolicy ByPass -c ""irm https://astral.sh/uv/install.ps1 | iex""
-   - Or download from: https://github.com/astral-sh/uv/releases
+2. uv Package Manager: Install the Windows binary
+   - Download uv-x86_64-pc-windows-msvc.zip from https://github.com/astral-sh/uv/releases
+   - Or install via winget if it is available on your system
 
 3. MCP Server: Will be installed automatically by MCP for Unity Bridge";
         }

@@ -339,6 +339,14 @@ namespace MCPForUnity.Editor.Services.Transport
                     return;
                 }
 
+                if (ToolDiscoveryService.IsVrcForgeDisabledToolName(command.type))
+                {
+                    pending.TrySetResult(SerializeError(
+                        $"Tool '{command.type}' is disabled in the VRCForge distribution; use VRCForge static tools instead."));
+                    RemovePending(id, pending);
+                    return;
+                }
+
                 var parameters = command.@params ?? new JObject();
 
                 // Block execution of disabled resources

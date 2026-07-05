@@ -273,7 +273,7 @@ namespace MCPForUnity.Editor.Windows
                     connectionSection?.UpdateVersionMismatchWarning(clientName, mismatchMessage);
             }
 
-            // Build Dependencies section (replaces old Roslyn + Validation in Deps tab)
+            // Build Dependencies section.
             BuildDependenciesSection(depsContainer);
 
             // Load and initialize Advanced section
@@ -783,11 +783,10 @@ namespace MCPForUnity.Editor.Windows
             installAllButton = new Button(() =>
             {
                 if (!EditorUtility.DisplayDialog("Install All Dependencies",
-                    "This will install Roslyn DLLs, ProBuilder, Cinemachine, and VFX Graph. Continue?",
+                    "This will install ProBuilder, Cinemachine, and VFX Graph. Continue?",
                     "Install All", "Cancel")) return;
                 installAllButton.SetEnabled(false);
                 installAllButton.text = "Installing...";
-                if (!RoslynInstaller.IsInstalled()) RoslynInstaller.Install(interactive: false);
                 BatchUpmAdd(upmPackages, () =>
                 {
                     installAllButton.SetEnabled(true);
@@ -803,11 +802,10 @@ namespace MCPForUnity.Editor.Windows
             uninstallAllButton = new Button(() =>
             {
                 if (!EditorUtility.DisplayDialog("Uninstall All Dependencies",
-                    "This will remove Roslyn DLLs, ProBuilder, Cinemachine, and VFX Graph. Continue?",
+                    "This will remove ProBuilder, Cinemachine, and VFX Graph. Continue?",
                     "Uninstall All", "Cancel")) return;
                 uninstallAllButton.SetEnabled(false);
                 uninstallAllButton.text = "Removing...";
-                UninstallRoslyn();
                 BatchUpmRemove(upmPackages, () =>
                 {
                     uninstallAllButton.SetEnabled(true);
@@ -819,21 +817,6 @@ namespace MCPForUnity.Editor.Windows
             bulkRow.Add(uninstallAllButton);
 
             content.Add(bulkRow);
-
-            // Roslyn — for execute_code modern C# support
-            // Check if Roslyn types are actually loaded (covers NuGet, Plugins folder, etc.)
-            bool roslynLoaded = Type.GetType("Microsoft.CodeAnalysis.CSharp.CSharpCompilation, Microsoft.CodeAnalysis.CSharp") != null;
-            bool roslynInstalledLocally = RoslynInstaller.IsInstalled();
-            AddDependencyRow(content,
-                "Roslyn (C# 12+ Compiler)",
-                "Enables modern C# syntax in execute_code tool (scripting_ext group).",
-                roslynLoaded,
-                roslynInstalledLocally
-                    ? "Installed via Plugins/Roslyn \u2014 execute_code uses Roslyn"
-                    : "Available (loaded from NuGet/external) \u2014 execute_code uses Roslyn",
-                "Not installed \u2014 execute_code falls back to C# 6 (CodeDom)",
-                () => RoslynInstaller.Install(interactive: true),
-                roslynInstalledLocally ? (Action)(() => UninstallRoslyn()) : null);
 
             // ProBuilder
             bool hasProBuilder = Type.GetType("UnityEngine.ProBuilder.ProBuilderMesh, Unity.ProBuilder") != null;
@@ -1001,20 +984,6 @@ namespace MCPForUnity.Editor.Windows
                 onComplete?.Invoke();
             };
             EditorApplication.update += pollCallback;
-        }
-
-        private static void UninstallRoslyn()
-        {
-            string folder = System.IO.Path.Combine(Application.dataPath, "Plugins/Roslyn");
-            if (System.IO.Directory.Exists(folder))
-            {
-                System.IO.Directory.Delete(folder, true);
-                string metaPath = folder + ".meta";
-                if (System.IO.File.Exists(metaPath))
-                    System.IO.File.Delete(metaPath);
-                AssetDatabase.Refresh();
-                Debug.Log("[MCP] Roslyn DLLs removed from Assets/Plugins/Roslyn/");
-            }
         }
 
         private static bool IsUpmPackageInstalled(string packageId)

@@ -110,7 +110,17 @@
     "goals": "ゴール",
     "memory": "メモリ",
     "desktopActions": "デスクトップ操作",
-    "refreshChanges": "変更を更新"
+    "refreshChanges": "変更を更新",
+    "statusUntracked": "未追跡",
+    "statusModified": "変更済み",
+    "statusAdded": "追加済み",
+    "statusDeleted": "削除済み",
+    "statusRenamed": "名前変更",
+    "statusCopied": "コピー済み",
+    "statusConflict": "競合",
+    "statusNotGit": "Git 以外",
+    "statusMissing": "欠落",
+    "statusError": "エラー"
   },
   "composerAction": {
     "addContext": "コンテキストを追加",
@@ -138,7 +148,7 @@
     "current": "現在：",
     "highRisk": "高リスク",
     "permissionModeDescription": "エージェントがコマンドや書き込み操作の承認をどのように処理するかを制御します。いつでも切り替え可能です。",
-    "roslynConfirmed": "フル権限リスク確認済み（初回有効化時のみ表示）",
+    "roslynConfirmed": "フル権限は有効です",
     "onboarding": "オンボーディング",
     "restartOnboarding": "再度案内",
     "modelProvider": "モデルプロバイダ",
@@ -159,7 +169,7 @@
     "checkpointArchiveCount": "アーカイブ数",
     "checkpointArchiveDirectory": "ディレクトリ",
     "checkpointArchiveLimit": "Checkpoint アーカイブ最大サイズ（MB）",
-    "checkpointArchiveLimitHint": "\u65e2\u5b9a\u5024\u306f 10240 MB \u3067\u3059\u3002\u7121\u5236\u9650\u306b\u3057\u305f\u3044\u5834\u5408\u3060\u3051 0 \u3092\u8a2d\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044\u3002VRCForge \u306f\u53e4\u3044 checkpoint ZIP \u3092\u524a\u9664\u3057\u3001\u6700\u65b0 2 \u4ef6\u306e\u30a2\u30fc\u30ab\u30a4\u30d6\u3068\u5fa9\u65e7\u4e2d\u306e checkpoint \u306f\u4fdd\u6301\u3057\u307e\u3059\u3002",
+    "checkpointArchiveLimitHint": "既定値は 10240 MB です。無制限にしたい場合だけ 0 を設定してください。VRCForge は古い checkpoint ZIP を削除し、最新 2 件のアーカイブと復旧中の checkpoint は保持します。",
     "checkpointArchiveUpdated": "Checkpoint ストレージを更新しました",
     "checkpointArchiveLimitInvalid": "Checkpoint アーカイブ上限は 0 または正の数にしてください。",
     "checkpointArchivePruned": "{{count}} 件のアーカイブを削除し、{{size}} を解放しました。",
@@ -173,7 +183,7 @@
     "checkpointArchiveInvertSelection": "選択を反転",
     "checkpointArchiveCleanSelected": "選択を削除",
     "checkpointArchiveProtected": "保護中",
-    "checkpointArchiveProtectedHint": "\u6700\u65b0 2 \u4ef6\u306e\u30a2\u30fc\u30ab\u30a4\u30d6\u3068\u5fa9\u65e7\u4e2d\u306e checkpoint \u3092\u652f\u3048\u308b\u30a2\u30fc\u30ab\u30a4\u30d6\u306f\u9078\u629e\u3067\u304d\u307e\u305b\u3093\u3002",
+    "checkpointArchiveProtectedHint": "最新 2 件のアーカイブと復旧中の checkpoint を支えるアーカイブは選択できません。",
     "checkpointArchiveSelectedCount": "{{count}} 件選択中",
     "checkpointArchiveNewDirectory": "アーカイブを新しいディレクトリへ移動",
     "checkpointArchiveNewDirectoryHint": "システムドライブ以外の絶対パスを使用してください。VRCForge は ZIP をコピーし、checkpoint 記録を書き換えてから古いコピーを削除します。復旧中の checkpoint があると移動できません。",
@@ -233,9 +243,9 @@
     "approval": "制限モード",
     "approvalDesc": "サンドボックスモード：高リスクコマンドと書き込み操作は個別に承認が必要です。最も安全です。",
     "auto": "自動承認",
-    "autoDesc": "通常の承認は監査記録付きで自動通過します。削除とプロジェクト外パスは確認が必要で、Roslyn の高度な機能はオフのままです。",
+    "autoDesc": "通常の承認は監査記録付きで自動通過します。削除とプロジェクト外パスは確認が必要です。",
     "roslynFullAuto": "フル権限",
-    "roslynFullAutoDesc": "自動承認 + Roslyn 完全自動。最もリスクが高く、初回有効化時に確認が必要です。"
+    "roslynFullAutoDesc": "すべてのリクエストを監査記録付きで自動承認します。最もリスクが高く、起動時の追加確認はありません。"
   },
   "chat": {
     "inputPlaceholder": "自由に入力",
@@ -359,7 +369,7 @@
     "searchPlaceholder": "スキルを検索…",
     "noMatch": "一致するスキルがありません。",
     "domains": {
-      "roslyn": "Roslyn 上級",
+      "roslyn": "上級",
       "face": "フェイス＆表情",
       "material": "マテリアル＆外観",
       "clothing": "衣装＆FX",
@@ -454,14 +464,14 @@
   },
   "roslynModal": {
     "title": "フル権限を有効化",
-    "riskDescription": "フル権限は Roslyn 完全自動モードを有効にします。すべての承認が自動で通過し、Roslyn の高度な機能が完全に開放されます。これは最もリスクが高いモードで、上級ユーザーのみに推奨されます。",
-    "confirmButton": "リスクを理解した上でフル権限を有効化する",
-    "riskConfirmTitle": "リスク確認",
-    "confirmed": "確認済み",
-    "notConfirmed": "未確認",
+    "riskDescription": "フル権限はすべてのリクエストを自動承認します。最もリスクが高く、上級ユーザーのみに推奨されます。",
+    "confirmButton": "フル権限を有効化",
+    "riskConfirmTitle": "権限モード",
+    "confirmed": "有効化済み",
+    "notConfirmed": "未有効",
     "targetMode": "対象モード",
-    "targetModeValue": "フル権限（Roslyn 完全自動）",
-    "description": "Roslyn フルオートモードを有効にすると、すべてのツール呼び出しが手動確認なしで自動承認されます。リスクを十分に理解してください。"
+    "targetModeValue": "フル権限",
+    "description": "フル権限は手動承認プロンプトをスキップし、監査記録を保持します。リスクを理解してください。"
   },
   "provider": {
     "apiProvider": "API プロバイダ",
@@ -482,7 +492,7 @@
   "thinking": {
     "reasoning": "推論",
     "thinking": "思考中",
-    "summary": "\u601d\u8003",
+    "summary": "思考",
     "workingOnIt": "処理中",
     "provider": "プロバイダ",
     "model": "モデル",

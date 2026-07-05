@@ -110,7 +110,17 @@
     "goals": "Goals",
     "memory": "Memory",
     "desktopActions": "Desktop actions",
-    "refreshChanges": "Refresh changes"
+    "refreshChanges": "Refresh changes",
+    "statusUntracked": "Untracked",
+    "statusModified": "Modified",
+    "statusAdded": "Added",
+    "statusDeleted": "Deleted",
+    "statusRenamed": "Renamed",
+    "statusCopied": "Copied",
+    "statusConflict": "Conflict",
+    "statusNotGit": "Not Git",
+    "statusMissing": "Missing",
+    "statusError": "Error"
   },
   "composerAction": {
     "addContext": "Add context",
@@ -138,7 +148,7 @@
     "current": "Current:",
     "highRisk": "High Risk",
     "permissionModeDescription": "Controls how the agent handles approval for commands and write operations. You can switch at any time.",
-    "roslynConfirmed": "Full Permission risk confirmed (prompted on first enable only)",
+    "roslynConfirmed": "Full Permission enabled",
     "onboarding": "Onboarding",
     "restartOnboarding": "Restart Onboarding",
     "modelProvider": "Model Provider",
@@ -233,9 +243,9 @@
     "approval": "Restricted",
     "approvalDesc": "Sandbox mode: high-risk commands and writes require individual approval. Safest option.",
     "auto": "Auto Approve",
-    "autoDesc": "Routine approvals pass automatically with an audit trail; deletes and outside-project paths still ask for confirmation. Roslyn advanced features stay off.",
+    "autoDesc": "Routine approvals pass automatically with an audit trail; deletes and outside-project paths still ask for confirmation.",
     "roslynFullAuto": "Full Permission",
-    "roslynFullAutoDesc": "Auto approve + Roslyn fully automatic. Highest risk; confirmation required on first enable."
+    "roslynFullAutoDesc": "Auto approve all requests with an audit trail. Highest risk; no extra startup confirmation."
   },
   "chat": {
     "inputPlaceholder": "Type anything",
@@ -359,7 +369,7 @@
     "searchPlaceholder": "Search skills...",
     "noMatch": "No matching skills.",
     "domains": {
-      "roslyn": "Roslyn Advanced",
+      "roslyn": "Advanced",
       "face": "Face & Expression",
       "material": "Material & Appearance",
       "clothing": "Wardrobe & FX",
@@ -454,14 +464,14 @@
   },
   "roslynModal": {
     "title": "Enable Full Permission",
-    "riskDescription": "Full Permission enables Roslyn fully automatic mode. All approvals will pass automatically, and Roslyn advanced capabilities will be fully unlocked. This is the highest-risk mode, recommended for advanced users only.",
-    "confirmButton": "I understand the risks, enable Full Permission",
-    "riskConfirmTitle": "Risk Confirmation",
-    "confirmed": "Confirmed",
-    "notConfirmed": "Not Confirmed",
-    "targetMode": "Target Mode",
-    "targetModeValue": "Full Permission (Roslyn Full Auto)",
-    "description": "Enabling Roslyn full-auto mode will auto-approve all tool calls without manual confirmation. Make sure you understand the risks."
+    "riskDescription": "Full Permission automatically approves all requests. This is the highest-risk mode, recommended for advanced users only.",
+    "confirmButton": "Enable Full Permission",
+    "riskConfirmTitle": "Permission mode",
+    "confirmed": "Enabled",
+    "notConfirmed": "Not enabled",
+    "targetMode": "Target mode",
+    "targetModeValue": "Full Permission",
+    "description": "Full Permission skips manual approval prompts and keeps an audit trail. Make sure you understand the risk."
   },
   "provider": {
     "apiProvider": "API Provider",

@@ -14,6 +14,7 @@ namespace MCPForUnity.Editor.Services
         private static readonly HashSet<string> VrcForgeDisabledToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "execute_code",
+            "manage_script",
         };
         private Dictionary<string, ToolMetadata> _cachedTools;
 
@@ -49,7 +50,7 @@ namespace MCPForUnity.Editor.Services
                 var metadata = ExtractToolMetadata(type, toolAttr);
                 if (metadata != null)
                 {
-                    if (VrcForgeDisabledToolNames.Contains(metadata.Name))
+                    if (IsVrcForgeDisabledToolName(metadata.Name))
                     {
                         McpLog.Warn($"Tool '{metadata.Name}' is disabled in the VRCForge distribution; use VRCForge static tools instead.");
                         continue;
@@ -76,6 +77,11 @@ namespace MCPForUnity.Editor.Services
             }
 
             return _cachedTools.TryGetValue(toolName, out var metadata) ? metadata : null;
+        }
+
+        public static bool IsVrcForgeDisabledToolName(string toolName)
+        {
+            return !string.IsNullOrWhiteSpace(toolName) && VrcForgeDisabledToolNames.Contains(toolName);
         }
 
         public List<ToolMetadata> GetEnabledTools()

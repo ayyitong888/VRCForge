@@ -105,7 +105,22 @@ namespace MCPForUnity.Editor.Tools
                     continue;
                 }
 
-                // Block disabled tools (mirrors TransportCommandDispatcher check)
+                // Block disabled tools (mirrors TransportCommandDispatcher check). This must
+                // fail closed even when a tool is excluded from discovery metadata.
+                if (MCPForUnity.Editor.Services.ToolDiscoveryService.IsVrcForgeDisabledToolName(toolName))
+                {
+                    invocationFailureCount++;
+                    anyCommandFailed = true;
+                    commandResults.Add(new
+                    {
+                        tool = toolName,
+                        callSucceeded = false,
+                        result = new ErrorResponse($"Tool '{toolName}' is disabled in the VRCForge distribution; use VRCForge static tools instead.")
+                    });
+                    if (failFast) break;
+                    continue;
+                }
+
                 var toolMeta = MCPServiceLocator.ToolDiscovery.GetToolMetadata(toolName);
                 if (toolMeta != null && !MCPServiceLocator.ToolDiscovery.IsToolEnabled(toolName))
                 {

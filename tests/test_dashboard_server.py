@@ -1508,11 +1508,14 @@ class DashboardServerTests(unittest.TestCase):
                 expected = Path(tmp) / "VRCForge" / "agentic-app"
                 self.assertEqual(dashboard_server.default_user_data_root(), expected)
 
-    @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", return_value={"ok": True})
-    def test_agentic_permission_requires_one_time_roslyn_acknowledgement(self, mock_unity_ack) -> None:
+    def test_agentic_permission_full_auto_does_not_wait_for_unity_acknowledgement(self) -> None:
         with TestClient(dashboard_server.app) as client:
             blocked = client.post("/api/app/permission", json={"execution_mode": "roslyn_full_auto"})
-            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(blocked.status_code, 200)
+            self.assertEqual(blocked.json()["permission"]["executionMode"], "roslyn_full_auto")
+            self.assertTrue(blocked.json()["permission"]["fullPermission"])
+            self.assertFalse(blocked.json()["permission"]["allowRoslynAdvanced"])
+            self.assertNotIn("unityAcknowledgement", blocked.json())
 
             enabled = client.post(
                 "/api/app/permission",
@@ -1525,8 +1528,9 @@ class DashboardServerTests(unittest.TestCase):
             permission = enabled.json()["permission"]
             self.assertEqual(permission["executionMode"], "roslyn_full_auto")
             self.assertTrue(permission["roslynRiskAcknowledged"])
-            self.assertTrue(enabled.json()["unityAcknowledgement"]["ok"])
-            mock_unity_ack.assert_called_once_with()
+            self.assertFalse(permission["allowRoslynAdvanced"])
+            self.assertTrue(enabled.json()["permission"]["fullPermission"])
+            self.assertNotIn("unityAcknowledgement", enabled.json())
 
             approval = client.post("/api/app/permission", json={"execution_mode": "approval"})
             self.assertEqual(approval.status_code, 200)
@@ -1537,26 +1541,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(restored.status_code, 200)
             self.assertEqual(restored.json()["permission"]["executionMode"], "roslyn_full_auto")
             self.assertTrue(restored.json()["permission"]["roslynRiskAcknowledged"])
-            self.assertEqual(mock_unity_ack.call_count, 2)
-
-    @patch("dashboard_server.acknowledge_unity_roslyn_risk_sync", side_effect=RuntimeError("Unity MCP timed out"))
-    def test_agentic_permission_does_not_block_on_unity_roslyn_acknowledgement(self, mock_unity_ack) -> None:
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/app/permission",
-                json={
-                    "execution_mode": "roslyn_full_auto",
-                    "acknowledge_roslyn_risk": True,
-                },
-            )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["permission"]["executionMode"], "roslyn_full_auto")
-        self.assertTrue(payload["permission"]["roslynRiskAcknowledged"])
-        self.assertFalse(payload["unityAcknowledgement"]["ok"])
-        self.assertIn("Unity acknowledgement sync is pending", payload["unityAcknowledgement"]["warning"])
-        mock_unity_ack.assert_called_once_with()
+            self.assertNotIn("unityAcknowledgement", restored.json())
 
     def test_auto_permission_shell_delete_and_outside_read_require_manual_until_full_auto(self) -> None:
         def ps_quote(path: Path) -> str:
@@ -1708,24 +1693,6 @@ class DashboardServerTests(unittest.TestCase):
                     for event in runtime_events
                 )
             )
-
-    @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
-    @patch("dashboard_server.load_dashboard_settings")
-    def test_unity_roslyn_acknowledgement_uses_short_timeout(self, mock_load_settings, mock_invoke) -> None:
-        settings = SimpleNamespace(
-            unity_mcp_timeout_seconds=30,
-            unity_mcp_retries=4,
-            unity_mcp_retry_backoff_seconds=1.0,
-        )
-        mock_load_settings.return_value = settings
-
-        with self.assertRaises(dashboard_server.UnityMcpError):
-            dashboard_server.acknowledge_unity_roslyn_risk_sync()
-
-        self.assertEqual(settings.unity_mcp_timeout_seconds, 3)
-        self.assertEqual(settings.unity_mcp_retries, 1)
-        self.assertEqual(settings.unity_mcp_retry_backoff_seconds, 0.0)
-        mock_invoke.assert_called_once()
 
     def test_agent_runtime_message_observes_and_plans_without_unity(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -2078,7 +2045,8 @@ class DashboardServerTests(unittest.TestCase):
             initial_payload = initial.json()
             self.assertEqual(initial_payload["schema"], "vrcforge.skills.v1")
             builtin_names = {skill["name"] for skill in initial_payload["skills"] if skill["source"] == "builtin"}
-            self.assertIn("vrcforge_roslyn_status", builtin_names)
+            self.assertNotIn("vrcforge_roslyn_status", builtin_names)
+            self.assertNotIn("roslyn-advanced-power", builtin_names)
             self.assertIn("runtime-diagnostics", builtin_names)
             runtime_skill = next(skill for skill in initial_payload["skills"] if skill["name"] == "runtime-diagnostics")
             self.assertEqual(runtime_skill["skillType"], "group")
@@ -2456,7 +2424,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_preflight_skill_package", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
-        self.assertIn("vrcforge_roslyn_status", tool_names)
+        self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_tool_registry", tool_names)
@@ -3076,64 +3044,22 @@ class DashboardServerTests(unittest.TestCase):
         with TestClient(dashboard_server.app) as client:
             initial = client.get("/api/agent/manifest", headers=headers).json()
             initial_tool_names = {tool["name"] for tool in initial["tools"]}
-            self.assertIn("vrcforge_roslyn_status", initial_tool_names)
+            self.assertNotIn("vrcforge_roslyn_status", initial_tool_names)
             self.assertNotIn("vrcforge_request_roslyn_advanced", initial_tool_names)
-            initial_roslyn_skill = next(skill for skill in initial["skills"] if skill["name"] == "roslyn-advanced-power")
-            self.assertFalse(initial_roslyn_skill["available"])
+            self.assertNotIn("roslyn-advanced-power", {skill["name"] for skill in initial["skills"]})
 
             dashboard_server.AGENT_GATEWAY.update_permission_state("roslyn_full_auto", acknowledge_roslyn_risk=True)
             payload = client.get("/api/agent/manifest", headers=headers).json()
             tool_names = {tool["name"] for tool in payload["tools"]}
-            self.assertIn("vrcforge_request_roslyn_advanced", tool_names)
-            self.assertIn("vrcforge_roslyn_advanced", {item["name"] for item in payload["writeTargets"]})
-            roslyn_skill = next(skill for skill in payload["skills"] if skill["name"] == "roslyn-advanced-power")
-            self.assertTrue(roslyn_skill["available"])
-
-            missing_confirm = client.post(
-                "/api/agent/tool/vrcforge_request_roslyn_advanced",
-                headers=headers,
-                json={"agent_name": "codex-test", "params": {"code": "1 + 1"}},
-            )
-            self.assertEqual(missing_confirm.status_code, 200)
-            self.assertFalse(missing_confirm.json()["ok"])
-            self.assertIn("confirmAdvancedPowerMode=true", missing_confirm.json()["error"])
-
-            request = client.post(
-                "/api/agent/tool/vrcforge_request_roslyn_advanced",
-                headers=headers,
-                json={
-                    "agent_name": "codex-test",
-                    "params": {
-                        "code": "1 + 1",
-                        "confirmAdvancedPowerMode": True,
-                    },
-                },
-            )
-            self.assertEqual(request.status_code, 200)
-            self.assertTrue(request.json()["ok"])
-            approval = request.json()["result"]["approval"]
-            self.assertEqual(approval["targetTool"], "vrcforge_roslyn_advanced")
-
-    @patch("dashboard_server.invoke_unity_mcp")
-    @patch("dashboard_server.load_dashboard_settings")
-    def test_roslyn_execution_timeout_outlives_confirmation_dialog(self, mock_load_settings, mock_invoke) -> None:
-        settings = SimpleNamespace(unity_mcp_timeout_seconds=30)
-        mock_load_settings.return_value = settings
-        mock_invoke.return_value = dashboard_server.McpResult(exit_code=0, stdout="result: 42", stderr="", payload=None)
-        result = dashboard_server.execute_agent_roslyn_advanced({
-            "code": "return 42;",
-            "confirmAdvancedPowerMode": True,
-            "timeoutSeconds": 10,
-        })
-        self.assertTrue(result["ok"])
-        self.assertEqual(settings.unity_mcp_timeout_seconds, 75)
-        self.assertEqual(mock_invoke.call_args.args[2]["timeoutSeconds"], 10)
+            self.assertNotIn("vrcforge_request_roslyn_advanced", tool_names)
+            self.assertNotIn("vrcforge_roslyn_advanced", {item["name"] for item in payload["writeTargets"]})
+            self.assertNotIn("roslyn-advanced-power", {skill["name"] for skill in payload["skills"]})
 
     @patch("dashboard_server.invoke_unity_mcp")
     def test_generic_unity_write_cannot_bypass_roslyn_gate(self, mock_invoke) -> None:
         result = dashboard_server.unity_mcp_write_sync({"toolName": "vrc_execute_roslyn", "arguments": {"code": "return 42;"}})
         self.assertFalse(result["ok"])
-        self.assertIn("dedicated Roslyn permission path", result["error"])
+        self.assertIn("Dynamic code execution is not supported", result["error"])
         mock_invoke.assert_not_called()
 
     @patch("dashboard_server.invoke_unity_mcp")
@@ -3202,7 +3128,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
-        self.assertIn("vrcforge_roslyn_status", tool_names)
+        self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertNotIn("vrcforge_apply_approved", tool_names)
@@ -3258,12 +3184,19 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_vrcforge_distribution_disables_third_party_execute_code_tool(self) -> None:
         discovery_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Services/ToolDiscoveryService.cs").read_text(encoding="utf-8-sig")
+        dispatcher_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Services/Transport/TransportCommandDispatcher.cs").read_text(encoding="utf-8-sig")
         execute_code_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Tools/ExecuteCode.cs").read_text(encoding="utf-8-sig")
 
         self.assertIn("VrcForgeDisabledToolNames", discovery_source)
+        self.assertIn("IsVrcForgeDisabledToolName", discovery_source)
         self.assertIn('"execute_code"', discovery_source)
+        self.assertIn('"manage_script"', discovery_source)
         self.assertIn("is disabled in the VRCForge distribution", discovery_source)
         self.assertIn("continue;", discovery_source)
+        self.assertIn("ToolDiscoveryService.IsVrcForgeDisabledToolName", dispatcher_source)
+        batch_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Tools/BatchExecute.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("ToolDiscoveryService.IsVrcForgeDisabledToolName", batch_source)
+        self.assertIn("fail closed even when a tool is excluded from discovery metadata", batch_source)
         self.assertIn('[McpForUnityTool("execute_code", AutoRegister = false', execute_code_source)
 
     def test_safe_backup_restore_source_constrains_manifest_paths(self) -> None:
@@ -5717,43 +5650,18 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["gameObjectPath"], "Avatar/Dress")
         self.assertEqual(params["mode"], "completely")
 
-    def test_roslyn_advanced_power_mode_requires_explicit_opt_in(self) -> None:
+    def test_dynamic_code_execution_files_are_not_distributed(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
-        source = (editor_dir / "RoslynExecutor.cs").read_text(encoding="utf-8")
-        bootstrap = (editor_dir / "RoslynSupportBootstrap.cs").read_text(encoding="utf-8")
+        self.assertFalse((editor_dir / "RoslynExecutor.cs").exists())
+        self.assertFalse((editor_dir / "RoslynSupportBootstrap.cs").exists())
+        self.assertFalse((Path(__file__).resolve().parents[1] / "tools" / "install-roslyn-support.ps1").exists())
 
-        self.assertNotIn("#if VRCFORGE_ENABLE_ROSLYN", source)
-        self.assertNotIn("#if VRCFORGE_ENABLE_ROSLYN", bootstrap)
-        self.assertIn('name: "vrc_execute_roslyn"', source)
-        self.assertIn("Advanced Power Mode", source)
-        self.assertIn("confirmAdvancedPowerMode", source)
-        self.assertIn("EditorUtility.DisplayDialog", source)
-        self.assertIn('"VRCForge Advanced Power Mode"', source)
-        self.assertIn("AdvancedPowerModeAcknowledged", source)
-        self.assertIn("EditorPrefs.GetBool", source)
-        self.assertIn("EditorPrefs.SetBool", source)
-        self.assertIn("advancedPowerModeAcknowledged", source)
-        self.assertIn("AssemblyResolve", source)
-        self.assertIn('name: "vrc_check_roslyn_status"', source)
-        self.assertIn("BatchStatusSmoke", source)
-        self.assertIn("BatchExecutionSmoke", source)
-        self.assertIn("CompileAndInvoke", source)
-        self.assertIn("CSharpCodeProvider", source)
-        self.assertIn("Assets/Plugins/Roslyn", bootstrap)
-
-        installer = (Path(__file__).resolve().parents[1] / "tools" / "install-roslyn-support.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("VRCFORGE_ENABLE_ROSLYN", installer)
-        self.assertIn("Assets\\csc.rsp", installer)
-        self.assertIn("ProjectSettings\\ProjectSettings.asset", installer)
-        self.assertIn("scriptingDefineSymbols", installer)
-        self.assertIn("Microsoft.CodeAnalysis.dll", installer)
-        self.assertIn("Microsoft.CodeAnalysis.CSharp.dll", installer)
-        self.assertIn("System.Collections.Immutable.dll", installer)
-        self.assertIn("System.Reflection.Metadata.dll", installer)
-        self.assertNotIn("Microsoft.CodeAnalysis.CSharp.Scripting.dll", installer)
-        self.assertNotIn("System.Memory.dll", installer)
+    def test_release_payload_excludes_dynamic_unity_mcp_execution_files(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+        self.assertIn("Editor\\Tools\\ExecuteCode.cs", script)
+        self.assertIn("Editor\\Setup\\RoslynInstaller.cs", script)
+        self.assertIn("$relativePath.meta", script)
+        self.assertIn("Remove-Item", script)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"

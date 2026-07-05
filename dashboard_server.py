@@ -1859,14 +1859,6 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    if payload["permission"].get("roslynFullAuto") and payload["permission"].get("roslynRiskAcknowledged"):
-        try:
-            payload["unityAcknowledgement"] = await asyncio.to_thread(acknowledge_unity_roslyn_risk_sync)
-        except Exception as exc:  # noqa: BLE001
-            payload["unityAcknowledgement"] = {
-                "ok": False,
-                "warning": f"Unity acknowledgement sync is pending; Unity will show its fallback dialog: {exc}",
-            }
     await EVENT_BUS.broadcast("agentPermission", payload["permission"])
     return payload
 
@@ -13703,32 +13695,6 @@ def request_agent_restore_last_backup(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def request_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
-    if not params.get("code"):
-        raise RuntimeError("code is required for Roslyn Advanced Power Mode.")
-    arguments = dict(params)
-    if arguments.get("confirmAdvancedPowerMode") is not True:
-        raise RuntimeError("confirmAdvancedPowerMode=true is required for Roslyn Advanced Power Mode requests.")
-    return AGENT_GATEWAY.create_apply_request(
-        {
-            "target_tool": "vrcforge_roslyn_advanced",
-            "arguments": arguments,
-            "reason": "Roslyn Advanced Power Mode request from external agent.",
-            "preview": {
-                "codePreview": str(params.get("code") or "")[:240],
-                "requiresUnityDialog": True,
-                "requiresConfirmAdvancedPowerMode": True,
-            },
-        }
-    )
-
-
-def read_agent_roslyn_status(params: dict[str, Any]) -> dict[str, Any]:
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    result = invoke_unity_mcp(settings, "vrc_check_roslyn_status", {})
-    return {"ok": True, "result": serialize_result(result)}
-
-
 def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
     arguments: dict[str, Any] = {}
@@ -13738,19 +13704,6 @@ def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
         arguments["includeConsoleFallback"] = bool(params["includeConsoleFallback"])
     result = invoke_unity_mcp(settings, "vrc_get_compile_errors", arguments)
     return {"ok": True, "result": serialize_result(result)}
-
-
-def acknowledge_unity_roslyn_risk_sync() -> dict[str, Any]:
-    settings = load_dashboard_settings(build_agent_connection_request({}))
-    settings.unity_mcp_timeout_seconds = min(int(settings.unity_mcp_timeout_seconds or 30), 3)
-    settings.unity_mcp_retries = 1
-    settings.unity_mcp_retry_backoff_seconds = 0.0
-    result = invoke_unity_mcp(settings, "vrc_acknowledge_roslyn_risk", {})
-    return {
-        "ok": result.exit_code == 0,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
 
 
 def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
@@ -13793,7 +13746,7 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
     if tool_name in {"vrc_prepare_checkpoint", "vrc_reload_after_checkpoint_restore"}:
         return {"ok": False, "error": f"Internal checkpoint tool cannot be invoked through the generic write wrapper: {tool_name}"}
     if tool_name in {"vrc_execute_roslyn", "execute_code"}:
-        return {"ok": False, "error": f"Advanced code execution must use the dedicated Roslyn permission path: {tool_name}"}
+        return {"ok": False, "error": f"Dynamic code execution is not supported by VRCForge static Unity tools: {tool_name}"}
     if tool_name not in VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST:
         return {"ok": False, "error": f"Unity MCP write tool is not in the VRCForge static write allowlist: {tool_name}"}
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
@@ -13802,26 +13755,6 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
     result = invoke_unity_mcp(settings, tool_name, arguments)
     return {"ok": result.exit_code == 0, "toolName": tool_name, "result": serialize_result(result)}
-
-
-def execute_agent_roslyn_advanced(params: dict[str, Any]) -> dict[str, Any]:
-    if params.get("confirmAdvancedPowerMode") is not True:
-        raise RuntimeError("confirmAdvancedPowerMode=true is required.")
-    settings = load_dashboard_settings(ConnectionRequest(**params))
-    snippet_timeout = max(1, min(int(params.get("timeoutSeconds", 10)), 30))
-    settings.unity_mcp_timeout_seconds = max(settings.unity_mcp_timeout_seconds, snippet_timeout + 45, 75)
-    result = invoke_unity_mcp(
-        settings,
-        "vrc_execute_roslyn",
-        {
-            "code": params.get("code") or "",
-            "confirmAdvancedPowerMode": True,
-            "enforceWriteDefaultsOn": params.get("enforceWriteDefaultsOn", True),
-            "targetAvatarPaths": params.get("targetAvatarPaths") or [],
-            "timeoutSeconds": snippet_timeout,
-        },
-    )
-    return {"ok": result.exit_code == 0, "result": serialize_result(result)}
 
 
 ADDON_FRAMEWORKS: dict[str, dict[str, Any]] = {
@@ -18834,7 +18767,6 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
-    AGENT_GATEWAY.register_tool("vrcforge_roslyn_status", "Read Roslyn Advanced Power Mode diagnostics from Unity.", "read/debug", read_agent_roslyn_status)
     AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)
     AGENT_GATEWAY.register_tool("vrcforge_get_property", "Read a single field/property value from a component on a scene GameObject.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
@@ -18851,8 +18783,6 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_request_roslyn_advanced", "Request Roslyn Advanced Power Mode execution with user approval.", "advanced", request_agent_roslyn_advanced, write=True, advanced=True)
-
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_apply_blendshapes",
         "Apply validated Blendshape adjustments through VRCForge.",
@@ -19110,13 +19040,6 @@ def register_agent_gateway_tools() -> None:
         "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
         "medium",
         toggle_scene_object_sync,
-    )
-    AGENT_GATEWAY.register_write_handler(
-        "vrcforge_roslyn_advanced",
-        "Execute Roslyn Advanced Power Mode through Unity's warning dialog.",
-        "critical",
-        execute_agent_roslyn_advanced,
-        advanced=True,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_shell_execute",

@@ -153,7 +153,6 @@ RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_request_apply",
     "vrcforge_apply_approved",
     "vrcforge_restore_last_backup",
-    "vrcforge_request_roslyn_advanced",
 }
 EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
@@ -821,30 +820,6 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "writes scene object active state after approval",
         "tags": ["wardrobe", "write"],
     },
-    "vrcforge_roslyn_status": {
-        "title": "Roslyn Status",
-        "outputs": ["Roslyn DLL, project flag, compiler, and Unity execution readiness."],
-        "sideEffects": "none",
-        "tags": ["roslyn", "advanced"],
-    },
-    "vrcforge_request_roslyn_advanced": {
-        "title": "Roslyn Advanced Request",
-        "permissionMode": "advanced_power_mode",
-        "inputs": ["C# code, timeout, confirmAdvancedPowerMode=true."],
-        "outputs": ["Approval record for Unity Roslyn execution."],
-        "sideEffects": "requests critical code execution approval",
-        "backupRestore": "caller must preview and back up affected Unity assets before writes",
-        "tags": ["roslyn", "critical", "advanced"],
-    },
-    "vrcforge_roslyn_advanced": {
-        "title": "Roslyn Advanced Execute",
-        "permissionMode": "advanced_power_mode",
-        "inputs": ["Approved Roslyn code payload."],
-        "outputs": ["Compiled snippet result and Unity execution diagnostics."],
-        "sideEffects": "can execute arbitrary approved C# inside Unity",
-        "backupRestore": "requires explicit user acknowledgement and audit logging",
-        "tags": ["roslyn", "critical", "advanced"],
-    },
 }
 
 BUILTIN_SKILL_OVERRIDES["vrcforge_optimization_plan"] = {
@@ -1278,26 +1253,6 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         ],
         "entrypointTool": "vrcforge_classify_shell",
         "tags": ["builtin", "group", "shell", "debug"],
-    },
-    {
-        "name": "roslyn-advanced-power",
-        "title": "Roslyn Advanced Power",
-        "description": "Inspect, request, and execute explicitly approved Roslyn Advanced Power Mode flows.",
-        "category": "advanced",
-        "permissionMode": "advanced_power_mode",
-        "riskLevel": "critical",
-        "whenToUse": "Roslyn status, dynamic C# repair, advanced Unity execution",
-        "inputs": ["C# code, timeout, approval id, and confirmAdvancedPowerMode=true."],
-        "outputs": ["Roslyn status, approval record, and execution result."],
-        "sideEffects": "can execute approved C# inside Unity",
-        "backupRestore": "requires risk acknowledgement, audit log, and backup before asset writes",
-        "allowedTools": [
-            "vrcforge_roslyn_status",
-            "vrcforge_request_roslyn_advanced",
-            "vrcforge_roslyn_advanced",
-        ],
-        "entrypointTool": "vrcforge_roslyn_status",
-        "tags": ["builtin", "group", "roslyn", "advanced", "critical"],
     },
     {
         "name": "modular-avatar-toolkit",
@@ -1928,8 +1883,7 @@ class AgentGateway:
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
             "allowRoslynAdvanced": self.roslyn_available(config),
-            "legacyRoslynEnvEnabled": os.environ.get("VRCFORGE_ENABLE_ROSLYN", "").strip().lower()
-            in {"1", "true", "yes", "on"},
+            "legacyRoslynEnvEnabled": False,
         }
 
     def update_permission_state(
@@ -1940,18 +1894,13 @@ class AgentGateway:
         with self._lock:
             config = self.ensure_config()
             mode = normalize_execution_mode(execution_mode)
-            entering_roslyn = mode == "roslyn_full_auto"
-            if entering_roslyn and not config.roslyn_risk_acknowledged and not acknowledge_roslyn_risk:
-                raise AgentGatewayError(
-                    "Roslyn full-auto requires one-time risk acknowledgement.",
-                    status_code=409,
-                )
+            entering_full_permission = mode == "roslyn_full_auto"
 
             previous = self.permission_state(config)
             config.execution_mode = mode
-            if acknowledge_roslyn_risk and entering_roslyn:
+            if acknowledge_roslyn_risk and entering_full_permission:
                 config.roslyn_risk_acknowledged = True
-            config.allow_roslyn_advanced = entering_roslyn
+            config.allow_roslyn_advanced = False
             self.save_config(config)
             updated = self.permission_state(config)
             self.append_audit(
@@ -6342,8 +6291,7 @@ class AgentGateway:
         }
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
-        config = config or self.ensure_config()
-        return bool(config.allow_roslyn_advanced)
+        return False
 
     def append_audit(self, entry: dict[str, Any]) -> None:
         safe_entry = redact_sensitive({
@@ -7625,8 +7573,6 @@ class AgentGateway:
         ):
             return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
 
-        if has_any(lowered, text, ["roslyn"]) and has_any(lowered, text, ["status", "diagnostic", "状态", "诊断", "检查"]):
-            return self._runtime_skill_route("vrcforge_roslyn_status", skill_params, "roslyn status")
         if has_any(lowered, text, ["screenshot", "capture", "截图", "拍照", "截屏"]):
             return self._runtime_skill_route("vrcforge_capture_screenshot", skill_params, "screenshot capture")
         if has_any(lowered, text, ["gesture", "play mode", "game view", "捕获状态", "截图状态"]):
@@ -8368,7 +8314,6 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_capture_screenshot",
         "vrcforge_vision_audit",
         "vrcforge_read_recent_logs",
-        "vrcforge_roslyn_status",
         "vrcforge_get_compile_errors",
         "vrcforge_get_property",
         "vrcforge_get_gameobject",
@@ -8380,7 +8325,6 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_preview_shader_apply",
         "vrcforge_request_apply",
         "vrcforge_restore_last_backup",
-        "vrcforge_request_roslyn_advanced",
     ]:
         register(tool_name)
 
@@ -9088,8 +9032,8 @@ def normalize_execution_mode(value: Any) -> str:
     """Three permission tiers:
 
     - "approval"          受限模式（沙箱）：高风险 shell 与写操作逐项审批。
-    - "auto"              自动审批：审批仍然生成并留痕，但立即自动批准执行；Roslyn 高级工具保持关闭。
-    - "roslyn_full_auto"  完全权限：自动审批 + Roslyn 高级工具，首次开启需要一次性风险确认。
+    - "auto"              自动审批：审批仍然生成并留痕，但删除和项目外路径仍需确认。
+    - "roslyn_full_auto"  兼容旧配置名的完全权限：自动审批所有请求，不启用动态代码执行。
     """
     mode = str(value or "approval").strip().lower().replace("-", "_")
     if mode in {"roslyn_full_auto", "full_auto", "roslyn_auto", "advanced", "full", "full_permission"}:

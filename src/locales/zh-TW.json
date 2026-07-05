@@ -110,7 +110,17 @@
     "goals": "目標",
     "memory": "記憶",
     "desktopActions": "桌面操作",
-    "refreshChanges": "刷新變更"
+    "refreshChanges": "刷新變更",
+    "statusUntracked": "未追蹤",
+    "statusModified": "已修改",
+    "statusAdded": "已新增",
+    "statusDeleted": "已刪除",
+    "statusRenamed": "已重新命名",
+    "statusCopied": "已複製",
+    "statusConflict": "有衝突",
+    "statusNotGit": "非 Git",
+    "statusMissing": "缺失",
+    "statusError": "錯誤"
   },
   "composerAction": {
     "addContext": "新增上下文",
@@ -138,7 +148,7 @@
     "current": "目前：",
     "highRisk": "高風險",
     "permissionModeDescription": "控制智能體執行命令與寫操作時的審批策略，隨時可切換。",
-    "roslynConfirmed": "完全權限風險確認：已確認（僅首次開啟時彈出）",
+    "roslynConfirmed": "完全權限已開啟",
     "onboarding": "新手引導",
     "restartOnboarding": "重新引導",
     "modelProvider": "模型供應商",
@@ -159,7 +169,7 @@
     "checkpointArchiveCount": "封存數量",
     "checkpointArchiveDirectory": "目錄",
     "checkpointArchiveLimit": "Checkpoint 封存最大大小（MB）",
-    "checkpointArchiveLimitHint": "\u9810\u8a2d 10240 MB\u3002\u53ea\u6709\u60f3\u8981\u7121\u9650\u5236\u5132\u5b58\u6642\u624d\u8a2d\u70ba 0\u3002VRCForge \u6703\u6e05\u7406\u6700\u820a\u7684 checkpoint ZIP\uff0c\u4e26\u4fdd\u7559\u6700\u65b0\u5169\u500b\u5c01\u5b58\u548c\u6b63\u5728\u5fa9\u539f\u4e2d\u7684 checkpoint\u3002",
+    "checkpointArchiveLimitHint": "預設 10240 MB。只有想要無限制儲存時才設為 0。VRCForge 會清理最舊的 checkpoint ZIP，並保留最新兩個封存和正在復原中的 checkpoint。",
     "checkpointArchiveUpdated": "Checkpoint 儲存設定已更新",
     "checkpointArchiveLimitInvalid": "Checkpoint 封存上限必須是 0 或正數。",
     "checkpointArchivePruned": "已清理 {{count}} 個封存，釋放 {{size}}。",
@@ -173,7 +183,7 @@
     "checkpointArchiveInvertSelection": "反選",
     "checkpointArchiveCleanSelected": "刪除選取",
     "checkpointArchiveProtected": "受保護",
-    "checkpointArchiveProtectedHint": "\u6700\u65b0\u5169\u500b\u5c01\u5b58\u548c\u6b63\u5728\u5fa9\u539f\u4e2d\u7684 checkpoint \u6240\u4f9d\u8cf4\u7684\u5c01\u5b58\u7121\u6cd5\u88ab\u9078\u53d6\u3002",
+    "checkpointArchiveProtectedHint": "最新兩個封存和正在復原中的 checkpoint 所依賴的封存無法被選取。",
     "checkpointArchiveSelectedCount": "已選 {{count}} 個",
     "checkpointArchiveNewDirectory": "搬移封存到新目錄",
     "checkpointArchiveNewDirectoryHint": "請使用非系統碟上的絕對路徑。VRCForge 會先複製 ZIP，再改寫 checkpoint 記錄，最後刪除舊副本。存在正在復原中的 checkpoint 時無法搬移。",
@@ -233,9 +243,9 @@
     "approval": "受限模式",
     "approvalDesc": "沙盒模式：高風險命令與寫操作逐項審批，最安全。",
     "auto": "自動審批",
-    "autoDesc": "普通審批會自動通過並留痕；刪除和專案外路徑仍需確認，Roslyn 進階能力保持關閉。",
+    "autoDesc": "普通審批會自動通過並留痕；刪除和專案外路徑仍需確認。",
     "roslynFullAuto": "完全權限",
-    "roslynFullAutoDesc": "自動審批 + Roslyn 全自動，風險最高，首次開啟需確認。"
+    "roslynFullAutoDesc": "所有請求自動通過並留痕；風險最高，不再需要啟動額外確認。"
   },
   "chat": {
     "inputPlaceholder": "隨心輸入",
@@ -359,7 +369,7 @@
     "searchPlaceholder": "搜尋能力…",
     "noMatch": "沒有符合的能力。",
     "domains": {
-      "roslyn": "Roslyn 進階",
+      "roslyn": "進階",
       "face": "捏臉與表情",
       "material": "材質與外觀",
       "clothing": "衣櫃與 FX",
@@ -454,14 +464,14 @@
   },
   "roslynModal": {
     "title": "開啟完全權限",
-    "riskDescription": "完全權限將啟用 Roslyn 全自動模式。所有審批將自動通過，Roslyn 進階能力將完全開放。這是風險最高的模式，僅推薦進階使用者使用。",
-    "confirmButton": "我已知風險，開啟完全權限",
-    "riskConfirmTitle": "風險確認",
-    "confirmed": "已確認",
-    "notConfirmed": "未確認",
+    "riskDescription": "完全權限會自動通過所有請求，風險最高，僅建議進階使用者使用。",
+    "confirmButton": "開啟完全權限",
+    "riskConfirmTitle": "權限模式",
+    "confirmed": "已開啟",
+    "notConfirmed": "未開啟",
     "targetMode": "目標模式",
-    "targetModeValue": "完全權限（Roslyn 全自動）",
-    "description": "啟用 Roslyn 全自動模式後，所有工具調用將自動批准，無需手動確認。請確保已充分了解風險。"
+    "targetModeValue": "完全權限",
+    "description": "完全權限會跳過手動審批提示，並保留審計記錄。請確保你理解風險。"
   },
   "provider": {
     "apiProvider": "API 供應商",
@@ -482,7 +492,7 @@
   "thinking": {
     "reasoning": "推理",
     "thinking": "思考中",
-    "summary": "\u601d\u8003",
+    "summary": "思考",
     "workingOnIt": "處理中",
     "provider": "供應商",
     "model": "模型",

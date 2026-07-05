@@ -108,10 +108,7 @@ namespace VRCForge.Editor
                 var maxErrors = Math.Max(1, Math.Min(parameters.maxErrors ?? DefaultMaxErrors, MaxMaxErrors));
                 var includeConsoleFallback = parameters.includeConsoleFallback ?? true;
 
-                var payload = RoslynMainThreadDispatcher.Run(
-                    () => BuildPayload(maxErrors, includeConsoleFallback),
-                    TimeSpan.FromSeconds(10));
-
+                var payload = BuildPayload(maxErrors, includeConsoleFallback);
                 return new SuccessResponse("Compile errors checked.", payload);
             }
             catch (Exception ex)

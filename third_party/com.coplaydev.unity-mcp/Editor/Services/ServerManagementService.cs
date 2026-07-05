@@ -99,9 +99,8 @@ namespace MCPForUnity.Editor.Services
                 if (Application.platform == RuntimePlatform.WindowsEditor)
                 {
                     // Query full command line so we can validate token (reduces PID reuse risk).
-                    // Use CIM via PowerShell (wmic is deprecated).
-                    string ps = $"(Get-CimInstance Win32_Process -Filter \\\"ProcessId={pid}\\\").CommandLine";
-                    bool ok = ExecPath.TryRun("powershell", $"-NoProfile -Command \"{ps}\"", Application.dataPath, out var stdout, out var stderr, 5000);
+                    // Windows' built-in wmic is optional on newer systems; if unavailable, fail closed.
+                    bool ok = ExecPath.TryRun("wmic", $"process where ProcessId={pid} get CommandLine /value", Application.dataPath, out var stdout, out var stderr, 5000);
                     string combined = ((stdout ?? string.Empty) + "\n" + (stderr ?? string.Empty)).ToLowerInvariant();
                     containsToken = combined.Contains(tokenNeedle);
                     return ok;

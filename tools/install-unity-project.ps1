@@ -235,7 +235,7 @@ Write-Host ""
 Write-Host "Next steps inside Unity:"
 Write-Host "1. Open the project and wait for package resolution."
 Write-Host "2. Confirm MCP for Unity finished importing."
-Write-Host "3. Optional advanced: define VRCFORGE_ENABLE_ROSLYN and run tools/install-roslyn-support.ps1 only if you need Roslyn Advanced Power Mode."
+Write-Host "3. Optional: use the VRCForge app Doctor if Unity tools do not appear."
 Write-Host "4. Start the Unity MCP server."
 Write-Host "5. Re-run python vrchat_blendshape_agent.py --unity-status"
 

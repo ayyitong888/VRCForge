@@ -62,12 +62,9 @@ namespace MCPForUnity.Editor.Helpers
                     // npm global locations (.cmd preferred for non-interactive processes)
                     Path.Combine(appData, "npm", "claude.cmd"),
                     Path.Combine(localAppData, "npm", "claude.cmd"),
-                    // Fall back to PowerShell shim if only .ps1 is present
-                    Path.Combine(appData, "npm", "claude.ps1"),
-                    Path.Combine(localAppData, "npm", "claude.ps1"),
                 };
                 foreach (string c in candidates) { if (File.Exists(c)) return c; }
-                string fromWhere = FindInPathWindows("claude.exe") ?? FindInPathWindows("claude.cmd") ?? FindInPathWindows("claude.ps1") ?? FindInPathWindows("claude");
+                string fromWhere = FindInPathWindows("claude.exe") ?? FindInPathWindows("claude.cmd") ?? FindInPathWindows("claude");
                 if (!string.IsNullOrEmpty(fromWhere)) return fromWhere;
 #endif
                 return null;
@@ -176,16 +173,10 @@ namespace MCPForUnity.Editor.Helpers
             stderr = string.Empty;
             try
             {
-                // Handle PowerShell scripts on Windows by invoking through powershell.exe
-                bool isPs1 = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
-                             file.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
-
                 var psi = new ProcessStartInfo
                 {
-                    FileName = isPs1 ? "powershell.exe" : file,
-                    Arguments = isPs1
-                        ? $"-NoProfile -ExecutionPolicy Bypass -File \"{file}\" {args}".Trim()
-                        : args,
+                    FileName = file,
+                    Arguments = args,
                     WorkingDirectory = string.IsNullOrEmpty(workingDir) ? Environment.CurrentDirectory : workingDir,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,

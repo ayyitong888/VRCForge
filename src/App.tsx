@@ -528,7 +528,7 @@ const VRCHAT_AVATAR_AGENT_NAMES = [
 const EXECUTION_MODES: Array<{ value: ExecutionMode; label: string; description: string }> = [
   { value: "approval", label: i18n.t("executionMode.approval"), description: i18n.t("executionMode.approvalDesc") },
   { value: "auto", label: i18n.t("header.autoApproval"), description: i18n.t("executionMode.autoDesc") },
-  { value: "roslyn_full_auto", label: i18n.t("header.fullPermission"), description: i18n.t("executionMode.roslynFullAutoDesc") },
+  { value: "roslyn_full_auto", label: i18n.t("header.fullPermission"), description: i18n.t("header.fullPermission") },
 ];
 
 function executionModeLabel(mode?: string): string {
@@ -896,8 +896,6 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
-  const [showRoslynWarning, setShowRoslynWarning] = useState(false);
-  const [pendingMode, setPendingMode] = useState<PermissionState["executionMode"] | null>(null);
   const [input, setInput] = useState("");
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
   const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
@@ -2323,36 +2321,17 @@ export default function App() {
     if (!permission) {
       return;
     }
-    if (mode === "roslyn_full_auto" && !permission.roslynRiskAcknowledged && !acknowledge) {
-      setPendingMode(mode);
-      setShowRoslynWarning(true);
-      return;
-    }
     setLoading(true);
     setError("");
     try {
       const payload = await updatePermission(endpoint, mode, acknowledge);
       setBootstrap((current) => (current ? { ...current, permission: payload.permission } : current));
-      setShowRoslynWarning(false);
-      setPendingMode(null);
       void refreshSilently();
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 409) {
-        setPendingMode("roslyn_full_auto");
-        setShowRoslynWarning(true);
-      } else {
-        setError(cause instanceof Error ? cause.message : String(cause));
-      }
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
-  }
-
-  async function confirmRoslynWarning() {
-    if (!pendingMode) {
-      return;
-    }
-    await switchMode(pendingMode, true);
   }
 
   function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
@@ -5441,9 +5420,6 @@ export default function App() {
                       );
                     })}
                   </div>
-                  {permission?.roslynRiskAcknowledged ? (
-                    <div className="mt-3 text-xs text-muted-foreground">{t("settings.roslynConfirmed")}</div>
-                  ) : null}
                 </section>
 
                 <section className="mt-12">
@@ -6668,31 +6644,6 @@ export default function App() {
         </div>
       ) : null}
 
-      {showRoslynWarning ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-          <section className="w-full max-w-lg rounded-lg border border-destructive/40 bg-card p-6 shadow-panel">
-            <div className="flex min-w-0 items-center gap-3 text-destructive">
-              <AlertTriangle className="h-5 w-5 shrink-0" />
-              <h2 className="truncate text-lg font-semibold">{t("roslynModal.title")}</h2>
-            </div>
-            <p className="mt-4 text-sm text-muted-foreground">
-              {t("roslynModal.description")}
-            </p>
-            <div className="mt-5 grid gap-3 text-sm">
-              <DataLine label={t("roslynModal.riskConfirmTitle")} value={permission?.roslynRiskAcknowledged ? t("roslynModal.confirmed") : t("roslynModal.notConfirmed")} />
-              <DataLine label={t("roslynModal.targetMode")} value={t("roslynModal.targetModeValue")} />
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <Button variant="outline" onClick={() => setShowRoslynWarning(false)}>
-                {t("deleteModal.cancel")}
-              </Button>
-              <Button variant="danger" onClick={confirmRoslynWarning} disabled={loading}>
-                {t("roslynModal.confirmButton")}
-              </Button>
-            </div>
-          </section>
-        </div>
-      ) : null}
     </main>
   );
 }
@@ -12060,15 +12011,36 @@ function RuntimeScheduleRow({ item }: { item: RuntimeScheduleItem }) {
 }
 
 function RuntimeDiffFileRow({ file }: { file: WorkspaceDiffSummary["files"][number] }) {
+  const statusLabel = workspaceDiffStatusLabel(file.status);
   return (
-    <div className="grid min-w-0 grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
-      <span className="font-mono text-muted-foreground">{file.status || "M"}</span>
+    <div className="grid min-w-0 grid-cols-[76px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-xs hover:bg-muted/70">
+      <span className="truncate text-muted-foreground" title={file.status || statusLabel}>
+        {statusLabel}
+      </span>
       <span className="truncate font-mono">{file.path}</span>
       <span className="shrink-0 font-mono text-muted-foreground">
         {file.binary ? "bin" : `+${file.additions || 0} -${file.deletions || 0}`}
       </span>
     </div>
   );
+}
+
+function workspaceDiffStatusLabel(status?: string) {
+  const normalized = (status || "M").trim();
+  const labels: Record<string, string> = {
+    "??": i18n.t("workspace.statusUntracked"),
+    M: i18n.t("workspace.statusModified"),
+    A: i18n.t("workspace.statusAdded"),
+    D: i18n.t("workspace.statusDeleted"),
+    R: i18n.t("workspace.statusRenamed"),
+    C: i18n.t("workspace.statusCopied"),
+    U: i18n.t("workspace.statusConflict"),
+    changed: i18n.t("workspace.statusModified"),
+    not_git: i18n.t("workspace.statusNotGit"),
+    missing: i18n.t("workspace.statusMissing"),
+    error: i18n.t("workspace.statusError"),
+  };
+  return labels[normalized] || labels[normalized.toUpperCase()] || normalized;
 }
 
 function RuntimeFileReferenceRow({ file }: { file: RuntimeFileReference }) {
