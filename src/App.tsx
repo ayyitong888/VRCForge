@@ -1818,6 +1818,33 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let active = true;
+    let unlistenTrayOpenChat: (() => void) | undefined;
+    void listen("vrcforge-tray-open-chat", () => {
+      setActiveView("chat");
+      setError("");
+      if (!activeChatId) {
+        newTemporaryChat();
+      }
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenTrayOpenChat = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unlistenTrayOpenChat?.();
+    };
+  }, [activeChatId, chats]);
+
+  useEffect(() => {
     if (!runtimeConnected) {
       setSubAgentList(null);
       return;

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, State,
 };
@@ -2569,14 +2569,22 @@ fn main() {
     tauri::Builder::default()
         .manage(BackendState::new())
         .setup(|app| {
-            let show_item = MenuItem::with_id(app, "show", "显示 VRCForge", true, None::<&str>)?;
+            let open_chat_item =
+                MenuItem::with_id(app, "open_chat", "打开对话", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "打开窗口", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 VRCForge", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let menu =
+                Menu::with_items(app, &[&open_chat_item, &show_item, &separator, &quit_item])?;
             let mut tray = TrayIconBuilder::new()
                 .tooltip("VRCForge")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open_chat" => {
+                        show_main_window(app);
+                        let _ = app.emit("vrcforge-tray-open-chat", ());
+                    }
                     "show" => show_main_window(app),
                     "quit" => {
                         shutdown_managed_backend(app);
@@ -2704,9 +2712,7 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let app = window.app_handle();
-                shutdown_managed_backend(app);
-                app.exit(0);
+                let _ = window.hide();
             }
         })
         .run(tauri::generate_context!())
