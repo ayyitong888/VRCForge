@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isDesktopLoopbackApiUrl } from "./desktop-routing";
 
 export type ExecutionMode = "approval" | "auto" | "roslyn_full_auto";
 
@@ -3028,17 +3029,7 @@ async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<
 }
 
 function isTauriLocalApiUrl(url: string): boolean {
-  if (!hasTauriInternals()) {
-    return false;
-  }
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    const isBackendLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
-    return parsed.protocol === "http:" && isBackendLoopback && parsed.port === "8757" && (parsed.pathname === "/api" || parsed.pathname.startsWith("/api/"));
-  } catch {
-    return false;
-  }
+  return hasTauriInternals() && isDesktopLoopbackApiUrl(url);
 }
 
 function hasTauriInternals(): boolean {
