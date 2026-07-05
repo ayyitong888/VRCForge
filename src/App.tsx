@@ -1613,8 +1613,34 @@ export default function App() {
   }, [showOnboarding, onboardingMinimized, onboardingStep, runtimeConnected, apiConfig?.apiKeyPresent, projectItems.length]);
 
   useEffect(() => {
-    void startRuntime();
+    void startRuntime({ waitForBootstrap: false });
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let active = true;
+    let unlistenStartStatus: (() => void) | null = null;
+    void listen<{ ok?: boolean; status?: string }>("vrcforge-backend-start-status", (event) => {
+      if (!active || !event.payload?.ok) {
+        return;
+      }
+      refreshStartupInBackground(endpoint, { refreshProjects: true });
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenStartStatus = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unlistenStartStatus?.();
+    };
+  }, [endpoint]);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -1942,10 +1968,19 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
-  async function startRuntime(): Promise<string | null> {
+  function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
+    void refreshWithRetry(target, options).catch((cause) => {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setStartupIssue(message);
+    });
+  }
+
+  async function startRuntime(options: { waitForBootstrap?: boolean } = {}): Promise<string | null> {
     if (runtimeStartingRef.current) {
       return endpoint;
     }
+    const waitForBootstrap = options.waitForBootstrap ?? true;
     runtimeStartingRef.current = true;
     setLoading(true);
     setError("");
@@ -1958,7 +1993,11 @@ export default function App() {
         setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
-        await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+        if (!waitForBootstrap && result.mode === "starting") {
+          setStartupIssue("");
+        } else {
+          await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+        }
       } else {
         setBackendMessage("dev");
         try {

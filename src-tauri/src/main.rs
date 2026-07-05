@@ -23,6 +23,7 @@ use tauri::{
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8757;
 const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
+const BACKEND_START_BACKGROUND_WAIT_SECONDS: u64 = 18;
 const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -2081,20 +2082,36 @@ fn start_backend(
         *guard = Some(child);
     }
 
-    if !wait_for_backend(Duration::from_secs(18)) {
-        return Err(format!(
-            "本地 runtime 未在 18 秒内就绪。日志目录: {}",
-            user_data.join("logs").display()
-        ));
+    let backend_ready = backend_port_open();
+    start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token.clone())?;
+    if !backend_ready {
+        let app_for_status = app_handle.clone();
+        let log_dir = user_data.join("logs");
+        thread::spawn(move || {
+            let ready =
+                wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
+            let payload = if ready {
+                serde_json::json!({"ok": true, "status": "ready"})
+            } else {
+                serde_json::json!({
+                    "ok": false,
+                    "status": "timeout",
+                    "logDir": log_dir.display().to_string()
+                })
+            };
+            let _ = app_for_status.emit("vrcforge-backend-start-status", payload);
+        });
     }
-
-    start_backend_event_bridge_once(app_handle, &state, app_session_token.clone())?;
     Ok(BackendStartResult {
         endpoint: BACKEND_ENDPOINT.to_string(),
         started: true,
         already_running: false,
-        mode: "managed".to_string(),
-        message: "已启动桌面 App 管理的 VRCForge runtime".to_string(),
+        mode: if backend_ready { "managed" } else { "starting" }.to_string(),
+        message: if backend_ready {
+            "已启动桌面 App 管理的 VRCForge runtime".to_string()
+        } else {
+            "VRCForge runtime is starting in the background.".to_string()
+        },
     })
 }
 
@@ -2408,6 +2425,9 @@ fn app_session_challenge_signature_matches(token: &str, nonce: &str, signature: 
 }
 
 fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
+    if !backend_port_open() {
+        return Err("VRCForge runtime is still starting.".to_string());
+    }
     if existing_backend_accepts_session(token) {
         Ok(())
     } else {
