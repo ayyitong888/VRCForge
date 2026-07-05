@@ -1106,6 +1106,7 @@ export default function App() {
   const stopRequestedRef = useRef(false);
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
+  const startupLaunchStartedAtRef = useRef<number | null>(null);
   const healthRefreshInFlightRef = useRef(false);
   const runtimeRefreshSeqRef = useRef(0);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
@@ -1622,11 +1623,28 @@ export default function App() {
     }
     let active = true;
     let unlistenStartStatus: (() => void) | null = null;
-    void listen<{ ok?: boolean; status?: string }>("vrcforge-backend-start-status", (event) => {
-      if (!active || !event.payload?.ok) {
+    void listen<{ ok?: boolean; status?: string; error?: string; logDir?: string }>("vrcforge-backend-start-status", (event) => {
+      if (!active) {
         return;
       }
-      refreshStartupInBackground(endpoint, { refreshProjects: true });
+      if (event.payload?.ok) {
+        const readyAt = performance.now();
+        const startedAt = startupLaunchStartedAtRef.current;
+        const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+        metrics.backendReadyEventMs = startedAt === null ? null : Math.round(readyAt - startedAt);
+        metrics.backendReadyMode = event.payload.status || "ready";
+        refreshStartupInBackground(endpoint, { refreshProjects: true });
+        return;
+      }
+      const message =
+        event.payload?.error ||
+        (event.payload?.status === "timeout"
+          ? `VRCForge runtime startup timed out. Logs: ${event.payload?.logDir || "unknown"}`
+          : "");
+      if (message) {
+        setError(message);
+        setStartupIssue(message);
+      }
     })
       .then((unlisten) => {
         if (active) {
@@ -1969,11 +1987,17 @@ export default function App() {
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
   function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
-    void refreshWithRetry(target, options).catch((cause) => {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      setStartupIssue(message);
-    });
+    const startedAt = performance.now();
+    void refreshWithRetry(target, options)
+      .then(() => {
+        const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+        metrics.bootstrapRefreshMs = Math.round(performance.now() - startedAt);
+      })
+      .catch((cause) => {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message);
+        setStartupIssue(message);
+      });
   }
 
   async function startRuntime(options: { waitForBootstrap?: boolean } = {}): Promise<string | null> {
@@ -1988,12 +2012,19 @@ export default function App() {
     try {
       if (isTauriRuntime()) {
         void invoke("ensure_agent_notes_file").catch(() => undefined);
+        const startedAt = performance.now();
+        startupLaunchStartedAtRef.current = startedAt;
         const result = await invoke<BackendStartResult>("start_backend");
+        const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+        metrics.startBackendInvokeMs = Math.round(performance.now() - startedAt);
+        metrics.startBackendMode = result.mode;
+        metrics.startBackendStarted = result.started;
+        metrics.startBackendAlreadyRunning = result.already_running;
         targetEndpoint = result.endpoint;
         setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
-        if (!waitForBootstrap && result.mode === "starting") {
+        if (result.mode === "starting") {
           setStartupIssue("");
         } else {
           await refreshWithRetry(targetEndpoint, { refreshProjects: true });

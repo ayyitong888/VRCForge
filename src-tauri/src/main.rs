@@ -31,6 +31,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 struct BackendState {
     child: Mutex<Option<Child>>,
     event_bridge_started: Mutex<bool>,
+    start_in_progress: Mutex<bool>,
 }
 
 impl BackendState {
@@ -38,6 +39,7 @@ impl BackendState {
         Self {
             child: Mutex::new(None),
             event_bridge_started: Mutex::new(false),
+            start_in_progress: Mutex::new(false),
         }
     }
 }
@@ -2070,6 +2072,57 @@ fn start_backend(
     app_handle: tauri::AppHandle,
     state: State<'_, BackendState>,
 ) -> Result<BackendStartResult, String> {
+    let already_running = backend_port_open();
+    let started_background = begin_backend_start(&state)?;
+    if started_background {
+        thread::spawn(move || run_backend_start_worker(app_handle));
+    }
+    Ok(BackendStartResult {
+        endpoint: BACKEND_ENDPOINT.to_string(),
+        started: started_background && !already_running,
+        already_running,
+        mode: "starting".to_string(),
+        message: if started_background {
+            "VRCForge runtime is starting in the background.".to_string()
+        } else {
+            "VRCForge runtime startup is already in progress.".to_string()
+        },
+    })
+}
+
+fn begin_backend_start(state: &BackendState) -> Result<bool, String> {
+    let mut guard = state
+        .start_in_progress
+        .lock()
+        .map_err(|_| "backend startup state lock poisoned".to_string())?;
+    if *guard {
+        return Ok(false);
+    }
+    *guard = true;
+    Ok(true)
+}
+
+fn clear_backend_start_in_progress(app_handle: &tauri::AppHandle) {
+    let state = app_handle.state::<BackendState>();
+    if let Ok(mut guard) = state.start_in_progress.lock() {
+        *guard = false;
+    };
+}
+
+fn run_backend_start_worker(app_handle: tauri::AppHandle) {
+    let payload = match start_backend_in_background(&app_handle) {
+        Ok(payload) => payload,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "error": error
+        }),
+    };
+    let _ = app_handle.emit("vrcforge-backend-start-status", payload);
+    clear_backend_start_in_progress(&app_handle);
+}
+
+fn start_backend_in_background(app_handle: &tauri::AppHandle) -> Result<serde_json::Value, String> {
     let user_data = user_data_dir()?;
     let app_session_token = ensure_app_session_token(&user_data)?;
     if backend_port_open() {
@@ -2078,14 +2131,13 @@ fn start_backend(
                 "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
             );
         }
-        start_backend_event_bridge_once(app_handle, &state, app_session_token.clone())?;
-        return Ok(BackendStartResult {
-            endpoint: BACKEND_ENDPOINT.to_string(),
-            started: false,
-            already_running: true,
-            mode: "existing".to_string(),
-            message: "已连接本机 VRCForge runtime".to_string(),
-        });
+        let state = app_handle.state::<BackendState>();
+        start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
+        return Ok(serde_json::json!({
+            "ok": true,
+            "status": "ready",
+            "mode": "existing"
+        }));
     }
 
     let root = repo_root()?;
@@ -2137,6 +2189,7 @@ fn start_backend(
         .map_err(|error| format!("无法启动本地 runtime: {error}"))?;
 
     {
+        let state = app_handle.state::<BackendState>();
         let mut guard = state
             .child
             .lock()
@@ -2144,37 +2197,22 @@ fn start_backend(
         *guard = Some(child);
     }
 
-    let backend_ready = backend_port_open();
-    start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token.clone())?;
-    if !backend_ready {
-        let app_for_status = app_handle.clone();
-        let log_dir = user_data.join("logs");
-        thread::spawn(move || {
-            let ready =
-                wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
-            let payload = if ready {
-                serde_json::json!({"ok": true, "status": "ready"})
-            } else {
-                serde_json::json!({
-                    "ok": false,
-                    "status": "timeout",
-                    "logDir": log_dir.display().to_string()
-                })
-            };
-            let _ = app_for_status.emit("vrcforge-backend-start-status", payload);
-        });
+    let state = app_handle.state::<BackendState>();
+    start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
+    let ready = wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
+
+    if ready {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "status": "ready",
+            "mode": "managed"
+        }));
     }
-    Ok(BackendStartResult {
-        endpoint: BACKEND_ENDPOINT.to_string(),
-        started: true,
-        already_running: false,
-        mode: if backend_ready { "managed" } else { "starting" }.to_string(),
-        message: if backend_ready {
-            "已启动桌面 App 管理的 VRCForge runtime".to_string()
-        } else {
-            "VRCForge runtime is starting in the background.".to_string()
-        },
-    })
+    Ok(serde_json::json!({
+        "ok": false,
+        "status": "timeout",
+        "logDir": log_dir.display().to_string()
+    }))
 }
 
 #[tauri::command]
@@ -2577,7 +2615,7 @@ fn backend_port_open() -> bool {
         return false;
     };
     if let Some(addr) = addrs.next() {
-        TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+        TcpStream::connect_timeout(&addr, Duration::from_millis(25)).is_ok()
     } else {
         false
     }
