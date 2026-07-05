@@ -1814,7 +1814,10 @@ class AgentGateway:
             "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
             "shellExecutor": {
                 "status": "ok",
+                "defaultRunner": SHELL_RUNNER_NATIVE,
+                "fallbackRunner": SHELL_RUNNER_POWERSHELL,
                 "shell": "powershell",
+                "shellRole": "fallback",
                 "timeoutSeconds": 120,
             },
             "deterministicPlanner": {
@@ -2587,7 +2590,10 @@ class AgentGateway:
             },
             "shellExecutor": {
                 "available": True,
+                "defaultRunner": SHELL_RUNNER_NATIVE,
+                "fallbackRunner": SHELL_RUNNER_POWERSHELL,
                 "shell": "powershell",
+                "shellRole": "fallback",
                 "timeoutSeconds": 120,
             },
             "deterministicPlanner": {
@@ -6564,6 +6570,7 @@ class AgentGateway:
             "reasons": reasons,
             "cwd": str(cwd),
             "workspaceRoot": str(workspace_root),
+            "plannedRunner": SHELL_RUNNER_NATIVE if native_shell_argv(command) is not None else SHELL_RUNNER_POWERSHELL,
         }
 
     def _shell_auto_manual_approval_reason(self, classification: dict[str, Any]) -> str:
@@ -6826,16 +6833,22 @@ class AgentGateway:
         env = os.environ.copy()
         env["GIT_PAGER"] = "cat"
         env["GIT_EXTERNAL_DIFF"] = ""
-        process_args = [
-            "powershell",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ]
+        native_argv = native_shell_argv(command)
+        if native_argv is not None:
+            runner = SHELL_RUNNER_NATIVE
+            process_args = native_argv
+        else:
+            runner = SHELL_RUNNER_POWERSHELL
+            process_args = [
+                resolve_powershell_executable(),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
         process = subprocess.Popen(  # noqa: S603 - shell execution is the supervised capability under test.
             process_args,
@@ -6878,6 +6891,7 @@ class AgentGateway:
             "ok": exit_code == 0 and not timed_out and not cancelled,
             "command": command,
             "cwd": str(cwd),
+            "runner": runner,
             "exitCode": exit_code,
             "timedOut": timed_out,
             "cancelled": cancelled,
@@ -8351,6 +8365,83 @@ def looks_like_absolute_path(value: str) -> bool:
     return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|\\\\)", value))
 
 
+SHELL_RUNNER_NATIVE = "native-win-process"
+SHELL_RUNNER_POWERSHELL = "powershell-fallback"
+
+# Any character PowerShell would interpret (pipeline, redirection, variables,
+# subexpressions, wildcard-sensitive braces, comments, here-strings). Commands
+# containing these keep full PowerShell semantics via the fallback runner.
+SHELL_NATIVE_BLOCK_PATTERN = re.compile(r"[|;&<>^`$%(){}\[\]#]|@\"|@'")
+
+_POWERSHELL_EXECUTABLE_CACHE: str | None = None
+
+
+def resolve_powershell_executable() -> str:
+    """Resolve the PowerShell fallback executable to a robust absolute path.
+
+    Prefers PowerShell 7 (pwsh) when installed, then the absolute Windows
+    PowerShell 5.1 path under SystemRoot, then a plain PATH lookup. The result
+    is cached for the process lifetime.
+    """
+    global _POWERSHELL_EXECUTABLE_CACHE
+    if _POWERSHELL_EXECUTABLE_CACHE:
+        return _POWERSHELL_EXECUTABLE_CACHE
+    candidates: list[str] = []
+    pwsh_path = shutil.which("pwsh")
+    if pwsh_path:
+        candidates.append(pwsh_path)
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+        candidates.append(str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"))
+    powershell_path = shutil.which("powershell")
+    if powershell_path:
+        candidates.append(powershell_path)
+    for candidate in candidates:
+        try:
+            if candidate and Path(candidate).is_file():
+                _POWERSHELL_EXECUTABLE_CACHE = candidate
+                return candidate
+        except OSError:
+            continue
+    _POWERSHELL_EXECUTABLE_CACHE = "powershell"
+    return _POWERSHELL_EXECUTABLE_CACHE
+
+
+def native_shell_argv(command: str) -> list[str] | None:
+    """Return an argv list when the command can run without any shell.
+
+    The native runner only accepts plain single commands whose head token
+    resolves to a real executable. Anything that could rely on PowerShell
+    parsing — pipelines, redirection, variables, subexpressions, cmdlets,
+    aliases, embedded quotes, multiline scripts — returns None so the caller
+    falls back to the explicit PowerShell runner. Conservative false
+    negatives are acceptable; behavior-changing false positives are not.
+    """
+    if "\n" in command or "\r" in command:
+        return None
+    if SHELL_NATIVE_BLOCK_PATTERN.search(command):
+        return None
+    tokens = tokenize_command(command)
+    if not tokens:
+        return None
+    argv = [strip_quotes(token) for token in tokens]
+    if any('"' in arg or "'" in arg for arg in argv):
+        return None
+    command_name = argv[0]
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", command_name):
+        return None
+    executable = shutil.which(command_name)
+    if not executable:
+        return None
+    if os.name == "nt" and not executable.lower().endswith(".exe"):
+        # .bat/.cmd shims require a shell and are unsafe to spawn with
+        # untrusted arguments (argument injection), so they stay on the
+        # PowerShell fallback path.
+        return None
+    argv[0] = executable
+    return argv
+
+
 def normalize_filesystem_path(value: str) -> str:
     text = str(value or "").strip().replace("\\", "/")
     try:
@@ -8570,6 +8661,7 @@ def truncate_text(text: str, limit: int = 12000) -> str:
 def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": result.get("ok"),
+        "runner": result.get("runner"),
         "exitCode": result.get("exitCode"),
         "timedOut": result.get("timedOut"),
         "durationSeconds": result.get("durationSeconds"),

@@ -15,7 +15,15 @@ from unittest.mock import ANY, patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
-from agent_gateway import AgentGateway, AgentGatewayError, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
+from agent_gateway import (
+    AgentGateway,
+    AgentGatewayError,
+    CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
+    SHELL_RUNNER_NATIVE,
+    SHELL_RUNNER_POWERSHELL,
+    native_shell_argv,
+    resolve_powershell_executable,
+)
 from skill_packages import SkillPackageService
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
@@ -2217,6 +2225,51 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(result["cancelled"])
         self.assertFalse(result["timedOut"])
         self.assertLess(result["durationSeconds"], 5)
+
+    def test_native_shell_argv_accepts_plain_commands_only(self) -> None:
+        argv = native_shell_argv("git --no-pager status --short")
+        self.assertIsNotNone(argv)
+        assert argv is not None
+        self.assertEqual(argv[1:], ["--no-pager", "status", "--short"])
+        self.assertIn("git", Path(argv[0]).name.lower())
+
+        # PowerShell cmdlets/aliases never resolve to a real executable.
+        self.assertIsNone(native_shell_argv("Get-ChildItem"))
+        # Pipeline, redirection, variables, formats stay on PowerShell semantics.
+        self.assertIsNone(native_shell_argv("git status | Out-Null"))
+        self.assertIsNone(native_shell_argv("Get-Content a.txt > b.txt"))
+        self.assertIsNone(native_shell_argv("echo $env:PATH"))
+        self.assertIsNone(native_shell_argv("git log --format=%h"))
+        self.assertIsNone(native_shell_argv("git status; git log"))
+        self.assertIsNone(native_shell_argv("git status\ngit log"))
+
+    def test_shell_classification_reports_planned_runner(self) -> None:
+        workspace_root = str(Path(__file__).resolve().parents[1])
+        native = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "git --no-pager status --short", "workspace_root": workspace_root}
+        )
+        self.assertEqual(native["plannedRunner"], SHELL_RUNNER_NATIVE)
+
+        cmdlet = dashboard_server.AGENT_GATEWAY.classify_shell(
+            {"command": "Get-ChildItem", "workspace_root": workspace_root}
+        )
+        self.assertEqual(cmdlet["plannedRunner"], SHELL_RUNNER_POWERSHELL)
+
+    def test_run_shell_command_uses_native_runner_for_plain_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = dashboard_server.AGENT_GATEWAY._run_shell_command(
+                "git --version",
+                Path(temp_dir),
+                timeout_seconds=30,
+            )
+        self.assertEqual(result["runner"], SHELL_RUNNER_NATIVE)
+        self.assertTrue(result["ok"])
+        self.assertIn("git version", result["stdout"].lower())
+
+    def test_resolve_powershell_executable_returns_nonempty_path(self) -> None:
+        resolved = resolve_powershell_executable()
+        self.assertIsInstance(resolved, str)
+        self.assertTrue(resolved)
 
     def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
