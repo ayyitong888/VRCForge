@@ -6,11 +6,13 @@ const positive = [
   "http://localhost:8757/api/app/bootstrap",
   "http://[::1]:8757/api/app/bootstrap",
   "http://[::1]:8757/api?x=1",
+  "http://[::ffff:127.0.0.1]:8757/api/app/bootstrap",
 ];
 
 const negative = [
   "http://127.0.0.1:8757/mcp",
   "http://127.0.0.1:8757/runtime-artifacts/example.png",
+  "http://[::ffff:127.0.0.1]:8757/runtime-artifacts/example.png",
   "http://127.0.0.1:8758/api/app/bootstrap",
   "https://127.0.0.1:8757/api/app/bootstrap",
   "http://192.168.1.2:8757/api/app/bootstrap",
