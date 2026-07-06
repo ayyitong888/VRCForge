@@ -100,12 +100,13 @@ import {
   thinkingStatusForModelLabel,
   thinkingTraceLabel,
 } from "./lib/provider-ui";
-import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
+import { cacheChatTimestampsFast, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
 import { emptySkillDraft } from "./lib/skill-draft";
+import { buildChatSidebarView, buildEmptyProjectState } from "./lib/sidebar-view";
 import type { RuntimeScheduleItem } from "./lib/runtime-ui-types";
 import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
@@ -871,29 +872,23 @@ export default function App() {
     reviewSummaryLabel,
     changeSummaryLabel,
   } = runtimeWorkspaceView;
-  const chatSidebar = useMemo(() => {
-    const now = Date.now();
-    return {
-      ...groupSidebarChats(chats, normalizeProjectPathKey),
-      times: new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now, i18n.language)])),
-    };
-  }, [chats, i18n.language]);
+  const chatSidebar = useMemo(
+    () => buildChatSidebarView(chats, i18n.language, normalizeProjectPathKey),
+    [chats, i18n.language],
+  );
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
-  const emptyProjectState = useMemo(() => {
-    if (projectItems.length > 0) {
-      return null;
-    }
-    if (loading && !error) {
-      return { name: t("agent.emptyProjectState.scanning"), meta: "wait" };
-    }
-    if (hasStartupIssue || !runtimeConnected) {
-      return { name: t("agent.modeLabel.notConnected"), meta: "retry" };
-    }
-    if (error) {
-      return { name: t("agent.emptyProjectState.refreshFailed"), meta: "retry" };
-    }
-    return { name: t("agent.emptyProjectState.noUnityProject"), meta: "empty" };
-  }, [error, hasStartupIssue, loading, projectItems.length, runtimeConnected]);
+  const emptyProjectState = useMemo(
+    () =>
+      buildEmptyProjectState({
+        t,
+        projectCount: projectItems.length,
+        loading,
+        error,
+        hasStartupIssue,
+        runtimeConnected,
+      }),
+    [error, hasStartupIssue, loading, projectItems.length, runtimeConnected, t],
+  );
 
   useLayoutEffect(() => {
     const isDark = theme === "dark";
