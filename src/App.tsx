@@ -46,12 +46,12 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
-  COLLAPSED_PROJECTS_KEY,
   LAYOUT_PANE_WIDTHS_KEY,
   LEFT_SIDEBAR_COLLAPSED_KEY,
   MAX_LEFT_PANE_WIDTH,
@@ -64,13 +64,10 @@ import {
   RIGHT_RUNTIME_SECTION_COLLAPSED_KEY,
   RIGHT_SIDEBAR_COLLAPSED_KEY,
   THEME_STORAGE_KEY,
-  PROJECT_UI_PREFS_KEY,
   clampNumber,
   loadLayoutPaneWidths,
-  loadProjectUiPrefs,
   loadThemePreference,
   type LayoutPaneWidths,
-  type ProjectUiPrefs,
   type ThemeMode,
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
@@ -133,11 +130,9 @@ import {
   DiagnosticsStatus,
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
-  OutfitImportPlanResult,
   OptimizationPlannerReport,
   OptimizationProofDetail,
   OptimizationProofSummary,
-  ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
   approveAgentApproval,
@@ -180,15 +175,12 @@ import {
   fetchAppHealth,
   fetchAvatars,
   fetchChats,
-  fetchProjectPrefs,
   fetchSubAgent,
   fetchSubAgents,
   installExternalAgentConnector,
   importSkillPackage,
-  planOutfitImport,
   planAvatarEncryption,
   preflightSkillPackage,
-  ProjectPrefs,
   previewRestoreCheckpoint,
   previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
@@ -200,7 +192,6 @@ import {
   requestOptimizationApply,
   requestAvatarEncryptionApply,
   requestRestoreInterruptedApplyRecovery,
-  requestOutfitImport,
   requestPackageInstall,
   requestRestoreCheckpoint,
   resolveInterruptedApplyRecovery,
@@ -210,9 +201,7 @@ import {
   revokeSkillPackageSigner,
   retrySubAgent,
   saveChats,
-  saveProjectPrefs,
   saveAgentNotes,
-  scanProjectIndex,
   sendAgentMessage,
   setSkillPackageSafeMode,
   setSkillPackageEnabled,
@@ -343,21 +332,6 @@ export default function App() {
   });
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingMinimized, setOnboardingMinimized] = useState(false);
-  const [showProjectModal, setShowProjectModal] = useState(false);
-  const [newProjectPath, setNewProjectPath] = useState("");
-  const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
-  const [projectModalError, setProjectModalError] = useState("");
-  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
-  const [projectPrefsReady, setProjectPrefsReady] = useState(false);
-  const [loadingProjects, setLoadingProjects] = useState(false);
-  const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
-  const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
-  const [renamingProjectPath, setRenamingProjectPath] = useState("");
-  const [projectRenameDraft, setProjectRenameDraft] = useState("");
-  const [projectIndex, setProjectIndex] = useState<ProjectIndexScanResult | null>(null);
-  const [projectIndexProject, setProjectIndexProject] = useState("");
-  const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
-  const [projectIndexError, setProjectIndexError] = useState("");
   const [optimizationReport, setOptimizationReport] = useState<OptimizationPlannerReport | null>(null);
   const [optimizationTargetProfile, setOptimizationTargetProfile] = useState("pc_conservative");
   const [optimizationAvatarPath, setOptimizationAvatarPath] = useState("");
@@ -408,20 +382,6 @@ export default function App() {
   const [subAgentError, setSubAgentError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
-  const [outfitPackagePath, setOutfitPackagePath] = useState("");
-  const [outfitImportPlan, setOutfitImportPlan] = useState<OutfitImportPlanResult | null>(null);
-  const [outfitImportStatus, setOutfitImportStatus] = useState("");
-  const [loadingOutfitImportPlan, setLoadingOutfitImportPlan] = useState(false);
-  const [requestingOutfitImport, setRequestingOutfitImport] = useState(false);
-  const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
-    try {
-      const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
-    } catch {
-      return {};
-    }
-  });
   const [queued, setQueued] = useState<QueuedTurn[]>([]);
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
   const [stopRequested, setStopRequested] = useState(false);
@@ -477,7 +437,6 @@ export default function App() {
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
-  const projectPrefsLoadedRef = useRef(false);
   const chatsRef = useRef<ChatThread[]>([]);
   const queueRef = useRef<QueuedTurn[]>([]);
   const sendingRef = useRef(false);
@@ -616,29 +575,64 @@ export default function App() {
     },
     [t, vrcForgeToolsReady],
   );
-  const hiddenPathSet = useMemo(
-    () => new Set(projectPrefs.hiddenPaths.map(normalizeProjectPathKey)),
-    [projectPrefs.hiddenPaths],
-  );
-  const customPathSet = useMemo(
-    () => new Set(projectPrefs.customPaths.map(normalizeProjectPathKey)),
-    [projectPrefs.customPaths],
-  );
-  const pinnedProjectSet = useMemo(
-    () => new Set(projectUiPrefs.pinnedPaths.map(normalizeProjectPathKey)),
-    [projectUiPrefs.pinnedPaths],
-  );
-  const projectItems = useMemo(
-    () =>
-      projects
-        .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
-        .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a))))),
-    [projects, hiddenPathSet, pinnedProjectSet],
-  );
-  const hiddenProjects = useMemo(
-    () => projects.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
-    [projects, hiddenPathSet],
-  );
+  const {
+    showProjectModal,
+    setShowProjectModal,
+    newProjectPath,
+    setNewProjectPath,
+    savingProjectPrefs,
+    projectModalError,
+    setProjectModalError,
+    projectPrefs,
+    projectPrefsReady,
+    loadingProjects,
+    setLoadingProjects,
+    projectMenu,
+    setProjectMenu,
+    renamingProjectPath,
+    projectRenameDraft,
+    setProjectRenameDraft,
+    projectIndex,
+    projectIndexProject,
+    loadingProjectIndex,
+    projectIndexError,
+    outfitPackagePath,
+    setOutfitPackagePath,
+    outfitImportPlan,
+    outfitImportStatus,
+    loadingOutfitImportPlan,
+    requestingOutfitImport,
+    collapsedProjects,
+    customPathSet,
+    pinnedProjectSet,
+    projectItems,
+    hiddenProjects,
+    addProjectPath,
+    removeCustomProject,
+    hideProject,
+    unhideProject,
+    projectDisplayName,
+    togglePinProject,
+    startRenameProject,
+    commitRenameProject,
+    openProjectFolder,
+    scanActiveProjectIndex,
+    planActiveOutfitImport,
+    requestActiveOutfitImport,
+    toggleProjectCollapse,
+    expandProjectGroup,
+  } = useProjectManagement({
+    endpoint,
+    runtimeConnected,
+    activeProjectPath,
+    projects,
+    refresh,
+    refreshSilently,
+    startRuntime,
+    setError,
+    onProjectAdded: selectProject,
+    onActiveProjectHidden: () => newConversation(""),
+  });
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
@@ -937,22 +931,6 @@ export default function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects));
-    } catch {
-      // 忽略持久化失败
-    }
-  }, [collapsedProjects]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PROJECT_UI_PREFS_KEY, JSON.stringify(projectUiPrefs));
-    } catch {
-      // Project display preferences are best-effort local UI state.
-    }
-  }, [projectUiPrefs]);
-
-  useEffect(() => {
-    try {
       window.localStorage.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(leftSidebarCollapsed));
     } catch {
       // Sidebar width is best-effort local UI state.
@@ -982,21 +960,6 @@ export default function App() {
       // Runtime section layout is best-effort local UI state.
     }
   }, [rightRuntimeSectionsCollapsed]);
-
-  useEffect(() => {
-    if (!runtimeConnected || projectPrefsLoadedRef.current) {
-      return;
-    }
-    projectPrefsLoadedRef.current = true;
-    void fetchProjectPrefs(endpoint)
-      .then((prefs) => {
-        setProjectPrefs(prefs);
-        setProjectPrefsReady(true);
-      })
-      .catch(() => {
-        setProjectPrefsReady(true);
-      });
-  }, [runtimeConnected, endpoint]);
 
   useEffect(() => {
     // 引导最小化期间，当前步骤完成后自动弹回向导。
@@ -1353,19 +1316,6 @@ export default function App() {
       void loadProtectionAvatars();
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
-
-  useEffect(() => {
-    if (!runtimeConnected || !activeProjectPath) {
-      setProjectIndex(null);
-      setProjectIndexProject("");
-      setProjectIndexError("");
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void scanActiveProjectIndex(activeProjectPath, true);
-    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
     setAgentApprovals(null);
@@ -2319,7 +2269,7 @@ export default function App() {
     setActiveProjectPath("");
     setError("");
     // 折叠状态下新建临时对话自动展开，避免「点了没反应」的错觉。
-    setCollapsedProjects((map) => (map[TEMP_CHATS_COLLAPSE_KEY] ? { ...map, [TEMP_CHATS_COLLAPSE_KEY]: false } : map));
+    expandProjectGroup(TEMP_CHATS_COLLAPSE_KEY);
     const existingEmpty = chats.find((chat) => !chat.projectPath && !chat.archived && chat.items.length === 0);
     if (existingEmpty) {
       setActiveChatId(existingEmpty.id);
@@ -2330,6 +2280,18 @@ export default function App() {
     markChatsDirty();
     setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", createdAt: now, updatedAt: now, items: [] }, ...list]);
     setActiveChatId(id);
+  }
+
+  function archiveProjectChats(path: string, archived: boolean) {
+    const key = normalizeProjectPathKey(path);
+    if (!key) {
+      return;
+    }
+    markChatsDirty();
+    setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
+    if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
+      setActiveChatId("");
+    }
   }
 
   async function loadSubAgents(includeEvents = false) {
@@ -2518,280 +2480,6 @@ export default function App() {
 
   function askInNewSession(text: string) {
     void openSelectionInSubAgent(text);
-  }
-
-  async function persistProjectPrefs(next: ProjectPrefs): Promise<ProjectPrefs | null> {
-    setSavingProjectPrefs(true);
-    try {
-      const saved = await saveProjectPrefs(endpoint, next);
-      setProjectPrefs(saved);
-      await refreshSilently();
-      return saved;
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      return null;
-    } finally {
-      setSavingProjectPrefs(false);
-    }
-  }
-
-  async function addProjectPath() {
-    const path = newProjectPath.trim();
-    if (!path || savingProjectPrefs) {
-      return;
-    }
-    setProjectModalError("");
-    const saved = await persistProjectPrefs({
-      ...projectPrefs,
-      customPaths: [...projectPrefs.customPaths, path],
-    });
-    if (!saved) {
-      return;
-    }
-    const accepted = saved.customPaths.some((item) => item.replace(/\//g, "\\").toLowerCase() === path.replace(/\//g, "\\").toLowerCase());
-    if (!accepted) {
-      setProjectModalError(t("project.invalidProjectRoot"));
-      return;
-    }
-    setNewProjectPath("");
-    setShowProjectModal(false);
-    try {
-      await refresh();
-    } catch {
-      // 列表会随下一次轮询更新
-    }
-    selectProject(path);
-  }
-
-  function removeCustomProject(path: string) {
-    void persistProjectPrefs({
-      ...projectPrefs,
-      customPaths: projectPrefs.customPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
-    });
-  }
-
-  function hideProject(path: string) {
-    if (!path) {
-      return;
-    }
-    void persistProjectPrefs({
-      ...projectPrefs,
-      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)), path],
-    });
-    if (normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(path)) {
-      newConversation("");
-    }
-  }
-
-  function unhideProject(path: string) {
-    void persistProjectPrefs({
-      ...projectPrefs,
-      hiddenPaths: projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
-    });
-  }
-
-  function projectDisplayName(project?: { path?: string; name?: string }): string {
-    if (!project) {
-      return "";
-    }
-    const key = projectKey(project);
-    return projectUiPrefs.aliases[normalizeProjectPathKey(key)] || project.name || project.path || "Unity Project";
-  }
-
-  function togglePinProject(path: string) {
-    const key = normalizeProjectPathKey(path);
-    if (!key) {
-      return;
-    }
-    setProjectUiPrefs((current) => {
-      const pinned = new Set(current.pinnedPaths.map(normalizeProjectPathKey));
-      if (pinned.has(key)) {
-        pinned.delete(key);
-      } else {
-        pinned.add(key);
-      }
-      return { ...current, pinnedPaths: Array.from(pinned) };
-    });
-  }
-
-  function startRenameProject(path: string) {
-    setRenamingProjectPath(path);
-    const project = projectItems.find((item) => normalizeProjectPathKey(projectKey(item)) === normalizeProjectPathKey(path));
-    setProjectRenameDraft(projectDisplayName(project) || shortPath(path));
-  }
-
-  function commitRenameProject(cancel = false) {
-    if (!cancel && renamingProjectPath) {
-      const key = normalizeProjectPathKey(renamingProjectPath);
-      const title = projectRenameDraft.trim();
-      setProjectUiPrefs((current) => {
-        const aliases = { ...current.aliases };
-        if (title) {
-          aliases[key] = title;
-        } else {
-          delete aliases[key];
-        }
-        return { ...current, aliases };
-      });
-    }
-    setRenamingProjectPath("");
-    setProjectRenameDraft("");
-  }
-
-  function resolveOpenableProjectPath(path: string): string {
-    const raw = path.trim();
-    const normalized = normalizeProjectPathKey(raw);
-    const candidates: string[] = [raw];
-    const pushCandidate = (candidate?: string) => {
-      const value = (candidate || "").trim();
-      if (value && !candidates.some((item) => normalizeProjectPathKey(item) === normalizeProjectPathKey(value))) {
-        candidates.push(value);
-      }
-    };
-    const matchingProject = projectItems.find((project) => {
-      const identifiers = [project.path, project.name, projectKey(project), projectDisplayName(project)];
-      return identifiers.some((identifier) => normalizeProjectPathKey(identifier || "") === normalized);
-    });
-    pushCandidate(matchingProject?.path);
-    if (normalized && normalized === normalizeProjectPathKey(activeProjectPath)) {
-      pushCandidate(activeProjectPath);
-    }
-    if (!isAbsoluteLocalPath(raw)) {
-      const activeMcpProjects = projectItems.filter((project) => Boolean((project as { activeMcp?: boolean }).activeMcp && project.path));
-      if (activeMcpProjects.length === 1) {
-        pushCandidate(activeMcpProjects[0].path);
-      }
-    }
-    return candidates.find(isAbsoluteLocalPath) || raw;
-  }
-
-  async function openProjectFolder(path: string) {
-    const targetPath = resolveOpenableProjectPath(path);
-    if (!targetPath) {
-      return;
-    }
-    if (!isAbsoluteLocalPath(targetPath)) {
-      setError("Cannot open this project because it does not have an absolute Unity project path.");
-      return;
-    }
-    try {
-      if (!isTauriRuntime()) {
-        throw new Error("Open folder is available in the desktop app.");
-      }
-      await invoke("open_folder", { path: targetPath });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  function archiveProjectChats(path: string, archived: boolean) {
-    const key = normalizeProjectPathKey(path);
-    if (!key) {
-      return;
-    }
-    markChatsDirty();
-    setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
-    if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
-      setActiveChatId("");
-    }
-  }
-
-  async function scanActiveProjectIndex(projectPath = activeProjectPath, silent = false) {
-    if (!projectPath) {
-      return;
-    }
-    setLoadingProjectIndex(true);
-    if (!silent) {
-      setProjectIndexError("");
-    }
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await scanProjectIndex(targetEndpoint, { projectPath });
-      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
-        setProjectIndex(payload);
-        setProjectIndexProject(projectPath);
-        setProjectIndexError(payload.ok ? "" : payload.error || "Project index scan failed.");
-      }
-    } catch (cause) {
-      if (normalizeProjectPathKey(projectPath) === normalizeProjectPathKey(activeProjectPath)) {
-        setProjectIndexError(cause instanceof Error ? cause.message : String(cause));
-      }
-    } finally {
-      setLoadingProjectIndex(false);
-    }
-  }
-
-  async function planActiveOutfitImport() {
-    const packagePath = outfitPackagePath.trim();
-    if (!packagePath) {
-      setOutfitImportStatus("Package path is required.");
-      return;
-    }
-    setLoadingOutfitImportPlan(true);
-    setOutfitImportStatus("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          setOutfitImportStatus("VRCForge runtime is not connected.");
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await planOutfitImport(targetEndpoint, {
-        packagePath,
-        projectPath: activeProjectPath,
-      });
-      setOutfitImportPlan(payload);
-      setOutfitImportStatus(payload.ok ? "Import plan ready." : payload.error || payload.plan?.error || "Import plan needs review.");
-    } catch (cause) {
-      setOutfitImportStatus(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingOutfitImportPlan(false);
-    }
-  }
-
-  async function requestActiveOutfitImport() {
-    const packagePath = outfitPackagePath.trim();
-    if (!packagePath) {
-      setOutfitImportStatus("Package path is required.");
-      return;
-    }
-    setRequestingOutfitImport(true);
-    setOutfitImportStatus("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          setOutfitImportStatus("VRCForge runtime is not connected.");
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await requestOutfitImport(targetEndpoint, {
-        packagePath,
-        projectPath: activeProjectPath,
-      });
-      setOutfitImportStatus(payload.approval ? `Approval queued: ${payload.approval.id}` : "Approval queued.");
-      await refresh(targetEndpoint);
-    } catch (cause) {
-      setOutfitImportStatus(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRequestingOutfitImport(false);
-    }
-  }
-
-  function toggleProjectCollapse(key: string) {
-    setCollapsedProjects((current) => ({ ...current, [key]: !current[key] }));
   }
 
   function finishOnboarding() {
