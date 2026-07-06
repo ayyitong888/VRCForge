@@ -46,6 +46,7 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
@@ -88,14 +89,13 @@ import {
   normalizeProviderForContext,
   readChatAttachment,
   selectedTextAttachment,
-  textContextAttachment,
 } from "./lib/conversation-utils";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import { cacheChatTimestampsFast, isStoredChat } from "./lib/chat-thread";
-import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
+import type { ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
-import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
+import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildRuntimeSchedule } from "./lib/runtime-schedule";
 import { emptySkillDraft } from "./lib/skill-draft";
 import { buildChatSidebarView, buildEmptyProjectState } from "./lib/sidebar-view";
@@ -134,7 +134,6 @@ import {
   OptimizationProofSummary,
   SkillPackageEntry,
   SkillPackagePreflight,
-  approveAgentApproval,
   checkSkills,
   compactAgentHistory,
   cancelSubAgent,
@@ -183,9 +182,7 @@ import {
   previewRestoreCheckpoint,
   previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
-  rejectAgentApproval,
   requestAgentDesktopAction,
-  requestApprovalRevision,
   requestOptimizationApply,
   requestAvatarEncryptionApply,
   requestRestoreInterruptedApplyRecovery,
@@ -284,7 +281,6 @@ export default function App() {
       return {};
     }
   });
-  const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
   const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
   const [renamingChatId, setRenamingChatId] = useState("");
@@ -668,6 +664,29 @@ export default function App() {
     setError,
   });
   refreshRuntimeRunsRef.current = refreshRuntimeRuns;
+  const {
+    approvalActions,
+    pendingApprovalForResponse,
+    modifyApprovalInComposer,
+    approveShell,
+    rejectShell,
+  } = useApprovalExecution({
+    endpoint,
+    activeRuntimeProjectPath,
+    activeChatId,
+    activeView,
+    pendingApprovalItems,
+    maxAttachmentsPerTurn: MAX_ATTACHMENTS_PER_TURN,
+    setInput,
+    setAttachments,
+    setRuntimeNotice,
+    setError,
+    formatPayload,
+    appendToChat,
+    refresh,
+    refreshRuntimeRuns,
+    loadCheckpoints,
+  });
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1583,60 +1602,6 @@ export default function App() {
     updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
   }
 
-  function pendingApprovalForResponse(response: AgentRuntimeResponse): AgentApproval | null {
-    const approvalId = approvalIdFromResponse(response);
-    if (approvalId) {
-      const pending = pendingApprovalItems.find((approval) => approval.id === approvalId);
-      if (pending) {
-        return pending;
-      }
-    }
-    const shellApproval = response.shell?.approval;
-    if (shellApproval?.status === "pending") {
-      return shellApproval;
-    }
-    return null;
-  }
-
-  async function modifyApprovalInComposer(approval: AgentApproval) {
-    const target = approval.targetTool || approval.preview?.command || t("approval.thisApproval");
-    const detail = approval.paramsSummary || approval.arguments || approval.preview || {};
-    const approvalContext = [
-      `${t("approval.contextPending")}: ${approval.id}`,
-      `${t("approval.contextTarget")}: ${target}`,
-      approval.reason ? `${t("approval.contextReason")}: ${approval.reason}` : "",
-      `${t("approval.contextDetails")}:\n${formatPayload(detail)}`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    setInput((current) => {
-      const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
-      return `${prefix}${t("approval.modifyPrompt", { id: approval.id, target })}\n`;
-    });
-    setAttachments((current) => [...current, textContextAttachment(t("approval.pendingContextTitle"), approvalContext)].slice(0, MAX_ATTACHMENTS_PER_TURN));
-    setRuntimeNotice(t("approval.modifyNotice"));
-    setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
-    setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
-    try {
-      await requestApprovalRevision(endpoint, approval.id, {
-        reason: t("approval.revisionReason"),
-        note: t("approval.revisionNote", { id: approval.id, target }),
-        ...approvalScope,
-      });
-      await refresh();
-      await refreshRuntimeRuns(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setApprovalActions((current) => {
-        const next = { ...current };
-        delete next[approval.id];
-        return next;
-      });
-    }
-  }
-
   function copyConversationItem(item: ConversationItem) {
     const text = conversationItemText(item, t);
     if (!text.trim()) {
@@ -1944,75 +1909,6 @@ export default function App() {
 
   function removeAttachment(id: string) {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-  }
-
-  async function approveShell(approvalId: string) {
-    setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
-    setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
-    try {
-      const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
-      const executionResult = payload.execution?.result;
-      const shellResult = isAgentShellResult(executionResult) ? executionResult : undefined;
-      if (activeChatId && (shellResult || payload.execution?.error)) {
-        appendToChat(activeChatId, {
-          id: `result-${approvalId}-${Date.now()}`,
-          type: "result",
-          approvalId,
-          result: shellResult,
-          error: payload.execution?.error,
-        });
-      }
-      await refresh();
-      await refreshRuntimeRuns(false);
-      const executionRecord = asRecord(payload.execution);
-      const executionTargetTool = typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "";
-      const executionResultRecord = asRecord(executionResult);
-      const resolvedRecoveries = executionResultRecord?.resolvedApplyRecoveries;
-      const shouldRefreshCheckpoints =
-        activeView === "checkpoints" ||
-        executionTargetTool === "vrcforge_restore_checkpoint" ||
-        executionTargetTool === "vrcforge_resolve_interrupted_apply_recovery" ||
-        Array.isArray(resolvedRecoveries);
-      if (shouldRefreshCheckpoints) {
-        await loadCheckpoints();
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setApprovalActions((current) => {
-        const next = { ...current };
-        delete next[approvalId];
-        return next;
-      });
-    }
-  }
-
-  async function rejectShell(approvalId: string) {
-    setApprovalActions((current) => ({ ...current, [approvalId]: "reject" }));
-    setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
-    try {
-      await rejectAgentApproval(endpoint, approvalId, approvalScope);
-      if (activeChatId) {
-        appendToChat(activeChatId, {
-          id: `result-${approvalId}-${Date.now()}`,
-          type: "result",
-          approvalId,
-          error: "rejected",
-        });
-      }
-      await refresh();
-      await refreshRuntimeRuns(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setApprovalActions((current) => {
-        const next = { ...current };
-        delete next[approvalId];
-        return next;
-      });
-    }
   }
 
   function newConversation(projectPath?: string) {
