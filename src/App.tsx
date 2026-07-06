@@ -86,6 +86,24 @@ import { OutputBlock } from "./components/ui/output-block";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
+  appendAttachmentSummary,
+  buildChatHistory,
+  buildCompactSummary,
+  buildContextUsageFromRuntime,
+  cloneChatAttachments,
+  conversationItemText,
+  findProviderModelInfo,
+  formatPayload,
+  isRetryableConversationItem,
+  latestAgentContextUsage,
+  latestConversationItemId,
+  normalizeProviderForContext,
+  readChatAttachment,
+  selectedTextAttachment,
+  serializeChatAttachments,
+  textContextAttachment,
+} from "./lib/conversation-utils";
+import {
   defaultBaseUrlForProvider,
   defaultModelForProvider,
   providerDisplayName,
@@ -93,7 +111,6 @@ import {
   thinkingStatusForModelLabel,
   thinkingTraceLabel,
 } from "./lib/provider-ui";
-import { formatAttachmentSize } from "./lib/chat-format";
 import { cacheChatTimestampsFast, formatChatSidebarTime, isStoredChat, sortChatsByPin } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./lib/chat-types";
@@ -108,7 +125,6 @@ import {
   AgentDesktopAction,
   AgentGoal,
   AgentMemory,
-  AgentContextUsage,
   AgentRuntimeRun,
   AgentRuntimeResponse,
   AgentReasoningTrace,
@@ -124,7 +140,6 @@ import {
   SubAgentTaskList,
   ApiError,
   AppBootstrap,
-  ChatHistoryEntry,
   DoctorReport,
   DiagnosticsStatus,
   ExternalAgentConnectorClient,
@@ -321,12 +336,8 @@ const LEFT_SIDEBAR_COLLAPSED_KEY = "vrcforge_left_sidebar_collapsed";
 const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
 const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
-const CONTEXT_AUTO_COMPACT_RATIO = 0.92;
 const MAX_QUEUED_TURNS = 8;
 const MAX_ATTACHMENTS_PER_TURN = 8;
-const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
-const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
-const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 const DEFAULT_LEFT_PANE_WIDTH = 280;
 const DEFAULT_RIGHT_PANE_WIDTH = 320;
@@ -1073,9 +1084,9 @@ export default function App() {
   const contextUsage = useMemo(
     () =>
       apiConfig || smokeMode
-        ? buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo)
+        ? buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t)
         : undefined,
-    [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode],
+    [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t],
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
@@ -2260,7 +2271,7 @@ export default function App() {
   }
 
   function copyConversationItem(item: ConversationItem) {
-    const text = conversationItemText(item);
+    const text = conversationItemText(item, t);
     if (!text.trim()) {
       return;
     }
@@ -2427,7 +2438,7 @@ export default function App() {
           targetEndpoint = readyEndpoint;
         }
       }
-      const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items));
+      const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items, t));
       summary = (payload.summary || "").trim();
       if (summary) {
         summary = `${t("compact.modelSummary", { count: payload.entryCount ?? items.length })}\n${summary}`;
@@ -2438,7 +2449,7 @@ export default function App() {
       setSending(false);
     }
     if (!summary) {
-      summary = buildCompactSummary(items);
+      summary = buildCompactSummary(items, t);
     }
     updateChat(chatId, (chat) => ({
       ...touchChat(chat),
@@ -2615,9 +2626,9 @@ export default function App() {
     const baseItems = options?.baseItems ?? chat?.items ?? [];
     const chatSessionId = options?.sessionId ?? chat?.sessionId ?? "";
     const chatAgentName = chat?.agentName || "desktop-agent";
-    const history = baseItems.length > 0 ? buildChatHistory(baseItems) : [];
+    const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
     const startedAt = Date.now();
-    const messageForModel = appendAttachmentSummary(turn.text, turn.attachments);
+    const messageForModel = appendAttachmentSummary(turn.text, turn.attachments, t);
     const abortController = new AbortController();
     let userItemId = "";
     activeTurnAbortRef.current = abortController;
@@ -2721,7 +2732,7 @@ export default function App() {
       return;
     }
     const selected = Array.from(files).slice(0, remaining);
-    const nextAttachments = await Promise.all(selected.map(readChatAttachment));
+    const nextAttachments = await Promise.all(selected.map((file) => readChatAttachment(file, t)));
     setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
     if (files.length > remaining) {
       setError(t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN }));
@@ -6382,20 +6393,6 @@ function displaySkillStatus(status: string): string {
   return labels[status] || status || "-";
 }
 
-function formatPayload(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 function buildRuntimeFileReferences(items: ConversationItem[], diffFiles: WorkspaceDiffSummary["files"]): RuntimeFileReference[] {
   const seen = new Map<string, RuntimeFileReference>();
   const add = (path: string, source: string) => {
@@ -6476,353 +6473,4 @@ function quoteLines(text: string): string {
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
-}
-
-function formatDuration(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  if (seconds < 60) {
-    return i18n.t("format.seconds", { n: seconds });
-  }
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes < 60) {
-    return rest > 0 ? i18n.t("format.minutesSeconds", { m: minutes, s: rest }) : i18n.t("format.minutes", { n: minutes });
-  }
-  const hours = Math.floor(minutes / 60);
-  const restMinutes = minutes % 60;
-  return restMinutes > 0 ? i18n.t("format.hoursMinutes", { h: hours, m: restMinutes }) : i18n.t("format.hours", { n: hours });
-}
-
-const COMPACT_ENTRY_MAX_CHARS = 400;
-const COMPACT_HEAD_ENTRIES = 2;
-const COMPACT_TAIL_ENTRIES = 8;
-
-function clipText(text: string, limit: number): string {
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
-}
-
-type ContextLimitResolution = {
-  limit: number;
-  known: boolean;
-  source: "provider" | "known" | "estimated";
-};
-
-const KNOWN_MODEL_CONTEXT_LIMITS: Record<string, number> = {
-  "deepseek:deepseek-v4-pro": 1_000_000,
-  "gemini:gemini-2.5-flash": 1_048_576,
-  "gemini:gemini-2.5-pro": 1_048_576,
-  "gemini:gemini-2.5-flash-lite": 1_048_576,
-  "gemini:gemini-3.5-flash": 1_048_576,
-};
-
-function normalizeProviderForContext(provider: string): string {
-  const key = provider.trim().toLowerCase();
-  if (key.includes("gemini") || key.includes("google") || key.includes("vertex")) {
-    return "gemini";
-  }
-  if (key.includes("anthropic") || key.includes("claude")) {
-    return "anthropic";
-  }
-  if (key.includes("deepseek")) {
-    return "deepseek";
-  }
-  if (key.includes("openai")) {
-    return "openai";
-  }
-  return key || "unknown";
-}
-
-function normalizeModelId(model: string): string {
-  const value = model.trim().toLowerCase();
-  const modelsPathIndex = value.lastIndexOf("/models/");
-  if (modelsPathIndex >= 0) {
-    return value.slice(modelsPathIndex + "/models/".length);
-  }
-  return value.replace(/^models\//, "");
-}
-
-function findProviderModelInfo(models: ProviderModelInfo[], model: string): ProviderModelInfo | undefined {
-  const target = normalizeModelId(model);
-  return models.find((item) => normalizeModelId(item.id) === target);
-}
-
-function readProviderModelContextLimit(modelInfo?: ProviderModelInfo): number | null {
-  const candidates = [
-    modelInfo?.inputTokenLimit,
-    modelInfo?.contextWindow,
-    modelInfo?.maxInputTokens,
-  ];
-  for (const value of candidates) {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function contextLimitForProviderModel(provider: string, model: string, modelInfo?: ProviderModelInfo): ContextLimitResolution {
-  const providerLimit = readProviderModelContextLimit(modelInfo);
-  if (providerLimit) {
-    return { limit: providerLimit, known: true, source: "provider" };
-  }
-  const providerKey = normalizeProviderForContext(provider);
-  const modelKey = normalizeModelId(model);
-  const knownLimit = KNOWN_MODEL_CONTEXT_LIMITS[`${providerKey}:${modelKey}`];
-  if (knownLimit) {
-    return { limit: knownLimit, known: true, source: "known" };
-  }
-  return { limit: CONTEXT_TOKEN_LIMIT_ESTIMATE, known: false, source: "estimated" };
-}
-
-function buildContextUsageFromRuntime(
-  usage: AgentContextUsage | undefined,
-  provider = "",
-  model = "",
-  modelInfo?: ProviderModelInfo,
-): ContextUsage | undefined {
-  if (!usage) {
-    return undefined;
-  }
-  const contextLimit = contextLimitForProviderModel(provider, model, modelInfo);
-  const limit = contextLimit.limit;
-  const used = numberOrNull(usage.inputTokens) ?? numberOrNull(usage.totalTokens);
-  if (!usage.exact || used === null) {
-    return {
-      used: 0,
-      limit,
-      limitKnown: contextLimit.known,
-      source: "unavailable",
-      exact: false,
-      ratio: 0,
-      label: i18n.t("chat.contextUsageUnavailable"),
-      title: i18n.t("chat.contextUsageUnavailableTitle", {
-        model: usage.model || model || provider || i18n.t("chat.currentModel"),
-      }),
-      warning: false,
-    };
-  }
-
-  const ratio = contextLimit.known ? Math.min(1, used / limit) : 0;
-  const percent = Math.round(ratio * 100);
-  const limitLabel = contextLimit.known ? formatCount(limit) : i18n.t("chat.contextLimitUnknown");
-  return {
-    used,
-    limit,
-    limitKnown: contextLimit.known,
-    source: "provider_usage",
-    exact: true,
-    ratio,
-    label: contextLimit.known ? `${formatCount(used)} / ${limitLabel} (${percent}%)` : `${formatCount(used)} / ${limitLabel}`,
-    title: i18n.t("chat.contextUsageActualTitle", {
-      input: formatCount(numberOrNull(usage.inputTokens) ?? 0),
-      output: formatCount(numberOrNull(usage.outputTokens) ?? 0),
-      total: formatCount(numberOrNull(usage.totalTokens) ?? used),
-      requests: formatCount(numberOrNull(usage.requestCount) ?? 1),
-      history: formatCount(numberOrNull(usage.sentHistoryEntryCount) ?? 0),
-      chars: formatCount(numberOrNull(usage.promptCharacterCount) ?? 0),
-      limit: limitLabel,
-      model: usage.model || model || provider || i18n.t("chat.currentModel"),
-    }),
-    warning: contextLimit.known && ratio >= CONTEXT_AUTO_COMPACT_RATIO,
-  };
-}
-
-function latestAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "agent" && item.response.contextUsage) {
-      return item.response.contextUsage;
-    }
-  }
-  return undefined;
-}
-
-function numberOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function buildChatHistory(items: ConversationItem[]): ChatHistoryEntry[] {
-  const history: ChatHistoryEntry[] = [];
-  for (const item of items) {
-    if (item.type === "user") {
-      const text = appendAttachmentSummary(item.text, item.attachments || []).trim();
-      if (text) {
-        history.push({ role: "user", text });
-      }
-    } else if (item.type === "agent") {
-      const text = visibleAgentDialogueText(item.response).trim();
-      if (text) {
-        history.push({ role: "agent", text });
-      }
-    } else if (item.type === "compact") {
-      const text = item.text.trim();
-      if (text) {
-        history.push({ role: "agent", text });
-      }
-    }
-  }
-  return history;
-}
-
-function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
-  return String(response.plan?.reply || response.plan?.summary || "");
-}
-
-function appendAttachmentSummary(text: string, attachments: ChatAttachment[]): string {
-  if (!attachments.length) {
-    return text;
-  }
-  const summary = attachments
-    .map((attachment) => {
-      const payload =
-        attachment.payloadKind === "data_url"
-          ? i18n.t("attachments.payloadAttached")
-          : attachment.payloadKind === "text"
-            ? i18n.t("attachments.textAttached")
-            : attachment.truncated
-              ? i18n.t("attachments.metadataOnlyLarge")
-              : i18n.t("attachments.metadataOnly");
-      return `- ${attachment.name} (${attachment.type || i18n.t("attachments.fileTypeFallback")}, ${formatAttachmentSize(attachment.size)}, ${payload})`;
-    })
-    .join("\n");
-  return [text.trim(), `${i18n.t("attachments.summaryHeader")}:\n${summary}`].filter(Boolean).join("\n\n");
-}
-
-function selectedTextAttachment(text: string): ChatAttachment {
-  const normalized = text.trim();
-  return {
-    id: `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: SELECTED_TEXT_ATTACHMENT_NAME,
-    size: new Blob([normalized]).size,
-    type: "text/plain",
-    text: normalized,
-    payloadKind: "text",
-  };
-}
-
-function textContextAttachment(name: string, text: string): ChatAttachment {
-  const normalized = text.trim();
-  return {
-    id: `context-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name,
-    size: new Blob([normalized]).size,
-    type: "text/plain",
-    text: normalized,
-    payloadKind: "text",
-  };
-}
-
-function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachment[] {
-  return attachments.map((attachment) => ({
-    ...attachment,
-    id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  }));
-}
-
-function conversationItemText(item: ConversationItem): string {
-  if (item.type === "user") {
-    return appendAttachmentSummary(item.text, item.attachments || []);
-  }
-  if (item.type === "agent") {
-    const parts = [
-      item.response.plan?.reply || item.response.plan?.summary || "",
-      item.response.write ? `Write:\n${formatPayload(item.response.write)}` : "",
-      item.response.skill ? `Tool:\n${formatPayload(item.response.skill)}` : "",
-      item.response.shell ? `Command:\n${formatPayload(item.response.shell)}` : "",
-    ];
-    return parts.filter((part) => part.trim()).join("\n\n");
-  }
-  if (item.type === "result") {
-    return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");
-  }
-  if (item.type === "error" || item.type === "compact") {
-    return item.text;
-  }
-  if (item.type === "subagent") {
-    return formatPayload(item.task);
-  }
-  return "";
-}
-
-function latestConversationItemId(
-  items: ConversationItem[],
-  predicate: (item: ConversationItem) => boolean,
-): string {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (predicate(item)) {
-      return item.id;
-    }
-  }
-  return "";
-}
-
-function isRetryableConversationItem(item: ConversationItem): boolean {
-  return item.type === "user" || item.type === "agent" || item.type === "result" || item.type === "error" || item.type === "subagent";
-}
-
-function serializeChatAttachments(attachments: ChatAttachment[]) {
-  return attachments.map((attachment) => ({
-    id: attachment.id,
-    name: attachment.name,
-    size: attachment.size,
-    type: attachment.type,
-    dataUrl: attachment.dataUrl,
-    text: attachment.text,
-    payloadKind: attachment.payloadKind || (attachment.dataUrl ? "data_url" : attachment.text ? "text" : "metadata"),
-    truncated: Boolean(attachment.truncated),
-    error: attachment.error || "",
-  }));
-}
-
-function readChatAttachment(file: File): Promise<ChatAttachment> {
-  const base: ChatAttachment = {
-    id: `att-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: file.name,
-    size: file.size,
-    type: file.type || "application/octet-stream",
-  };
-  if (file.size > MAX_ATTACHMENT_PAYLOAD_BYTES) {
-    return Promise.resolve({
-      ...base,
-      payloadKind: "metadata",
-      truncated: true,
-      error: i18n.t("attachments.payloadLimitError", { limit: formatAttachmentSize(MAX_ATTACHMENT_PAYLOAD_BYTES) }),
-    });
-  }
-  if (file.type.startsWith("text/") && file.size <= MAX_TEXT_ATTACHMENT_BYTES) {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve({ ...base, text: typeof reader.result === "string" ? reader.result : "", payloadKind: "text" });
-      reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: i18n.t("attachments.readTextFailed") });
-      reader.readAsText(file);
-    });
-  }
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () =>
-      resolve({
-        ...base,
-        dataUrl: typeof reader.result === "string" ? reader.result : undefined,
-        payloadKind: typeof reader.result === "string" ? "data_url" : "metadata",
-      });
-    reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: i18n.t("attachments.readFileFailed") });
-    reader.readAsDataURL(file);
-  });
-}
-
-function buildCompactSummary(items: ConversationItem[]): string {
-  const entries = buildChatHistory(items).map(
-    (entry) => `${entry.role === "user" ? i18n.t("compact.user") : i18n.t("compact.assistant")}: ${clipText(entry.text.replace(/\s+/g, " ").trim(), COMPACT_ENTRY_MAX_CHARS)}`,
-  );
-  let lines = entries;
-  if (entries.length > COMPACT_HEAD_ENTRIES + COMPACT_TAIL_ENTRIES) {
-    const omitted = entries.length - COMPACT_HEAD_ENTRIES - COMPACT_TAIL_ENTRIES;
-    lines = [
-      ...entries.slice(0, COMPACT_HEAD_ENTRIES),
-      i18n.t("compact.omitted", { count: omitted }),
-      ...entries.slice(entries.length - COMPACT_TAIL_ENTRIES),
-    ];
-  }
-  return `${i18n.t("compact.summary", { count: entries.length })}\n${lines.join("\n")}`;
 }
