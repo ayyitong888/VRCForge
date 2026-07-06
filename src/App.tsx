@@ -941,6 +941,7 @@ export default function App() {
   const queueRef = useRef<QueuedTurn[]>([]);
   const sendingRef = useRef(false);
   const stopRequestedRef = useRef(false);
+  const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
@@ -2199,14 +2200,22 @@ export default function App() {
       return;
     }
     setChats((list) =>
-      list.map((chat) => ({
-        ...chat,
-        items: chat.items.map((item) =>
-          item.type === "streaming" && item.clientTurnId === clientTurnId
-            ? { ...item, text: `${item.text}${delta.textDelta}` }
-            : item,
-        ),
-      })),
+      list.map((chat) => {
+        if (streamingTurnChatRef.current.get(clientTurnId) !== chat.id) {
+          return chat;
+        }
+        const index = chat.items.findIndex((item) => item.type === "streaming" && item.clientTurnId === clientTurnId);
+        if (index < 0) {
+          return chat;
+        }
+        const items = [...chat.items];
+        const item = items[index];
+        if (!item || item.type !== "streaming") {
+          return chat;
+        }
+        items[index] = { ...item, text: `${item.text}${delta.textDelta}` };
+        return { ...chat, items };
+      }),
     );
   }
 
@@ -2647,6 +2656,7 @@ export default function App() {
         model: turn.model,
       };
       const message = turn.text;
+      streamingTurnChatRef.current.set(turn.id, chatId);
       updateChat(chatId, (current) => ({
         ...touchChat(current),
         sessionId: options?.sessionId ?? current.sessionId,
@@ -2692,6 +2702,7 @@ export default function App() {
       if (activeTurnAbortRef.current === abortController) {
         activeTurnAbortRef.current = null;
       }
+      streamingTurnChatRef.current.delete(turn.id);
       setCurrentTurn(null);
     }
   }
