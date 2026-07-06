@@ -67,7 +67,8 @@ import {
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { ChatMarkdown } from "./components/chat/chat-markdown";
-import { RuntimeDiffFileRow, RuntimeFileReferenceRow, RuntimeInfoRow, RuntimeReviewEvidenceRow, RuntimeRunRow, RuntimeScheduleRow, RuntimeSection, RuntimeToolButton, StatusDot } from "./components/runtime/runtime-sidebar-ui";
+import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
+import { RuntimeToolButton } from "./components/runtime/runtime-sidebar-ui";
 import { AttachmentStrip, Composer } from "./components/chat/composer";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
 import { CheckpointStoragePanel } from "./components/settings/checkpoint-storage-panel";
@@ -5694,379 +5695,58 @@ export default function App() {
           <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
         </div>
         {rightSidebarCollapsed ? null : (
-          <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold">{t("workspace.title")}</div>
-              <button
-                type="button"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                onClick={() => void refreshUnityStatus()}
-                title={t("workspace.refreshStatus")}
-                disabled={!runtimeConnected || loadingUnityStatus}
-              >
-                <RefreshCw className={cn("h-4 w-4", loadingUnityStatus && "animate-spin")} />
-              </button>
-              <button
-                type="button"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                onClick={() => setRightSidebarCollapsed(true)}
-                title={t("workspace.hideSidebar")}
-              >
-                <PanelRightClose className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
-              <section className="border-b border-border pb-3">
-                <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-                  <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.projectStatus")}</h2>
-                  {hasEnvironmentAttention || hasStartupIssue ? (
-                    <button
-                      type="button"
-                      className="shrink-0 rounded-md border border-amber-300/70 px-2 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-50 dark:border-amber-900/50 dark:text-amber-300 dark:hover:bg-amber-950/30"
-                      onClick={() => void openDoctor()}
-                    >
-                      {t("sidebar.doctor")}
-                    </button>
-                  ) : null}
-                </div>
-                <div className="space-y-1">
-                  <RuntimeInfoRow
-                    icon={<Folder className="h-4 w-4" />}
-                    label={t("workspace.project")}
-                    value={workspaceProjectLabel}
-                  />
-                  <RuntimeInfoRow
-                    icon={<Bot className="h-4 w-4" />}
-                    label={t("workspace.core")}
-                    value={runtimeConnected ? localizeHealthMessage(backendComponent?.message) || t("workspace.online") : t("workspace.offline")}
-                    suffix={backendComponent ? <StatusDot status={backendComponent.status} /> : null}
-                  />
-                  <RuntimeInfoRow
-                    icon={<Monitor className="h-4 w-4" />}
-                    label={t("workspace.unity")}
-                    value={unityBridgeLabel}
-                    suffix={unityBridgeComponent ? <StatusDot status={unityBridgeComponent.status} /> : null}
-                  />
-                  <RuntimeInfoRow
-                    icon={<Wrench className="h-4 w-4" />}
-                    label={t("workspace.avatarTools")}
-                    value={unityToolsLabel}
-                    suffix={unityToolsComponent ? <StatusDot status={unityToolsComponent.status} /> : null}
-                  />
-                  <RuntimeInfoRow
-                    icon={<Sparkles className="h-4 w-4" />}
-                    label={t("workspace.agent")}
-                    value={providerCompactLabel}
-                    suffix={providerComponent ? <StatusDot status={providerComponent.status} /> : null}
-                  />
-                  <RuntimeInfoRow
-                    icon={<ListChecks className="h-4 w-4" />}
-                    label={t("workspace.review")}
-                    value={reviewSummaryLabel}
-                  />
-                  <RuntimeInfoRow
-                    icon={<FileText className="h-4 w-4" />}
-                    label={t("workspace.changes")}
-                    value={
-                      changeSummaryLabel
-                    }
-                    suffix={
-                      workspaceDiffChanged ? (
-                        <span className="font-mono">
-                          <span className="text-emerald-600">+{formatCount(workspaceDiff?.additions || 0)}</span>{" "}
-                          <span className="text-destructive">-{formatCount(workspaceDiff?.deletions || 0)}</span>
-                        </span>
-                      ) : null
-                    }
-                  />
-                </div>
-                {runtimeNotice ? (
-                  <div className="mt-3 rounded-md border border-border bg-muted/50 px-2 py-2 text-xs text-muted-foreground">
-                    {runtimeNotice}
-                  </div>
-                ) : null}
-              {pendingApprovalItems.length ? (
-                  <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/5 px-2 py-2 text-xs text-amber-700">
-                    {t("workspace.inlineApprovalHint")}
-                  </div>
-                ) : null}
-              </section>
-
-              {runtimeRuns.length || runtimeRunsError ? (
-                <RuntimeSection
-                  title={t("workspace.runLedger")}
-                  collapsed={rightRuntimeSectionsCollapsed.runs}
-                  onToggle={() => toggleRightRuntimeSection("runs")}
-                  count={<Badge tone={runtimeRunsError ? "warn" : "muted"}>{runtimeRunsError ? "!" : formatCount(runtimeRuns.length)}</Badge>}
-                >
-                  {runtimeRunsError ? (
-                    <div className="text-xs text-muted-foreground">{runtimeRunsError}</div>
-                  ) : (
-                    <div className="space-y-0.5">
-                      {runtimeRuns.slice(0, 6).map((run, index) => (
-                        <RuntimeRunRow key={run.id || run.turnId || run.clientTurnId || index} run={run} />
-                      ))}
-                    </div>
-                  )}
-                </RuntimeSection>
-              ) : null}
-
-              {agentGoals.length ? (
-                <RuntimeSection
-                  title={t("workspace.goals")}
-                  collapsed={rightRuntimeSectionsCollapsed.goals}
-                  onToggle={() => toggleRightRuntimeSection("goals")}
-                  count={<Badge tone="muted">{formatCount(agentGoals.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {agentGoals.slice(0, 5).map((goal) => (
-                      <div key={goal.goalId} className="rounded-md px-1 py-1.5 text-xs">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className={cn("h-2 w-2 shrink-0 rounded-full", goal.status === "active" ? "bg-primary" : goal.status === "paused" ? "bg-amber-500" : "bg-muted-foreground/40")} />
-                          <span className="min-w-0 flex-1 truncate font-medium">{goal.title || goal.goalId}</span>
-                          <span className="shrink-0 text-muted-foreground">{goal.status}</span>
-                        </div>
-                        {goal.summary ? <div className="mt-0.5 line-clamp-2 pl-4 text-muted-foreground">{goal.summary}</div> : null}
-                      </div>
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {agentMemory.length ? (
-                <RuntimeSection
-                  title={t("workspace.memory")}
-                  collapsed={rightRuntimeSectionsCollapsed.memory}
-                  onToggle={() => toggleRightRuntimeSection("memory")}
-                  count={<Badge tone="muted">{formatCount(agentMemory.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {agentMemory.slice(0, 6).map((memory) => (
-                      <div key={memory.memoryId} className="rounded-md px-1 py-1.5 text-xs">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className="shrink-0 text-muted-foreground">{memory.scope || "project"}</span>
-                          <span className="min-w-0 flex-1 truncate font-medium">{memory.kind || "memory"}</span>
-                        </div>
-                        <div className="mt-0.5 line-clamp-2 text-muted-foreground">{memory.text}</div>
-                      </div>
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {desktopActions.length ? (
-                <RuntimeSection
-                  title={t("workspace.desktopActions")}
-                  collapsed={rightRuntimeSectionsCollapsed.desktopActions}
-                  onToggle={() => toggleRightRuntimeSection("desktopActions")}
-                  count={<Badge tone="muted">{formatCount(desktopActions.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {desktopActions.slice(0, 5).map((action) => (
-                      <div key={action.id || `${action.action}-${action.createdAt}`} className="rounded-md px-1 py-1.5 text-xs">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <MousePointer2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="min-w-0 flex-1 truncate font-medium">{action.action}</span>
-                          <span className="shrink-0 text-muted-foreground">{action.status}</span>
-                        </div>
-                        {action.error || action.promptSummary ? <div className="mt-0.5 line-clamp-2 pl-5 text-muted-foreground">{action.error || action.promptSummary}</div> : null}
-                      </div>
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {workspaceStateError ? <div className="px-1 py-2 text-xs text-muted-foreground">{workspaceStateError}</div> : null}
-
-              {runtimeReviewEvidence.length ? (
-                <RuntimeSection
-                  title={t("workspace.reviewEvidence")}
-                  collapsed={rightRuntimeSectionsCollapsed.reviewEvidence}
-                  onToggle={() => toggleRightRuntimeSection("reviewEvidence")}
-                  count={<Badge tone="muted">{formatCount(runtimeReviewEvidence.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {runtimeReviewEvidence.map((item) => (
-                      <RuntimeReviewEvidenceRow key={item.id} item={item} />
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {runtimeFileReferences.length ? (
-                <RuntimeSection
-                  title={t("workspace.filesSeen")}
-                  collapsed={rightRuntimeSectionsCollapsed.files}
-                  onToggle={() => toggleRightRuntimeSection("files")}
-                  count={<Badge tone="muted">{formatCount(runtimeFileReferences.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {runtimeFileReferences.map((file) => (
-                      <RuntimeFileReferenceRow key={`${file.source}-${file.path}`} file={file} />
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {workspaceDiffFiles.length || workspaceDiffError || workspaceDiff ? (
-                <RuntimeSection
-                  title={t("workspace.changes")}
-                  collapsed={rightRuntimeSectionsCollapsed.diff}
-                  onToggle={() => toggleRightRuntimeSection("diff")}
-                  action={
-                    <button
-                      type="button"
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void refreshWorkspaceDiff();
-                      }}
-                      title={t("workspace.refreshChanges")}
-                      aria-label={t("workspace.refreshChanges")}
-                      disabled={!runtimeConnected || loadingWorkspaceDiff}
-                    >
-                      <RefreshCw className={cn("h-3.5 w-3.5", loadingWorkspaceDiff && "animate-spin")} />
-                    </button>
-                  }
-                  count={
-                    <Badge tone={workspaceDiffChanged ? "warn" : "muted"}>
-                      {workspaceDiffChanged ? formatCount(workspaceDiff?.fileCount || 0) : workspaceDiff?.status || "idle"}
-                    </Badge>
-                  }
-                >
-                {workspaceDiffFiles.length ? (
-                  <div className="space-y-2">
-                    <button
-                      type="button"
-                      className="flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
-                      onClick={toggleWorkspaceDiffReview}
-                    >
-                      <span className="truncate">{t("workspace.changeReview")}</span>
-                      <span className="shrink-0 text-muted-foreground">
-                        {loadingWorkspaceDiffPatch ? t("common.loadingShort") : workspaceDiffReviewOpen ? t("common.hide") : t("common.open")}
-                      </span>
-                    </button>
-                    <div className="space-y-0.5">
-                      {workspaceDiffFiles.slice(0, 6).map((file) => (
-                        <RuntimeDiffFileRow key={`${file.status}-${file.path}`} file={file} />
-                      ))}
-                      {workspaceDiffFiles.length > 6 ? (
-                        <div className="pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(workspaceDiffFiles.length - 6) })}</div>
-                      ) : null}
-                    </div>
-                    {workspaceDiffReviewOpen ? (
-                      <div className="rounded-md border border-border bg-background/80 p-2">
-                        <div className="mb-1 text-xs font-medium text-muted-foreground">{t("workspace.gitPatchPreview")}</div>
-                        {workspaceDiff?.patch ? (
-                          <pre className="app-scrollbar max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
-                            {workspaceDiff.patch}
-                          </pre>
-                        ) : (
-                          <div className="text-xs text-muted-foreground">
-                            {loadingWorkspaceDiffPatch ? t("workspace.loadingPatch") : t("workspace.noTrackedPatch")}
-                          </div>
-                        )}
-                        {workspaceDiff?.patchTruncated ? <div className="mt-1 text-xs text-amber-700">{t("workspace.patchTruncated")}</div> : null}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">
-                    {workspaceDiffError || (runtimeConnected ? t("workspace.noLocalChanges") : t("workspace.coreOffline"))}
-                  </div>
-                )}
-                </RuntimeSection>
-              ) : null}
-
-              {runtimeSchedule.length ? (
-                <RuntimeSection
-                  title={t("workspace.queue")}
-                  collapsed={rightRuntimeSectionsCollapsed.schedule}
-                  onToggle={() => toggleRightRuntimeSection("schedule")}
-                  count={<Badge tone="warn">{formatCount(runtimeSchedule.length)}</Badge>}
-                >
-                  <div className="space-y-0.5">
-                    {runtimeSchedule.slice(0, 8).map((item) => (
-                      <RuntimeScheduleRow key={item.id} item={item} />
-                    ))}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-              {visibleSubAgentTasks.length ? (
-                <RuntimeSection
-                  title={t("workspace.subAgents")}
-                  collapsed={rightRuntimeSectionsCollapsed.subagents}
-                  onToggle={() => toggleRightRuntimeSection("subagents")}
-                  count={<Badge tone="warn">{formatCount(visibleSubAgentTasks.length)}</Badge>}
-                >
-                  <div className="space-y-1">
-                    {visibleSubAgentTasks.slice(0, rightRuntimeSectionsCollapsed.subagents ? 0 : 6).map((task) => {
-                      const runningTask = ["queued", "running", "cancelling"].includes(task.status);
-                      return (
-                        <button
-                          key={task.id}
-                          type="button"
-                          className="grid w-full min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1.5 text-left text-xs transition-colors hover:bg-muted"
-                          onClick={() => void inspectSubAgentTask(task.id)}
-                        >
-                          <span className={cn("block h-3 w-3 rounded-sm", runningTask ? "bg-primary" : task.status === "failed" ? "bg-destructive" : "bg-muted-foreground/50")} />
-                          <span className="min-w-0">
-                            <span className="block truncate font-medium">{task.displayName || subAgentRoleLabel(task.role)}</span>
-                            <span className="block truncate text-muted-foreground">{task.task || task.status}</span>
-                          </span>
-                          <span className="shrink-0 text-muted-foreground">{task.status}</span>
-                        </button>
-                      );
-                    })}
-                    {visibleSubAgentTasks.length > 6 ? (
-                      <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(visibleSubAgentTasks.length - 6) })}</div>
-                    ) : null}
-                    {selectedSubAgent && selectedSubAgentPanelOpen ? (
-                      <div
-                        className="mt-2 rounded-md border border-border bg-background/80 p-2 text-xs"
-                        data-vrcforge-sub-agent-panel="true"
-                      >
-                        <div className="mb-2 flex min-w-0 items-center gap-2">
-                          <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
-                          <span className="min-w-0 flex-1 truncate font-medium">{selectedSubAgent.displayName || subAgentRoleLabel(selectedSubAgent.role)}</span>
-                          <Badge tone={subAgentStatusTone(selectedSubAgent.status)} className="shrink-0">
-                            {displaySubAgentStatus(selectedSubAgent.status)}
-                          </Badge>
-                          <button
-                            type="button"
-                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                            onClick={() => setSelectedSubAgentPanelOpen(false)}
-                            title={t("common.hide")}
-                            aria-label={t("common.hide")}
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                        <div className="grid gap-2">
-                          <DataLine label="Role" value={subAgentRoleLabel(selectedSubAgent.role)} />
-                          <OutputBlock label="Task" value={selectedSubAgent.task || selectedSubAgent.id} />
-                          {selectedSubAgent.summary ? <OutputBlock label="Summary" value={selectedSubAgent.summary} /> : null}
-                          {selectedSubAgent.error ? <OutputBlock label={t("doctor.error")} value={selectedSubAgent.error} danger /> : null}
-                          {selectedSubAgent.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(selectedSubAgent.result)} /> : null}
-                        </div>
-                      </div>
-                    ) : selectedSubAgent ? (
-                      <button
-                        type="button"
-                        className="mt-2 flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
-                        onClick={() => setSelectedSubAgentPanelOpen(true)}
-                      >
-                        <span className="truncate">{selectedSubAgent.displayName || subAgentRoleLabel(selectedSubAgent.role)}</span>
-                        <span className="shrink-0 text-muted-foreground">{t("common.open")}</span>
-                      </button>
-                    ) : null}
-                  </div>
-                </RuntimeSection>
-              ) : null}
-
-            </div>
-          </aside>
+          <RightRuntimeSidebar
+              runtimeConnected={runtimeConnected}
+              loadingUnityStatus={loadingUnityStatus}
+              hasEnvironmentAttention={hasEnvironmentAttention}
+              hasStartupIssue={hasStartupIssue}
+              workspaceProjectLabel={workspaceProjectLabel}
+              backendComponent={backendComponent}
+              unityBridgeLabel={unityBridgeLabel}
+              unityBridgeComponent={unityBridgeComponent}
+              unityToolsLabel={unityToolsLabel}
+              unityToolsComponent={unityToolsComponent}
+              providerCompactLabel={providerCompactLabel}
+              providerComponent={providerComponent}
+              reviewSummaryLabel={reviewSummaryLabel}
+              changeSummaryLabel={changeSummaryLabel}
+              workspaceDiffChanged={workspaceDiffChanged}
+              workspaceDiff={workspaceDiff}
+              runtimeNotice={runtimeNotice}
+              pendingApprovalItems={pendingApprovalItems}
+              runtimeRuns={runtimeRuns}
+              runtimeRunsError={runtimeRunsError}
+              rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
+              agentGoals={agentGoals}
+              agentMemory={agentMemory}
+              desktopActions={desktopActions}
+              workspaceStateError={workspaceStateError}
+              runtimeReviewEvidence={runtimeReviewEvidence}
+              runtimeFileReferences={runtimeFileReferences}
+              workspaceDiffFiles={workspaceDiffFiles}
+              workspaceDiffError={workspaceDiffError}
+              loadingWorkspaceDiff={loadingWorkspaceDiff}
+              workspaceDiffReviewOpen={workspaceDiffReviewOpen}
+              loadingWorkspaceDiffPatch={loadingWorkspaceDiffPatch}
+              runtimeSchedule={runtimeSchedule}
+              visibleSubAgentTasks={visibleSubAgentTasks}
+              selectedSubAgent={selectedSubAgent}
+              selectedSubAgentPanelOpen={selectedSubAgentPanelOpen}
+              refreshUnityStatus={refreshUnityStatus}
+              onHideSidebar={() => setRightSidebarCollapsed(true)}
+              openDoctor={openDoctor}
+              localizeHealthMessage={localizeHealthMessage}
+              toggleRightRuntimeSection={toggleRightRuntimeSection}
+              refreshWorkspaceDiff={refreshWorkspaceDiff}
+              toggleWorkspaceDiffReview={toggleWorkspaceDiffReview}
+              inspectSubAgentTask={inspectSubAgentTask}
+              onCloseSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(false)}
+              onOpenSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(true)}
+              subAgentRoleLabel={subAgentRoleLabel}
+              subAgentStatusTone={subAgentStatusTone}
+              displaySubAgentStatus={displaySubAgentStatus}
+              formatPayload={formatPayload}
+          />
         )}
       </div>
 
