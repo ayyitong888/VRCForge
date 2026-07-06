@@ -5710,7 +5710,7 @@ export default function App() {
                   <div ref={conversationEndRef} />
                 </div>
               </div>
-              <div className="shrink-0 border-t border-border/80 bg-workspace/95 px-4 py-3 md:px-6 md:py-4">
+              <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2">
                 <div className="mx-auto max-w-3xl">
                   <Composer
                     input={input}
@@ -6917,53 +6917,55 @@ function Composer({
           </div>
         </div>
       </div>
-      <div className="relative flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
-        <button
-          type="button"
-          className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted hover:text-foreground"
-          onClick={() => setBindMenuOpen((open) => !open)}
-          title={t("chat.switchProject")}
-        >
-          {projectLabel ? <Folder className="h-4 w-4 shrink-0" /> : <MessageSquare className="h-4 w-4 shrink-0" />}
-          <span className="truncate">{projectLabel ? t("chat.workingInProject", { project: projectLabel }) : t("chat.tempChatHint")}</span>
-          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-        </button>
-        {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
-        {bindMenuOpen ? (
-          <div className="absolute bottom-11 left-4 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-              onClick={() => {
-                setBindMenuOpen(false);
-                onBindProject?.("");
-              }}
-            >
-              <MessageSquare className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{t("chat.tempChatHint")}</span>
-              <Check className={cn("h-4 w-4 shrink-0 text-primary", projectLabel ? "opacity-0" : "")} />
-            </button>
-            {projects.map((project) => (
+      {!projectLabel ? (
+        <div className="relative flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
+          <button
+            type="button"
+            className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted hover:text-foreground"
+            onClick={() => setBindMenuOpen((open) => !open)}
+            title={t("chat.switchProject")}
+          >
+            <MessageSquare className="h-4 w-4 shrink-0" />
+            <span className="truncate">{t("chat.tempChatHint")}</span>
+            <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+          </button>
+          {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
+          {bindMenuOpen ? (
+            <div className="absolute bottom-11 left-4 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
               <button
-                key={project.key}
                 type="button"
                 className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
                 onClick={() => {
                   setBindMenuOpen(false);
-                  onBindProject?.(project.key);
+                  onBindProject?.("");
                 }}
               >
-                <Folder className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                <Check className={cn("h-4 w-4 shrink-0 text-primary", projectLabel === project.name ? "" : "opacity-0")} />
+                <MessageSquare className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{t("chat.tempChatHint")}</span>
+                <Check className="h-4 w-4 shrink-0 text-primary" />
               </button>
-            ))}
-            <div className="mt-1 border-t border-border px-2.5 py-1.5 text-xs text-muted-foreground/70">
-              {t("chat.tempChatDesc")}
+              {projects.map((project) => (
+                <button
+                  key={project.key}
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
+                  onClick={() => {
+                    setBindMenuOpen(false);
+                    onBindProject?.(project.key);
+                  }}
+                >
+                  <Folder className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                  <Check className="h-4 w-4 shrink-0 text-primary opacity-0" />
+                </button>
+              ))}
+              <div className="mt-1 border-t border-border px-2.5 py-1.5 text-xs text-muted-foreground/70">
+                {t("chat.tempChatDesc")}
+              </div>
             </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </form>
   );
 }
