@@ -30,6 +30,7 @@ import {
 } from "react";
 import { PendingApprovalsStrip } from "./components/approvals/pending-approvals-strip";
 import { ChatWorkspace } from "./components/chat/chat-workspace";
+import { LayoutSplitter } from "./components/workspace/layout-splitter";
 import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace, buildOptimizationRequestOptions, type OptimizationActionOptions } from "./components/optimization/optimization-workspace";
@@ -4504,19 +4505,14 @@ export default function App() {
           onChatRenameCommit={commitRenameChat}
         />
 
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-valuenow={Math.round(effectiveLeftPaneWidth)}
-          aria-valuemin={COLLAPSED_LEFT_PANE_WIDTH}
-          aria-valuemax={MAX_LEFT_PANE_WIDTH}
-          data-layout-splitter="left"
-          className="group relative h-screen cursor-col-resize touch-none bg-transparent"
-          onPointerDown={(event) => startLayoutResize("left", event)}
+        <LayoutSplitter
+          side="left"
+          value={effectiveLeftPaneWidth}
+          min={COLLAPSED_LEFT_PANE_WIDTH}
+          max={MAX_LEFT_PANE_WIDTH}
           title={t("workspace.resizeLeftPane")}
-        >
-          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
-        </div>
+          onPointerDown={(event) => startLayoutResize("left", event)}
+        />
 
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
           <WorkspaceHeader
@@ -4817,19 +4813,14 @@ export default function App() {
             />
           ) : null}
         </section>
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-valuenow={Math.round(effectiveRightPaneWidth)}
-          aria-valuemin={0}
-          aria-valuemax={MAX_RIGHT_PANE_WIDTH}
-          data-layout-splitter="right"
-          className="group relative h-screen cursor-col-resize touch-none bg-transparent"
-          onPointerDown={(event) => startLayoutResize("right", event)}
+        <LayoutSplitter
+          side="right"
+          value={effectiveRightPaneWidth}
+          min={0}
+          max={MAX_RIGHT_PANE_WIDTH}
           title={t("workspace.resizeRightPane")}
-        >
-          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors group-hover:bg-primary group-active:bg-primary" />
-        </div>
+          onPointerDown={(event) => startLayoutResize("right", event)}
+        />
         {rightSidebarCollapsed ? null : (
           <RightRuntimeSidebar
               runtimeConnected={runtimeConnected}
