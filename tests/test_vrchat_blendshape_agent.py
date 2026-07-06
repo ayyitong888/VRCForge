@@ -1,5 +1,7 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +31,10 @@ from vrchat_blendshape_agent import (
     resolve_unity_mcp_wrapper_command,
     resolve_avatar_selection,
     render_preview,
+    request_anthropic_plan_with_metadata,
+    request_gemini_plan_with_metadata,
+    request_openai_compatible_plan_with_metadata,
+    request_vertex_ai_plan_with_metadata,
     run_unity_mcp_process,
     validate_plan,
 )
@@ -87,6 +93,177 @@ def make_export_payload() -> dict:
             },
         ],
     }
+
+
+def make_llm_settings(provider: str, model: str = "test-model", base_url: str = "https://provider.example/v1") -> Settings:
+    return Settings(
+        llm_provider=provider,
+        llm_api_key="test-key",
+        llm_base_url=base_url,
+        llm_model=model,
+        llm_api_key_env="TEST_API_KEY",
+        gemini_thinking_level="",
+        unity_mcp_command=["unity-mcp"],
+        unity_mcp_host="127.0.0.1",
+        unity_mcp_port=8080,
+        unity_mcp_instance="",
+        unity_mcp_retries=3,
+        unity_mcp_retry_backoff_seconds=2.0,
+        unity_mcp_timeout_seconds=30,
+        export_tool_name="vrc_export_blendshapes",
+        execute_tool_name="vrc_apply_blendshapes",
+        export_path=Path("Assets/VRCForge/blendshapes_export.json"),
+        min_confidence=0.65,
+    )
+
+
+class FakeGoogleModels:
+    def __init__(self) -> None:
+        self.generate_content_calls: list[dict] = []
+        self.generate_content_stream_calls: list[dict] = []
+
+    def generate_content_stream(self, **kwargs):
+        self.generate_content_stream_calls.append(kwargs)
+        yield SimpleNamespace(text='{"reply":"hel')
+        yield SimpleNamespace(text='lo"}')
+
+    def generate_content(self, **kwargs):
+        self.generate_content_calls.append(kwargs)
+        return SimpleNamespace(text='{"reply":"fallback"}')
+
+
+class FakeGoogleClient:
+    instances: list["FakeGoogleClient"] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.models = FakeGoogleModels()
+        FakeGoogleClient.instances.append(self)
+
+
+class ProviderStreamingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        FakeGoogleClient.instances = []
+
+    def install_fake_google(self) -> None:
+        google_module = types.ModuleType("google")
+        genai_module = types.ModuleType("google.genai")
+        genai_module.Client = FakeGoogleClient
+        google_module.genai = genai_module
+        self.addCleanup(lambda: sys.modules.pop("google", None))
+        self.addCleanup(lambda: sys.modules.pop("google.genai", None))
+        sys.modules["google"] = google_module
+        sys.modules["google.genai"] = genai_module
+
+    def test_gemini_streams_text_chunks(self) -> None:
+        self.install_fake_google()
+        settings = make_llm_settings("gemini", model="gemini-test", base_url="")
+        chunks: list[str] = []
+
+        response = request_gemini_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"hello"}')
+        self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
+        self.assertEqual(FakeGoogleClient.instances[0].kwargs, {"api_key": "test-key"})
+        self.assertEqual(FakeGoogleClient.instances[0].models.generate_content_calls, [])
+        self.assertEqual(FakeGoogleClient.instances[0].models.generate_content_stream_calls[0]["model"], "gemini-test")
+
+    def test_vertex_streams_text_chunks(self) -> None:
+        self.install_fake_google()
+        settings = make_llm_settings("vertexai", model="gemini-vertex", base_url="project=demo;location=asia-northeast1")
+        chunks: list[str] = []
+
+        response = request_vertex_ai_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"hello"}')
+        self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
+        self.assertEqual(FakeGoogleClient.instances[0].kwargs, {"vertexai": True, "project": "demo", "location": "asia-northeast1"})
+        self.assertEqual(FakeGoogleClient.instances[0].models.generate_content_calls, [])
+
+    def test_anthropic_streams_text_chunks(self) -> None:
+        class FakeMessageStream:
+            text_stream = iter(['{"reply":"hel', 'lo"}'])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get_final_message(self):
+                return SimpleNamespace(content=[SimpleNamespace(text='{"reply":"hello"}')])
+
+        class FakeMessages:
+            def __init__(self) -> None:
+                self.create_calls: list[dict] = []
+                self.stream_calls: list[dict] = []
+
+            def stream(self, **kwargs):
+                self.stream_calls.append(kwargs)
+                return FakeMessageStream()
+
+            def create(self, **kwargs):
+                self.create_calls.append(kwargs)
+                return SimpleNamespace(content=[SimpleNamespace(text='{"reply":"fallback"}')])
+
+        class FakeAnthropic:
+            instances: list["FakeAnthropic"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.messages = FakeMessages()
+                FakeAnthropic.instances.append(self)
+
+        anthropic_module = types.ModuleType("anthropic")
+        anthropic_module.Anthropic = FakeAnthropic
+        self.addCleanup(lambda: sys.modules.pop("anthropic", None))
+        sys.modules["anthropic"] = anthropic_module
+        settings = make_llm_settings("anthropic", model="claude-test", base_url="")
+        chunks: list[str] = []
+
+        response = request_anthropic_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"hello"}')
+        self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
+        self.assertEqual(FakeAnthropic.instances[0].kwargs, {"api_key": "test-key"})
+        self.assertEqual(FakeAnthropic.instances[0].messages.create_calls, [])
+        self.assertEqual(FakeAnthropic.instances[0].messages.stream_calls[0]["model"], "claude-test")
+
+    def test_ollama_stream_unsupported_falls_back_to_non_streaming(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    raise RuntimeError("stream is not supported by this endpoint")
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"fallback"}'))])
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeOpenAI:
+            instances: list["FakeOpenAI"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.chat = FakeChat()
+                FakeOpenAI.instances.append(self)
+
+        openai_module = types.ModuleType("openai")
+        openai_module.OpenAI = FakeOpenAI
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = openai_module
+        settings = make_llm_settings("ollama", model="local-model", base_url="http://127.0.0.1:11434/v1")
+        chunks: list[str] = []
+
+        response = request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"fallback"}')
+        self.assertEqual(chunks, [])
+        self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True, False])
 
 
 class LlmReasoningTraceTests(unittest.TestCase):

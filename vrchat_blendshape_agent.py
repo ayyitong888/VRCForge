@@ -1292,11 +1292,11 @@ def request_llm_plan_with_metadata(
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
     if provider == "gemini":
-        return request_gemini_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
+        return request_gemini_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
     if provider == "vertexai":
-        return request_vertex_ai_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
+        return request_vertex_ai_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
     if provider == "anthropic":
-        return request_anthropic_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
+        return request_anthropic_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
 
     return request_openai_compatible_plan_with_metadata(
         settings,
@@ -1325,6 +1325,7 @@ def request_gemini_plan_with_metadata(
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
     try:
         from google import genai
@@ -1343,6 +1344,24 @@ def request_gemini_plan_with_metadata(
 
     client = genai.Client(api_key=settings.llm_api_key)
     try:
+        if stream_callback is not None and not image_paths:
+            chunks: list[str] = []
+            final_chunk: Any = None
+            for chunk in client.models.generate_content_stream(
+                model=settings.llm_model,
+                contents=contents,
+            ):
+                final_chunk = chunk
+                text = str(getattr(chunk, "text", "") or "")
+                if not text:
+                    continue
+                chunks.append(text)
+                stream_callback(text)
+            return LlmPlanResponse(
+                text="".join(chunks),
+                reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="gemini") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "gemini"},
+                usage=extract_llm_token_usage(final_chunk, settings, source="gemini") if final_chunk is not None else provider_stream_usage_missing(settings, "gemini"),
+            )
         response = client.models.generate_content(
             model=settings.llm_model,
             contents=contents,
@@ -1375,6 +1394,7 @@ def request_vertex_ai_plan_with_metadata(
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
     try:
         from google import genai
@@ -1394,6 +1414,24 @@ def request_vertex_ai_plan_with_metadata(
 
     try:
         client = genai.Client(vertexai=True, project=project, location=location)
+        if stream_callback is not None and not image_paths:
+            chunks: list[str] = []
+            final_chunk: Any = None
+            for chunk in client.models.generate_content_stream(
+                model=settings.llm_model,
+                contents=contents,
+            ):
+                final_chunk = chunk
+                text = str(getattr(chunk, "text", "") or "")
+                if not text:
+                    continue
+                chunks.append(text)
+                stream_callback(text)
+            return LlmPlanResponse(
+                text="".join(chunks),
+                reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="vertexai") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "vertexai"},
+                usage=extract_llm_token_usage(final_chunk, settings, source="vertexai") if final_chunk is not None else provider_stream_usage_missing(settings, "vertexai"),
+            )
         response = client.models.generate_content(
             model=settings.llm_model,
             contents=contents,
@@ -1428,6 +1466,36 @@ def request_openai_compatible_plan(
         reference_image_path=reference_image_path,
         reference_image_paths=reference_image_paths,
     ).text
+
+
+def provider_stream_usage_missing(settings: Settings, source: str) -> dict[str, Any]:
+    return {
+        "exact": False,
+        "unavailableReason": "provider_stream_usage_missing",
+        "provider": settings.llm_provider,
+        "model": settings.llm_model,
+        "source": source,
+    }
+
+
+def should_retry_without_streaming(exc: Exception, settings: Settings) -> bool:
+    provider = normalize_provider_name(settings.llm_provider)
+    if provider not in {"ollama", "custom"}:
+        return False
+    message = str(exc).lower()
+    if any(marker in message for marker in ("auth", "unauthorized", "forbidden", "quota", "rate limit", "billing")):
+        return False
+    return "stream" in message and any(
+        marker in message
+        for marker in (
+            "unsupported",
+            "not supported",
+            "not implemented",
+            "unknown parameter",
+            "invalid parameter",
+            "unrecognized",
+        )
+    )
 
 
 def request_openai_compatible_plan_with_metadata(
@@ -1474,22 +1542,26 @@ def request_openai_compatible_plan_with_metadata(
         }
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
-            stream = client.chat.completions.create(**request_payload, stream=True)
-            for event in stream:
-                choices = getattr(event, "choices", []) or []
-                if not choices:
-                    continue
-                delta = getattr(choices[0], "delta", None)
-                text = str(getattr(delta, "content", "") or "")
-                if not text:
-                    continue
-                chunks.append(text)
-                stream_callback(text)
-            return LlmPlanResponse(
-                text="".join(chunks),
-                reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
-                usage={"exact": False, "unavailableReason": "provider_stream_usage_missing", "provider": settings.llm_provider, "model": settings.llm_model},
-            )
+            try:
+                stream = client.chat.completions.create(**request_payload, stream=True)
+                for event in stream:
+                    choices = getattr(event, "choices", []) or []
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0], "delta", None)
+                    text = str(getattr(delta, "content", "") or "")
+                    if not text:
+                        continue
+                    chunks.append(text)
+                    stream_callback(text)
+                return LlmPlanResponse(
+                    text="".join(chunks),
+                    reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
+                    usage=provider_stream_usage_missing(settings, "openai-compatible"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not should_retry_without_streaming(exc, settings):
+                    raise
         response = client.chat.completions.create(**request_payload)
         return LlmPlanResponse(
             text=extract_openai_message_text(response),
@@ -1521,6 +1593,7 @@ def request_anthropic_plan_with_metadata(
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
     try:
         import anthropic
@@ -1553,11 +1626,30 @@ def request_anthropic_plan_with_metadata(
 
     client = anthropic.Anthropic(api_key=settings.llm_api_key)
     try:
+        request_payload = {
+            "model": settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
+            "max_tokens": 1400,
+            "system": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+            "messages": [{"role": "user", "content": user_content}],
+        }
+        if stream_callback is not None and not image_paths:
+            chunks: list[str] = []
+            final_message: Any = None
+            with client.messages.stream(**request_payload) as stream:
+                for text in stream.text_stream:
+                    text = str(text or "")
+                    if not text:
+                        continue
+                    chunks.append(text)
+                    stream_callback(text)
+                final_message = stream.get_final_message()
+            return LlmPlanResponse(
+                text="".join(chunks) or extract_anthropic_message_text(final_message),
+                reasoning=extract_llm_reasoning_trace(final_message, settings, source="anthropic"),
+                usage=extract_llm_token_usage(final_message, settings, source="anthropic"),
+            )
         response = client.messages.create(
-            model=settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
-            max_tokens=1400,
-            system="You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
-            messages=[{"role": "user", "content": user_content}],
+            **request_payload,
         )
         return LlmPlanResponse(
             text=extract_anthropic_message_text(response),
