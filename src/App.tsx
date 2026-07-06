@@ -48,6 +48,7 @@ import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
+import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
@@ -91,14 +92,13 @@ import {
   selectedTextAttachment,
 } from "./lib/conversation-utils";
 import { thinkingTraceLabel } from "./lib/provider-ui";
-import { cacheChatTimestampsFast, isStoredChat } from "./lib/chat-thread";
-import type { ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
+import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildRuntimeSchedule } from "./lib/runtime-schedule";
 import { emptySkillDraft } from "./lib/skill-draft";
-import { buildChatSidebarView, buildEmptyProjectState } from "./lib/sidebar-view";
+import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
@@ -172,7 +172,6 @@ import {
   fetchAppSession,
   fetchAppHealth,
   fetchAvatars,
-  fetchChats,
   fetchSubAgent,
   fetchSubAgents,
   installExternalAgentConnector,
@@ -194,7 +193,6 @@ import {
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
   retrySubAgent,
-  saveChats,
   saveAgentNotes,
   setSkillPackageSafeMode,
   setSkillPackageEnabled,
@@ -253,8 +251,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const [input, setInput] = useState("");
-  const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
-  const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
@@ -282,10 +278,6 @@ export default function App() {
     }
   });
   const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
-  const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
-  const [renamingChatId, setRenamingChatId] = useState("");
-  const [renameDraft, setRenameDraft] = useState("");
-  const [deleteTargetId, setDeleteTargetId] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(() => {
     if (isMarkdownSmokeMode()) {
       return false;
@@ -397,11 +389,6 @@ export default function App() {
   const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("10240");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
-  const chatsLoadedRef = useRef(false);
-  const chatsDirtyRef = useRef(false);
-  const chatsSaveVersionRef = useRef(0);
-  const chatTimestampCacheTimerRef = useRef<number | null>(null);
-  const chatsRef = useRef<ChatThread[]>([]);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
@@ -418,6 +405,10 @@ export default function App() {
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
+  const chatSessionActionsRef = useRef<{
+    selectProject: (projectPath: string) => void;
+    newConversation: (projectPath?: string) => void;
+  } | null>(null);
 
   const permission = bootstrap?.permission;
   const currentPermissionVisual = permissionVisualState(permission);
@@ -590,10 +581,56 @@ export default function App() {
     refreshSilently,
     startRuntime,
     setError,
-    onProjectAdded: selectProject,
-    onActiveProjectHidden: () => newConversation(""),
+    onProjectAdded: (projectPath) => {
+      chatSessionActionsRef.current?.selectProject(projectPath);
+    },
+    onActiveProjectHidden: () => {
+      chatSessionActionsRef.current?.newConversation("");
+    },
   });
-  const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
+  const chatSessionProjectPaths = useMemo(() => projectItems.map((project) => projectKey(project)).filter(Boolean), [projectItems]);
+  const {
+    chats,
+    activeChat,
+    activeChatId,
+    setActiveChatId,
+    chatMenu,
+    setChatMenu,
+    renamingChatId,
+    renameDraft,
+    setRenameDraft,
+    deleteTargetId,
+    setDeleteTargetId,
+    chatSidebar,
+    touchChat,
+    updateChat,
+    appendToChat,
+    ensureActiveChat,
+    getChatById,
+    newConversation,
+    togglePinChat,
+    startRenameChat,
+    commitRenameChat,
+    deleteChatPermanently,
+    bindProject,
+    newTemporaryChat,
+    archiveProjectChats,
+    openChat,
+    selectProject,
+  } = useChatSessions({
+    endpoint,
+    runtimeConnected,
+    projectPrefsReady,
+    projectPaths: chatSessionProjectPaths,
+    customProjectPaths: projectPrefs.customPaths,
+    activeProjectPath,
+    setActiveProjectPath,
+    setActiveView,
+    setError,
+    expandProjectGroup,
+    initialChatState,
+  });
+  chatSessionActionsRef.current = { selectProject, newConversation };
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
@@ -616,7 +653,7 @@ export default function App() {
     runtimeConnected,
     sessionId,
     activeRuntimeProjectPath,
-    getChatById: (chatId) => chatsRef.current.find((chat) => chat.id === chatId),
+    getChatById,
     ensureActiveChat,
     updateChat,
     appendToChat,
@@ -853,10 +890,6 @@ export default function App() {
     reviewSummaryLabel,
     changeSummaryLabel,
   } = runtimeWorkspaceView;
-  const chatSidebar = useMemo(
-    () => buildChatSidebarView(chats, i18n.language, normalizeProjectPathKey),
-    [chats, i18n.language],
-  );
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(
     () =>
@@ -911,7 +944,6 @@ export default function App() {
   }, [selectionMenu]);
 
   useEffect(() => {
-    // 屏蔽 WebView 默认右键菜单（返回/刷新/另存为等）；输入框保留原生菜单以便粘贴。
     const handler = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && target.closest("input, textarea, [contenteditable='true']")) {
@@ -921,18 +953,6 @@ export default function App() {
     };
     window.addEventListener("contextmenu", handler);
     return () => window.removeEventListener("contextmenu", handler);
-  }, []);
-
-  useEffect(() => {
-    chatsRef.current = chats;
-  }, [chats]);
-
-  useEffect(() => {
-    return () => {
-      if (chatTimestampCacheTimerRef.current) {
-        window.clearTimeout(chatTimestampCacheTimerRef.current);
-      }
-    };
   }, []);
 
   useEffect(() => {
@@ -973,7 +993,6 @@ export default function App() {
   }, [rightRuntimeSectionsCollapsed]);
 
   useEffect(() => {
-    // 引导最小化期间，当前步骤完成后自动弹回向导。
     if (!showOnboarding || !onboardingMinimized) {
       return;
     }
@@ -1025,100 +1044,6 @@ export default function App() {
       }
     }
   }, [projectItems]);
-
-  useEffect(() => {
-    if (!runtimeConnected || chatsLoadedRef.current || !projectPrefsReady) {
-      return;
-    }
-    let restoreCancelled = false;
-    let restoreCompleted = false;
-    chatsLoadedRef.current = true;
-    void (async () => {
-      try {
-        await new Promise((resolve) => window.setTimeout(resolve, isTauriRuntime() ? 1000 : 0));
-        if (restoreCancelled) {
-          return;
-        }
-        const projectPaths = Array.from(
-          new Set([
-            ...projectItems.map((project) => projectKey(project)).filter(Boolean),
-            ...projectPrefs.customPaths.filter(Boolean),
-          ]),
-        );
-        const payload = await fetchChats<unknown>(endpoint, projectPaths);
-        let shouldCacheRestoredTimestamps = false;
-        const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
-          const normalized: ChatThread = {
-          id: chat.id,
-          sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
-          title: typeof chat.title === "string" ? chat.title : "",
-          projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
-          createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
-          updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
-          agentName: typeof chat.agentName === "string" ? chat.agentName : "",
-          pinned: chat.pinned === true,
-          archived: chat.archived === true,
-          items: chat.items,
-          };
-          const cached = cacheChatTimestampsFast(normalized);
-          shouldCacheRestoredTimestamps =
-            shouldCacheRestoredTimestamps || cached.createdAt !== normalized.createdAt || cached.updatedAt !== normalized.updatedAt;
-          return cached;
-        });
-        if (restoreCancelled) {
-          return;
-        }
-        if (restored.length > 0) {
-          const initialSaveVersion = chatsSaveVersionRef.current;
-          const canRestore = chatsRef.current.length === 0;
-          if (canRestore) {
-            setChats(restored);
-            if (shouldCacheRestoredTimestamps) {
-              if (chatTimestampCacheTimerRef.current) {
-                window.clearTimeout(chatTimestampCacheTimerRef.current);
-              }
-              chatTimestampCacheTimerRef.current = window.setTimeout(() => {
-                chatTimestampCacheTimerRef.current = null;
-                if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restored.length) {
-                  return;
-                }
-                void saveChats(endpoint, chatsRef.current);
-              }, 3000);
-            }
-          }
-        }
-        restoreCompleted = true;
-      } catch {
-        // 读取失败时保持空列表，不打断使用；下次启动会重试。
-        chatsLoadedRef.current = false;
-      }
-    })();
-    return () => {
-      restoreCancelled = true;
-      if (!restoreCompleted) {
-        chatsLoadedRef.current = false;
-      }
-    };
-  }, [runtimeConnected, endpoint, projectItems, projectPrefs.customPaths, projectPrefsReady]);
-
-  useEffect(() => {
-    if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current) {
-      return;
-    }
-    const saveVersion = chatsSaveVersionRef.current;
-    const timer = window.setTimeout(() => {
-      void saveChats(endpoint, chats)
-        .then(() => {
-          if (chatsSaveVersionRef.current === saveVersion) {
-            chatsDirtyRef.current = false;
-          }
-        })
-        .catch(() => {
-          chatsDirtyRef.current = true;
-        });
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [chats, runtimeConnected, endpoint]);
 
   useEffect(() => {
     const intervalMs = isTauriRuntime() ? 30000 : 5000;
@@ -1584,24 +1509,6 @@ export default function App() {
     }
   }
 
-  function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
-    markChatsDirty();
-    setChats((list) => list.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
-  }
-
-  function markChatsDirty() {
-    chatsDirtyRef.current = true;
-    chatsSaveVersionRef.current += 1;
-  }
-
-  function touchChat(chat: ChatThread, timestamp = new Date().toISOString()): ChatThread {
-    return { ...chat, createdAt: chat.createdAt || timestamp, updatedAt: timestamp };
-  }
-
-  function appendToChat(chatId: string, item: ConversationItem) {
-    updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
-  }
-
   function copyConversationItem(item: ConversationItem) {
     const text = conversationItemText(item, t);
     if (!text.trim()) {
@@ -1624,7 +1531,7 @@ export default function App() {
   }
 
   function editConversationMessage(itemId: string) {
-    const chat = chatsRef.current.find((item) => item.id === activeChatId);
+    const chat = getChatById(activeChatId);
     if (!chat) {
       return;
     }
@@ -1652,7 +1559,7 @@ export default function App() {
       setError(t("chat.cannotActionWhileRunning"));
       return;
     }
-    const chat = chatsRef.current.find((item) => item.id === activeChatId);
+    const chat = getChatById(activeChatId);
     if (!chat) {
       return;
     }
@@ -1741,18 +1648,6 @@ export default function App() {
         setError(message);
       }
     }
-  }
-
-  function ensureActiveChat(): string {
-    if (activeChat) {
-      return activeChat.id;
-    }
-    const id = `chat-${Date.now()}`;
-    const now = new Date().toISOString();
-    markChatsDirty();
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] }, ...list]);
-    setActiveChatId(id);
-    return id;
   }
 
   async function compactChat() {
@@ -1909,82 +1804,6 @@ export default function App() {
 
   function removeAttachment(id: string) {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-  }
-
-  function newConversation(projectPath?: string) {
-    setActiveView("chat");
-    if (projectPath !== undefined) {
-      setActiveProjectPath(projectPath);
-    }
-    setActiveChatId("");
-    setError("");
-  }
-
-  function togglePinChat(chatId: string) {
-    updateChat(chatId, (chat) => ({ ...chat, pinned: !chat.pinned }));
-  }
-
-  function startRenameChat(chat: ChatThread) {
-    setRenamingChatId(chat.id);
-    setRenameDraft(chat.title || "");
-  }
-
-  function commitRenameChat(cancel = false) {
-    if (!cancel && renamingChatId) {
-      const title = renameDraft.trim();
-      if (title) {
-        updateChat(renamingChatId, (chat) => ({ ...chat, title }));
-      }
-    }
-    setRenamingChatId("");
-    setRenameDraft("");
-  }
-
-  function deleteChatPermanently(chatId: string) {
-    markChatsDirty();
-    setChats((list) => list.filter((chat) => chat.id !== chatId));
-    if (activeChatId === chatId) {
-      setActiveChatId("");
-    }
-    setDeleteTargetId("");
-    setChatMenu(null);
-  }
-
-  function bindProject(projectPath: string) {
-    setActiveProjectPath(projectPath);
-    if (activeChatId) {
-      updateChat(activeChatId, (chat) => ({ ...chat, projectPath }));
-    }
-  }
-
-  function newTemporaryChat() {
-    setActiveView("chat");
-    setActiveProjectPath("");
-    setError("");
-    // 折叠状态下新建临时对话自动展开，避免「点了没反应」的错觉。
-    expandProjectGroup(TEMP_CHATS_COLLAPSE_KEY);
-    const existingEmpty = chats.find((chat) => !chat.projectPath && !chat.archived && chat.items.length === 0);
-    if (existingEmpty) {
-      setActiveChatId(existingEmpty.id);
-      return;
-    }
-    const id = `chat-${Date.now()}`;
-    const now = new Date().toISOString();
-    markChatsDirty();
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", createdAt: now, updatedAt: now, items: [] }, ...list]);
-    setActiveChatId(id);
-  }
-
-  function archiveProjectChats(path: string, archived: boolean) {
-    const key = normalizeProjectPathKey(path);
-    if (!key) {
-      return;
-    }
-    markChatsDirty();
-    setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
-    if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
-      setActiveChatId("");
-    }
   }
 
   async function loadSubAgents(includeEvents = false) {
@@ -2179,7 +1998,7 @@ export default function App() {
     try {
       window.localStorage.setItem(ONBOARDING_FLAG_KEY, "true");
     } catch {
-      // 忽略持久化失败，仅本次会话关闭引导。
+      // Keep onboarding close usable even if local storage is blocked.
     }
     setShowOnboarding(false);
     setOnboardingMinimized(false);
@@ -2189,27 +2008,12 @@ export default function App() {
     try {
       window.localStorage.removeItem(ONBOARDING_FLAG_KEY);
     } catch {
-      // 忽略
+      // Ignore blocked local storage.
     }
     setActiveView("chat");
     setOnboardingStep(0);
     setOnboardingMinimized(false);
     setShowOnboarding(true);
-  }
-
-  function openChat(chat: ChatThread) {
-    setActiveView("chat");
-    setActiveChatId(chat.id);
-    setActiveProjectPath(chat.projectPath);
-    setError("");
-  }
-
-  function selectProject(projectPath: string) {
-    setActiveView("chat");
-    setActiveProjectPath(projectPath);
-    const latest = chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived);
-    setActiveChatId(latest ? latest.id : "");
-    setError("");
   }
 
   async function openDoctor() {
