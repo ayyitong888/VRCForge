@@ -10,16 +10,12 @@ import {
   ListChecks,
   MoreHorizontal,
   Monitor,
-  Moon,
   MousePointer2,
-  PanelRightClose,
-  PanelRightOpen,
   Paperclip,
   RotateCcw,
   Search,
   Send,
   Square,
-  Sun,
   ThumbsDown,
   ThumbsUp,
   X,
@@ -38,11 +34,11 @@ import {
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { ChatWorkspace } from "./components/chat/chat-workspace";
+import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace, buildOptimizationRequestOptions, type OptimizationActionOptions } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace, protectionPlanPayload } from "./components/protection/protection-workspace";
 import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
-import { RuntimeToolButton } from "./components/runtime/runtime-sidebar-ui";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { AppSidebar } from "./components/sidebar/app-sidebar";
@@ -4575,95 +4571,32 @@ export default function App() {
         </div>
 
         <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
-          <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/80 px-3 md:px-5">
-            <div className="flex min-w-0 items-center gap-2 text-sm">
-              <span className="truncate text-muted-foreground">{activeProjectPath ? activeProjectName : t("sidebar.tempChat")}</span>
-              <span className="text-muted-foreground">/</span>
-              <span className="truncate font-medium">
-                {activeView === "doctor"
-                  ? t("sidebar.doctor")
-                  : activeView === "optimization"
-                    ? t("sidebar.optimization")
-                    : activeView === "protection"
-                      ? t("encryption.protection")
-                  : activeView === "skills"
-                    ? t("sidebar.skills")
-                    : activeView === "settings"
-                      ? t("sidebar.settings")
-                      : activeChat
-                        ? activeChat.title || t("header.currentSession")
-                        : t("header.newTask")}
-              </span>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {permission?.roslynFullAuto ? (
-                <Badge tone={currentPermissionVisual.badgeTone}>
-                  <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
-                  {t("header.fullPermission")}
-                </Badge>
-              ) : permission?.executionMode === "auto" ? (
-                <Badge tone={currentPermissionVisual.badgeTone}>{t("header.autoApproval")}</Badge>
-              ) : null}
-              <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
-              <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>{formatCount(pendingApprovals)} {t("header.pendingApprovals")}</Badge>
-              <RuntimeToolButton
-                icon={rightSidebarCollapsed ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
-                label={rightSidebarCollapsed ? t("workspace.showSidebar") : t("workspace.hideSidebar")}
-                onClick={() => setRightSidebarCollapsed((value) => !value)}
-              />
-              <Button variant="ghost" className="h-9 w-9 px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </Button>
-            </div>
-          </header>
-
-          {showDoctorStartupPrompt ? (
-            <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-                <div className="flex min-w-0 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-panel dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <div className="min-w-0 flex-1 space-y-0.5">
-                  <div className="font-medium">
-                    {hasStartupIssue ? t("header.startupIssueDetected") : t("header.envNeedsAttention")}
-                  </div>
-                  <div className="break-words text-amber-900/80 dark:text-amber-100/80">
-                    {hasStartupIssue
-                      ? t("header.startupIssueDesc")
-                      : t("header.envNeedsAttentionDesc", { errors: healthErrors, warnings: healthWarnings })}
-                  </div>
-                  {hasStartupIssue ? <div className="break-words text-amber-900/70 dark:text-amber-100/70">{startupIssue}</div> : null}
-                </div>
-                <Button variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={() => void openDoctor()} disabled={loadingDoctor}>
-                  {t("sidebar.doctor")}
-                </Button>
-                <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => void retryStartupOrHealth()} disabled={loading}>
-                  {loading ? t("doctor.retrying") : t("doctor.retry")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-7 shrink-0 px-2 text-xs"
-                  onClick={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
-                >
-                  {t("common.dismiss")}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {error && !showDoctorStartupPrompt ? (
-            <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-              <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
-                <span className="break-words">{error}</span>
-                <Button
-                  variant="ghost"
-                  className="ml-auto h-7 shrink-0 px-2 text-xs text-destructive/80 hover:bg-destructive/10"
-                  onClick={() => void startRuntime()}
-                  disabled={loading}
-                >
-                  {loading ? t("header.reconnecting") : t("header.reconnect")}
-                </Button>
-              </div>
-            </div>
-          ) : null}
+          <WorkspaceHeader
+            activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
+            activeView={activeView}
+            activeChatTitle={activeChat ? activeChat.title || t("header.currentSession") : ""}
+            permissionFullAuto={Boolean(permission?.roslynFullAuto)}
+            permissionAuto={permission?.executionMode === "auto"}
+            permissionBadgeTone={currentPermissionVisual.badgeTone}
+            runtimeConnected={runtimeConnected}
+            pendingApprovals={pendingApprovals}
+            rightSidebarCollapsed={rightSidebarCollapsed}
+            theme={theme}
+            showDoctorStartupPrompt={showDoctorStartupPrompt}
+            hasStartupIssue={hasStartupIssue}
+            healthErrors={healthErrors}
+            healthWarnings={healthWarnings}
+            startupIssue={startupIssue}
+            loadingDoctor={loadingDoctor}
+            loading={loading}
+            error={error}
+            onToggleRightSidebar={() => setRightSidebarCollapsed((value) => !value)}
+            onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+            onOpenDoctor={() => void openDoctor()}
+            onRetryStartupOrHealth={() => void retryStartupOrHealth()}
+            onDismissDoctorPrompt={() => setDismissedDoctorPromptSignature(doctorPromptSignature)}
+            onStartRuntime={() => void startRuntime()}
+          />
 
           {activeView === "doctor" ? (
             <DoctorWorkspace
@@ -5092,7 +5025,6 @@ export default function App() {
     </main>
   );
 }
-
 function ApprovalCard({
   approval,
   loading,
@@ -5130,13 +5062,5 @@ function ApprovalCard({
         </Button>
       </div>
     </section>
-  );
-}
-
-function StatusChip({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <Badge tone={ok ? "ok" : "warn"} className="max-w-[180px]">
-      <span className="truncate">{label}</span>
-    </Badge>
   );
 }
