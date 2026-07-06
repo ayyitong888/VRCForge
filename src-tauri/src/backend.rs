@@ -30,6 +30,7 @@ pub(crate) const BACKEND_PORT: u16 = 8757;
 pub(crate) const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
 pub(crate) const BACKEND_START_BACKGROUND_WAIT_SECONDS: u64 = 18;
 pub(crate) const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
+pub(crate) const BACKEND_SESSION_VERIFY_WAIT: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -439,7 +440,7 @@ pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String>
     if !backend_port_open() {
         return Err("VRCForge runtime is still starting.".to_string());
     }
-    if existing_backend_accepts_session(token) {
+    if wait_for_backend_session(token, BACKEND_SESSION_VERIFY_WAIT) {
         Ok(())
     } else {
         Err(
@@ -560,6 +561,19 @@ pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
         return false;
     };
     app_session_challenge_signature_matches(token, &nonce, &signature)
+}
+
+pub(crate) fn wait_for_backend_session(token: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if existing_backend_accepts_session(token) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
 }
 
 pub(crate) fn extract_challenge_signature(payload: &serde_json::Value) -> Option<String> {

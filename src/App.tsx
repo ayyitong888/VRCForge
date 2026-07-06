@@ -39,7 +39,6 @@ import {
   Send,
   Settings,
   Shield,
-  Sparkles,
   Square,
   Sun,
   ThumbsDown,
@@ -73,6 +72,7 @@ import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./compone
 import { CheckpointStoragePanel } from "./components/settings/checkpoint-storage-panel";
 import { ExternalAgentConnectorsPanel } from "./components/settings/external-agent-connectors-panel";
 import { ProviderSetup, VisionProfileSetup } from "./components/settings/provider-settings";
+import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
@@ -710,6 +710,15 @@ function markdownSmokeMemories(): AgentMemory[] {
   ];
 }
 
+function isRuntimeSessionVerificationError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("runtime session verification failed") ||
+    normalized.includes("local runtime was replaced") ||
+    normalized.includes("does not accept this desktop session")
+  );
+}
+
 export default function App() {
   const { t } = useTranslation();
   const initialChatState = useMemo(() => createMarkdownSmokeChatState(), []);
@@ -933,6 +942,7 @@ export default function App() {
   const chatsLoadedRef = useRef(false);
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
+  const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const projectPrefsLoadedRef = useRef(false);
   const chatsRef = useRef<ChatThread[]>([]);
   const queueRef = useRef<QueuedTurn[]>([]);
@@ -1390,6 +1400,14 @@ export default function App() {
   }, [chats]);
 
   useEffect(() => {
+    return () => {
+      if (chatTimestampCacheTimerRef.current) {
+        window.clearTimeout(chatTimestampCacheTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
     setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "10240");
   }, [connectorStatus?.gateway?.checkpointArchiveMaxSizeMb]);
@@ -1515,9 +1533,15 @@ export default function App() {
     if (!runtimeConnected || chatsLoadedRef.current || !projectPrefsReady) {
       return;
     }
+    let restoreCancelled = false;
+    let restoreCompleted = false;
     chatsLoadedRef.current = true;
     void (async () => {
       try {
+        await new Promise((resolve) => window.setTimeout(resolve, isTauriRuntime() ? 1000 : 0));
+        if (restoreCancelled) {
+          return;
+        }
         const projectPaths = Array.from(
           new Set([
             ...projectItems.map((project) => projectKey(project)).filter(Boolean),
@@ -1525,6 +1549,7 @@ export default function App() {
           ]),
         );
         const payload = await fetchChats<unknown>(endpoint, projectPaths);
+        let shouldCacheRestoredTimestamps = false;
         const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
           const normalized: ChatThread = {
           id: chat.id,
@@ -1538,16 +1563,45 @@ export default function App() {
           archived: chat.archived === true,
           items: chat.items,
           };
-          return cacheChatTimestampsFast(normalized);
+          const cached = cacheChatTimestampsFast(normalized);
+          shouldCacheRestoredTimestamps =
+            shouldCacheRestoredTimestamps || cached.createdAt !== normalized.createdAt || cached.updatedAt !== normalized.updatedAt;
+          return cached;
         });
-        if (restored.length > 0) {
-          setChats((current) => (current.length === 0 ? restored : current));
+        if (restoreCancelled) {
+          return;
         }
+        if (restored.length > 0) {
+          const initialSaveVersion = chatsSaveVersionRef.current;
+          const canRestore = chatsRef.current.length === 0;
+          if (canRestore) {
+            setChats(restored);
+            if (shouldCacheRestoredTimestamps) {
+              if (chatTimestampCacheTimerRef.current) {
+                window.clearTimeout(chatTimestampCacheTimerRef.current);
+              }
+              chatTimestampCacheTimerRef.current = window.setTimeout(() => {
+                chatTimestampCacheTimerRef.current = null;
+                if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restored.length) {
+                  return;
+                }
+                void saveChats(endpoint, chatsRef.current);
+              }, 3000);
+            }
+          }
+        }
+        restoreCompleted = true;
       } catch {
         // 读取失败时保持空列表，不打断使用；下次启动会重试。
         chatsLoadedRef.current = false;
       }
     })();
+    return () => {
+      restoreCancelled = true;
+      if (!restoreCompleted) {
+        chatsLoadedRef.current = false;
+      }
+    };
   }, [runtimeConnected, endpoint, projectItems, projectPrefs.customPaths, projectPrefsReady]);
 
   useEffect(() => {
@@ -1909,9 +1963,21 @@ export default function App() {
       (payload?.status === "timeout" ? `VRCForge runtime startup timed out. Logs: ${payload?.logDir || "unknown"}` : "");
     if (message) {
       rejectBackendReady(message);
-      setError(message);
-      setStartupIssue(message);
+      if (isRuntimeSessionVerificationError(message)) {
+        handleRuntimeSessionFailure(message);
+      } else {
+        setError(message);
+        setStartupIssue(message);
+      }
     }
+  }
+
+  function handleRuntimeSessionFailure(message: string) {
+    setAppSessionToken("");
+    setBootstrap(null);
+    setStartupIssue(message);
+    setError(message);
+    setBackendMessage("session_mismatch");
   }
 
   async function startRuntime(options: { waitForBootstrap?: boolean } = {}): Promise<string | null> {
@@ -1975,8 +2041,12 @@ export default function App() {
       return targetEndpoint;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      setStartupIssue(message);
+      if (isRuntimeSessionVerificationError(message)) {
+        handleRuntimeSessionFailure(message);
+      } else {
+        setError(message);
+        setStartupIssue(message);
+      }
       return null;
     } finally {
       runtimeStartingRef.current = false;
@@ -1997,7 +2067,11 @@ export default function App() {
       setBootstrap(payload);
       setStartupIssue("");
       setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
-    } catch {
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (isRuntimeSessionVerificationError(message)) {
+        handleRuntimeSessionFailure(message);
+      }
       // Keep the current UI usable; explicit retry remains available.
     }
   }
@@ -2713,7 +2787,11 @@ export default function App() {
         ...touchChat(current),
         items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
       }));
-      setError(text);
+      if (isRuntimeSessionVerificationError(text)) {
+        handleRuntimeSessionFailure(text);
+      } else {
+        setError(text);
+      }
     } finally {
       if (activeTurnAbortRef.current === abortController) {
         activeTurnAbortRef.current = null;
@@ -5743,141 +5821,29 @@ export default function App() {
         )}
       </div>
 
-      {showOnboarding && !onboardingMinimized
-        ? (() => {
-            const steps = [
-              {
-                title: t("onboarding.step1Title"),
-                done: runtimeConnected,
-                doneDesc: t("onboarding.step1DoneDesc"),
-                todoDesc: t("onboarding.step1TodoDesc"),
-                action: (
-                  <Button variant="outline" disabled={loading} onClick={() => void startRuntime()}>
-                    <RefreshCw className="mr-1 h-4 w-4" />
-                    {loading ? t("onboarding.connecting") : t("onboarding.retryConnection")}
-                  </Button>
-                ),
-              },
-              {
-                title: t("onboarding.step2Title"),
-                done: Boolean(apiConfig?.apiKeyPresent),
-                doneDesc: t("onboarding.step2DoneDesc"),
-                todoDesc: t("onboarding.step2TodoDesc"),
-                action: (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setOnboardingMinimized(true);
-                      void openSettings();
-                    }}
-                  >
-                    <Settings className="mr-1 h-4 w-4" />
-                    {t("onboarding.goToSettings")}
-                  </Button>
-                ),
-              },
-              {
-                title: t("onboarding.step3Title"),
-                done: projectItems.length > 0,
-                doneDesc: t("onboarding.step3DoneDesc"),
-                todoDesc: t("onboarding.step3TodoDesc"),
-                action: (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setOnboardingMinimized(true);
-                      setProjectModalError("");
-                      setShowProjectModal(true);
-                    }}
-                  >
-                    <FolderPlus className="mr-1 h-4 w-4" />
-                    {t("sidebar.newProject")}
-                  </Button>
-                ),
-              },
-            ];
-            const step = steps[Math.min(onboardingStep, steps.length - 1)];
-            const isLast = onboardingStep >= steps.length - 1;
-            return (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-                <section className="w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-panel">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <Sparkles className="h-5 w-5 shrink-0 text-primary" />
-                    <h2 className="truncate text-lg font-semibold">{t("onboarding.welcome")}</h2>
-                    <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                      {t("onboarding.stepProgress", { current: onboardingStep + 1, total: steps.length })}
-                    </span>
-                  </div>
-                  <div className="mt-4 flex items-center gap-2">
-                    {steps.map((item, index) => (
-                      <div
-                        key={item.title}
-                        className={cn(
-                          "h-1.5 flex-1 rounded-full transition-colors",
-                          index < onboardingStep || item.done
-                            ? "bg-primary"
-                            : index === onboardingStep
-                              ? "bg-primary/40"
-                              : "bg-muted",
-                        )}
-                      />
-                    ))}
-                  </div>
-                  <div className="mt-5 rounded-xl border border-border px-5 py-4">
-                    <div className="flex min-w-0 items-center gap-2">
-                      {step.done ? (
-                        <Check className="h-4 w-4 shrink-0 text-primary" />
-                      ) : (
-                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-                      )}
-                      <div className="truncate text-sm font-medium">{step.title}</div>
-                      <Badge tone={step.done ? "ok" : "muted"} className="ml-auto shrink-0">
-                        {step.done ? t("onboarding.done") : t("onboarding.detecting")}
-                      </Badge>
-                    </div>
-                    <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>
-                    {!step.done ? <div className="mt-4">{step.action}</div> : null}
-                  </div>
-                  <div className="mt-6 flex items-center gap-3">
-                    <Button variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>
-                      {t("onboarding.skipOnboarding")}
-                    </Button>
-                    <div className="ml-auto flex gap-3">
-                      {onboardingStep > 0 ? (
-                        <Button variant="outline" onClick={() => setOnboardingStep((value) => Math.max(0, value - 1))}>
-                          {t("onboarding.prevStep")}
-                        </Button>
-                      ) : null}
-                      <Button
-                        disabled={!step.done}
-                        onClick={() => {
-                          if (isLast) {
-                            finishOnboarding();
-                          } else {
-                            setOnboardingStep((value) => value + 1);
-                          }
-                        }}
-                      >
-                        {isLast ? t("onboarding.startUsing") : t("onboarding.nextStep")}
-                      </Button>
-                    </div>
-                  </div>
-                </section>
-              </div>
-            );
-          })()
-        : null}
-
-      {showOnboarding && onboardingMinimized ? (
-        <button
-          type="button"
-          onClick={() => setOnboardingMinimized(false)}
-          className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm shadow-panel transition-colors hover:bg-muted"
-        >
-          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
-          <span>{t("onboarding.continueOnboarding", { step: onboardingStep + 1 })}</span>
-        </button>
-      ) : null}
+      <OnboardingOverlay
+        open={showOnboarding}
+        minimized={onboardingMinimized}
+        stepIndex={onboardingStep}
+        runtimeConnected={runtimeConnected}
+        apiKeyPresent={Boolean(apiConfig?.apiKeyPresent)}
+        hasProjects={projectItems.length > 0}
+        loadingRuntime={loading}
+        onRetryRuntime={() => void startRuntime()}
+        onOpenSettings={() => {
+          setOnboardingMinimized(true);
+          void openSettings();
+        }}
+        onOpenProjectPicker={() => {
+          setOnboardingMinimized(true);
+          setProjectModalError("");
+          setShowProjectModal(true);
+        }}
+        onResume={() => setOnboardingMinimized(false)}
+        onFinish={finishOnboarding}
+        onPreviousStep={() => setOnboardingStep((value) => Math.max(0, value - 1))}
+        onNextStep={() => setOnboardingStep((value) => value + 1)}
+      />
 
       <ProjectPickerModal
         open={showProjectModal}
