@@ -108,10 +108,10 @@ import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isSt
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
-import { buildRuntimeFileReferences } from "./lib/runtime-file-references";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
 import { emptySkillDraft } from "./lib/skill-draft";
-import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "./lib/runtime-ui-types";
+import type { RuntimeScheduleItem } from "./lib/runtime-ui-types";
+import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
   createMarkdownSmokeChatState,
@@ -815,113 +815,66 @@ export default function App() {
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
   };
-  const workspaceDiffFiles = workspaceDiff?.files ?? [];
-  const runtimeFileReferences = useMemo(() => buildRuntimeFileReferences(conversation, workspaceDiffFiles), [conversation, workspaceDiffFiles]);
-  const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
-  const runtimeReviewEvidence = useMemo<RuntimeReviewEvidence[]>(() => {
-    const items: RuntimeReviewEvidence[] = [];
-    for (const approval of pendingApprovalItems.slice(0, 4)) {
-      items.push({
-        id: `approval-${approval.id}`,
-        kind: "approval",
-        title: approval.targetTool || approval.preview?.command || t("workspace.approvalEvidence"),
-        meta: t("workspace.approvalEvidenceMeta", { status: approval.status || "pending" }),
-        status: approval.status,
-      });
-    }
-    const seenCheckpoints = new Set<string>();
-    for (const run of runtimeRuns) {
-      const checkpointIds = [run.checkpointId, ...(run.checkpointIds ?? [])].filter(Boolean) as string[];
-      for (const checkpointId of checkpointIds) {
-        if (seenCheckpoints.has(checkpointId)) {
-          continue;
-        }
-        seenCheckpoints.add(checkpointId);
-        items.push({
-          id: `checkpoint-${checkpointId}`,
-          kind: "checkpoint",
-          title: checkpointId,
-          meta: run.targetTool || run.writeTool || run.messageSummary || t("workspace.checkpointEvidence"),
-          status: run.status,
-          action: () => setActiveView("checkpoints"),
-        });
-      }
-    }
-    const recentRunWithApproval = runtimeRuns.find((run) => (run.approvalId || (run.approvalIds ?? []).length) && !run.checkpointId);
-    if (recentRunWithApproval && items.length < 6) {
-      items.push({
-        id: `run-approval-${recentRunWithApproval.id || recentRunWithApproval.turnId || recentRunWithApproval.clientTurnId}`,
-        kind: "run",
-        title: recentRunWithApproval.targetTool || recentRunWithApproval.writeTool || t("workspace.runEvidence"),
-        meta: recentRunWithApproval.status || recentRunWithApproval.lastEvent || "",
-        status: recentRunWithApproval.status,
-      });
-    }
-    if (workspaceDiffChanged) {
-      items.push({
-        id: "git-diff",
-        kind: "diff",
-        title: t("workspace.gitDiffEvidence"),
-        meta: t("workspace.gitDiffEvidenceMeta", {
-          count: formatCount(workspaceDiff?.fileCount || 0),
-          additions: formatCount(workspaceDiff?.additions || 0),
-          deletions: formatCount(workspaceDiff?.deletions || 0),
-        }),
-        status: workspaceDiff?.status,
-        action: toggleWorkspaceDiffReview,
-      });
-    }
-    return items.slice(0, 8);
-  }, [pendingApprovalItems, runtimeRuns, t, workspaceDiff?.additions, workspaceDiff?.deletions, workspaceDiff?.fileCount, workspaceDiff?.status, workspaceDiffChanged]);
   const backendComponent = healthComponents.backend;
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
   const providerComponent = healthComponents.providerConfigPresent;
-  const localizeHealthMessage = (message?: string | null) => {
-    const normalized = (message || "").trim();
-    if (!normalized) {
-      return "";
-    }
-    if (normalized === "Backend process is responding.") {
-      return t("workspace.backendResponding");
-    }
-    if (normalized === "Unity MCP bridge online" || normalized === "Unity bridge online") {
-      return t("workspace.unityBridgeOnline");
-    }
-    if (normalized === "Unity MCP bridge is not reachable.") {
-      return t("workspace.unityBridgeNotReachable");
-    }
-    if (normalized === "Unity MCP is connected, but VRCForge Unity tools are missing or incomplete.") {
-      return t("workspace.unityToolsMissing");
-    }
-    return normalized;
-  };
-  const workspaceProjectLabel = activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat");
-  const unityBridgeLabel = !runtimeConnected
-    ? t("workspace.coreOffline")
-    : unityBridgeComponent?.status === "ok"
-      ? t("workspace.unityBridgeOnline")
-      : localizeHealthMessage(unityBridgeComponent?.message) || t("workspace.unityNotConnected");
-  const unityToolsLabel = vrcForgeToolsReady
-    ? t("workspace.vrcTools", { count: formatCount(vrcForgeToolsCount) })
-    : localizeHealthMessage(unityToolsComponent?.message) || (runtimeConnected ? t("workspace.avatarToolsNotReady") : t("workspace.coreOffline"));
-  const providerCompactLabel = `${providerSnapshot.providerLabel}${providerSnapshot.model ? ` / ${providerSnapshot.model}` : ""}`;
-  const reviewSummaryLabel = pendingApprovals
-    ? t("workspace.pendingApprovals", { count: formatCount(pendingApprovals) })
-    : t("workspace.noPendingApprovals");
-  const changeSummaryLabel = loadingWorkspaceDiff
-    ? t("workspace.refreshing")
-    : workspaceDiffError
-      ? t("workspace.diffUnavailable")
-      : workspaceDiff
-        ? workspaceDiffChanged
-          ? t("workspace.changedFiles", { count: formatCount(workspaceDiff.fileCount) })
-          : workspaceDiff.status === "clean"
-            ? t("workspace.clean")
-            : workspaceDiff.status
-        : runtimeConnected
-          ? t("workspace.notLoaded")
-          : t("workspace.coreOffline");
+  const runtimeWorkspaceView = useMemo(
+    () =>
+      buildRuntimeWorkspaceViewModel({
+        t,
+        conversation,
+        workspaceDiff,
+        pendingApprovalItems,
+        runtimeRuns,
+        workspaceProjectLabel: activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat"),
+        runtimeConnected,
+        unityBridgeComponent,
+        unityToolsComponent,
+        vrcForgeToolsReady,
+        vrcForgeToolsCount,
+        providerLabel: providerSnapshot.providerLabel,
+        model: providerSnapshot.model,
+        pendingApprovals,
+        loadingWorkspaceDiff,
+        workspaceDiffError,
+        onOpenCheckpoints: () => setActiveView("checkpoints"),
+        onToggleWorkspaceDiffReview: toggleWorkspaceDiffReview,
+      }),
+    [
+      activeProjectName,
+      activeProjectPath,
+      conversation,
+      loadingWorkspaceDiff,
+      pendingApprovalItems,
+      pendingApprovals,
+      providerSnapshot.model,
+      providerSnapshot.providerLabel,
+      runtimeConnected,
+      runtimeRuns,
+      t,
+      toggleWorkspaceDiffReview,
+      unityBridgeComponent,
+      unityToolsComponent,
+      vrcForgeToolsCount,
+      vrcForgeToolsReady,
+      workspaceDiff,
+      workspaceDiffError,
+    ],
+  );
+  const {
+    workspaceDiffFiles,
+    workspaceDiffChanged,
+    runtimeFileReferences,
+    runtimeReviewEvidence,
+    localizeHealthMessage,
+    workspaceProjectLabel,
+    unityBridgeLabel,
+    unityToolsLabel,
+    providerCompactLabel,
+    reviewSummaryLabel,
+    changeSummaryLabel,
+  } = runtimeWorkspaceView;
   const chatSidebar = useMemo(() => {
     const now = Date.now();
     return {
