@@ -249,7 +249,7 @@
   },
   "chat": {
     "inputPlaceholder": "Type anything",
-    "executingHint": "Running · type to queue guidance",
+    "executingHint": "Running · waiting for model",
     "executingHintCount": " · {{count}} queued",
     "stopping": "Stopping",
     "stop": "Stop",

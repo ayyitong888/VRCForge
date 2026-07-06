@@ -12,7 +12,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -1287,6 +1287,7 @@ def request_llm_plan_with_metadata(
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
@@ -1297,7 +1298,12 @@ def request_llm_plan_with_metadata(
     if provider == "anthropic":
         return request_anthropic_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
 
-    return request_openai_compatible_plan_with_metadata(settings, prompt, reference_image_paths=image_paths)
+    return request_openai_compatible_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_paths=image_paths,
+        stream_callback=stream_callback,
+    )
 
 
 def request_gemini_plan(
@@ -1429,6 +1435,7 @@ def request_openai_compatible_plan_with_metadata(
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
@@ -1454,17 +1461,36 @@ def request_openai_compatible_plan_with_metadata(
 
     client = OpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
     try:
-        response = client.chat.completions.create(
-            model=settings.llm_model,
-            temperature=0.1,
-            messages=[
+        request_payload = {
+            "model": settings.llm_model,
+            "temperature": 0.1,
+            "messages": [
                 {
                     "role": "system",
                     "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
                 },
                 {"role": "user", "content": user_content},
             ],
-        )
+        }
+        if stream_callback is not None and not image_paths:
+            chunks: list[str] = []
+            stream = client.chat.completions.create(**request_payload, stream=True)
+            for event in stream:
+                choices = getattr(event, "choices", []) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                text = str(getattr(delta, "content", "") or "")
+                if not text:
+                    continue
+                chunks.append(text)
+                stream_callback(text)
+            return LlmPlanResponse(
+                text="".join(chunks),
+                reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
+                usage={"exact": False, "unavailableReason": "provider_stream_usage_missing", "provider": settings.llm_provider, "model": settings.llm_model},
+            )
+        response = client.chat.completions.create(**request_payload)
         return LlmPlanResponse(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),

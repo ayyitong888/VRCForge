@@ -1474,6 +1474,7 @@ class AgentGateway:
         self.llm_planner_label: str = ""
         self.llm_reasoning_trace: dict[str, Any] = {}
         self.llm_context_usage: dict[str, Any] = {}
+        self._runtime_stream_context = threading.local()
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
@@ -2076,6 +2077,11 @@ class AgentGateway:
             observe["turn"] = turn_context
         reasoning_trace: dict[str, Any] = {}
         context_usage: dict[str, Any] = {}
+        self._runtime_stream_context.value = {
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "clientTurnId": client_turn_id,
+        }
         self._append_runtime_run(
             {
                 "event": "runtime_turn_started",
@@ -2407,7 +2413,11 @@ class AgentGateway:
             payload["result"] = write_payload["result"]
         elif shell_payload is not None and shell_payload.get("result"):
             payload["result"] = shell_payload["result"]
+        self._runtime_stream_context.value = {}
         return payload
+
+    def runtime_stream_context(self) -> dict[str, str]:
+        return dict(getattr(self._runtime_stream_context, "value", {}) or {})
 
     def _execute_write_request(
         self,

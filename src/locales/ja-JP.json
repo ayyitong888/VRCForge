@@ -249,7 +249,7 @@
   },
   "chat": {
     "inputPlaceholder": "自由に入力",
-    "executingHint": "実行中 · 入力するとキューに追加されます",
+    "executingHint": "実行中 · モデルの応答待ち",
     "executingHintCount": " · {{count}} 件待ち",
     "stopping": "停止中",
     "stop": "停止",

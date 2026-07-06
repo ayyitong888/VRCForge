@@ -341,6 +341,28 @@ mod tests {
             Some(serde_json::json!({"type": "agentRuntimeRuns", "timestamp": 1.0}))
         );
 
+        let delta = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeDelta",
+            "sessionId": "sess-1",
+            "turnId": "turn-1",
+            "clientTurnId": "client-1",
+            "textDelta": "hello",
+            "done": false,
+            "secret": "should-not-reach-webview",
+            "configPath": "C:\\Users\\Example\\AppData\\Local\\VRCForge\\settings.json"
+        }));
+        assert_eq!(
+            delta,
+            Some(serde_json::json!({
+                "type": "agentRuntimeDelta",
+                "sessionId": "sess-1",
+                "turnId": "turn-1",
+                "clientTurnId": "client-1",
+                "textDelta": "hello",
+                "done": false
+            }))
+        );
+
         for event_type in ["config", "log", "state", "agentNotesUpdated"] {
             assert!(sanitize_backend_event(serde_json::json!({
                 "type": event_type,

@@ -249,7 +249,7 @@
   },
   "chat": {
     "inputPlaceholder": "隨心輸入",
-    "executingHint": "執行中 · 繼續輸入可排隊引導",
+    "executingHint": "執行中 · 等待模型回應",
     "executingHintCount": " · 已排 {{count}} 條",
     "stopping": "正在停止",
     "stop": "停止",

@@ -71,6 +71,7 @@ import {
 } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
+import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import {
   AgentApproval,
   AdjustmentCheckpoint,
@@ -226,6 +227,11 @@ type BackendStartStatus = {
 
 type BackendEventMessage = {
   type?: string;
+  sessionId?: string;
+  turnId?: string;
+  clientTurnId?: string;
+  textDelta?: string;
+  done?: boolean;
   payload?: unknown;
 };
 
@@ -321,6 +327,7 @@ function formatStorageSize(bytes?: number) {
 
 type ConversationItem =
   | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
@@ -1803,6 +1810,10 @@ export default function App() {
       if (!eventType) {
         return;
       }
+      if (eventType === "agentRuntimeDelta") {
+        applyRuntimeDelta(event.payload as AgentRuntimeDeltaEvent);
+        return;
+      }
       if (bootstrapEvents.has(eventType)) {
         scheduleBootstrapRefresh();
       }
@@ -2342,6 +2353,23 @@ export default function App() {
     updateChat(chatId, (chat) => ({ ...chat, items: [...chat.items, item] }));
   }
 
+  function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
+    const clientTurnId = String(delta.clientTurnId || "").trim();
+    if (!clientTurnId || !delta.textDelta) {
+      return;
+    }
+    setChats((list) =>
+      list.map((chat) => ({
+        ...chat,
+        items: chat.items.map((item) =>
+          item.type === "streaming" && item.clientTurnId === clientTurnId
+            ? { ...item, text: `${item.text}${delta.textDelta}` }
+            : item,
+        ),
+      })),
+    );
+  }
+
   function pendingApprovalForResponse(response: AgentRuntimeResponse): AgentApproval | null {
     const approvalId = approvalIdFromResponse(response);
     if (approvalId) {
@@ -2761,12 +2789,20 @@ export default function App() {
       }
       const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments, queuedFrom: Boolean(turn.queuedFrom) };
       userItemId = userItem.id;
+      const streamingItem: ConversationItem = {
+        id: `stream-${turn.id}`,
+        type: "streaming",
+        clientTurnId: turn.id,
+        text: "",
+        providerLabel: turn.providerLabel,
+        model: turn.model,
+      };
       const message = turn.text;
       updateChat(chatId, (current) => ({
         ...current,
         sessionId: options?.sessionId ?? current.sessionId,
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-        items: [...(options?.baseItems ?? current.items), userItem],
+        items: [...(options?.baseItems ?? current.items), userItem, streamingItem],
       }));
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
@@ -2782,7 +2818,7 @@ export default function App() {
         ...current,
         sessionId: response.sessionId || response.session_id || current.sessionId,
         items: [
-          ...current.items,
+          ...current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
           { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model },
         ],
       }));
@@ -2798,6 +2834,10 @@ export default function App() {
         }));
       }
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
+      updateChat(chatId, (current) => ({
+        ...current,
+        items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
+      }));
       setError(text);
     } finally {
       if (activeTurnAbortRef.current === abortController) {
@@ -11043,6 +11083,26 @@ function ConversationCard({
             <Wrench className="h-3.5 w-3.5" />
             {t("sidebar.doctor")}
           </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (item.type === "streaming") {
+    return (
+      <div className="group flex justify-start">
+        <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
+          {item.text ? (
+            <ChatMarkdown text={item.text} />
+          ) : (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>{t("chat.executingHint")}</span>
+            </div>
+          )}
+          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+            <span>{item.providerLabel || displayPlanner("llm")}{item.model ? ` / ${item.model}` : ""}</span>
+          </div>
         </div>
       </div>
     );

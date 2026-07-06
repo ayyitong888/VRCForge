@@ -8730,6 +8730,34 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     return settings
 
 
+def extract_streaming_reply_text(raw_json_fragment: str) -> str:
+    marker = '"reply"'
+    marker_index = raw_json_fragment.find(marker)
+    if marker_index < 0:
+        return ""
+    colon_index = raw_json_fragment.find(":", marker_index + len(marker))
+    if colon_index < 0:
+        return ""
+    quote_index = raw_json_fragment.find('"', colon_index + 1)
+    if quote_index < 0:
+        return ""
+
+    output: list[str] = []
+    escaped = False
+    for char in raw_json_fragment[quote_index + 1 :]:
+        if escaped:
+            output.append({"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "/": "/"}.get(char, char))
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            break
+        output.append(char)
+    return "".join(output)
+
+
 def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     """LLM planner hook for the agent gateway (multi-provider dispatch).
 
@@ -8742,7 +8770,41 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     label_parts = [provider_display_name(settings.llm_provider), str(settings.llm_model or "").strip()]
     AGENT_GATEWAY.llm_planner_label = " · ".join(part for part in label_parts if part)
     AGENT_GATEWAY.llm_reasoning_trace = {}
-    response = request_llm_plan_with_metadata(settings, prompt)
+    stream_state = {"raw": "", "reply": ""}
+
+    def stream_callback(delta: str) -> None:
+        stream_state["raw"] += delta
+        reply = extract_streaming_reply_text(stream_state["raw"])
+        if not reply or reply == stream_state["reply"]:
+            return
+        text_delta = reply[len(stream_state["reply"]) :]
+        stream_state["reply"] = reply
+        context = AGENT_GATEWAY.runtime_stream_context()
+        client_turn_id = str(context.get("clientTurnId") or "").strip()
+        if not client_turn_id:
+            return
+        EVENT_BUS.broadcast_from_sync(
+            "agentRuntimeDelta",
+            {
+                "sessionId": context.get("sessionId") or "",
+                "turnId": context.get("turnId") or "",
+                "clientTurnId": client_turn_id,
+                "textDelta": text_delta[:1000],
+            },
+        )
+
+    response = request_llm_plan_with_metadata(settings, prompt, stream_callback=stream_callback)
+    context = AGENT_GATEWAY.runtime_stream_context()
+    if context.get("clientTurnId"):
+        EVENT_BUS.broadcast_from_sync(
+            "agentRuntimeDelta",
+            {
+                "sessionId": context.get("sessionId") or "",
+                "turnId": context.get("turnId") or "",
+                "clientTurnId": context.get("clientTurnId") or "",
+                "done": True,
+            },
+        )
     reasoning = dict(response.reasoning or {})
     if int(reasoning.get("itemCount") or 0) > 0:
         AGENT_GATEWAY.llm_reasoning_trace = reasoning

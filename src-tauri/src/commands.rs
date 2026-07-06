@@ -500,28 +500,31 @@ pub fn update_permission_mode(
 }
 
 #[tauri::command]
-pub fn send_agent_message(
+pub async fn send_agent_message(
     request: DesktopAgentMessageRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/agent/message".to_string(),
-        Some(serde_json::json!({
-            "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
-            "session_id": request.session_id,
-            "clientTurnId": request.client_turn_id,
-            "message": request.message,
-            "history": request.history.unwrap_or_default(),
-            "attachments": request.attachments.unwrap_or_default(),
-            "projectPath": request.project_path,
-            "provider": request.provider,
-            "providerLabel": request.provider_label,
-            "model": request.model,
-        })),
-        request
-            .timeout_ms
-            .or(Some(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/agent/message".to_string(),
+            Some(serde_json::json!({
+                "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
+                "session_id": request.session_id,
+                "clientTurnId": request.client_turn_id,
+                "message": request.message,
+                "history": request.history.unwrap_or_default(),
+                "attachments": request.attachments.unwrap_or_default(),
+                "projectPath": request.project_path,
+                "provider": request.provider,
+                "providerLabel": request.provider_label,
+                "model": request.model,
+            })),
+            request
+                .timeout_ms
+                .or(Some(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]

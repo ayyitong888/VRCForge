@@ -141,6 +141,23 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
     if let Some(timestamp) = payload.get("timestamp") {
         event["timestamp"] = timestamp.clone();
     }
+    if event_type == "agentRuntimeDelta" {
+        if let Some(value) = payload.get("sessionId").and_then(|value| value.as_str()) {
+            event["sessionId"] = serde_json::Value::String(value.chars().take(160).collect());
+        }
+        if let Some(value) = payload.get("turnId").and_then(|value| value.as_str()) {
+            event["turnId"] = serde_json::Value::String(value.chars().take(160).collect());
+        }
+        if let Some(value) = payload.get("clientTurnId").and_then(|value| value.as_str()) {
+            event["clientTurnId"] = serde_json::Value::String(value.chars().take(160).collect());
+        }
+        if let Some(value) = payload.get("textDelta").and_then(|value| value.as_str()) {
+            event["textDelta"] = serde_json::Value::String(value.chars().take(1000).collect());
+        }
+        if let Some(value) = payload.get("done").and_then(|value| value.as_bool()) {
+            event["done"] = serde_json::Value::Bool(value);
+        }
+    }
     Some(event)
 }
 
@@ -153,6 +170,7 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
             | "agentMemory"
             | "agentPermission"
             | "agentRuntimeCancel"
+            | "agentRuntimeDelta"
             | "agentRuntimeQueue"
             | "agentRuntimeRuns"
             | "agentRuntimeTurn"

@@ -1,45 +1,57 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
-import LanguageDetector from "i18next-browser-languagedetector";
 
-import enUS from "./locales/en-US.json";
-import zhCN from "./locales/zh-CN.json";
-import zhTW from "./locales/zh-TW.json";
-import jaJP from "./locales/ja-JP.json";
+import {
+  DEFAULT_LOCALE,
+  LOCALE_STORAGE_KEY,
+  SUPPORTED_LOCALES,
+  detectInitialLocale,
+  loadLocaleMessages,
+  normalizeLocaleCode,
+  type LocaleCode,
+} from "./locales";
 
-export const SUPPORTED_LOCALES = [
-  { code: "zh-CN", label: "简体中文" },
-  { code: "zh-TW", label: "繁體中文" },
-  { code: "ja-JP", label: "日本語" },
-  { code: "en-US", label: "English" },
-] as const;
+export { DEFAULT_LOCALE, LOCALE_STORAGE_KEY, SUPPORTED_LOCALES, type LocaleCode };
 
-export type LocaleCode = (typeof SUPPORTED_LOCALES)[number]["code"];
+const loadedLocales = new Set<string>();
 
-const LOCALE_STORAGE_KEY = "vrcforge-locale";
+async function ensureLocaleLoaded(code: string): Promise<LocaleCode> {
+  const locale = normalizeLocaleCode(code);
+  if (!loadedLocales.has(locale)) {
+    const payload = await loadLocaleMessages(locale);
+    i18n.addResourceBundle(payload.code, "translation", payload.messages, true, true);
+    loadedLocales.add(payload.code);
+  }
+  return locale;
+}
 
-i18n
-  .use(LanguageDetector)
-  .use(initReactI18next)
-  .init({
-    resources: {
-      "zh-CN": { translation: zhCN },
-      "zh-TW": { translation: zhTW },
-      "ja-JP": { translation: jaJP },
-      "en-US": { translation: enUS },
-    },
-    fallbackLng: "en-US",
-    interpolation: { escapeValue: false },
-    detection: {
-      order: ["localStorage"],
-      lookupLocalStorage: LOCALE_STORAGE_KEY,
-      caches: ["localStorage"],
-    },
-  });
+export async function initializeI18n(): Promise<typeof i18n> {
+  if (!i18n.isInitialized) {
+    const fallback = await loadLocaleMessages(DEFAULT_LOCALE);
+    loadedLocales.add(fallback.code);
+    await i18n.use(initReactI18next).init({
+      fallbackLng: DEFAULT_LOCALE,
+      interpolation: { escapeValue: false },
+      resources: { [fallback.code]: { translation: fallback.messages } },
+      lng: DEFAULT_LOCALE,
+    });
+  }
 
-export function setLocale(code: string) {
-  window.localStorage.setItem(LOCALE_STORAGE_KEY, code);
-  i18n.changeLanguage(code);
+  const initial = await ensureLocaleLoaded(detectInitialLocale());
+  if (i18n.language !== initial) {
+    await i18n.changeLanguage(initial);
+  }
+  return i18n;
+}
+
+export async function setLocale(code: string): Promise<void> {
+  const locale = await ensureLocaleLoaded(code);
+  try {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  } catch {
+    // Ignore blocked storage; the in-memory language still changes.
+  }
+  await i18n.changeLanguage(locale);
 }
 
 export default i18n;
