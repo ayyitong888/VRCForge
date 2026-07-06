@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
 
+use crate::backend::*;
+use crate::commands::*;
+use crate::sanitize::*;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -21,9 +24,6 @@ use tauri::{
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
-use crate::backend::*;
-use crate::commands::*;
-use crate::sanitize::*;
 
 pub(crate) fn start_backend_event_bridge_once(
     app_handle: tauri::AppHandle,

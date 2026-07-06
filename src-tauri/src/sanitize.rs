@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
 
+use crate::backend::*;
+use crate::commands::*;
+use crate::event_bridge::*;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -21,9 +24,6 @@ use tauri::{
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
-use crate::backend::*;
-use crate::commands::*;
-use crate::event_bridge::*;
 
 pub(crate) fn remove_secret_response_fields(value: &mut serde_json::Value) {
     match value {

@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
 
+use crate::backend::*;
+use crate::event_bridge::*;
+use crate::sanitize::*;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -21,9 +24,6 @@ use tauri::{
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
-use crate::backend::*;
-use crate::event_bridge::*;
-use crate::sanitize::*;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -339,7 +339,6 @@ pub(crate) struct DesktopOptimizationProofsRequest {
     timeout_ms: Option<u64>,
 }
 
-
 #[tauri::command]
 pub async fn desktop_runtime_snapshot(
     request: DesktopRuntimeSnapshotRequest,
@@ -388,7 +387,9 @@ pub async fn desktop_runtime_snapshot(
 }
 
 #[tauri::command]
-pub fn update_api_config(request: DesktopProviderConfigRequest) -> Result<serde_json::Value, String> {
+pub fn update_api_config(
+    request: DesktopProviderConfigRequest,
+) -> Result<serde_json::Value, String> {
     let secret = request.api_key.clone().unwrap_or_default();
     sanitize_provider_result(
         backend_json_request(
@@ -407,7 +408,9 @@ pub fn update_api_config(request: DesktopProviderConfigRequest) -> Result<serde_
 }
 
 #[tauri::command]
-pub fn update_vision_config(request: DesktopVisionConfigRequest) -> Result<serde_json::Value, String> {
+pub fn update_vision_config(
+    request: DesktopVisionConfigRequest,
+) -> Result<serde_json::Value, String> {
     let secret = request.api_key.clone().unwrap_or_default();
     let mut body = provider_config_body(
         request.provider,
@@ -482,7 +485,9 @@ pub fn test_provider_capability(
 }
 
 #[tauri::command]
-pub fn update_permission_mode(request: DesktopPermissionRequest) -> Result<serde_json::Value, String> {
+pub fn update_permission_mode(
+    request: DesktopPermissionRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "POST",
         "/api/app/permission".to_string(),
@@ -495,7 +500,9 @@ pub fn update_permission_mode(request: DesktopPermissionRequest) -> Result<serde
 }
 
 #[tauri::command]
-pub fn send_agent_message(request: DesktopAgentMessageRequest) -> Result<serde_json::Value, String> {
+pub fn send_agent_message(
+    request: DesktopAgentMessageRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "POST",
         "/api/app/agent/message".to_string(),
@@ -923,7 +930,9 @@ pub fn export_support_bundle(
 }
 
 #[tauri::command]
-pub async fn fetch_project_prefs(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_project_prefs(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -937,7 +946,9 @@ pub async fn fetch_project_prefs(request: DesktopTimeoutRequest) -> Result<serde
 }
 
 #[tauri::command]
-pub fn save_project_prefs(request: DesktopProjectPrefsRequest) -> Result<serde_json::Value, String> {
+pub fn save_project_prefs(
+    request: DesktopProjectPrefsRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "POST",
         "/api/app/projects/prefs".to_string(),
@@ -1182,7 +1193,9 @@ pub fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json::Valu
 }
 
 #[tauri::command]
-pub fn fetch_optimization_plan(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn fetch_optimization_plan(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/optimization/plan", request, 120_000)
 }
 
@@ -1204,12 +1217,16 @@ pub fn request_outfit_import(request: DesktopJsonBodyRequest) -> Result<serde_js
 }
 
 #[tauri::command]
-pub fn request_package_install(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn request_package_install(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/package-install/request", request, 120_000)
 }
 
 #[tauri::command]
-pub fn plan_avatar_encryption(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn plan_avatar_encryption(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/avatar-encryption/plan", request, 120_000)
 }
 
@@ -1227,7 +1244,9 @@ pub fn fetch_skill_packages() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn preflight_skill_package(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn preflight_skill_package(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/skill-packages/preflight", request, 120_000)
 }
 
@@ -1284,7 +1303,9 @@ pub fn set_skill_package_enabled(
 }
 
 #[tauri::command]
-pub fn uninstall_skill_package(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn uninstall_skill_package(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "DELETE",
         format!(
@@ -1353,7 +1374,9 @@ pub fn delete_skill(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn fetch_sub_agents(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_sub_agents(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -1414,7 +1437,9 @@ pub fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::
 }
 
 #[tauri::command]
-pub async fn fetch_agent_runs(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_agent_runs(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -1470,7 +1495,9 @@ pub fn request_agent_desktop_action(
 }
 
 #[tauri::command]
-pub async fn fetch_agent_goals(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_agent_goals(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -1503,7 +1530,9 @@ pub fn update_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json
 }
 
 #[tauri::command]
-pub async fn fetch_agent_memory(request: DesktopAgentListRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_agent_memory(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -1692,7 +1721,6 @@ pub fn uninstall_external_agent_connector(
     )
     .map(sanitize_webview_response)
 }
-
 
 #[tauri::command]
 pub fn ensure_agent_notes_file() -> String {

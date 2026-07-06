@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
 
+use crate::commands::*;
+use crate::event_bridge::*;
+use crate::sanitize::*;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -21,9 +24,6 @@ use tauri::{
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
-use crate::commands::*;
-use crate::event_bridge::*;
-use crate::sanitize::*;
 
 pub(crate) const BACKEND_HOST: &str = "127.0.0.1";
 pub(crate) const BACKEND_PORT: u16 = 8757;
@@ -108,7 +108,9 @@ pub(crate) fn backend_json_request(
     }
 }
 
-pub(crate) async fn blocking_backend_json_request<F>(operation: F) -> Result<serde_json::Value, String>
+pub(crate) async fn blocking_backend_json_request<F>(
+    operation: F,
+) -> Result<serde_json::Value, String>
 where
     F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
 {
@@ -172,7 +174,9 @@ pub(crate) fn run_backend_start_worker(app_handle: tauri::AppHandle) {
     clear_backend_start_in_progress(&app_handle);
 }
 
-pub(crate) fn start_backend_in_background(app_handle: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+pub(crate) fn start_backend_in_background(
+    app_handle: &tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     let user_data = user_data_dir()?;
     let app_session_token = ensure_app_session_token(&user_data)?;
     if backend_port_open() {
@@ -264,7 +268,6 @@ pub(crate) fn start_backend_in_background(app_handle: &tauri::AppHandle) -> Resu
         "logDir": log_dir.display().to_string()
     }))
 }
-
 
 pub(crate) fn backend_command(root: &Path) -> Result<Command, String> {
     let packaged = root.join("backend").join("vrcforge_backend.exe");
@@ -418,7 +421,11 @@ pub(crate) fn app_session_challenge_signature(token: &str, nonce: &str) -> Strin
     )
 }
 
-pub(crate) fn app_session_challenge_signature_matches(token: &str, nonce: &str, signature: &str) -> bool {
+pub(crate) fn app_session_challenge_signature_matches(
+    token: &str,
+    nonce: &str,
+    signature: &str,
+) -> bool {
     let Some(signature_bytes) = decode_hmac_sha256_hex(signature) else {
         return false;
     };
