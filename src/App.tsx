@@ -94,7 +94,8 @@ import {
   thinkingTraceLabel,
 } from "./lib/provider-ui";
 import { formatAttachmentSize } from "./lib/chat-format";
-import type { ApprovalActionState, ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
+import { cacheChatTimestampsFast, formatChatSidebarTime, isStoredChat, sortChatsByPin } from "./lib/chat-thread";
+import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./lib/chat-types";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "./lib/permission-ui";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "./lib/runtime-ui-types";
@@ -261,21 +262,6 @@ type BackendEventMessage = {
 
 
 type ActiveView = "chat" | "doctor" | "optimization" | "protection" | "skills" | "checkpoints" | "settings";
-
-type ChatThread = {
-  id: string;
-  sessionId: string;
-  title: string;
-  projectPath: string;
-  createdAt?: string;
-  updatedAt?: string;
-  agentName?: string;
-  pinned?: boolean;
-  archived?: boolean;
-  items: ConversationItem[];
-};
-
-
 
 type QueuedTurn = {
   id: string;
@@ -1315,7 +1301,7 @@ export default function App() {
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
   const chatSidebarTimes = useMemo(() => {
     const now = Date.now();
-    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now)]));
+    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now, i18n.language)]));
   }, [chats, i18n.language]);
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
@@ -6297,106 +6283,6 @@ function ShellResultCard({ title, result, error }: { title: string; result?: Age
 
 function projectKey(project: { path?: string; name?: string }): string {
   return project.path || project.name || "";
-}
-
-function sortChatsByPin(list: ChatThread[]): ChatThread[] {
-  return [...list].sort((a, b) => {
-    const pinDelta = Number(b.pinned ?? false) - Number(a.pinned ?? false);
-    if (pinDelta !== 0) {
-      return pinDelta;
-    }
-    return chatTimeMs(b) - chatTimeMs(a);
-  });
-}
-
-function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
-  const fallbackMs = parseChatTimeCandidate(chat.id);
-  const createdMs = parseChatTimeCandidate(chat.createdAt) || fallbackMs;
-  const updatedMs = parseChatTimeCandidate(chat.updatedAt) || createdMs;
-  return {
-    ...chat,
-    createdAt: chat.createdAt || isoFromTime(createdMs),
-    updatedAt: chat.updatedAt || isoFromTime(updatedMs),
-  };
-}
-
-function isoFromTime(timestampMs: number): string {
-  return timestampMs ? new Date(timestampMs).toISOString() : "";
-}
-
-function formatChatSidebarTime(chat: ChatThread, nowMs = Date.now()): string {
-  const ms = chatTimeMs(chat);
-  if (!ms) {
-    return "";
-  }
-  return formatCompactRelativeTime(ms, nowMs);
-}
-
-function chatTimeMs(chat: ChatThread): number {
-  for (const candidate of [chat.updatedAt, chat.createdAt]) {
-    const parsed = parseChatTimeCandidate(candidate);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  return parseChatTimeCandidate(chat.id);
-}
-
-function parseChatTimeCandidate(value: unknown): number {
-  if (typeof value !== "string" || !value.trim()) {
-    return 0;
-  }
-  const dateValue = Date.parse(value);
-  if (Number.isFinite(dateValue)) {
-    return dateValue;
-  }
-  const match = value.match(/(?:^|[^0-9])([0-9]{13})(?:[^0-9]|$)/);
-  if (!match) {
-    return 0;
-  }
-  const timestamp = Number(match[1]);
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function formatCompactRelativeTime(timestampMs: number, nowMs = Date.now()): string {
-  const diffMs = Math.max(0, nowMs - timestampMs);
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  const week = 7 * day;
-  const month = 30 * day;
-  const zh = i18n.language.toLowerCase().startsWith("zh");
-  if (diffMs < minute) {
-    return zh ? "刚刚" : "now";
-  }
-  if (diffMs < hour) {
-    const value = Math.max(1, Math.floor(diffMs / minute));
-    return zh ? `${value} 分钟` : `${value}m`;
-  }
-  if (diffMs < day) {
-    const value = Math.max(1, Math.floor(diffMs / hour));
-    return zh ? `${value} 小时` : `${value}h`;
-  }
-  if (diffMs < week) {
-    const value = Math.max(1, Math.floor(diffMs / day));
-    return zh ? `${value} 天` : `${value}d`;
-  }
-  if (diffMs < month) {
-    const value = Math.max(1, Math.floor(diffMs / week));
-    return zh ? `${value} 周` : `${value}w`;
-  }
-  const value = Math.max(1, Math.floor(diffMs / month));
-  return zh ? `${value} 月` : `${value}mo`;
-}
-
-
-
-function isStoredChat(value: unknown): value is ChatThread {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const chat = value as Partial<ChatThread>;
-  return typeof chat.id === "string" && chat.id.length > 0 && Array.isArray(chat.items);
 }
 
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {

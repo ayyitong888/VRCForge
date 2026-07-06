@@ -51,5 +51,18 @@ export type ConversationItem =
   | { id: string; type: "compact"; text: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 
+export type ChatThread = {
+  id: string;
+  sessionId: string;
+  title: string;
+  projectPath: string;
+  createdAt?: string;
+  updatedAt?: string;
+  agentName?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  items: ConversationItem[];
+};
+
 export type ApprovalActionState = "approve" | "reject" | "modify";
 export type MessageFeedback = "up" | "down";
