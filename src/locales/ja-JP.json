@@ -132,7 +132,7 @@
     "desktopDesc": "デスクトップ救援/Computer Use を明示的に依頼します。通常のチャットからは自動開始しません。"
   },
   "notice": {
-    "projectNotGit": "選択中の Unity プロジェクトは Git リポジトリではありません。VRCForge アプリのコード変更を表示しています。",
+    "projectNotGit": "選択中の Unity プロジェクトは Git リポジトリではないため、表示できるプロジェクトの Git 変更はありません。",
     "actionUnavailable": "{{action}} は現在使用できません。",
     "browserContext": "ブラウザーコンテキストは右サイドバーに表示されます。アプリ内ブラウザー操作は明示的な Browser スキルから使用してください。",
     "screenshotSelected": "スクリーンショットスキルを選択しました。slash コマンドを確認して送信するとキャプチャします。",

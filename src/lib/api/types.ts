@@ -239,7 +239,6 @@ export type WorkspaceDiffSummary = {
   patch?: string;
   patchTruncated?: boolean;
   error?: string;
-  fallbackFromProjectRoot?: string;
 };
 
 export type AgentMessageAttachment = {

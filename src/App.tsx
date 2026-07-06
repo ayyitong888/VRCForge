@@ -117,6 +117,7 @@ import {
   AppBootstrap,
   DoctorReport,
   DiagnosticsStatus,
+  DesktopRuntimeSnapshot,
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
   OutfitImportPlanResult,
@@ -929,6 +930,7 @@ export default function App() {
   >([]);
   const healthRefreshInFlightRef = useRef(false);
   const runtimeRefreshSeqRef = useRef(0);
+  const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
@@ -2114,11 +2116,7 @@ export default function App() {
       setLoadingWorkspaceDiffPatch(true);
     }
     try {
-      let payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
-      if (!payload.ok && payload.status === "not_git" && activeProjectPath) {
-        payload = await fetchWorkspaceDiff(endpoint, "", includePatch);
-        setRuntimeNotice(t("notice.projectNotGit"));
-      }
+      const payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
       setWorkspaceDiff(payload);
       setWorkspaceDiffError(payload.ok ? "" : payload.error || t("workspace.diffUnavailable"));
     } catch (cause) {
@@ -2131,6 +2129,24 @@ export default function App() {
         setLoadingWorkspaceDiffPatch(false);
       }
     }
+  }
+
+  function fetchRuntimeSnapshotOnce(
+    key: string,
+    target: string,
+    params: { sessionId?: string; projectRoot?: string; includePatch?: boolean; globalOnly?: boolean },
+  ) {
+    const existing = runtimeSnapshotInFlightRef.current.get(key);
+    if (existing) {
+      return existing;
+    }
+    const request = fetchDesktopRuntimeSnapshot(target, params).finally(() => {
+      if (runtimeSnapshotInFlightRef.current.get(key) === request) {
+        runtimeSnapshotInFlightRef.current.delete(key);
+      }
+    });
+    runtimeSnapshotInFlightRef.current.set(key, request);
+    return request;
   }
 
   async function refreshRuntimeRuns(showError = false, target = endpoint) {
@@ -2154,11 +2170,13 @@ export default function App() {
     }
     try {
       const projectRoot = requestProjectRoot || undefined;
-      const snapshot = await fetchDesktopRuntimeSnapshot(target, {
+      const includePatch = workspaceDiffReviewOpen;
+      const snapshotKey = JSON.stringify([target, requestSessionId || "", projectRoot || "", includePatch ? "patch" : "summary"]);
+      const snapshot = await fetchRuntimeSnapshotOnce(snapshotKey, target, {
         sessionId: requestSessionId || undefined,
         projectRoot,
         globalOnly: !projectRoot,
-        includePatch: workspaceDiffReviewOpen,
+        includePatch,
       });
       if (!isLatestRefresh()) {
         return;
@@ -2166,9 +2184,6 @@ export default function App() {
       if (snapshot.workspaceDiff) {
         setWorkspaceDiff(snapshot.workspaceDiff);
         setWorkspaceDiffError(snapshot.workspaceDiff.ok ? "" : snapshot.workspaceDiff.error || t("workspace.diffUnavailable"));
-        if (snapshot.workspaceDiff.fallbackFromProjectRoot) {
-          setRuntimeNotice(t("notice.projectNotGit"));
-        }
       }
       setAgentApprovals(snapshot.approvals?.approvals ?? []);
       setRuntimeRuns(snapshot.runs?.runs ?? []);

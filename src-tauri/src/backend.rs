@@ -13,7 +13,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -31,8 +31,11 @@ pub(crate) const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
 pub(crate) const BACKEND_START_BACKGROUND_WAIT_SECONDS: u64 = 18;
 pub(crate) const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
 pub(crate) const BACKEND_SESSION_VERIFY_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const BACKEND_SESSION_VERIFY_CACHE_TTL: Duration = Duration::from_secs(15);
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+static BACKEND_SESSION_VERIFIED_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 pub(crate) struct BackendState {
     pub(crate) child: Mutex<Option<Child>>,
@@ -89,19 +92,32 @@ pub(crate) fn backend_json_request(
         .redirects(0)
         .build();
     let url = format!("{BACKEND_ENDPOINT}{path}");
-    let http_request = agent
-        .request(method, &url)
-        .set("Accept", "application/json")
-        .set("Origin", "tauri://localhost")
-        .set("Authorization", &format!("Bearer {app_session_token}"));
-    let response = if let Some(body) = body {
-        http_request
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-    } else {
-        http_request.call()
+    let send_once = || {
+        let http_request = agent
+            .request(method, &url)
+            .set("Accept", "application/json")
+            .set("Origin", "tauri://localhost")
+            .set("Authorization", &format!("Bearer {app_session_token}"));
+        let response = if let Some(body) = body.as_ref() {
+            http_request
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+        } else {
+            http_request.call()
+        };
+        app_api_response_from_ureq(response)
     };
-    let response = app_api_response_from_ureq(response)?;
+    let mut response = send_once()?;
+    if matches!(response.status, 401 | 403) {
+        clear_backend_session_verify_cache();
+        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            mark_backend_session_verified();
+            response = send_once()?;
+            if matches!(response.status, 401 | 403) {
+                clear_backend_session_verify_cache();
+            }
+        }
+    }
     if response.ok {
         Ok(response.body)
     } else {
@@ -186,6 +202,7 @@ pub(crate) fn start_backend_in_background(
                 "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
             );
         }
+        mark_backend_session_verified();
         let state = app_handle.state::<BackendState>();
         start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
         return Ok(serde_json::json!({
@@ -253,10 +270,11 @@ pub(crate) fn start_backend_in_background(
     }
 
     let state = app_handle.state::<BackendState>();
-    start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
+    start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token.clone())?;
     let ready = wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
 
-    if ready {
+    if ready && wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+        mark_backend_session_verified();
         return Ok(serde_json::json!({
             "ok": true,
             "status": "ready",
@@ -438,14 +456,45 @@ pub(crate) fn app_session_challenge_signature_matches(
 
 pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String> {
     if !backend_port_open() {
+        clear_backend_session_verify_cache();
         return Err("VRCForge runtime is still starting.".to_string());
     }
+    if backend_session_verify_cache_valid() {
+        return Ok(());
+    }
     if wait_for_backend_session(token, BACKEND_SESSION_VERIFY_WAIT) {
+        mark_backend_session_verified();
         Ok(())
     } else {
+        clear_backend_session_verify_cache();
         Err(
             "VRCForge runtime session verification failed before an internal IPC request. Restart VRCForge if the local runtime was replaced.".to_string(),
         )
+    }
+}
+
+pub(crate) fn backend_session_verify_cache() -> &'static Mutex<Option<Instant>> {
+    BACKEND_SESSION_VERIFIED_UNTIL.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn backend_session_verify_cache_valid() -> bool {
+    let Ok(guard) = backend_session_verify_cache().lock() else {
+        return false;
+    };
+    guard
+        .as_ref()
+        .is_some_and(|deadline| Instant::now() <= *deadline)
+}
+
+pub(crate) fn mark_backend_session_verified() {
+    if let Ok(mut guard) = backend_session_verify_cache().lock() {
+        *guard = Some(Instant::now() + BACKEND_SESSION_VERIFY_CACHE_TTL);
+    }
+}
+
+pub(crate) fn clear_backend_session_verify_cache() {
+    if let Ok(mut guard) = backend_session_verify_cache().lock() {
+        *guard = None;
     }
 }
 

@@ -1800,9 +1800,6 @@ def read_app_runtime_snapshot(
     effective_global_only = bool(globalOnly or not projectRoot)
     scoped_ledgers = bool(str(sessionId or "").strip() or str(projectRoot or "").strip())
     workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
-    if projectRoot and not workspace_diff.get("ok") and workspace_diff.get("status") == "not_git":
-        workspace_diff = build_workspace_diff_summary("", include_patch=includePatch)
-        workspace_diff["fallbackFromProjectRoot"] = projectRoot
     if scoped_ledgers:
         runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
         desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)

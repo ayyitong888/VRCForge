@@ -8,6 +8,7 @@ const port = Number(process.env.VRCFORGE_CDP_PORT || "9340");
 const marker = `LATENCY_PROBE_${Date.now()}`;
 const outPath = resolve(repoRoot, "artifacts", "latency", `packaged-latency-${marker}.json`);
 const maxWaitMs = Number(process.env.VRCFORGE_PROBE_WAIT_MS || "180000");
+const closeOnComplete = process.env.VRCFORGE_PROBE_CLOSE_ON_COMPLETE === "1";
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -212,13 +213,16 @@ async function main() {
   const beforeLaunch = await processSnapshot();
   const launchedAt = Date.now();
   const child = spawn(exe, [], {
-    detached: false,
+    detached: !closeOnComplete,
     stdio: "ignore",
     env: {
       ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
     },
   });
+  if (!closeOnComplete) {
+    child.unref();
+  }
   const page = await waitForCdpTarget();
   const cdp = connectCdp(page.webSocketDebuggerUrl);
   await cdp.opened;
@@ -461,10 +465,11 @@ async function main() {
     network,
     performanceMetrics: perfMetrics.metrics,
     childPid: child.pid,
+    closeOnComplete,
   };
   await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   cdp.close();
-  if (completed && process.env.VRCFORGE_PROBE_KEEP_OPEN !== "1") {
+  if (completed && closeOnComplete) {
     child.kill();
     await sleep(500);
     await closeExistingVrcforgeProcesses();

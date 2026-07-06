@@ -132,7 +132,7 @@
     "desktopDesc": "明確請求桌面救援/Computer Use 協助。普通聊天不會自動啟動。"
   },
   "notice": {
-    "projectNotGit": "所選 Unity 專案不是 Git 倉庫；正在顯示 VRCForge 應用程式碼變更。",
+    "projectNotGit": "所選 Unity 專案不是 Git 倉庫；沒有可顯示的專案 Git 變更。",
     "actionUnavailable": "{{action}} 目前不可用。",
     "browserContext": "瀏覽器上下文會顯示在右側欄；應用內瀏覽器控制請從顯式 Browser 技能入口使用。",
     "screenshotSelected": "已選擇截圖技能。請檢查 slash 命令並發送以執行截圖。",

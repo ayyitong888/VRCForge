@@ -132,7 +132,7 @@
     "desktopDesc": "Explicitly request desktop/computer-use help. It never starts from normal chat text."
   },
   "notice": {
-    "projectNotGit": "Selected Unity project is not a Git repository; showing VRCForge app code changes.",
+    "projectNotGit": "Selected Unity project is not a Git repository; no project Git changes are available.",
     "actionUnavailable": "{{action}} is not available.",
     "browserContext": "Browser context is shown in the runtime sidebar. In-app browser control is available from the explicit Browser skill surface.",
     "screenshotSelected": "Screenshot skill selected. Review the slash command and send it to run capture.",

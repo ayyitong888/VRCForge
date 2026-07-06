@@ -132,7 +132,7 @@
     "desktopDesc": "显式请求桌面救援/Computer Use 帮助。普通聊天不会自动启动。"
   },
   "notice": {
-    "projectNotGit": "所选 Unity 项目不是 Git 仓库；正在显示 VRCForge 应用代码变更。",
+    "projectNotGit": "所选 Unity 项目不是 Git 仓库；没有可显示的项目 Git 变更。",
     "actionUnavailable": "{{action}} 当前不可用。",
     "browserContext": "浏览器上下文会显示在右侧栏；应用内浏览器控制请从显式 Browser 技能入口使用。",
     "screenshotSelected": "已选择截图技能。请检查 slash 命令并发送以执行截图。",
