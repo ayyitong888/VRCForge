@@ -1312,6 +1312,10 @@ export default function App() {
           ? t("workspace.notLoaded")
           : t("workspace.coreOffline");
   const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
+  const chatSidebarTimes = useMemo(() => {
+    const now = Date.now();
+    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now)]));
+  }, [chats, i18n.language]);
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
     if (projectItems.length > 0) {
@@ -1521,7 +1525,8 @@ export default function App() {
           ]),
         );
         const payload = await fetchChats<unknown>(endpoint, projectPaths);
-        const restored = (payload.chats || []).filter(isStoredChat).map((chat) => ({
+        const restoredRecords = (payload.chats || []).filter(isStoredChat).map((chat) => {
+          const normalized: ChatThread = {
           id: chat.id,
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
           title: typeof chat.title === "string" ? chat.title : "",
@@ -1532,9 +1537,16 @@ export default function App() {
           pinned: chat.pinned === true,
           archived: chat.archived === true,
           items: chat.items,
-        }));
+          };
+          return {
+            chat: cacheChatTimestampsFast(normalized),
+            needsDeepMigration: !parseChatTimeCandidate(normalized.updatedAt) && normalized.items.length > 0,
+          };
+        });
+        const restored = restoredRecords.map((record) => record.chat);
         if (restored.length > 0) {
           setChats((current) => (current.length === 0 ? restored : current));
+          migrateChatTimestampsInChunks(restoredRecords.filter((record) => record.needsDeepMigration).map((record) => record.chat));
         }
       } catch {
         // 读取失败时保持空列表，不打断使用；下次启动会重试。
@@ -2184,6 +2196,30 @@ export default function App() {
 
   function appendToChat(chatId: string, item: ConversationItem) {
     updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
+  }
+
+  function migrateChatTimestampsInChunks(candidates: ChatThread[]) {
+    if (candidates.length === 0) {
+      return;
+    }
+    let index = 0;
+    const runChunk = () => {
+      const updates = new Map<string, ChatThread>();
+      const end = Math.min(index + 8, candidates.length);
+      for (; index < end; index += 1) {
+        const migrated = cacheChatTimestampsDeep(candidates[index]);
+        if (migrated.createdAt !== candidates[index].createdAt || migrated.updatedAt !== candidates[index].updatedAt) {
+          updates.set(migrated.id, migrated);
+        }
+      }
+      if (updates.size > 0) {
+        setChats((list) => list.map((chat) => updates.get(chat.id) || chat));
+      }
+      if (index < candidates.length) {
+        window.setTimeout(runChunk, 32);
+      }
+    };
+    window.setTimeout(runChunk, 1200);
   }
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
@@ -4942,7 +4978,7 @@ export default function App() {
                       <SidebarChat
                         key={chat.id}
                         title={chat.title || t("sidebar.newChat")}
-                        meta={formatChatSidebarTime(chat)}
+                        meta={chatSidebarTimes.get(chat.id) || ""}
                         active={activeView === "chat" && chat.id === activeChatId}
                         indent
                         pinned={chat.pinned}
@@ -4977,7 +5013,7 @@ export default function App() {
                 <SidebarChat
                   key={chat.id}
                   title={chat.title || t("sidebar.newChat")}
-                  meta={formatChatSidebarTime(chat)}
+                  meta={chatSidebarTimes.get(chat.id) || ""}
                   active={activeView === "chat" && chat.id === activeChatId}
                   pinned={chat.pinned}
                   renaming={renamingChatId === chat.id}
@@ -6291,12 +6327,37 @@ function sortChatsByPin(list: ChatThread[]): ChatThread[] {
   });
 }
 
-function formatChatSidebarTime(chat: ChatThread): string {
+function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
+  const fallbackMs = parseChatTimeCandidate(chat.id);
+  const createdMs = parseChatTimeCandidate(chat.createdAt) || fallbackMs;
+  const updatedMs = parseChatTimeCandidate(chat.updatedAt) || createdMs;
+  return {
+    ...chat,
+    createdAt: chat.createdAt || isoFromTime(createdMs),
+    updatedAt: chat.updatedAt || isoFromTime(updatedMs),
+  };
+}
+
+function cacheChatTimestampsDeep(chat: ChatThread): ChatThread {
+  const createdMs = parseChatTimeCandidate(chat.createdAt) || chatCreatedTimeMsDeep(chat);
+  const updatedMs = parseChatTimeCandidate(chat.updatedAt) || chatUpdatedTimeMsDeep(chat) || createdMs;
+  return {
+    ...chat,
+    createdAt: chat.createdAt || isoFromTime(createdMs),
+    updatedAt: chat.updatedAt || isoFromTime(updatedMs),
+  };
+}
+
+function isoFromTime(timestampMs: number): string {
+  return timestampMs ? new Date(timestampMs).toISOString() : "";
+}
+
+function formatChatSidebarTime(chat: ChatThread, nowMs = Date.now()): string {
   const ms = chatTimeMs(chat);
   if (!ms) {
     return "";
   }
-  return formatCompactRelativeTime(ms);
+  return formatCompactRelativeTime(ms, nowMs);
 }
 
 function chatTimeMs(chat: ChatThread): number {
@@ -6306,13 +6367,33 @@ function chatTimeMs(chat: ChatThread): number {
       return parsed;
     }
   }
+  return parseChatTimeCandidate(chat.id);
+}
+
+function chatCreatedTimeMsDeep(chat: ChatThread): number {
+  for (const candidate of [chat.createdAt, chat.id]) {
+    const parsed = parseChatTimeCandidate(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  for (const item of chat.items) {
+    const parsed = parseChatTimeCandidate(item.id);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function chatUpdatedTimeMsDeep(chat: ChatThread): number {
   for (let index = chat.items.length - 1; index >= 0; index -= 1) {
     const parsed = parseChatTimeCandidate(chat.items[index]?.id);
     if (parsed) {
       return parsed;
     }
   }
-  return parseChatTimeCandidate(chat.id);
+  return parseChatTimeCandidate(chat.updatedAt) || parseChatTimeCandidate(chat.createdAt) || parseChatTimeCandidate(chat.id);
 }
 
 function parseChatTimeCandidate(value: unknown): number {
@@ -6331,8 +6412,8 @@ function parseChatTimeCandidate(value: unknown): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function formatCompactRelativeTime(timestampMs: number): string {
-  const diffMs = Math.max(0, Date.now() - timestampMs);
+function formatCompactRelativeTime(timestampMs: number, nowMs = Date.now()): string {
+  const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
   const day = 24 * hour;
