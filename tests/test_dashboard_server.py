@@ -610,7 +610,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("tracked.txt", patch_payload.get("patch", ""))
         self.assertFalse(patch_payload.get("patchTruncated", False))
 
-    def test_runtime_snapshot_combines_workspace_and_runtime_ledgers(self) -> None:
+    def test_workspace_diff_summary_does_not_fallback_for_non_git_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "UnityProject"
+            project_root.mkdir()
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/app/workspace/diff", params={"root": str(project_root), "includePatch": "true"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "vrcforge.workspace_diff.v1")
+        self.assertEqual(payload["requestedRoot"], str(project_root))
+        self.assertEqual(payload["status"], "not_git")
+        self.assertEqual(payload["fileCount"], 0)
+        self.assertEqual(payload["files"], [])
+        self.assertNotIn("gitRoot", payload)
+        self.assertNotIn("fallbackFromProjectRoot", payload)
+        self.assertNotIn("src/App.tsx", json.dumps(payload, ensure_ascii=False))
+
+    def test_runtime_snapshot_reports_non_git_project_without_app_diff_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "ProjectA"
             project_root.mkdir()
@@ -624,7 +643,14 @@ class DashboardServerTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["schema"], "vrcforge.desktop_runtime_snapshot.v1")
-        self.assertEqual(payload["workspaceDiff"].get("fallbackFromProjectRoot"), str(project_root))
+        workspace_diff = payload["workspaceDiff"]
+        self.assertFalse(workspace_diff["ok"])
+        self.assertEqual(workspace_diff["requestedRoot"], str(project_root))
+        self.assertEqual(workspace_diff["status"], "not_git")
+        self.assertEqual(workspace_diff["files"], [])
+        self.assertNotIn("gitRoot", workspace_diff)
+        self.assertNotIn("fallbackFromProjectRoot", workspace_diff)
+        self.assertNotIn("src/App.tsx", json.dumps(workspace_diff, ensure_ascii=False))
         self.assertIn("approvals", payload)
         self.assertIn("runs", payload)
         self.assertIn("desktopActions", payload)
