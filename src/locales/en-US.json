@@ -293,7 +293,8 @@
     "cannotActionWhileRunning": "A task is running. Stop it or wait before changing history.",
     "slashGoal": "Create a long-running goal",
     "slashMemory": "Save explicit memory",
-    "slashDelegate": "Delegate scoped read-only work to a sub-agent"
+    "slashDelegate": "Delegate scoped read-only work to a sub-agent",
+    "latestMessageActionOnly": "Only the latest message can be changed."
   },
   "agent": {
     "modeLabel": {

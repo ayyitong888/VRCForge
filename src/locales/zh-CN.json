@@ -293,7 +293,8 @@
     "cannotActionWhileRunning": "当前任务运行中，先停止或等它结束后再修改历史。",
     "slashGoal": "创建长期目标",
     "slashMemory": "保存显式记忆",
-    "slashDelegate": "把范围明确的只读工作委派给子 agent"
+    "slashDelegate": "把范围明确的只读工作委派给子 agent",
+    "latestMessageActionOnly": "只能修改最新一条消息。"
   },
   "agent": {
     "modeLabel": {

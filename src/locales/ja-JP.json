@@ -293,7 +293,8 @@
     "cannotActionWhileRunning": "タスク実行中です。履歴を変更する前に停止するか完了を待ってください。",
     "slashGoal": "長期ゴールを作成",
     "slashMemory": "明示的なメモリを保存",
-    "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任"
+    "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任",
+    "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。"
   },
   "agent": {
     "modeLabel": {
