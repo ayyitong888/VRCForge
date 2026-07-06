@@ -97,7 +97,6 @@ import {
   defaultModelForProvider,
   providerDisplayName,
   providerNeedsApiKey,
-  thinkingStatusForModelLabel,
   thinkingTraceLabel,
 } from "./lib/provider-ui";
 import { cacheChatTimestampsFast, isStoredChat } from "./lib/chat-thread";
@@ -105,9 +104,9 @@ import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, C
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
+import { buildRuntimeSchedule } from "./lib/runtime-schedule";
 import { emptySkillDraft } from "./lib/skill-draft";
 import { buildChatSidebarView, buildEmptyProjectState } from "./lib/sidebar-view";
-import type { RuntimeScheduleItem } from "./lib/runtime-ui-types";
 import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
@@ -714,36 +713,10 @@ export default function App() {
     }
     return [selectedSubAgent, ...activeSubAgentTasks];
   }, [activeSubAgentTasks, selectedSubAgent]);
-  const runtimeSchedule = useMemo<RuntimeScheduleItem[]>(() => {
-    const items: RuntimeScheduleItem[] = [];
-    if (currentTurn) {
-      items.push({
-        id: "current-turn",
-        status: stopRequested ? "cancelling" : "running",
-        title: thinkingStatusForModelLabel(currentTurn.providerLabel, currentTurn.model),
-        meta: `${currentTurn.providerLabel} / ${currentTurn.model}`,
-      });
-    }
-    queued.forEach((turn, index) => {
-      items.push({
-        id: `queued-${turn.id}`,
-        status: "queued",
-        title: turn.text || i18n.t("attachments.fallbackTitle"),
-        meta: i18n.t("workspace.queueMeta", { index: index + 1, provider: turn.providerLabel, model: turn.model }),
-      });
-    });
-    activeSubAgentTasks
-      .filter((task) => ["queued", "running", "cancelling"].includes(task.status))
-      .forEach((task) => {
-        items.push({
-          id: `subagent-${task.id}`,
-          status: task.status === "cancelling" ? "cancelling" : task.status === "queued" ? "queued" : "running",
-          title: task.displayName || subAgentRoleLabel(task.role),
-          meta: task.task || task.status,
-        });
-    });
-    return items;
-  }, [activeSubAgentTasks, currentTurn, queued, stopRequested]);
+  const runtimeSchedule = useMemo(
+    () => buildRuntimeSchedule({ currentTurn, stopRequested, queued, activeSubAgentTasks }),
+    [activeSubAgentTasks, currentTurn, i18n.language, queued, stopRequested],
+  );
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
