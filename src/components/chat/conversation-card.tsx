@@ -39,6 +39,8 @@ export function ConversationCard({
   approval,
   approvalAction,
   feedback,
+  canRetry,
+  canEdit,
   onCopyItem,
   onRetryItem,
   onEditItem,
@@ -53,6 +55,8 @@ export function ConversationCard({
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   feedback?: MessageFeedback;
+  canRetry?: boolean;
+  canEdit?: boolean;
   onCopyItem?: (item: ConversationItem) => void;
   onRetryItem?: (itemId: string) => void;
   onEditItem?: (itemId: string) => void;
@@ -81,8 +85,8 @@ export function ConversationCard({
           <MessageActions
             align="right"
             onCopy={() => onCopyItem?.(item)}
-            onRetry={() => onRetryItem?.(item.id)}
-            onEdit={() => onEditItem?.(item.id)}
+            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
+            onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           />
         </div>
       </div>
@@ -94,19 +98,15 @@ export function ConversationCard({
       <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
         <div className="break-words">{item.text}</div>
         <div className="mt-2 flex flex-wrap gap-2">
-          <Button type="button" variant="outline" className="h-7 px-2 text-xs" onClick={() => onRetryItem?.(item.id)}>
-            <RotateCcw className="h-3.5 w-3.5" />
-            {t("chat.retryMessage")}
-          </Button>
-          <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCopyItem?.(item)}>
-            <Copy className="h-3.5 w-3.5" />
-            {t("chat.copyMessage")}
-          </Button>
           <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onOpenDoctor?.()}>
             <Wrench className="h-3.5 w-3.5" />
             {t("sidebar.doctor")}
           </Button>
         </div>
+        <MessageActions
+          onCopy={() => onCopyItem?.(item)}
+          onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
+        />
       </div>
     );
   }
@@ -152,7 +152,7 @@ export function ConversationCard({
           </RunRow>
           <MessageActions
             onCopy={() => onCopyItem?.(item)}
-            onRetry={() => onRetryItem?.(item.id)}
+            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
       </div>
@@ -189,7 +189,7 @@ export function ConversationCard({
           {task.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(task.result)} /> : null}
           <MessageActions
             onCopy={() => onCopyItem?.(item)}
-            onRetry={() => onRetryItem?.(item.id)}
+            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
       </div>
@@ -225,7 +225,7 @@ export function ConversationCard({
           </Button>
           <MessageActions
             onCopy={() => onCopyItem?.(item)}
-            onRetry={() => onRetryItem?.(item.id)}
+            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
       </div>
@@ -373,7 +373,7 @@ export function ConversationCard({
         ) : null}
         <MessageActions
           onCopy={() => onCopyItem?.(item)}
-          onRetry={() => onRetryItem?.(item.id)}
+          onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           onFeedbackUp={() => onFeedbackItem?.(item.id, "up")}
           onFeedbackDown={() => onFeedbackItem?.(item.id, "down")}
           feedback={feedback}
@@ -408,8 +408,8 @@ function MessageActions({
   return (
     <div
       className={cn(
-        "pointer-events-none absolute top-full z-20 mt-1 flex items-center gap-1 rounded-md border border-border bg-popover/95 px-1 py-0.5 shadow-panel opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100",
-        align === "right" ? "right-0 justify-end" : "left-0 justify-start",
+        "mt-1 flex items-center gap-1 px-1 text-muted-foreground",
+        align === "right" ? "justify-end" : "justify-start",
       )}
     >
       {onCopy ? (

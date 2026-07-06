@@ -1066,6 +1066,8 @@ export default function App() {
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
+  const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
+  const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
   const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = pendingApprovalItems.length;
   const currentModelInfo = useMemo(
@@ -2273,6 +2275,10 @@ export default function App() {
     if (!chat) {
       return;
     }
+    if (latestConversationItemId(chat.items, (item) => item.type === "user") !== itemId) {
+      setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
+      return;
+    }
     const index = chat.items.findIndex((item) => item.id === itemId);
     const item = index >= 0 ? chat.items[index] : null;
     if (!item || item.type !== "user") {
@@ -2299,6 +2305,10 @@ export default function App() {
     }
     const index = chat.items.findIndex((item) => item.id === itemId);
     if (index < 0) {
+      return;
+    }
+    if (latestConversationItemId(chat.items, isRetryableConversationItem) !== itemId) {
+      setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
       return;
     }
     let userIndex = chat.items[index].type === "user" ? index : -1;
@@ -2959,11 +2969,6 @@ export default function App() {
   function clearSelectionMenu() {
     setSelectionMenu(null);
     window.getSelection()?.removeAllRanges();
-  }
-
-  function copySelection(text: string) {
-    void navigator.clipboard?.writeText(text).catch(() => undefined);
-    clearSelectionMenu();
   }
 
   function addSelectionToComposer(text: string) {
@@ -5544,6 +5549,8 @@ export default function App() {
                         approval={approval}
                         approvalAction={approval ? approvalActions[approval.id] : undefined}
                         feedback={messageFeedback[item.id]}
+                        canRetry={!sending && item.id === latestRetryableItemId}
+                        canEdit={!sending && item.id === latestEditableUserItemId}
                         onCopyItem={copyConversationItem}
                         onRetryItem={retryConversationItem}
                         onEditItem={editConversationMessage}
@@ -6079,10 +6086,10 @@ export default function App() {
           <button
             type="button"
             className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-            onClick={() => copySelection(selectionMenu.text)}
+            onClick={() => askInNewSession(selectionMenu.text)}
           >
-            <Copy className="h-3.5 w-3.5 shrink-0" />
-            {t("contextMenu.copy")}
+            <Bot className="h-3.5 w-3.5 shrink-0" />
+            {t("contextMenu.askInNewSession")}
           </button>
           <button
             type="button"
@@ -6091,14 +6098,6 @@ export default function App() {
           >
             <MessageSquare className="h-3.5 w-3.5 shrink-0" />
             {t("contextMenu.addToChat")}
-          </button>
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-            onClick={() => askInNewSession(selectionMenu.text)}
-          >
-            <Bot className="h-3.5 w-3.5 shrink-0" />
-            {t("contextMenu.askInNewSession")}
           </button>
         </div>
       ) : null}
@@ -6748,6 +6747,23 @@ function conversationItemText(item: ConversationItem): string {
     return formatPayload(item.task);
   }
   return "";
+}
+
+function latestConversationItemId(
+  items: ConversationItem[],
+  predicate: (item: ConversationItem) => boolean,
+): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (predicate(item)) {
+      return item.id;
+    }
+  }
+  return "";
+}
+
+function isRetryableConversationItem(item: ConversationItem): boolean {
+  return item.type === "user" || item.type === "agent" || item.type === "result" || item.type === "error" || item.type === "subagent";
 }
 
 function serializeChatAttachments(attachments: ChatAttachment[]) {
