@@ -1,9 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  AlertTriangle,
   Camera,
-  Check,
   Copy,
   FileText,
   GitBranch,
@@ -18,7 +16,6 @@ import {
   Square,
   ThumbsDown,
   ThumbsUp,
-  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { setLocale } from "./i18n";
@@ -31,8 +28,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
+import { PendingApprovalsStrip } from "./components/approvals/pending-approvals-strip";
 import { ChatWorkspace } from "./components/chat/chat-workspace";
 import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
@@ -49,7 +45,6 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
-import { DataLine } from "./components/ui/data-line";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
@@ -4813,20 +4808,13 @@ export default function App() {
               onOpenDoctor={() => void openDoctor()}
             />
           )}
-          {activeView !== "chat" && pendingApprovalItems.length > 0 ? (
-            <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
-              <div className="mx-auto max-w-4xl space-y-3">
-                {pendingApprovalItems.map((approval) => (
-                  <ApprovalCard
-                    key={approval.id}
-                    approval={approval}
-                    loading={loading}
-                    onApprove={approveShell}
-                    onReject={rejectShell}
-                  />
-                ))}
-              </div>
-            </div>
+          {activeView !== "chat" ? (
+            <PendingApprovalsStrip
+              approvals={pendingApprovalItems}
+              loading={loading}
+              onApprove={approveShell}
+              onReject={rejectShell}
+            />
           ) : null}
         </section>
         <div
@@ -4976,44 +4964,5 @@ export default function App() {
       />
 
     </main>
-  );
-}
-function ApprovalCard({
-  approval,
-  loading,
-  onApprove,
-  onReject,
-}: {
-  approval: AgentApproval;
-  loading: boolean;
-  onApprove: (approvalId: string) => void;
-  onReject: (approvalId: string) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-panel">
-      <div className="flex min-w-0 items-center gap-2">
-        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-        <div className="truncate text-sm font-semibold">{t("header.pendingApprovals")}</div>
-        <Badge tone="warn" className="ml-auto shrink-0">
-          {approval.riskLevel || "high"}
-        </Badge>
-      </div>
-      <div className="mt-4 grid gap-3">
-        <DataLine label={t("approval.command")} value={approval.preview?.command || "-"} mono />
-        <DataLine label={t("approval.directory")} value={approval.preview?.cwd || "-"} />
-        <DataLine label={t("approval.reason")} value={approval.reason || "-"} />
-      </div>
-      <div className="mt-4 flex justify-end gap-2">
-        <Button variant="outline" disabled={loading} onClick={() => onReject(approval.id)}>
-          <X className="h-4 w-4" />
-          {t("approval.reject")}
-        </Button>
-        <Button variant="primary" disabled={loading} onClick={() => onApprove(approval.id)}>
-          <Check className="h-4 w-4" />
-          {t("approval.approve")}
-        </Button>
-      </div>
-    </section>
   );
 }
