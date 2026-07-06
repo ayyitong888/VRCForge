@@ -1,3 +1,5 @@
+import type { AgentRuntimeResponse, AgentShellResult, SubAgentTask } from "./api";
+
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 
 export type ChatAttachment = {
@@ -39,3 +41,15 @@ export type ContextUsage = {
   title: string;
   warning: boolean;
 };
+
+export type ConversationItem =
+  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
+  | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
+  | { id: string; type: "error"; text: string }
+  | { id: string; type: "compact"; text: string }
+  | { id: string; type: "subagent"; task: SubAgentTask };
+
+export type ApprovalActionState = "approve" | "reject" | "modify";
+export type MessageFeedback = "up" | "down";
