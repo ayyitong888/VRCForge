@@ -46,6 +46,7 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
@@ -74,7 +75,6 @@ import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationErr
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
-  appendAttachmentSummary,
   buildChatHistory,
   buildCompactSummary,
   buildContextUsageFromRuntime,
@@ -88,7 +88,6 @@ import {
   normalizeProviderForContext,
   readChatAttachment,
   selectedTextAttachment,
-  serializeChatAttachments,
   textContextAttachment,
 } from "./lib/conversation-utils";
 import { thinkingTraceLabel } from "./lib/provider-ui";
@@ -185,9 +184,7 @@ import {
   previewInterruptedApplyRecovery,
   previewAdjustmentCheckpoint,
   rejectAgentApproval,
-  recordAgentRunQueued,
   requestAgentDesktopAction,
-  requestAgentRunCancel,
   requestApprovalRevision,
   requestOptimizationApply,
   requestAvatarEncryptionApply,
@@ -202,7 +199,6 @@ import {
   retrySubAgent,
   saveChats,
   saveAgentNotes,
-  sendAgentMessage,
   setSkillPackageSafeMode,
   setSkillPackageEnabled,
   setAppSessionToken,
@@ -244,31 +240,6 @@ type BackendEventMessage = {
   payload?: unknown;
 };
 
-type QueuedTurn = {
-  id: string;
-  text: string;
-  attachments: ChatAttachment[];
-  providerLabel: string;
-  model: string;
-  queuedFrom?: boolean;
-};
-
-type CurrentTurn = {
-  clientTurnId?: string;
-  text: string;
-  startedAt: number;
-  providerLabel: string;
-  model: string;
-};
-
-type RunSingleTurnOptions = {
-  baseItems?: ConversationItem[];
-  sessionId?: string;
-};
-
-
-
-const MAX_QUEUED_TURNS = 8;
 const MAX_ATTACHMENTS_PER_TURN = 8;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
 
@@ -282,7 +253,6 @@ export default function App() {
   const [agentApprovals, setAgentApprovals] = useState<AgentApproval[] | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const [input, setInput] = useState("");
@@ -382,9 +352,7 @@ export default function App() {
   const [subAgentError, setSubAgentError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
-  const [queued, setQueued] = useState<QueuedTurn[]>([]);
-  const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
-  const [stopRequested, setStopRequested] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
@@ -438,11 +406,7 @@ export default function App() {
   const chatsSaveVersionRef = useRef(0);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const chatsRef = useRef<ChatThread[]>([]);
-  const queueRef = useRef<QueuedTurn[]>([]);
-  const sendingRef = useRef(false);
-  const stopRequestedRef = useRef(false);
-  const streamingTurnChatRef = useRef(new Map<string, string>());
-  const activeTurnAbortRef = useRef<AbortController | null>(null);
+  const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
   const backendReadyStatusRef = useRef<"idle" | "starting" | "ready" | "error">("idle");
@@ -642,6 +606,33 @@ export default function App() {
   const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = pendingApprovalItems.length;
   const {
+    sending: chatRunSending,
+    queued,
+    currentTurn,
+    stopRequested,
+    isRunning: isChatRunActive,
+    submitTurn,
+    runTurnNow,
+    stopCurrentRun,
+    applyRuntimeDelta,
+  } = useChatRunController({
+    endpoint,
+    runtimeConnected,
+    sessionId,
+    activeRuntimeProjectPath,
+    getChatById: (chatId) => chatsRef.current.find((chat) => chat.id === chatId),
+    ensureActiveChat,
+    updateChat,
+    appendToChat,
+    touchChat,
+    startRuntime,
+    refresh,
+    refreshRuntimeRuns: (includeEvents, target) => refreshRuntimeRunsRef.current(includeEvents, target),
+    handleRuntimeSessionFailure,
+    setError,
+  });
+  const sending = chatRunSending || compacting;
+  const {
     workspaceDiff,
     loadingWorkspaceDiff,
     workspaceDiffError,
@@ -676,6 +667,7 @@ export default function App() {
     setAgentApprovals,
     setError,
   });
+  refreshRuntimeRunsRef.current = refreshRuntimeRuns;
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1591,32 +1583,6 @@ export default function App() {
     updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
   }
 
-  function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
-    const clientTurnId = String(delta.clientTurnId || "").trim();
-    if (!clientTurnId || !delta.textDelta) {
-      return;
-    }
-    markChatsDirty();
-    setChats((list) =>
-      list.map((chat) => {
-        if (streamingTurnChatRef.current.get(clientTurnId) !== chat.id) {
-          return chat;
-        }
-        const index = chat.items.findIndex((item) => item.type === "streaming" && item.clientTurnId === clientTurnId);
-        if (index < 0) {
-          return chat;
-        }
-        const items = [...chat.items];
-        const item = items[index];
-        if (!item || item.type !== "streaming") {
-          return chat;
-        }
-        items[index] = { ...item, text: `${item.text}${delta.textDelta}` };
-        return { ...chat, items };
-      }),
-    );
-  }
-
   function pendingApprovalForResponse(response: AgentRuntimeResponse): AgentApproval | null {
     const approvalId = approvalIdFromResponse(response);
     if (approvalId) {
@@ -1717,7 +1683,7 @@ export default function App() {
   }
 
   function retryConversationItem(itemId: string) {
-    if (sendingRef.current) {
+    if (isChatRunActive() || compacting) {
       setError(t("chat.cannotActionWhileRunning"));
       return;
     }
@@ -1752,6 +1718,7 @@ export default function App() {
       text: userItem.text,
       attachments: cloneChatAttachments(userItem.attachments || []),
       providerLabel: providerSnapshot.providerLabel,
+      provider: providerSnapshot.provider,
       model: providerSnapshot.model,
     };
     void runTurnNow(chat.id, turn, {
@@ -1830,7 +1797,7 @@ export default function App() {
     }
     const chatId = activeChat.id;
     const items = activeChat.items;
-    setSending(true);
+    setCompacting(true);
     let summary = "";
     try {
       let targetEndpoint = endpoint;
@@ -1848,7 +1815,7 @@ export default function App() {
     } catch {
       summary = "";
     } finally {
-      setSending(false);
+      setCompacting(false);
     }
     if (!summary) {
       summary = buildCompactSummary(items, t);
@@ -1946,186 +1913,16 @@ export default function App() {
       text: message,
       attachments,
       providerLabel: providerSnapshot.providerLabel,
+      provider: providerSnapshot.provider,
       model: providerSnapshot.model,
     };
     setInput("");
     setAttachments([]);
-    if (sendingRef.current) {
-      // Running turns queue follow-up messages in FIFO order.
-      if (queueRef.current.length >= MAX_QUEUED_TURNS) {
-        setError(t("chat.queueFull", { max: MAX_QUEUED_TURNS }));
-        setInput(message);
-        setAttachments(turn.attachments);
-        return;
-      }
-      const queuedTurn = { ...turn, queuedFrom: true };
-      queueRef.current.push(queuedTurn);
-      setQueued([...queueRef.current]);
-      void recordAgentRunQueued(endpoint, {
-        sessionId: sessionId || undefined,
-        clientTurnId: turn.id,
-        message: turn.text,
-        attachments: serializeChatAttachments(turn.attachments),
-        provider: providerSnapshot.provider,
-        providerLabel: turn.providerLabel,
-        model: turn.model,
-        projectPath: activeRuntimeProjectPath || undefined,
-        projectRoot: activeRuntimeProjectPath || undefined,
-      })
-        .then(() => refreshRuntimeRuns(false))
-        .catch(() => undefined);
-      return;
+    const result = await submitTurn(turn);
+    if (result === "queue_full") {
+      setInput(message);
+      setAttachments(turn.attachments);
     }
-    const chatId = ensureActiveChat();
-    sendingRef.current = true;
-    setSending(true);
-    setStopRequested(false);
-    stopRequestedRef.current = false;
-    try {
-      let next: QueuedTurn | undefined = turn;
-      while (next !== undefined) {
-        await runSingleTurn(chatId, next);
-        if (stopRequestedRef.current) {
-          queueRef.current = [];
-          break;
-        }
-        next = queueRef.current.shift();
-        setQueued([...queueRef.current]);
-      }
-    } finally {
-      queueRef.current = [];
-      setQueued([]);
-      sendingRef.current = false;
-      setSending(false);
-      setStopRequested(false);
-      stopRequestedRef.current = false;
-    }
-  }
-
-  async function runTurnNow(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
-    if (sendingRef.current) {
-      setError(t("chat.cannotActionWhileRunning"));
-      return;
-    }
-    sendingRef.current = true;
-    setSending(true);
-    setStopRequested(false);
-    stopRequestedRef.current = false;
-    try {
-      await runSingleTurn(chatId, turn, options);
-    } finally {
-      queueRef.current = [];
-      setQueued([]);
-      sendingRef.current = false;
-      setSending(false);
-      setStopRequested(false);
-      stopRequestedRef.current = false;
-    }
-  }
-
-  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
-    const chat = chatsRef.current.find((item) => item.id === chatId);
-    const baseItems = options?.baseItems ?? chat?.items ?? [];
-    const chatSessionId = options?.sessionId ?? chat?.sessionId ?? "";
-    const chatAgentName = chat?.agentName || "desktop-agent";
-    const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
-    const startedAt = Date.now();
-    const messageForModel = appendAttachmentSummary(turn.text, turn.attachments, t);
-    const abortController = new AbortController();
-    let userItemId = "";
-    activeTurnAbortRef.current = abortController;
-    setCurrentTurn({ clientTurnId: turn.id, text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          throw new Error(t("agent.coreDisconnectedSend"));
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const userItem: ConversationItem = { id: `user-${Date.now()}`, type: "user", text: turn.text, attachments: turn.attachments, queuedFrom: Boolean(turn.queuedFrom) };
-      userItemId = userItem.id;
-      const streamingItem: ConversationItem = {
-        id: `stream-${turn.id}`,
-        type: "streaming",
-        clientTurnId: turn.id,
-        text: "",
-        providerLabel: turn.providerLabel,
-        model: turn.model,
-      };
-      const message = turn.text;
-      streamingTurnChatRef.current.set(turn.id, chatId);
-      updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        sessionId: options?.sessionId ?? current.sessionId,
-        title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-        items: [...(options?.baseItems ?? current.items), userItem, streamingItem],
-      }));
-      const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
-        signal: abortController.signal,
-        attachments: serializeChatAttachments(turn.attachments),
-        projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,
-        provider: providerSnapshot.provider,
-        providerLabel: turn.providerLabel,
-        model: turn.model,
-        clientTurnId: turn.id,
-      });
-      const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-      updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        sessionId: response.sessionId || response.session_id || current.sessionId,
-        items: [
-          ...current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
-          { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model },
-        ],
-      }));
-      await refresh(targetEndpoint);
-      await refreshRuntimeRuns(false, targetEndpoint);
-    } catch (cause) {
-      const text = cause instanceof Error ? cause.message : String(cause);
-      if (userItemId && text.toLowerCase().includes("cancel")) {
-        updateChat(chatId, (current) => ({
-          ...touchChat(current),
-          sessionId: "",
-          items: current.items.filter((item) => item.id !== userItemId),
-        }));
-      }
-      appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
-      updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
-      }));
-      if (isRuntimeSessionVerificationError(text)) {
-        handleRuntimeSessionFailure(text);
-      } else {
-        setError(text);
-      }
-    } finally {
-      if (activeTurnAbortRef.current === abortController) {
-        activeTurnAbortRef.current = null;
-      }
-      streamingTurnChatRef.current.delete(turn.id);
-      setCurrentTurn(null);
-    }
-  }
-
-  function stopCurrentRun() {
-    stopRequestedRef.current = true;
-    setStopRequested(true);
-    queueRef.current = [];
-    setQueued([]);
-    const current = currentTurn;
-    if (current?.clientTurnId || sessionId) {
-      void requestAgentRunCancel(endpoint, {
-        sessionId: sessionId || undefined,
-        clientTurnId: current?.clientTurnId,
-        reason: "user_stop",
-      })
-        .then(() => refreshRuntimeRuns(false))
-        .catch(() => undefined);
-    }
-    activeTurnAbortRef.current?.abort();
   }
 
   async function addComposerFiles(files: FileList | null) {
