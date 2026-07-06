@@ -179,6 +179,7 @@ class ProviderStreamingTests(unittest.TestCase):
         self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
         self.assertEqual(FakeGoogleClient.instances[0].kwargs, {"vertexai": True, "project": "demo", "location": "asia-northeast1"})
         self.assertEqual(FakeGoogleClient.instances[0].models.generate_content_calls, [])
+        self.assertEqual(FakeGoogleClient.instances[0].models.generate_content_stream_calls[0]["model"], "gemini-vertex")
 
     def test_anthropic_streams_text_chunks(self) -> None:
         class FakeMessageStream:
@@ -264,6 +265,117 @@ class ProviderStreamingTests(unittest.TestCase):
         self.assertEqual(response.text, '{"reply":"fallback"}')
         self.assertEqual(chunks, [])
         self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True, False])
+
+    def test_openai_compatible_streams_text_chunks(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    return [
+                        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"reply":"hel'))]),
+                        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='lo"}'))]),
+                    ]
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"fallback"}'))])
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeOpenAI:
+            instances: list["FakeOpenAI"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.chat = FakeChat()
+                FakeOpenAI.instances.append(self)
+
+        openai_module = types.ModuleType("openai")
+        openai_module.OpenAI = FakeOpenAI
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = openai_module
+        settings = make_llm_settings("deepseek", model="deepseek-chat", base_url="https://api.deepseek.example/v1")
+        chunks: list[str] = []
+
+        response = request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"hello"}')
+        self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
+        self.assertEqual(FakeOpenAI.instances[0].kwargs, {"api_key": "test-key", "base_url": "https://api.deepseek.example/v1"})
+        self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True])
+        self.assertEqual(response.usage["unavailableReason"], "provider_stream_usage_missing")
+
+    def test_custom_stream_unsupported_falls_back_to_non_streaming(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    raise RuntimeError("stream unknown parameter")
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"fallback"}'))])
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeOpenAI:
+            instances: list["FakeOpenAI"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.chat = FakeChat()
+                FakeOpenAI.instances.append(self)
+
+        openai_module = types.ModuleType("openai")
+        openai_module.OpenAI = FakeOpenAI
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = openai_module
+        settings = make_llm_settings("custom", model="custom-model", base_url="https://custom.example/v1")
+        chunks: list[str] = []
+
+        response = request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        self.assertEqual(response.text, '{"reply":"fallback"}')
+        self.assertEqual(chunks, [])
+        self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True, False])
+
+    def test_ollama_stream_auth_error_does_not_fallback_to_non_streaming(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    raise RuntimeError("unauthorized stream request")
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"should-not-fallback"}'))])
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeOpenAI:
+            instances: list["FakeOpenAI"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.chat = FakeChat()
+                FakeOpenAI.instances.append(self)
+
+        openai_module = types.ModuleType("openai")
+        openai_module.OpenAI = FakeOpenAI
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = openai_module
+        settings = make_llm_settings("ollama", model="local-model", base_url="http://127.0.0.1:11434/v1")
+
+        with self.assertRaises(RuntimeError):
+            request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=lambda _text: None)
+
+        self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True])
 
 
 class LlmReasoningTraceTests(unittest.TestCase):

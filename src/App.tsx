@@ -9,8 +9,6 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Download,
-  Eye,
   EyeOff,
   FileText,
   FolderOpen,
@@ -44,12 +42,11 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
-  Globe,
   Wrench,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import i18n, { SUPPORTED_LOCALES, setLocale } from "./i18n";
+import i18n, { setLocale } from "./i18n";
 import {
   FormEvent,
   PointerEvent as ReactPointerEvent,
@@ -69,9 +66,7 @@ import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
 import { RuntimeToolButton } from "./components/runtime/runtime-sidebar-ui";
 import { AttachmentStrip, Composer } from "./components/chat/composer";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
-import { CheckpointStoragePanel } from "./components/settings/checkpoint-storage-panel";
-import { ExternalAgentConnectorsPanel } from "./components/settings/external-agent-connectors-panel";
-import { ProviderSetup, VisionProfileSetup } from "./components/settings/provider-settings";
+import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
@@ -110,7 +105,7 @@ import {
 } from "./lib/provider-ui";
 import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
-import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "./lib/permission-ui";
+import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { projectKey, shortPath } from "./lib/project-path";
 import { buildRuntimeFileReferences } from "./lib/runtime-file-references";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
@@ -5372,259 +5367,84 @@ export default function App() {
               onRequestDependency={(dependency) => void requestOptimizationDependencyInstall(dependency)}
             />
           ) : activeView === "settings" ? (
-            <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
-              <div className="mx-auto w-full max-w-3xl">
-                <h1 className="text-2xl font-semibold tracking-tight">{t("sidebar.settings")}</h1>
-                <p className="mt-1 text-sm text-muted-foreground">{t("settings.subtitle")}</p>
-
-                <section className="mt-10">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
-                    <Badge tone={currentPermissionVisual.badgeTone} className="shrink-0">
-                      {t("settings.currentMode", { mode: executionModeLabel(permission?.executionMode) })}
-                    </Badge>
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.permissionModeDescription")}</p>
-                  <div className="mt-4 grid gap-3">
-                    {EXECUTION_MODES.map((mode) => {
-                      const modeVisual = permissionVisualState(undefined, mode.value);
-                      const selected = permission?.executionMode === mode.value;
-                      return (
-                        <button
-                          key={mode.value}
-                          type="button"
-                          disabled={loading || !runtimeConnected}
-                          onClick={() => void switchMode(mode.value)}
-                          className={cn(
-                            "grid min-w-0 gap-1 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60",
-                            selected ? modeVisual.selectedClass : cn("border-border", modeVisual.hoverClass),
-                          )}
-                        >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className={cn("truncate text-sm font-medium", modeVisual.textClass)}>{mode.label}</span>
-                            {mode.value === "roslyn_full_auto" ? (
-                              <Badge tone={modeVisual.badgeTone} className="shrink-0">
-                                {t("settings.highRisk")}
-                              </Badge>
-                            ) : null}
-                            {selected ? (
-                              <Check className={cn("ml-auto h-4 w-4 shrink-0", modeVisual.textClass)} />
-                            ) : null}
-                          </div>
-                          <div className="text-xs text-muted-foreground">{mode.description}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
-                  <div className="mt-4">
-                    <Button type="button" variant="outline" onClick={restartOnboarding}>
-                      <RefreshCw className="mr-1 h-4 w-4" />
-                      {t("settings.restartOnboarding")}
-                    </Button>
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <h2 className="text-base font-semibold">
-                    <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
-                    {t("settings.language")}
-                  </h2>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.languageDesc")}</p>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {SUPPORTED_LOCALES.map((loc) => (
-                      <button
-                        key={loc.code}
-                        type="button"
-                        onClick={() => setLocale(loc.code)}
-                        className={cn(
-                          "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
-                          i18n.language === loc.code
-                            ? "border-primary bg-primary/10 text-primary"
-                            : "border-border bg-card text-foreground hover:bg-accent",
-                        )}
-                      >
-                        {loc.label}
-                      </button>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
-                  <div className="mt-4">
-                    <ProviderSetup
-                      provider={apiProvider}
-                      apiKey={apiKey}
-                      baseUrl={apiBaseUrl}
-                      model={apiModel}
-                      saving={savingApiConfig}
-                      models={modelOptions}
-                      loadingModels={loadingModels}
-                      modelsError={modelsError}
-                      testingProvider={testingProvider}
-                      providerTestMessage={providerTestMessage}
-                      runtimeConnected={runtimeConnected}
-                      keySaved={apiKeySaved}
-                      onLoadModels={() => void loadModels()}
-                      onTestProvider={(capability) => void runProviderTest(capability)}
-                      onProviderChange={handleProviderChange}
-                      onApiKeyChange={setApiKey}
-                      onBaseUrlChange={setApiBaseUrl}
-                      onModelChange={setApiModel}
-                      onSubmit={saveApiProvider}
-                    />
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="text-base font-semibold">
-                      <Eye className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
-                      {t("settings.visionProfile")}
-                    </h2>
-                    {visionConfig?.configured ? (
-                      <Badge tone={visionConfig.enabled ? "ok" : "muted"} className="shrink-0">
-                        {visionConfig.enabled ? t("vision.statusActive") : t("vision.statusDisabled")}
-                      </Badge>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">{t("settings.visionProfileDesc")}</p>
-                  <div className="mt-4">
-                    <VisionProfileSetup
-                      provider={visionProvider}
-                      apiKey={visionApiKey}
-                      baseUrl={visionBaseUrl}
-                      model={visionModel}
-                      enabled={visionEnabled}
-                      saving={savingVisionConfig}
-                      runtimeConnected={runtimeConnected}
-                      keySaved={Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider)}
-                      configured={Boolean(visionConfig?.configured)}
-                      onProviderChange={handleVisionProviderChange}
-                      onApiKeyChange={setVisionApiKey}
-                      onBaseUrlChange={setVisionBaseUrl}
-                      onModelChange={setVisionModel}
-                      onEnabledChange={setVisionEnabled}
-                      onSubmit={saveVisionProfile}
-                      onClear={() => void clearVisionProfile()}
-                    />
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
-                    {diagnosticsMessage ? (
-                      <Badge tone="ok" className="shrink-0">
-                        {diagnosticsMessage}
-                      </Badge>
-                    ) : null}
-                  </div>
-                  <div className="mt-4 rounded-lg border border-border bg-card p-4">
-                    <div className="flex min-w-0 flex-wrap items-center gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">Debug logging</div>
-                        <div className="mt-1 truncate text-xs text-muted-foreground">
-                          {diagnosticsStatus?.debugLogging ? "Recording local API, MCP, agent, checkpoint, and runtime interactions" : t("connector.off")}
-                        </div>
-                      </div>
-                      <Badge tone={diagnosticsStatus?.debugLogging ? "warn" : "muted"} className="shrink-0">
-                        {diagnosticsStatus?.debugLogging ? "Debug on" : "Debug off"}
-                      </Badge>
-                      <Button
-                        type="button"
-                        variant={diagnosticsStatus?.debugLogging ? "outline" : "primary"}
-                        disabled={loadingDiagnostics}
-                        onClick={() => void setDebugLogging(!diagnosticsStatus?.debugLogging)}
-                      >
-                        {loadingDiagnostics ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                        {diagnosticsStatus?.debugLogging ? "Turn off" : "Turn on"}
-                      </Button>
-                      <Button type="button" variant="outline" disabled={exportingSupportBundle} onClick={() => void createSupportBundle()}>
-                        {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                        Export Bundle
-                      </Button>
-                    </div>
-                    {diagnosticsStatus?.logsDir ? <div className="mt-3 truncate text-xs text-muted-foreground/70">{diagnosticsStatus.logsDir}</div> : null}
-                  </div>
-                </section>
-
-                <section className="mt-12">
-                  <CheckpointStoragePanel
-                    status={connectorStatus}
-                    loading={loadingConnectors}
-                    isDesktop={isTauriRuntime()}
-                    limitInput={checkpointArchiveLimitInput}
-                    onLimitInputChange={setCheckpointArchiveLimitInput}
-                    onSaveLimit={() => void saveCheckpointArchiveLimit()}
-                    onOpenFolder={(targetPath) => void openCheckpointArchiveFolder(targetPath)}
-                    onPickDirectory={pickCheckpointArchiveDirectory}
-                    onDeleteSelected={(ids) => void deleteCheckpointArchives(ids)}
-                    onRelocate={(directory) => void relocateCheckpointArchives(directory)}
-                  />
-                </section>
-
-                <section className="mt-12">
-                  <ExternalAgentConnectorsPanel
-                    status={connectorStatus}
-                    loading={loadingConnectors}
-                    message={connectorMessage}
-                    selectedProjectPath={activeProjectPath}
-                    onRefresh={() => void loadConnectors()}
-                    onToggleGateway={(enabled) => void updateGatewaySettings({ enabled })}
-                    onToggleWriteRequests={(allowWriteRequests) => void updateGatewaySettings({ allowWriteRequests })}
-                    onRevoke={() => void updateGatewaySettings({ revokeToken: true })}
-                    onInstall={(client) => void runConnectorAction(client, "install")}
-                    onUninstall={(client) => void runConnectorAction(client, "uninstall")}
-                    onCopy={(text, label) => {
-                      void navigator.clipboard
-                        .writeText(text)
-                        .then(() => setConnectorMessage(`${label} copied`))
-                        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-                    }}
-                  />
-                </section>
-
-                <section className="mt-12 pb-6">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <h2 className="truncate text-base font-semibold">{t("settings.customInstructions")}</h2>
-                    {notesMessage ? (
-                      <Badge tone="ok" className="shrink-0">
-                        {notesMessage}
-                      </Badge>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {t("settings.customInstructionsDesc")}
-                  </p>
-                  {agentNotesPath ? <p className="mt-1 truncate text-xs text-muted-foreground/70">{agentNotesPath}</p> : null}
-                  <form onSubmit={saveNotes} className="mt-4">
-                    <textarea
-                      value={agentNotes}
-                      onChange={(event) => {
-                        setAgentNotes(event.target.value);
-                        setNotesMessage("");
-                      }}
-                      disabled={!agentNotesLoaded}
-                      placeholder={agentNotesLoaded ? t("settings.customInstructionsPlaceholder") : t("settings.customInstructionsDisabled")}
-                      className="min-h-56 w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm leading-relaxed outline-none focus:border-primary disabled:bg-muted"
-                    />
-                    <div className="mt-3 flex justify-end">
-                      <Button type="submit" disabled={savingNotes || !agentNotesLoaded}>
-                        {savingNotes ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                        {t("common.save")}
-                      </Button>
-                    </div>
-                  </form>
-                </section>
-              </div>
-            </div>
+            <SettingsWorkspace
+              permission={permission ?? null}
+              loading={loading}
+              runtimeConnected={runtimeConnected}
+              currentLanguage={i18n.language}
+              apiProvider={apiProvider}
+              apiKey={apiKey}
+              apiBaseUrl={apiBaseUrl}
+              apiModel={apiModel}
+              apiKeySaved={apiKeySaved}
+              savingApiConfig={savingApiConfig}
+              modelOptions={modelOptions}
+              loadingModels={loadingModels}
+              modelsError={modelsError}
+              testingProvider={testingProvider}
+              providerTestMessage={providerTestMessage}
+              visionConfig={visionConfig}
+              visionProvider={visionProvider}
+              visionApiKey={visionApiKey}
+              visionBaseUrl={visionBaseUrl}
+              visionModel={visionModel}
+              visionEnabled={visionEnabled}
+              savingVisionConfig={savingVisionConfig}
+              diagnosticsStatus={diagnosticsStatus}
+              diagnosticsMessage={diagnosticsMessage}
+              loadingDiagnostics={loadingDiagnostics}
+              exportingSupportBundle={exportingSupportBundle}
+              connectorStatus={connectorStatus}
+              loadingConnectors={loadingConnectors}
+              connectorMessage={connectorMessage}
+              selectedProjectPath={activeProjectPath}
+              isDesktop={isTauriRuntime()}
+              checkpointArchiveLimitInput={checkpointArchiveLimitInput}
+              agentNotes={agentNotes}
+              agentNotesLoaded={agentNotesLoaded}
+              agentNotesPath={agentNotesPath}
+              notesMessage={notesMessage}
+              savingNotes={savingNotes}
+              onSwitchMode={(mode) => void switchMode(mode)}
+              onRestartOnboarding={restartOnboarding}
+              onLocaleChange={(code) => void setLocale(code)}
+              onLoadModels={() => void loadModels()}
+              onProviderTest={(capability) => void runProviderTest(capability)}
+              onProviderChange={handleProviderChange}
+              onApiKeyChange={setApiKey}
+              onApiBaseUrlChange={setApiBaseUrl}
+              onApiModelChange={setApiModel}
+              onSaveApiProvider={saveApiProvider}
+              onVisionProviderChange={handleVisionProviderChange}
+              onVisionApiKeyChange={setVisionApiKey}
+              onVisionBaseUrlChange={setVisionBaseUrl}
+              onVisionModelChange={setVisionModel}
+              onVisionEnabledChange={setVisionEnabled}
+              onSaveVisionProfile={saveVisionProfile}
+              onClearVisionProfile={() => void clearVisionProfile()}
+              onSetDebugLogging={(enabled) => void setDebugLogging(enabled)}
+              onCreateSupportBundle={() => void createSupportBundle()}
+              onCheckpointArchiveLimitInputChange={setCheckpointArchiveLimitInput}
+              onSaveCheckpointArchiveLimit={() => void saveCheckpointArchiveLimit()}
+              onOpenCheckpointArchiveFolder={(targetPath) => void openCheckpointArchiveFolder(targetPath)}
+              onPickCheckpointArchiveDirectory={pickCheckpointArchiveDirectory}
+              onDeleteCheckpointArchives={(ids) => void deleteCheckpointArchives(ids)}
+              onRelocateCheckpointArchives={(directory) => void relocateCheckpointArchives(directory)}
+              onLoadConnectors={() => void loadConnectors()}
+              onUpdateGatewaySettings={(settings) => void updateGatewaySettings(settings)}
+              onRunConnectorAction={(client, action) => void runConnectorAction(client, action)}
+              onCopyConnectorText={(text, label) => {
+                void navigator.clipboard
+                  .writeText(text)
+                  .then(() => setConnectorMessage(`${label} copied`))
+                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              }}
+              onAgentNotesChange={(value) => {
+                setAgentNotes(value);
+                setNotesMessage("");
+              }}
+              onSaveNotes={saveNotes}
+            />
           ) : conversation.length === 0 ? (
             <div className="flex min-h-0 flex-1 items-center justify-center p-5 md:p-8">
               <div className="w-full max-w-3xl">

@@ -1952,6 +1952,48 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(events[1][1]["textDelta"], "lo")
         self.assertEqual(events[-1][1]["done"], True)
 
+    @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
+    @patch("dashboard_server.request_llm_plan_with_metadata")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_agent_runtime_stream_callback_continues_when_reply_replaces_summary_prefix(
+        self,
+        mock_load_settings,
+        mock_request_llm_plan,
+        mock_broadcast,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="deepseek",
+            llm_api_key="test-key",
+            llm_model="deepseek-chat",
+        )
+
+        def fake_request(_settings, _prompt, stream_callback=None):
+            self.assertIsNotNone(stream_callback)
+            stream_callback('{"summary":"hel"')
+            stream_callback(',"reply":"hello wor')
+            stream_callback('ld"}')
+            return LlmPlanResponse(
+                text=json.dumps({"action": "reply", "reply": "hello world", "summary": "hel"}),
+                reasoning={},
+                usage={},
+            )
+
+        mock_request_llm_plan.side_effect = fake_request
+        dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {
+            "sessionId": "sess-stream-prefix",
+            "turnId": "turn-stream-prefix",
+            "clientTurnId": "client-stream-prefix",
+        }
+        try:
+            payload = dashboard_server._agent_gateway_llm_plan("hello")
+        finally:
+            dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
+
+        self.assertEqual(json.loads(payload["text"])["reply"], "hello world")
+        delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and not call.args[1].get("done")]
+        self.assertEqual([event["textDelta"] for event in delta_events], ["hel", "lo wor", "ld"])
+        self.assertTrue(mock_broadcast.call_args_list[-1].args[1]["done"])
+
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
         captured: dict[str, str] = {}
         previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
