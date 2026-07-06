@@ -47,6 +47,7 @@ import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { useProviderSettings } from "./hooks/use-provider-settings";
+import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
@@ -109,8 +110,6 @@ import {
   createSubAgentContextSmokeTask,
   isMarkdownSmokeMode,
   markdownSmokeAgentNotes,
-  markdownSmokeGoals,
-  markdownSmokeMemories,
 } from "./lib/markdown-smoke";
 import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
 import {
@@ -118,10 +117,6 @@ import {
   AdjustmentCheckpoint,
   AgentCheckpoint,
   AgentCheckpointPreview,
-  AgentDesktopAction,
-  AgentGoal,
-  AgentMemory,
-  AgentRuntimeRun,
   AgentRuntimeResponse,
   AgentReasoningTrace,
   AgentSkill,
@@ -136,7 +131,6 @@ import {
   AppBootstrap,
   DoctorReport,
   DiagnosticsStatus,
-  DesktopRuntimeSnapshot,
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
   OutfitImportPlanResult,
@@ -146,7 +140,6 @@ import {
   ProjectIndexScanResult,
   SkillPackageEntry,
   SkillPackagePreflight,
-  WorkspaceDiffSummary,
   approveAgentApproval,
   checkSkills,
   compactAgentHistory,
@@ -164,10 +157,8 @@ import {
   createAdjustmentCheckpoint,
   deleteAdjustmentCheckpoint,
   fetchBootstrap,
-  fetchWorkspaceDiff,
   fetchDiagnostics,
   fetchDoctor,
-  fetchDesktopRuntimeSnapshot,
   fetchExternalAgentConnectors,
   fetchInterruptedApplyRecoveries,
   fetchOptimizationPlan,
@@ -214,7 +205,6 @@ import {
   requestRestoreCheckpoint,
   resolveInterruptedApplyRecovery,
   refreshProjects,
-  refreshUnityReadiness,
   selectAdjustmentCheckpoint,
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
@@ -423,19 +413,6 @@ export default function App() {
   const [outfitImportStatus, setOutfitImportStatus] = useState("");
   const [loadingOutfitImportPlan, setLoadingOutfitImportPlan] = useState(false);
   const [requestingOutfitImport, setRequestingOutfitImport] = useState(false);
-  const [workspaceDiff, setWorkspaceDiff] = useState<WorkspaceDiffSummary | null>(null);
-  const [loadingWorkspaceDiff, setLoadingWorkspaceDiff] = useState(false);
-  const [workspaceDiffError, setWorkspaceDiffError] = useState("");
-  const [workspaceDiffReviewOpen, setWorkspaceDiffReviewOpen] = useState(false);
-  const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
-  const [loadingUnityStatus, setLoadingUnityStatus] = useState(false);
-  const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
-  const [runtimeRunsError, setRuntimeRunsError] = useState("");
-  const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
-  const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
-  const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
-  const [workspaceStateError, setWorkspaceStateError] = useState("");
-  const [runtimeNotice, setRuntimeNotice] = useState("");
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_KEY);
@@ -518,8 +495,6 @@ export default function App() {
     }>
   >([]);
   const healthRefreshInFlightRef = useRef(false);
-  const runtimeRefreshSeqRef = useRef(0);
-  const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
@@ -672,6 +647,41 @@ export default function App() {
   const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
   const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = pendingApprovalItems.length;
+  const {
+    workspaceDiff,
+    loadingWorkspaceDiff,
+    workspaceDiffError,
+    workspaceDiffReviewOpen,
+    loadingWorkspaceDiffPatch,
+    loadingUnityStatus,
+    runtimeRuns,
+    runtimeRunsError,
+    desktopActions,
+    agentGoals,
+    agentMemory,
+    workspaceStateError,
+    runtimeNotice,
+    setRuntimeNotice,
+    refreshUnityStatus,
+    refreshWorkspaceDiff,
+    refreshRuntimeRuns,
+    toggleWorkspaceDiffReview,
+    prependDesktopAction,
+    upsertAgentGoal,
+    upsertAgentMemory,
+  } = useRuntimeWorkspace({
+    endpoint,
+    runtimeConnected,
+    sessionId,
+    activeRuntimeProjectPath,
+    activeProjectPath,
+    rightSidebarCollapsed,
+    sending,
+    pendingApprovals,
+    setBootstrap,
+    setAgentApprovals,
+    setError,
+  });
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1358,35 +1368,8 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
-    if (!runtimeConnected) {
-      setWorkspaceDiff(null);
-      setWorkspaceDiffError("");
-    }
-  }, [runtimeConnected, endpoint, activeProjectPath]);
-
-  useEffect(() => {
     setAgentApprovals(null);
   }, [activeRuntimeProjectPath]);
-
-  useEffect(() => {
-    if (!runtimeConnected) {
-      setRuntimeRuns([]);
-      setRuntimeRunsError("");
-      return;
-    }
-    void refreshRuntimeRuns(false);
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath]);
-
-  useEffect(() => {
-    if (!runtimeConnected || rightSidebarCollapsed) {
-      return;
-    }
-    const intervalMs = isTauriRuntime() ? (sending || pendingApprovals > 0 ? 5000 : 15000) : sending || pendingApprovals > 0 ? 2500 : 5000;
-    const timer = window.setInterval(() => {
-      void refreshRuntimeRuns(false);
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
 
   function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
     const startedAt = performance.now();
@@ -1607,135 +1590,6 @@ export default function App() {
     } finally {
       setLoadingProjects(false);
     }
-  }
-
-  async function refreshUnityStatus(target = endpoint) {
-    if (!runtimeConnected || loadingUnityStatus) {
-      return;
-    }
-    setLoadingUnityStatus(true);
-    try {
-      const payload = await refreshUnityReadiness(target);
-      setBootstrap((current) => (current ? { ...current, health: payload.health } : current));
-      setWorkspaceStateError("");
-      setError((current) => (current.toLowerCase().includes("unity") ? "" : current));
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setWorkspaceStateError(message);
-      setError(message);
-    } finally {
-      setLoadingUnityStatus(false);
-    }
-  }
-
-  async function refreshWorkspaceDiff(showLoading = true, includePatch = workspaceDiffReviewOpen) {
-    if (!runtimeConnected) {
-      return;
-    }
-    if (showLoading) {
-      setLoadingWorkspaceDiff(true);
-    }
-    if (includePatch) {
-      setLoadingWorkspaceDiffPatch(true);
-    }
-    try {
-      const payload = await fetchWorkspaceDiff(endpoint, activeProjectPath, includePatch);
-      setWorkspaceDiff(payload);
-      setWorkspaceDiffError(payload.ok ? "" : payload.error || t("workspace.diffUnavailable"));
-    } catch (cause) {
-      setWorkspaceDiffError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (showLoading) {
-        setLoadingWorkspaceDiff(false);
-      }
-      if (includePatch) {
-        setLoadingWorkspaceDiffPatch(false);
-      }
-    }
-  }
-
-  function fetchRuntimeSnapshotOnce(
-    key: string,
-    target: string,
-    params: { sessionId?: string; projectRoot?: string; includePatch?: boolean; globalOnly?: boolean },
-  ) {
-    const existing = runtimeSnapshotInFlightRef.current.get(key);
-    if (existing) {
-      return existing;
-    }
-    const request = fetchDesktopRuntimeSnapshot(target, params).finally(() => {
-      if (runtimeSnapshotInFlightRef.current.get(key) === request) {
-        runtimeSnapshotInFlightRef.current.delete(key);
-      }
-    });
-    runtimeSnapshotInFlightRef.current.set(key, request);
-    return request;
-  }
-
-  async function refreshRuntimeRuns(showError = false, target = endpoint) {
-    const refreshSeq = runtimeRefreshSeqRef.current + 1;
-    runtimeRefreshSeqRef.current = refreshSeq;
-    const requestSessionId = sessionId;
-    const requestProjectRoot = activeRuntimeProjectPath || "";
-    const isLatestRefresh = () =>
-      runtimeRefreshSeqRef.current === refreshSeq &&
-      requestSessionId === sessionId &&
-      requestProjectRoot === (activeRuntimeProjectPath || "");
-    if (!runtimeConnected) {
-      setRuntimeRuns([]);
-      setRuntimeRunsError("");
-      setDesktopActions([]);
-      setAgentGoals([]);
-      setAgentMemory([]);
-      setAgentApprovals(null);
-      setWorkspaceStateError("");
-      return;
-    }
-    try {
-      const projectRoot = requestProjectRoot || undefined;
-      const includePatch = workspaceDiffReviewOpen;
-      const snapshotKey = JSON.stringify([target, requestSessionId || "", projectRoot || "", includePatch ? "patch" : "summary"]);
-      const snapshot = await fetchRuntimeSnapshotOnce(snapshotKey, target, {
-        sessionId: requestSessionId || undefined,
-        projectRoot,
-        globalOnly: !projectRoot,
-        includePatch,
-      });
-      if (!isLatestRefresh()) {
-        return;
-      }
-      if (snapshot.workspaceDiff) {
-        setWorkspaceDiff(snapshot.workspaceDiff);
-        setWorkspaceDiffError(snapshot.workspaceDiff.ok ? "" : snapshot.workspaceDiff.error || t("workspace.diffUnavailable"));
-      }
-      setAgentApprovals(snapshot.approvals?.approvals ?? []);
-      setRuntimeRuns(snapshot.runs?.runs ?? []);
-      setDesktopActions(snapshot.desktopActions?.actions ?? []);
-      setAgentGoals(snapshot.goals?.goals ?? []);
-      setAgentMemory(snapshot.memory?.memories ?? []);
-      setRuntimeRunsError("");
-      setWorkspaceStateError("");
-    } catch (cause) {
-      if (!isLatestRefresh()) {
-        return;
-      }
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setRuntimeRunsError(message);
-      setWorkspaceStateError(message);
-      if (showError) {
-        setRuntimeNotice(message);
-      }
-    }
-  }
-
-  function toggleWorkspaceDiffReview() {
-    setWorkspaceDiffReviewOpen((open) => {
-      const next = !open;
-      if (next && runtimeConnected && !workspaceDiff?.patch) {
-        void refreshWorkspaceDiff(false, true);
-      }
-      return next;
-    });
   }
 
   async function refreshWithRetry(target = endpoint, options: { refreshProjects?: boolean } = {}) {
@@ -1996,7 +1850,7 @@ export default function App() {
             : payload.error || t("notice.desktopActionRecorded", { action: action.label, status: payload.status || "recorded" });
         setRuntimeNotice(message);
         if (payload.event) {
-          setDesktopActions((items) => [payload.event as AgentDesktopAction, ...items].slice(0, 8));
+          prependDesktopAction(payload.event);
         }
         void refreshRuntimeRuns(false);
       } catch (cause) {
@@ -2069,7 +1923,7 @@ export default function App() {
         projectPath: activeRuntimeProjectPath || undefined,
         projectRoot: activeRuntimeProjectPath || undefined,
       });
-      setAgentGoals((items) => [payload.goal, ...items.filter((item) => item.goalId !== payload.goal.goalId)].slice(0, 8));
+      upsertAgentGoal(payload.goal);
       setRuntimeNotice(t("goal.created"));
       setInput("");
     } catch (cause) {
@@ -2093,7 +1947,7 @@ export default function App() {
         projectPath: activeRuntimeProjectPath || undefined,
         projectRoot: activeRuntimeProjectPath || undefined,
       });
-      setAgentMemory((items) => [payload.memory, ...items.filter((item) => item.memoryId !== payload.memory.memoryId)].slice(0, 8));
+      upsertAgentMemory(payload.memory);
       setRuntimeNotice(t("memory.created"));
       setInput("");
     } catch (cause) {
