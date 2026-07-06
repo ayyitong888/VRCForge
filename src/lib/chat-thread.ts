@@ -1,13 +1,41 @@
 import type { ChatThread } from "./chat-types";
 
+export type ChatSidebarGroups = {
+  temporaryChats: ChatThread[];
+  projectChatsByPath: Map<string, ChatThread[]>;
+};
+
 export function sortChatsByPin(list: ChatThread[]): ChatThread[] {
-  return [...list].sort((a, b) => {
-    const pinDelta = Number(b.pinned ?? false) - Number(a.pinned ?? false);
-    if (pinDelta !== 0) {
-      return pinDelta;
+  return [...list].sort(compareChatsForSidebar);
+}
+
+export function groupSidebarChats(
+  list: ChatThread[],
+  normalizeProjectPath: (value: string) => string,
+): ChatSidebarGroups {
+  const temporaryChats: ChatThread[] = [];
+  const projectChatsByPath = new Map<string, ChatThread[]>();
+  for (const chat of list) {
+    if (chat.archived) {
+      continue;
     }
-    return chatTimeMs(b) - chatTimeMs(a);
-  });
+    const key = normalizeProjectPath(chat.projectPath || "");
+    if (!key) {
+      temporaryChats.push(chat);
+      continue;
+    }
+    const group = projectChatsByPath.get(key);
+    if (group) {
+      group.push(chat);
+    } else {
+      projectChatsByPath.set(key, [chat]);
+    }
+  }
+  temporaryChats.sort(compareChatsForSidebar);
+  for (const group of projectChatsByPath.values()) {
+    group.sort(compareChatsForSidebar);
+  }
+  return { temporaryChats, projectChatsByPath };
 }
 
 export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
@@ -45,6 +73,14 @@ export function isStoredChat(value: unknown): value is ChatThread {
   }
   const chat = value as Partial<ChatThread>;
   return typeof chat.id === "string" && chat.id.length > 0 && Array.isArray(chat.items);
+}
+
+function compareChatsForSidebar(a: ChatThread, b: ChatThread): number {
+  const pinDelta = Number(b.pinned ?? false) - Number(a.pinned ?? false);
+  if (pinDelta !== 0) {
+    return pinDelta;
+  }
+  return chatTimeMs(b) - chatTimeMs(a);
 }
 
 function isoFromTime(timestampMs: number): string {

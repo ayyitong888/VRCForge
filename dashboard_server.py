@@ -8730,17 +8730,29 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     return settings
 
 
-def extract_streaming_reply_text(raw_json_fragment: str) -> str:
-    marker = '"reply"'
-    marker_index = raw_json_fragment.find(marker)
-    if marker_index < 0:
-        return ""
-    colon_index = raw_json_fragment.find(":", marker_index + len(marker))
-    if colon_index < 0:
-        return ""
-    quote_index = raw_json_fragment.find('"', colon_index + 1)
-    if quote_index < 0:
-        return ""
+STREAMING_DIALOGUE_FIELDS = ("reply", "summary")
+
+
+def extract_streaming_json_string_field(raw_json_fragment: str, field_name: str) -> str | None:
+    marker = f'"{field_name}"'
+    search_from = 0
+    colon_index = -1
+    while True:
+        marker_index = raw_json_fragment.find(marker, search_from)
+        if marker_index < 0:
+            return None
+        cursor = marker_index + len(marker)
+        while cursor < len(raw_json_fragment) and raw_json_fragment[cursor].isspace():
+            cursor += 1
+        if cursor < len(raw_json_fragment) and raw_json_fragment[cursor] == ":":
+            colon_index = cursor
+            break
+        search_from = marker_index + len(marker)
+    quote_index = colon_index + 1
+    while quote_index < len(raw_json_fragment) and raw_json_fragment[quote_index].isspace():
+        quote_index += 1
+    if quote_index >= len(raw_json_fragment) or raw_json_fragment[quote_index] != '"':
+        return None
 
     output: list[str] = []
     escaped = False
@@ -8758,6 +8770,19 @@ def extract_streaming_reply_text(raw_json_fragment: str) -> str:
     return "".join(output)
 
 
+def extract_streaming_dialogue_text(raw_json_fragment: str) -> tuple[str, str]:
+    for field_name in STREAMING_DIALOGUE_FIELDS:
+        text = extract_streaming_json_string_field(raw_json_fragment, field_name)
+        if text:
+            return field_name, text
+    return "", ""
+
+
+def extract_streaming_reply_text(raw_json_fragment: str) -> str:
+    _field_name, text = extract_streaming_dialogue_text(raw_json_fragment)
+    return text
+
+
 def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     """LLM planner hook for the agent gateway (multi-provider dispatch).
 
@@ -8770,15 +8795,23 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
     label_parts = [provider_display_name(settings.llm_provider), str(settings.llm_model or "").strip()]
     AGENT_GATEWAY.llm_planner_label = " · ".join(part for part in label_parts if part)
     AGENT_GATEWAY.llm_reasoning_trace = {}
-    stream_state = {"raw": "", "reply": ""}
+    stream_state = {"raw": "", "field": "", "text": ""}
 
     def stream_callback(delta: str) -> None:
         stream_state["raw"] += delta
-        reply = extract_streaming_reply_text(stream_state["raw"])
-        if not reply or reply == stream_state["reply"]:
+        field_name, text = extract_streaming_dialogue_text(stream_state["raw"])
+        if not text:
             return
-        text_delta = reply[len(stream_state["reply"]) :]
-        stream_state["reply"] = reply
+        if field_name != stream_state["field"]:
+            if stream_state["field"] and stream_state["text"] and not text.startswith(stream_state["text"]):
+                stream_state["field"] = field_name
+                stream_state["text"] = text
+                return
+            stream_state["field"] = field_name
+        if text == stream_state["text"]:
+            return
+        text_delta = text[len(stream_state["text"]) :]
+        stream_state["text"] = text
         context = AGENT_GATEWAY.runtime_stream_context()
         client_turn_id = str(context.get("clientTurnId") or "").strip()
         if not client_turn_id:

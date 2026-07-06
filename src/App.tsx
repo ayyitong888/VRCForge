@@ -111,7 +111,7 @@ import {
   thinkingStatusForModelLabel,
   thinkingTraceLabel,
 } from "./lib/provider-ui";
-import { cacheChatTimestampsFast, formatChatSidebarTime, isStoredChat, sortChatsByPin } from "./lib/chat-thread";
+import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./lib/chat-types";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "./lib/permission-ui";
@@ -1309,10 +1309,12 @@ export default function App() {
         : runtimeConnected
           ? t("workspace.notLoaded")
           : t("workspace.coreOffline");
-  const temporaryChats = sortChatsByPin(chats.filter((chat) => !chat.projectPath && !chat.archived));
-  const chatSidebarTimes = useMemo(() => {
+  const chatSidebar = useMemo(() => {
     const now = Date.now();
-    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now, i18n.language)]));
+    return {
+      ...groupSidebarChats(chats, normalizeProjectPathKey),
+      times: new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, now, i18n.language)])),
+    };
   }, [chats, i18n.language]);
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(() => {
@@ -4924,7 +4926,7 @@ export default function App() {
             {projectItems.length > 0 ? (
               projectItems.map((project, index) => {
                 const key = projectKey(project) || `project-${index}`;
-                const projectChats = sortChatsByPin(chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(key) && !chat.archived));
+                const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
                 const collapsed = Boolean(collapsedProjects[key]);
                 return (
                   <div key={key} className="min-w-0">
@@ -4957,7 +4959,7 @@ export default function App() {
                       <SidebarChat
                         key={chat.id}
                         title={chat.title || t("sidebar.newChat")}
-                        meta={chatSidebarTimes.get(chat.id) || ""}
+                        meta={chatSidebar.times.get(chat.id) || ""}
                         active={activeView === "chat" && chat.id === activeChatId}
                         indent
                         pinned={chat.pinned}
@@ -4987,12 +4989,12 @@ export default function App() {
             collapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
             onToggleCollapse={() => toggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}
           >
-            {temporaryChats.length > 0 ? (
-              temporaryChats.map((chat) => (
+            {chatSidebar.temporaryChats.length > 0 ? (
+              chatSidebar.temporaryChats.map((chat) => (
                 <SidebarChat
                   key={chat.id}
                   title={chat.title || t("sidebar.newChat")}
-                  meta={chatSidebarTimes.get(chat.id) || ""}
+                  meta={chatSidebar.times.get(chat.id) || ""}
                   active={activeView === "chat" && chat.id === activeChatId}
                   pinned={chat.pinned}
                   renaming={renamingChatId === chat.id}

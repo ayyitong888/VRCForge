@@ -223,6 +223,28 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
 
+    def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
+        field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
+
+        self.assertEqual(field, "summary")
+        self.assertEqual(text, "hel")
+
+    def test_extract_streaming_dialogue_text_prefers_reply(self) -> None:
+        field, text = dashboard_server.extract_streaming_dialogue_text(
+            '{"summary":"draft","reply":"final line"}'
+        )
+
+        self.assertEqual(field, "reply")
+        self.assertEqual(text, "final line")
+
+    def test_extract_streaming_dialogue_text_skips_non_string_reply(self) -> None:
+        field, text = dashboard_server.extract_streaming_dialogue_text(
+            '{"reply":null,"summary":"visible"}'
+        )
+
+        self.assertEqual(field, "summary")
+        self.assertEqual(text, "visible")
+
     def test_project_prefs_accepts_only_unity_project_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1885,6 +1907,50 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(usage["totalTokens"], 1290)
         self.assertEqual(usage["sentHistoryEntryCount"], 1)
         self.assertGreater(usage["promptCharacterCount"], 0)
+
+    @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
+    @patch("dashboard_server.request_llm_plan_with_metadata")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_agent_runtime_stream_callback_emits_summary_deltas(
+        self,
+        mock_load_settings,
+        mock_request_llm_plan,
+        mock_broadcast,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace(
+            llm_provider="ollama",
+            llm_api_key="",
+            llm_model="qwen3",
+        )
+
+        def fake_request(_settings, _prompt, stream_callback=None):
+            self.assertIsNotNone(stream_callback)
+            stream_callback('{"action":"reply","summary":"hel')
+            stream_callback('lo"}')
+            return LlmPlanResponse(
+                text=json.dumps({"action": "reply", "summary": "hello"}),
+                reasoning={},
+                usage={},
+            )
+
+        mock_request_llm_plan.side_effect = fake_request
+        dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {
+            "sessionId": "sess-stream",
+            "turnId": "turn-stream",
+            "clientTurnId": "client-stream",
+        }
+        try:
+            payload = dashboard_server._agent_gateway_llm_plan("hello")
+        finally:
+            dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
+
+        self.assertEqual(json.loads(payload["text"])["summary"], "hello")
+        events = [call.args for call in mock_broadcast.call_args_list]
+        self.assertEqual(events[0][0], "agentRuntimeDelta")
+        self.assertEqual(events[0][1]["textDelta"], "hel")
+        self.assertEqual(events[0][1]["clientTurnId"], "client-stream")
+        self.assertEqual(events[1][1]["textDelta"], "lo")
+        self.assertEqual(events[-1][1]["done"], True)
 
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
         captured: dict[str, str] = {}

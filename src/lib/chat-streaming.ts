@@ -7,18 +7,46 @@ export type AgentRuntimeDeltaEvent = {
   done?: boolean;
 };
 
+const STREAMING_DIALOGUE_FIELDS = ["reply", "summary"] as const;
+
 export function extractReplyTextFromPartialJson(value: string): string {
-  const marker = '"reply"';
-  const markerIndex = value.indexOf(marker);
-  if (markerIndex < 0) {
-    return "";
+  return extractDialogueTextFromPartialJson(value).text;
+}
+
+export function extractDialogueTextFromPartialJson(value: string): { field: string; text: string } {
+  for (const field of STREAMING_DIALOGUE_FIELDS) {
+    const text = extractJsonStringField(value, field);
+    if (text) {
+      return { field, text };
+    }
   }
-  const colonIndex = value.indexOf(":", markerIndex + marker.length);
-  if (colonIndex < 0) {
-    return "";
+  return { field: "", text: "" };
+}
+
+function extractJsonStringField(value: string, field: string): string {
+  const marker = `"${field}"`;
+  let searchFrom = 0;
+  let colonIndex = -1;
+  while (true) {
+    const markerIndex = value.indexOf(marker, searchFrom);
+    if (markerIndex < 0) {
+      return "";
+    }
+    let cursor = markerIndex + marker.length;
+    while (cursor < value.length && /\s/.test(value[cursor])) {
+      cursor += 1;
+    }
+    if (value[cursor] === ":") {
+      colonIndex = cursor;
+      break;
+    }
+    searchFrom = markerIndex + marker.length;
   }
-  const quoteIndex = value.indexOf('"', colonIndex + 1);
-  if (quoteIndex < 0) {
+  let quoteIndex = colonIndex + 1;
+  while (quoteIndex < value.length && /\s/.test(value[quoteIndex])) {
+    quoteIndex += 1;
+  }
+  if (value[quoteIndex] !== '"') {
     return "";
   }
 
