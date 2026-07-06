@@ -8,7 +8,6 @@ import {
   FileText,
   GitBranch,
   ListChecks,
-  Loader2,
   MoreHorizontal,
   Monitor,
   Moon,
@@ -38,13 +37,12 @@ import {
 } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
-import { ConversationCard } from "./components/chat/conversation-card";
+import { ChatWorkspace } from "./components/chat/chat-workspace";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace, buildOptimizationRequestOptions, type OptimizationActionOptions } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace, protectionPlanPayload } from "./components/protection/protection-workspace";
 import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
 import { RuntimeToolButton } from "./components/runtime/runtime-sidebar-ui";
-import { AttachmentStrip, Composer } from "./components/chat/composer";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { AppSidebar } from "./components/sidebar/app-sidebar";
@@ -4881,116 +4879,53 @@ export default function App() {
               }}
               onSaveNotes={saveNotes}
             />
-          ) : conversation.length === 0 ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center p-5 md:p-8">
-              <div className="w-full max-w-3xl">
-                {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
-                <Composer
-                  input={input}
-                  setInput={setInput}
-                  sending={sending}
-                  permission={permission}
-                  statusLabel={agentModeLabel}
-                  projectLabel={activeProjectPath ? activeProjectName : ""}
-                  onSubmit={submitMessage}
-                  onStop={stopCurrentRun}
-                  onSwitchMode={switchMode}
-                  commands={slashCommands}
-                  actions={composerActions}
-                  onAction={runExplicitWorkspaceAction}
-                  disabledReason={chatDisabledReason}
-                  attachments={attachments}
-                  onAttachFiles={(files) => void addComposerFiles(files)}
-                  onRemoveAttachment={removeAttachment}
-                  contextUsage={contextUsage}
-                  providerLabel={providerSnapshot.providerLabel}
-                  model={providerSnapshot.model}
-                  projects={projectItems.map((project) => ({
-                    key: projectKey(project),
-                    name: project.name || shortPath(project.path || ""),
-                  }))}
-                  onBindProject={bindProject}
-                />
-              </div>
-            </div>
           ) : (
-            <>
-              <div
-                className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8"
-                onMouseUp={handleConversationMouseUp}
-                onScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
-              >
-                <div className="mx-auto max-w-3xl space-y-7">
-                  {conversation.map((item) => {
-                    const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
-                    return (
-                      <ConversationCard
-                        key={item.id}
-                        item={item}
-                        approval={approval}
-                        approvalAction={approval ? approvalActions[approval.id] : undefined}
-                        feedback={messageFeedback[item.id]}
-                        canRetry={!sending && item.id === latestRetryableItemId}
-                        canEdit={!sending && item.id === latestEditableUserItemId}
-                        onCopyItem={copyConversationItem}
-                        onRetryItem={retryConversationItem}
-                        onEditItem={editConversationMessage}
-                        onFeedbackItem={setConversationFeedback}
-                        onApprove={approveShell}
-                        onReject={rejectShell}
-                        onModifyApproval={modifyApprovalInComposer}
-                        onOpenSettings={() => void openSettings()}
-                        onOpenDoctor={() => void openDoctor()}
-                      />
-                    );
-                  })}
-                  {queued.map((turn, index) => (
-                    <div key={turn.id} className="flex justify-end opacity-65">
-                      <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
-                        <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          {t("chat.queued")} {index + 1}
-                        </div>
-                        <p className="whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
-                        {turn.attachments.length ? <AttachmentStrip attachments={turn.attachments} compact /> : null}
-                      </div>
-                    </div>
-                  ))}
-                  <div ref={conversationEndRef} />
-                </div>
-              </div>
-              <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2">
-                <div className="mx-auto max-w-3xl">
-                  <Composer
-                    input={input}
-                    setInput={setInput}
-                    sending={sending}
-                    permission={permission}
-                    statusLabel={agentModeLabel}
-                    projectLabel={activeProjectPath ? activeProjectName : ""}
-                    onSubmit={submitMessage}
-                    onStop={stopCurrentRun}
-                    onSwitchMode={switchMode}
-                    commands={slashCommands}
-                    actions={composerActions}
-                    onAction={runExplicitWorkspaceAction}
-                    compact
-                    disabledReason={chatDisabledReason}
-                    attachments={attachments}
-                    onAttachFiles={(files) => void addComposerFiles(files)}
-                    onRemoveAttachment={removeAttachment}
-                    contextUsage={contextUsage}
-                    providerLabel={providerSnapshot.providerLabel}
-                    model={providerSnapshot.model}
-                    projects={projectItems.map((project) => ({
-                      key: projectKey(project),
-                      name: project.name || shortPath(project.path || ""),
-                    }))}
-                    onBindProject={bindProject}
-                  />
-                </div>
-              </div>
-            </>
+            <ChatWorkspace
+              projectPromptTitle={projectPromptTitle}
+              input={input}
+              setInput={setInput}
+              sending={sending}
+              permission={permission}
+              statusLabel={agentModeLabel}
+              projectLabel={activeProjectPath ? activeProjectName : ""}
+              onSubmit={submitMessage}
+              onStop={stopCurrentRun}
+              onSwitchMode={switchMode}
+              commands={slashCommands}
+              actions={composerActions}
+              onAction={runExplicitWorkspaceAction}
+              disabledReason={chatDisabledReason}
+              attachments={attachments}
+              onAttachFiles={(files) => void addComposerFiles(files)}
+              onRemoveAttachment={removeAttachment}
+              contextUsage={contextUsage}
+              providerLabel={providerSnapshot.providerLabel}
+              model={providerSnapshot.model}
+              projects={projectItems.map((project) => ({
+                key: projectKey(project),
+                name: project.name || shortPath(project.path || ""),
+              }))}
+              onBindProject={bindProject}
+              conversation={conversation}
+              queued={queued}
+              conversationEndRef={conversationEndRef}
+              onConversationMouseUp={handleConversationMouseUp}
+              onConversationScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
+              pendingApprovalForResponse={pendingApprovalForResponse}
+              approvalActions={approvalActions}
+              messageFeedback={messageFeedback}
+              latestRetryableItemId={latestRetryableItemId}
+              latestEditableUserItemId={latestEditableUserItemId}
+              onCopyItem={copyConversationItem}
+              onRetryItem={retryConversationItem}
+              onEditItem={editConversationMessage}
+              onFeedbackItem={setConversationFeedback}
+              onApprove={approveShell}
+              onReject={rejectShell}
+              onModifyApproval={modifyApprovalInComposer}
+              onOpenSettings={() => void openSettings()}
+              onOpenDoctor={() => void openDoctor()}
+            />
           )}
           {activeView !== "chat" && pendingApprovalItems.length > 0 ? (
             <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
