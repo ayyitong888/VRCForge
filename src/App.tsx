@@ -13,7 +13,6 @@ import {
   Eye,
   EyeOff,
   FileText,
-  Folder,
   FolderOpen,
   FolderPlus,
   Gauge,
@@ -43,7 +42,6 @@ import {
   Sparkles,
   Square,
   Sun,
-  TerminalSquare,
   ThumbsDown,
   ThumbsUp,
   Trash2,
@@ -56,7 +54,6 @@ import i18n, { SUPPORTED_LOCALES, setLocale } from "./i18n";
 import {
   FormEvent,
   PointerEvent as ReactPointerEvent,
-  ReactNode,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -78,11 +75,11 @@ import { ExternalAgentConnectorsPanel } from "./components/settings/external-age
 import { ProviderSetup, VisionProfileSetup } from "./components/settings/provider-settings";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
+import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SidebarChat, SidebarProject, SidebarSection } from "./components/sidebar/sidebar";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { DataLine } from "./components/ui/data-line";
-import { OutputBlock } from "./components/ui/output-block";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
@@ -114,8 +111,10 @@ import {
 import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "./lib/permission-ui";
+import { projectKey, shortPath } from "./lib/project-path";
 import { buildRuntimeFileReferences } from "./lib/runtime-file-references";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
+import { emptySkillDraft } from "./lib/skill-draft";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "./lib/runtime-ui-types";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
@@ -131,8 +130,6 @@ import {
   AgentReasoningTrace,
   AgentSkill,
   AgentSkillRegistry,
-  AgentSkillResult,
-  AgentShellResult,
   AvatarListItem,
   AvatarEncryptionPlanResult,
   InterruptedApplyRecovery,
@@ -5882,120 +5879,29 @@ export default function App() {
         </button>
       ) : null}
 
-      {showProjectModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-          <section className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
-            <div className="flex min-w-0 items-center gap-2">
-              <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
-              <h2 className="truncate text-lg font-semibold">{t("onboarding.step3Title")}</h2>
-              <button
-                type="button"
-                className="ml-auto shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                onClick={() => {
-                  setShowProjectModal(false);
-                  setProjectModalError("");
-                }}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="app-scrollbar mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
-              <div>
-                <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.scannedProjects")}</div>
-                {projectItems.length > 0 ? (
-                  <div className="space-y-1">
-                    {projectItems.map((project) => {
-                      const key = projectKey(project);
-                      const isCustom = customPathSet.has((project.path || "").toLowerCase());
-                      return (
-                        <div key={key} className="group flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-muted">
-                          <button
-                            type="button"
-                            className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm"
-                            onClick={() => {
-                              selectProject(key);
-                              setShowProjectModal(false);
-                              setProjectModalError("");
-                            }}
-                          >
-                            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 truncate">{project.name || shortPath(project.path || "")}</span>
-                            <span className="min-w-0 truncate text-xs text-muted-foreground">{project.path}</span>
-                          </button>
-                          {isCustom ? (
-                            <button
-                              type="button"
-                              title={t("project.removeFromList")}
-                              disabled={savingProjectPrefs}
-                              className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-background hover:text-destructive group-hover:opacity-100"
-                              onClick={() => removeCustomProject(project.path || "")}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                    {t("project.noProjectsHint")}
-                  </p>
-                )}
-              </div>
-              {hiddenProjects.length > 0 ? (
-                <div>
-                  <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.hiddenProjects")}</div>
-                  <div className="space-y-1">
-                    {hiddenProjects.map((project) => (
-                      <div key={project.path} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
-                        <EyeOff className="h-4 w-4 shrink-0" />
-                        <span className="min-w-0 flex-1 truncate">{project.name || shortPath(project.path || "")}</span>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="h-7 shrink-0 px-2 text-xs"
-                          disabled={savingProjectPrefs}
-                          onClick={() => unhideProject(project.path || "")}
-                        >
-                          <Eye className="mr-1 h-3.5 w-3.5" />
-                          {t("project.restore")}
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              <div>
-                <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
-                <div className="flex gap-2">
-                  <input
-                    value={newProjectPath}
-                    onChange={(event) => {
-                      setNewProjectPath(event.target.value);
-                      setProjectModalError("");
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-                        event.preventDefault();
-                        void addProjectPath();
-                      }
-                    }}
-                    placeholder={t("project.pathPlaceholder")}
-                    className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
-                  />
-                  <Button type="button" disabled={savingProjectPrefs || !newProjectPath.trim()} onClick={() => void addProjectPath()}>
-                    {savingProjectPrefs ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                    {t("common.add")}
-                  </Button>
-                </div>
-                {projectModalError ? <p className="mt-2 text-xs text-destructive">{projectModalError}</p> : null}
-                <p className="mt-2 text-xs text-muted-foreground">{t("project.pathHint")}</p>
-              </div>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <ProjectPickerModal
+        open={showProjectModal}
+        projects={projectItems}
+        hiddenProjects={hiddenProjects}
+        customPathSet={customPathSet}
+        saving={savingProjectPrefs}
+        newProjectPath={newProjectPath}
+        error={projectModalError}
+        onClose={() => {
+          setShowProjectModal(false);
+          setProjectModalError("");
+        }}
+        onSelectProject={(key) => {
+          selectProject(key);
+          setShowProjectModal(false);
+          setProjectModalError("");
+        }}
+        onRemoveCustomProject={removeCustomProject}
+        onRestoreProject={unhideProject}
+        onNewProjectPathChange={setNewProjectPath}
+        onClearError={() => setProjectModalError("")}
+        onAddProjectPath={() => void addProjectPath()}
+      />
 
       {projectMenu
         ? (() => {
@@ -6235,16 +6141,6 @@ export default function App() {
   );
 }
 
-function FieldLabel({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label className="grid min-w-0 gap-2 text-sm">
-      <span className="truncate font-medium text-muted-foreground">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-
 function ApprovalCard({
   approval,
   loading,
@@ -6285,132 +6181,10 @@ function ApprovalCard({
   );
 }
 
-function ShellResultCard({ title, result, error }: { title: string; result?: AgentShellResult; error?: string }) {
-  const { t } = useTranslation();
-  return (
-    <section className="rounded-xl border border-border bg-card p-4 shadow-panel">
-      <div className="mb-3 flex min-w-0 items-center gap-2">
-        <TerminalSquare className="h-4 w-4 shrink-0 text-primary" />
-        <div className="truncate text-sm font-semibold">{title}</div>
-        {result ? (
-          <Badge tone={result.ok ? "ok" : "danger"} className="ml-auto shrink-0">
-            {t("shell.exitCode", { code: result.exitCode })}
-          </Badge>
-        ) : null}
-      </div>
-      {error ? <DataLine label={t("skills.error")} value={error} /> : null}
-      {result ? (
-        <div className="grid gap-3">
-          <DataLine label={t("shell.elapsed")} value={`${result.durationSeconds}s`} />
-          <OutputBlock label={t("shell.output")} value={result.stdout} />
-          {result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={result.stderr} danger /> : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function projectKey(project: { path?: string; name?: string }): string {
-  return project.path || project.name || "";
-}
-
 function StatusChip({ ok, label }: { ok: boolean; label: string }) {
   return (
     <Badge tone={ok ? "ok" : "warn"} className="max-w-[180px]">
       <span className="truncate">{label}</span>
     </Badge>
   );
-}
-
-function emptySkillDraft(): Partial<AgentSkill> {
-  return {
-    name: "",
-    title: "",
-    description: "",
-    category: "user",
-    source: "user",
-    skillType: "package",
-    enabled: true,
-    available: true,
-    permissionMode: "instruction_only",
-    riskLevel: "low",
-    whenToUse: "",
-    inputs: [],
-    outputs: [],
-    sideEffects: "none",
-    backupRestore: "not required",
-    tools: [],
-    allowedTools: [],
-    disallowedTools: [],
-    entrypointTool: "",
-    userInvocable: true,
-    disableModelInvocation: false,
-    argumentHint: "",
-    requiresEnv: [],
-    requiresBinaries: [],
-    supportedOs: ["windows"],
-    supportFiles: [],
-    testCommand: "",
-    instructions: "",
-    tags: ["user"],
-  };
-}
-
-function displayPlanner(planner: string): string {
-  if (planner === "deterministic-local") {
-    return i18n.t("planner.local");
-  }
-  if (planner === "llm") {
-    return i18n.t("planner.ai");
-  }
-  return planner || i18n.t("planner.fallback");
-}
-
-function displayStep(step: string): string {
-  const labels: Record<string, string> = {
-    classify_shell: i18n.t("step.classifyShell"),
-    execute_shell: i18n.t("step.executeShell"),
-    call_skill: i18n.t("step.callSkill"),
-    request_approval: i18n.t("shell.awaitConfirmation"),
-    await_user_instruction: i18n.t("step.awaitUserInstruction"),
-    done: i18n.t("step.done"),
-  };
-  return labels[step] || step;
-}
-
-function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {
-  if (risk === "low") return "ok";
-  if (risk === "high") return "warn";
-  if (risk === "reject") return "danger";
-  return "muted";
-}
-
-function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" {
-  if (skill.status === "executed" && skill.ok) return "ok";
-  if (skill.status === "loaded" && skill.ok) return "ok";
-  if (skill.status === "blocked") return "warn";
-  if (skill.status === "failed" || !skill.ok) return "danger";
-  return "muted";
-}
-
-function displaySkillStatus(status: string): string {
-  const labels: Record<string, string> = {
-    executed: i18n.t("agent.executed"),
-    loaded: i18n.t("skillStatus.loaded"),
-    failed: i18n.t("skillStatus.failed"),
-    blocked: i18n.t("skillStatus.blocked"),
-  };
-  return labels[status] || status || "-";
-}
-
-function shortPath(path: string) {
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.split("/").filter(Boolean).slice(-1)[0] || path;
-}
-
-function quoteLines(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => `> ${line}`)
-    .join("\n");
 }

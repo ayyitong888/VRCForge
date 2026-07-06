@@ -1,0 +1,35 @@
+import type { AgentSkill } from "./api";
+
+export function emptySkillDraft(): Partial<AgentSkill> {
+  return {
+    name: "",
+    title: "",
+    description: "",
+    category: "user",
+    source: "user",
+    skillType: "package",
+    enabled: true,
+    available: true,
+    permissionMode: "instruction_only",
+    riskLevel: "low",
+    whenToUse: "",
+    inputs: [],
+    outputs: [],
+    sideEffects: "none",
+    backupRestore: "not required",
+    tools: [],
+    allowedTools: [],
+    disallowedTools: [],
+    entrypointTool: "",
+    userInvocable: true,
+    disableModelInvocation: false,
+    argumentHint: "",
+    requiresEnv: [],
+    requiresBinaries: [],
+    supportedOs: ["windows"],
+    supportFiles: [],
+    testCommand: "",
+    instructions: "",
+    tags: ["user"],
+  };
+}
