@@ -6718,7 +6718,6 @@ function Composer({
 }) {
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [bindMenuOpen, setBindMenuOpen] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
@@ -6917,55 +6916,6 @@ function Composer({
           </div>
         </div>
       </div>
-      {!projectLabel ? (
-        <div className="relative flex h-12 min-w-0 items-center gap-2 px-5 text-sm text-muted-foreground">
-          <button
-            type="button"
-            className="flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted hover:text-foreground"
-            onClick={() => setBindMenuOpen((open) => !open)}
-            title={t("chat.switchProject")}
-          >
-            <MessageSquare className="h-4 w-4 shrink-0" />
-            <span className="truncate">{t("chat.tempChatHint")}</span>
-            <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-          </button>
-          {bindMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setBindMenuOpen(false)} /> : null}
-          {bindMenuOpen ? (
-            <div className="absolute bottom-11 left-4 z-30 w-72 rounded-lg border border-border bg-card p-1.5 shadow-panel">
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                onClick={() => {
-                  setBindMenuOpen(false);
-                  onBindProject?.("");
-                }}
-              >
-                <MessageSquare className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{t("chat.tempChatHint")}</span>
-                <Check className="h-4 w-4 shrink-0 text-primary" />
-              </button>
-              {projects.map((project) => (
-                <button
-                  key={project.key}
-                  type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                  onClick={() => {
-                    setBindMenuOpen(false);
-                    onBindProject?.(project.key);
-                  }}
-                >
-                  <Folder className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                  <Check className="h-4 w-4 shrink-0 text-primary opacity-0" />
-                </button>
-              ))}
-              <div className="mt-1 border-t border-border px-2.5 py-1.5 text-xs text-muted-foreground/70">
-                {t("chat.tempChatDesc")}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
     </form>
   );
 }
