@@ -1525,7 +1525,7 @@ export default function App() {
           ]),
         );
         const payload = await fetchChats<unknown>(endpoint, projectPaths);
-        const restoredRecords = (payload.chats || []).filter(isStoredChat).map((chat) => {
+        const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
           const normalized: ChatThread = {
           id: chat.id,
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
@@ -1538,15 +1538,10 @@ export default function App() {
           archived: chat.archived === true,
           items: chat.items,
           };
-          return {
-            chat: cacheChatTimestampsFast(normalized),
-            needsDeepMigration: !parseChatTimeCandidate(normalized.updatedAt) && normalized.items.length > 0,
-          };
+          return cacheChatTimestampsFast(normalized);
         });
-        const restored = restoredRecords.map((record) => record.chat);
         if (restored.length > 0) {
           setChats((current) => (current.length === 0 ? restored : current));
-          migrateChatTimestampsInChunks(restoredRecords.filter((record) => record.needsDeepMigration).map((record) => record.chat));
         }
       } catch {
         // 读取失败时保持空列表，不打断使用；下次启动会重试。
@@ -2196,30 +2191,6 @@ export default function App() {
 
   function appendToChat(chatId: string, item: ConversationItem) {
     updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
-  }
-
-  function migrateChatTimestampsInChunks(candidates: ChatThread[]) {
-    if (candidates.length === 0) {
-      return;
-    }
-    let index = 0;
-    const runChunk = () => {
-      const updates = new Map<string, ChatThread>();
-      const end = Math.min(index + 8, candidates.length);
-      for (; index < end; index += 1) {
-        const migrated = cacheChatTimestampsDeep(candidates[index]);
-        if (migrated.createdAt !== candidates[index].createdAt || migrated.updatedAt !== candidates[index].updatedAt) {
-          updates.set(migrated.id, migrated);
-        }
-      }
-      if (updates.size > 0) {
-        setChats((list) => list.map((chat) => updates.get(chat.id) || chat));
-      }
-      if (index < candidates.length) {
-        window.setTimeout(runChunk, 32);
-      }
-    };
-    window.setTimeout(runChunk, 1200);
   }
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
@@ -6338,16 +6309,6 @@ function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
   };
 }
 
-function cacheChatTimestampsDeep(chat: ChatThread): ChatThread {
-  const createdMs = parseChatTimeCandidate(chat.createdAt) || chatCreatedTimeMsDeep(chat);
-  const updatedMs = parseChatTimeCandidate(chat.updatedAt) || chatUpdatedTimeMsDeep(chat) || createdMs;
-  return {
-    ...chat,
-    createdAt: chat.createdAt || isoFromTime(createdMs),
-    updatedAt: chat.updatedAt || isoFromTime(updatedMs),
-  };
-}
-
 function isoFromTime(timestampMs: number): string {
   return timestampMs ? new Date(timestampMs).toISOString() : "";
 }
@@ -6368,32 +6329,6 @@ function chatTimeMs(chat: ChatThread): number {
     }
   }
   return parseChatTimeCandidate(chat.id);
-}
-
-function chatCreatedTimeMsDeep(chat: ChatThread): number {
-  for (const candidate of [chat.createdAt, chat.id]) {
-    const parsed = parseChatTimeCandidate(candidate);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  for (const item of chat.items) {
-    const parsed = parseChatTimeCandidate(item.id);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  return 0;
-}
-
-function chatUpdatedTimeMsDeep(chat: ChatThread): number {
-  for (let index = chat.items.length - 1; index >= 0; index -= 1) {
-    const parsed = parseChatTimeCandidate(chat.items[index]?.id);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  return parseChatTimeCandidate(chat.updatedAt) || parseChatTimeCandidate(chat.createdAt) || parseChatTimeCandidate(chat.id);
 }
 
 function parseChatTimeCandidate(value: unknown): number {
