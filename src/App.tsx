@@ -12,10 +12,7 @@ import {
   EyeOff,
   FileText,
   FolderOpen,
-  FolderPlus,
-  Gauge,
   GitBranch,
-  History,
   ListChecks,
   Loader2,
   MessageSquare,
@@ -23,26 +20,20 @@ import {
   Monitor,
   Moon,
   MousePointer2,
-  PanelLeftClose,
-  PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
   Pencil,
   Pin,
   Plus,
-  RefreshCw,
   RotateCcw,
   Search,
   Send,
-  Settings,
-  Shield,
   Square,
   Sun,
   ThumbsDown,
   ThumbsUp,
   Trash2,
-  Wrench,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -67,14 +58,15 @@ import { RuntimeToolButton } from "./components/runtime/runtime-sidebar-ui";
 import { AttachmentStrip, Composer } from "./components/chat/composer";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
+import { AppSidebar } from "./components/sidebar/app-sidebar";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
-import { SidebarChat, SidebarProject, SidebarSection } from "./components/sidebar/sidebar";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { DataLine } from "./components/ui/data-line";
+import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
@@ -106,7 +98,7 @@ import {
 import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
-import { projectKey, shortPath } from "./lib/project-path";
+import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { buildRuntimeFileReferences } from "./lib/runtime-file-references";
 import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
 import { emptySkillDraft } from "./lib/skill-draft";
@@ -268,9 +260,6 @@ type BackendEventMessage = {
   payload?: unknown;
 };
 
-
-type ActiveView = "chat" | "doctor" | "optimization" | "protection" | "skills" | "checkpoints" | "settings";
-
 type QueuedTurn = {
   id: string;
   text: string;
@@ -341,9 +330,6 @@ const MAX_LEFT_PANE_WIDTH = 440;
 const MIN_RIGHT_PANE_WIDTH = 260;
 const MAX_RIGHT_PANE_WIDTH = 520;
 const MIN_CENTER_PANE_WIDTH = 520;
-// 临时对话区折叠状态复用 collapsedProjects 存储；保留 key 不会与真实项目路径冲突。
-const TEMP_CHATS_COLLAPSE_KEY = "__temp_chats__";
-
 const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
 const VRCHAT_AVATAR_AGENT_NAMES = [
   "Manuka",
@@ -396,10 +382,6 @@ const VRCHAT_AVATAR_AGENT_NAMES = [
 
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
-}
-
-function normalizeProjectPathKey(path?: string): string {
-  return (path || "").replace(/\//g, "\\").trim().toLowerCase();
 }
 
 function isAbsoluteLocalPath(path?: string): boolean {
@@ -4883,248 +4865,57 @@ export default function App() {
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen" style={{ gridTemplateColumns: workspaceGridColumns }}>
-        <aside
-          className={cn(
-            "sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border/80 bg-sidebar px-2 py-3 transition-[width] max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden",
-            leftSidebarCollapsed ? "items-stretch [&_nav_button]:justify-center [&_nav_button]:px-0 [&_nav_span]:hidden" : "md:px-3",
-          )}
-        >
-          <div className={cn("flex h-9 items-center gap-2 px-2", leftSidebarCollapsed ? "justify-center" : "justify-between")}>
-            <Bot className="h-4 w-4 shrink-0 text-primary" />
-            {leftSidebarCollapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">VRCForge</div>}
-            <button
-              type="button"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={() => setLeftSidebarCollapsed((value) => !value)}
-              title={leftSidebarCollapsed ? t("sidebar.expandSidebar") : t("sidebar.collapseSidebar")}
-            >
-              {leftSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-            </button>
-          </div>
-
-          <nav className="mt-4 space-y-0.5">
-            <button
-              onClick={newTemporaryChat}
-              aria-label={t("sidebar.tempChat")}
-              title={t("sidebar.tempChat")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "chat" && !activeProjectPath && !activeChat
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <MessageSquare className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("sidebar.tempChat")}</span>
-            </button>
-            <button
-              aria-label={t("sidebar.newProject")}
-              title={t("sidebar.newProject")}
-              onClick={() => {
-                setProjectModalError("");
-                setShowProjectModal(true);
-              }}
-              className="flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <FolderPlus className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("sidebar.newProject")}</span>
-            </button>
-            <button
-              onClick={() => void openDoctor()}
-              aria-label={t("sidebar.doctor")}
-              title={t("sidebar.doctor")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "doctor"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("sidebar.doctor")}</span>
-            </button>
-            <button
-              onClick={() => void openOptimization()}
-              aria-label={t("sidebar.optimization")}
-              title={t("sidebar.optimization")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "optimization"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Gauge className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("sidebar.optimization")}</span>
-            </button>
-            <button
-              onClick={() => void openProtection()}
-              aria-label={t("encryption.protection")}
-              title={t("encryption.protection")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "protection"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Shield className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("encryption.protection")}</span>
-            </button>
-            <button
-              onClick={() => void openSkills()}
-              aria-label={t("sidebar.skills")}
-              title={t("sidebar.skills")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "skills"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Wrench className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("sidebar.skills")}</span>
-            </button>
-            <button
-              onClick={() => void openCheckpoints()}
-              aria-label={t("checkpoint.checkpoints")}
-              title={t("checkpoint.checkpoints")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",
-                activeView === "checkpoints"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <History className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t("checkpoint.checkpoints")}</span>
-            </button>
-          </nav>
-
-          {leftSidebarCollapsed ? null : <SidebarSection
-            title={t("sidebar.projects")}
-            action={
-              <button
-                type="button"
-                onClick={() => void refreshProjectList()}
-                disabled={!runtimeConnected || loadingProjects}
-                title={t("workspace.refreshStatus")}
-                aria-label={t("workspace.refreshStatus")}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-              >
-                <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
-              </button>
-            }
-          >
-            {projectItems.length > 0 ? (
-              projectItems.map((project, index) => {
-                const key = projectKey(project) || `project-${index}`;
-                const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
-                const collapsed = Boolean(collapsedProjects[key]);
-                return (
-                  <div key={key} className="min-w-0">
-                    <SidebarProject
-                      name={projectDisplayName(project)}
-                      meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
-                      active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
-                      collapsed={collapsed}
-                      hasChats={projectChats.length > 0}
-                      pinned={pinnedProjectSet.has(normalizeProjectPathKey(key))}
-                      renaming={renamingProjectPath === key}
-                      renameDraft={projectRenameDraft}
-                      onRenameChange={setProjectRenameDraft}
-                      onRenameCommit={commitRenameProject}
-                      onToggleCollapse={() => toggleProjectCollapse(key)}
-                      onClick={() => selectProject(key)}
-                      onOpenMenu={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        setProjectMenu({ projectPath: key, x: event.clientX, y: event.clientY });
-                      }}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        setProjectMenu({ projectPath: key, x: event.clientX, y: event.clientY });
-                      }}
-                    />
-                    {collapsed
-                      ? null
-                      : projectChats.map((chat) => (
-                      <SidebarChat
-                        key={chat.id}
-                        title={chat.title || t("sidebar.newChat")}
-                        meta={chatSidebar.times.get(chat.id) || ""}
-                        active={activeView === "chat" && chat.id === activeChatId}
-                        indent
-                        pinned={chat.pinned}
-                        renaming={renamingChatId === chat.id}
-                        renameDraft={renameDraft}
-                        onRenameChange={setRenameDraft}
-                        onRenameCommit={commitRenameChat}
-                        onClick={() => openChat(chat)}
-                        onTogglePin={() => togglePinChat(chat.id)}
-                        onDelete={() => setDeleteTargetId(chat.id)}
-                        onContextMenu={(event) => {
-                          event.preventDefault();
-                          setChatMenu({ chatId: chat.id, x: event.clientX, y: event.clientY });
-                        }}
-                      />
-                    ))}
-                  </div>
-                );
-              })
-            ) : (
-              <SidebarProject name={emptyProjectState?.name || t("agent.emptyProjectState.noUnityProject")} meta={emptyProjectState?.meta} active />
-            )}
-          </SidebarSection>}
-
-          {leftSidebarCollapsed ? null : <SidebarSection
-            title={t("sidebar.chats")}
-            collapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
-            onToggleCollapse={() => toggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}
-          >
-            {chatSidebar.temporaryChats.length > 0 ? (
-              chatSidebar.temporaryChats.map((chat) => (
-                <SidebarChat
-                  key={chat.id}
-                  title={chat.title || t("sidebar.newChat")}
-                  meta={chatSidebar.times.get(chat.id) || ""}
-                  active={activeView === "chat" && chat.id === activeChatId}
-                  pinned={chat.pinned}
-                  renaming={renamingChatId === chat.id}
-                  renameDraft={renameDraft}
-                  onRenameChange={setRenameDraft}
-                  onRenameCommit={commitRenameChat}
-                  onClick={() => openChat(chat)}
-                  onTogglePin={() => togglePinChat(chat.id)}
-                  onDelete={() => setDeleteTargetId(chat.id)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setChatMenu({ chatId: chat.id, x: event.clientX, y: event.clientY });
-                  }}
-                />
-              ))
-            ) : (
-              <div className="px-3 py-1 text-xs text-muted-foreground/70">{t("sidebar.noTempChats")}</div>
-            )}
-          </SidebarSection>}
-
-          <div className="mt-auto">
-            <button
-              onClick={() => void openSettings()}
-              aria-label={t("sidebar.settings")}
-              title={t("sidebar.settings")}
-              className={cn(
-                "flex h-9 w-full min-w-0 items-center justify-center gap-2.5 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-2.5",
-                activeView === "settings"
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Settings className="h-4 w-4 shrink-0" />
-              {leftSidebarCollapsed ? null : <span className="hidden truncate md:inline">{t("sidebar.settings")}</span>}
-            </button>
-          </div>
-        </aside>
+        <AppSidebar
+          collapsed={leftSidebarCollapsed}
+          activeView={activeView}
+          temporaryChatActive={activeView === "chat" && !activeProjectPath && !activeChat}
+          activeProjectPath={activeProjectPath}
+          activeChatId={activeChatId}
+          runtimeConnected={runtimeConnected}
+          loadingProjects={loadingProjects}
+          projectItems={projectItems}
+          chatSidebar={chatSidebar}
+          emptyProjectState={emptyProjectState}
+          collapsedProjects={collapsedProjects}
+          temporaryChatsCollapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
+          pinnedProjectSet={pinnedProjectSet}
+          renamingProjectPath={renamingProjectPath}
+          projectRenameDraft={projectRenameDraft}
+          renamingChatId={renamingChatId}
+          renameDraft={renameDraft}
+          projectDisplayName={projectDisplayName}
+          onToggleSidebar={() => setLeftSidebarCollapsed((value) => !value)}
+          onNewTemporaryChat={newTemporaryChat}
+          onOpenProjectPicker={() => {
+            setProjectModalError("");
+            setShowProjectModal(true);
+          }}
+          onOpenDoctor={() => void openDoctor()}
+          onOpenOptimization={() => void openOptimization()}
+          onOpenProtection={() => void openProtection()}
+          onOpenSkills={() => void openSkills()}
+          onOpenCheckpoints={() => void openCheckpoints()}
+          onOpenSettings={() => void openSettings()}
+          onRefreshProjects={() => void refreshProjectList()}
+          onSelectProject={selectProject}
+          onToggleProjectCollapse={toggleProjectCollapse}
+          onProjectMenu={(projectPath, event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setProjectMenu({ projectPath, x: event.clientX, y: event.clientY });
+          }}
+          onProjectRenameChange={setProjectRenameDraft}
+          onProjectRenameCommit={commitRenameProject}
+          onOpenChat={openChat}
+          onTogglePinChat={togglePinChat}
+          onDeleteChat={setDeleteTargetId}
+          onChatMenu={(chatId, event) => {
+            event.preventDefault();
+            setChatMenu({ chatId, x: event.clientX, y: event.clientY });
+          }}
+          onChatRenameChange={setRenameDraft}
+          onChatRenameCommit={commitRenameChat}
+        />
 
         <div
           role="separator"
