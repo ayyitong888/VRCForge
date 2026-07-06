@@ -113,8 +113,9 @@ import {
 } from "./lib/provider-ui";
 import { cacheChatTimestampsFast, formatChatSidebarTime, groupSidebarChats, isStoredChat } from "./lib/chat-thread";
 import type { ApprovalActionState, ChatAttachment, ChatThread, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
-import { SELECTED_TEXT_ATTACHMENT_NAME } from "./lib/chat-types";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "./lib/permission-ui";
+import { buildRuntimeFileReferences } from "./lib/runtime-file-references";
+import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellResult } from "./lib/runtime-parsing";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "./lib/runtime-ui-types";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
@@ -933,6 +934,8 @@ export default function App() {
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const chatsLoadedRef = useRef(false);
+  const chatsDirtyRef = useRef(false);
+  const chatsSaveVersionRef = useRef(0);
   const projectPrefsLoadedRef = useRef(false);
   const chatsRef = useRef<ChatThread[]>([]);
   const queueRef = useRef<QueuedTurn[]>([]);
@@ -1551,11 +1554,20 @@ export default function App() {
   }, [runtimeConnected, endpoint, projectItems, projectPrefs.customPaths, projectPrefsReady]);
 
   useEffect(() => {
-    if (!chatsLoadedRef.current || !runtimeConnected) {
+    if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current) {
       return;
     }
+    const saveVersion = chatsSaveVersionRef.current;
     const timer = window.setTimeout(() => {
-      void saveChats(endpoint, chats).catch(() => undefined);
+      void saveChats(endpoint, chats)
+        .then(() => {
+          if (chatsSaveVersionRef.current === saveVersion) {
+            chatsDirtyRef.current = false;
+          }
+        })
+        .catch(() => {
+          chatsDirtyRef.current = true;
+        });
     }, 800);
     return () => window.clearTimeout(timer);
   }, [chats, runtimeConnected, endpoint]);
@@ -2182,7 +2194,13 @@ export default function App() {
   }
 
   function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
+    markChatsDirty();
     setChats((list) => list.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
+  }
+
+  function markChatsDirty() {
+    chatsDirtyRef.current = true;
+    chatsSaveVersionRef.current += 1;
   }
 
   function touchChat(chat: ChatThread, timestamp = new Date().toISOString()): ChatThread {
@@ -2198,6 +2216,7 @@ export default function App() {
     if (!clientTurnId || !delta.textDelta) {
       return;
     }
+    markChatsDirty();
     setChats((list) =>
       list.map((chat) => {
         if (streamingTurnChatRef.current.get(clientTurnId) !== chat.id) {
@@ -2418,6 +2437,7 @@ export default function App() {
     }
     const id = `chat-${Date.now()}`;
     const now = new Date().toISOString();
+    markChatsDirty();
     setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] }, ...list]);
     setActiveChatId(id);
     return id;
@@ -2844,6 +2864,7 @@ export default function App() {
   }
 
   function deleteChatPermanently(chatId: string) {
+    markChatsDirty();
     setChats((list) => list.filter((chat) => chat.id !== chatId));
     if (activeChatId === chatId) {
       setActiveChatId("");
@@ -2872,6 +2893,7 @@ export default function App() {
     }
     const id = `chat-${Date.now()}`;
     const now = new Date().toISOString();
+    markChatsDirty();
     setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", createdAt: now, updatedAt: now, items: [] }, ...list]);
     setActiveChatId(id);
   }
@@ -3233,6 +3255,7 @@ export default function App() {
     if (!key) {
       return;
     }
+    markChatsDirty();
     setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
     if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
       setActiveChatId("");
@@ -6212,13 +6235,6 @@ export default function App() {
   );
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
-
 function FieldLabel({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="grid min-w-0 gap-2 text-sm">
@@ -6306,14 +6322,6 @@ function StatusChip({ ok, label }: { ok: boolean; label: string }) {
   );
 }
 
-function getHealthDetailNumber(detail: unknown, key: string): number {
-  if (!detail || typeof detail !== "object") {
-    return 0;
-  }
-  const value = (detail as Record<string, unknown>)[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
 function emptySkillDraft(): Partial<AgentSkill> {
   return {
     name: "",
@@ -6393,76 +6401,6 @@ function displaySkillStatus(status: string): string {
     blocked: i18n.t("skillStatus.blocked"),
   };
   return labels[status] || status || "-";
-}
-
-function buildRuntimeFileReferences(items: ConversationItem[], diffFiles: WorkspaceDiffSummary["files"]): RuntimeFileReference[] {
-  const seen = new Map<string, RuntimeFileReference>();
-  const add = (path: string, source: string) => {
-    const cleaned = path.trim().replace(/[),.;:\]}]+$/g, "");
-    if (!cleaned || cleaned.length > 260) {
-      return;
-    }
-    const key = cleaned.replace(/\//g, "\\").toLowerCase();
-    if (!seen.has(key)) {
-      seen.set(key, { path: cleaned, source });
-    }
-  };
-  const scan = (value: unknown, source: string) => {
-    if (value === null || value === undefined) {
-      return;
-    }
-    const text = typeof value === "string" ? value : formatPayload(value);
-    const pathPattern =
-      /[A-Za-z]:[\\/][^\s"'<>|]+|\b(?:Assets|Packages|ProjectSettings|src|docs|tests|packaging|artifacts)[\\/][^\s"'<>|]+|\b[\w.-]+\.(?:tsx?|py|md|json|ps1|cs|shader|asset|controller|prefab|mat|anim|unity)\b/g;
-    for (const match of text.matchAll(pathPattern)) {
-      add(match[0], source);
-    }
-  };
-
-  for (const item of items.slice(-16)) {
-    if (item.type === "user") {
-      item.attachments?.forEach((attachment) => {
-        if (attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME) {
-          add(attachment.name, "attachment");
-        }
-      });
-    } else if (item.type === "agent") {
-      const responseRecord = asRecord(item.response) || {};
-      scan(responseRecord.steps, "run");
-      scan(item.response.write, "write");
-      scan(item.response.skill, "tool");
-      scan(item.response.shell, "command");
-      scan(item.response.result, "result");
-    } else if (item.type === "result") {
-      scan(item.result, "approval");
-      scan(item.error, "approval");
-    } else if (item.type === "subagent") {
-      scan(item.task, "sub-agent");
-    }
-  }
-  diffFiles.slice(0, 12).forEach((file) => add(file.path, "changes"));
-  return Array.from(seen.values()).slice(-12).reverse();
-}
-
-function isAgentShellResult(value: unknown): value is AgentShellResult {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const payload = value as Partial<AgentShellResult>;
-  return typeof payload.command === "string" && typeof payload.exitCode === "number";
-}
-
-function approvalIdFromResponse(response: AgentRuntimeResponse): string {
-  return String(
-    response.approval_id ||
-      response.approvalId ||
-      response.write?.approval_id ||
-      response.write?.approvalId ||
-      response.shell?.approval_id ||
-      response.shell?.approvalId ||
-      response.shell?.approval?.id ||
-      "",
-  ).trim();
 }
 
 function shortPath(path: string) {
