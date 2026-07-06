@@ -2,20 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertTriangle,
-  Archive,
-  Bot,
   Camera,
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
-  EyeOff,
   FileText,
-  FolderOpen,
   GitBranch,
   ListChecks,
   Loader2,
-  MessageSquare,
   MoreHorizontal,
   Monitor,
   Moon,
@@ -23,9 +16,6 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
-  Pencil,
-  Pin,
-  Plus,
   RotateCcw,
   Search,
   Send,
@@ -33,7 +23,6 @@ import {
   Sun,
   ThumbsDown,
   ThumbsUp,
-  Trash2,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -59,6 +48,7 @@ import { AttachmentStrip, Composer } from "./components/chat/composer";
 import { CheckpointWorkspace, type AdjustmentCheckpointPreview } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { AppSidebar } from "./components/sidebar/app-sidebar";
+import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
@@ -5480,239 +5470,34 @@ export default function App() {
         onAddProjectPath={() => void addProjectPath()}
       />
 
-      {projectMenu
-        ? (() => {
-            const menuPath = projectMenu.projectPath;
-            const menuKey = normalizeProjectPathKey(menuPath);
-            const isCustom = customPathSet.has(menuKey);
-            const collapsed = Boolean(collapsedProjects[menuPath]);
-            const pinned = pinnedProjectSet.has(normalizeProjectPathKey(menuPath));
-            const projectChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(menuPath) && !chat.archived).length;
-            const archivedChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(menuPath) && chat.archived).length;
-            return (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setProjectMenu(null)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setProjectMenu(null);
-                  }}
-                />
-                <div
-                  className="fixed z-50 w-56 rounded-lg border border-border bg-card p-1.5 shadow-panel"
-                  style={{
-                    left: Math.min(projectMenu.x, window.innerWidth - 240),
-                    top: Math.min(projectMenu.y, window.innerHeight - 260),
-                  }}
-                >
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      togglePinProject(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    <Pin className={cn("h-4 w-4 shrink-0", pinned ? "text-primary" : "")} />
-                    {pinned ? t("project.unpinProject") : t("project.pinProject")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      void openProjectFolder(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    <FolderOpen className="h-4 w-4 shrink-0" />
-                    {t("project.openInExplorer")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      newConversation(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    <Plus className="h-4 w-4 shrink-0" />
-                    {t("project.newChatInProject")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      startRenameProject(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    <Pencil className="h-4 w-4 shrink-0" />
-                    {t("project.renameProject")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      toggleProjectCollapse(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    {collapsed ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                    {collapsed ? t("project.expandChats") : t("project.collapseChats")}
-                  </button>
-                  {projectChatCount > 0 || archivedChatCount > 0 ? (
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                      onClick={() => {
-                        archiveProjectChats(menuPath, projectChatCount > 0);
-                        setProjectMenu(null);
-                      }}
-                    >
-                      <Archive className="h-4 w-4 shrink-0" />
-                      {projectChatCount > 0 ? t("project.archiveChats") : t("project.restoreArchived")}
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      hideProject(menuPath);
-                      setProjectMenu(null);
-                    }}
-                  >
-                    <EyeOff className="h-4 w-4 shrink-0" />
-                    {t("project.hideProject")}
-                  </button>
-                  {isCustom ? (
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
-                      onClick={() => {
-                        removeCustomProject(menuPath);
-                        setProjectMenu(null);
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4 shrink-0" />
-                      {t("project.removeProject")}
-                    </button>
-                  ) : null}
-                </div>
-              </>
-            );
-          })()
-        : null}
-
-      {selectionMenu ? (
-        <div
-          ref={selectionMenuRef}
-          className="fixed z-50 flex w-max max-w-[calc(100vw-1rem)] flex-wrap items-center gap-0.5 rounded-lg border border-border bg-card p-1 shadow-panel"
-          style={{ left: 0, top: 0 }}
-          onMouseUp={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-            onClick={() => askInNewSession(selectionMenu.text)}
-          >
-            <Bot className="h-3.5 w-3.5 shrink-0" />
-            {t("contextMenu.askInNewSession")}
-          </button>
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-            onClick={() => addSelectionToComposer(selectionMenu.text)}
-          >
-            <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-            {t("contextMenu.addToChat")}
-          </button>
-        </div>
-      ) : null}
-
-      {chatMenu
-        ? (() => {
-            const menuChat = chats.find((chat) => chat.id === chatMenu.chatId);
-            if (!menuChat) {
-              return null;
-            }
-            return (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setChatMenu(null)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setChatMenu(null);
-                  }}
-                />
-                <div
-                  className="fixed z-50 w-44 rounded-lg border border-border bg-card p-1.5 shadow-panel"
-                  style={{
-                    left: Math.min(chatMenu.x, window.innerWidth - 190),
-                    top: Math.min(chatMenu.y, window.innerHeight - 140),
-                  }}
-                >
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      togglePinChat(menuChat.id);
-                      setChatMenu(null);
-                    }}
-                  >
-                    <Pin className="h-4 w-4 shrink-0" />
-                    {menuChat.pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted"
-                    onClick={() => {
-                      startRenameChat(menuChat);
-                      setChatMenu(null);
-                    }}
-                  >
-                    <Pencil className="h-4 w-4 shrink-0" />
-                    {t("contextMenu.renameChat")}
-                  </button>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
-                    onClick={() => {
-                      setDeleteTargetId(menuChat.id);
-                      setChatMenu(null);
-                    }}
-                  >
-                    <Trash2 className="h-4 w-4 shrink-0" />
-                    {t("contextMenu.permanentDelete")}
-                  </button>
-                </div>
-              </>
-            );
-          })()
-        : null}
-
-      {deleteTargetId ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
-          <section className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-panel">
-            <div className="flex min-w-0 items-center gap-2 text-destructive">
-              <Trash2 className="h-4 w-4 shrink-0" />
-              <h2 className="truncate text-base font-semibold">{t("deleteModal.title")}</h2>
-            </div>
-            <p className="mt-3 text-sm text-muted-foreground">
-              「{chats.find((chat) => chat.id === deleteTargetId)?.title || t("sidebar.newChat")}」将被永久删除，本地记录一并清除，无法恢复。
-            </p>
-            <div className="mt-5 flex justify-end gap-3">
-              <Button variant="outline" onClick={() => setDeleteTargetId("")}>
-                {t("deleteModal.cancel")}
-              </Button>
-              <Button variant="danger" onClick={() => deleteChatPermanently(deleteTargetId)}>
-                {t("contextMenu.permanentDelete")}
-              </Button>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <SidebarMenus
+        projectMenu={projectMenu}
+        chatMenu={chatMenu}
+        selectionMenu={selectionMenu}
+        deleteTargetId={deleteTargetId}
+        chats={chats}
+        customPathSet={customPathSet}
+        collapsedProjects={collapsedProjects}
+        pinnedProjectSet={pinnedProjectSet}
+        selectionMenuRef={selectionMenuRef}
+        onCloseProjectMenu={() => setProjectMenu(null)}
+        onTogglePinProject={togglePinProject}
+        onOpenProjectFolder={(projectPath) => void openProjectFolder(projectPath)}
+        onNewConversation={newConversation}
+        onStartRenameProject={startRenameProject}
+        onToggleProjectCollapse={toggleProjectCollapse}
+        onArchiveProjectChats={archiveProjectChats}
+        onHideProject={hideProject}
+        onRemoveCustomProject={removeCustomProject}
+        onAskInNewSession={askInNewSession}
+        onAddSelectionToComposer={addSelectionToComposer}
+        onCloseChatMenu={() => setChatMenu(null)}
+        onTogglePinChat={togglePinChat}
+        onStartRenameChat={startRenameChat}
+        onDeleteChat={setDeleteTargetId}
+        onCancelDeleteChat={() => setDeleteTargetId("")}
+        onConfirmDeleteChat={deleteChatPermanently}
+      />
 
     </main>
   );
