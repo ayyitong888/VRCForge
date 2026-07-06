@@ -57,6 +57,31 @@ import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { DataLine } from "./components/ui/data-line";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
+import {
+  COLLAPSED_LEFT_PANE_WIDTH,
+  COLLAPSED_PROJECTS_KEY,
+  LAYOUT_PANE_WIDTHS_KEY,
+  LEFT_SIDEBAR_COLLAPSED_KEY,
+  MAX_LEFT_PANE_WIDTH,
+  MAX_RIGHT_PANE_WIDTH,
+  MIN_CENTER_PANE_WIDTH,
+  MIN_LEFT_PANE_WIDTH,
+  MIN_RIGHT_PANE_WIDTH,
+  ONBOARDING_FLAG_KEY,
+  RESIZE_HANDLE_WIDTH,
+  RIGHT_RUNTIME_SECTION_COLLAPSED_KEY,
+  RIGHT_SIDEBAR_COLLAPSED_KEY,
+  THEME_STORAGE_KEY,
+  PROJECT_UI_PREFS_KEY,
+  clampNumber,
+  loadLayoutPaneWidths,
+  loadProjectUiPrefs,
+  loadThemePreference,
+  type LayoutPaneWidths,
+  type ProjectUiPrefs,
+  type ThemeMode,
+} from "./lib/app-preferences";
+import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
@@ -94,6 +119,15 @@ import { approvalIdFromResponse, asRecord, getHealthDetailNumber, isAgentShellRe
 import { emptySkillDraft } from "./lib/skill-draft";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "./lib/runtime-ui-types";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
+import {
+  createMarkdownSmokeChatState,
+  createSubAgentContextSmokeTask,
+  isMarkdownSmokeMode,
+  markdownSmokeAgentNotes,
+  markdownSmokeGoals,
+  markdownSmokeMemories,
+} from "./lib/markdown-smoke";
+import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
   AdjustmentCheckpoint,
@@ -289,403 +323,9 @@ type RunSingleTurnOptions = {
 
 
 
-type ProjectUiPrefs = {
-  pinnedPaths: string[];
-  aliases: Record<string, string>;
-};
-
-type LayoutPaneWidths = {
-  left: number;
-  right: number;
-};
-
-type ThemeMode = "light" | "dark";
-
-const ONBOARDING_FLAG_KEY = "vrcforge_onboarded";
-const COLLAPSED_PROJECTS_KEY = "vrcforge_collapsed_projects";
-const PROJECT_UI_PREFS_KEY = "vrcforge_project_ui_prefs";
-const THEME_STORAGE_KEY = "vrcforge_theme";
-const LEFT_SIDEBAR_COLLAPSED_KEY = "vrcforge_left_sidebar_collapsed";
-const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
-const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
-const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
 const MAX_QUEUED_TURNS = 8;
 const MAX_ATTACHMENTS_PER_TURN = 8;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
-const DEFAULT_LEFT_PANE_WIDTH = 280;
-const DEFAULT_RIGHT_PANE_WIDTH = 320;
-const COLLAPSED_LEFT_PANE_WIDTH = 56;
-const RESIZE_HANDLE_WIDTH = 6;
-const MIN_LEFT_PANE_WIDTH = 220;
-const MAX_LEFT_PANE_WIDTH = 440;
-const MIN_RIGHT_PANE_WIDTH = 260;
-const MAX_RIGHT_PANE_WIDTH = 520;
-const MIN_CENTER_PANE_WIDTH = 520;
-const FALLBACK_ENDPOINT = "http://127.0.0.1:8757";
-const VRCHAT_AVATAR_AGENT_NAMES = [
-  "Manuka",
-  "Shinano",
-  "Kikyo",
-  "Moe",
-  "Selestia",
-  "Milltina",
-  "Kipfel",
-  "Rurune",
-  "Mamehinata",
-  "Usasaki",
-  "Airi",
-  "Maya",
-  "Rindo",
-  "Karin",
-  "Lasyusha",
-  "Lime",
-  "Chiffon",
-  "Chocolat",
-  "Mizuki",
-  "Sio",
-  "Milfy",
-  "Mao",
-  "Lumina",
-  "Leefa",
-  "Lunalitt",
-  "Rusk",
-  "Clonka",
-  "Uzuruha",
-  "Mitsumame",
-  "Ulthara",
-  "IsanaiNuku",
-  "Yilnel",
-  "NoraFirika",
-  "IODragonewt",
-  "Ortwa",
-  "Ricorine",
-  "Siska",
-  "NoraMiaree",
-  "Clara",
-  "Korone",
-  "Azuki",
-  "Miminoko",
-  "Nemesis",
-  "Elusion",
-];
-
-
-
-function isTauriRuntime() {
-  return "__TAURI_INTERNALS__" in window;
-}
-
-function isAbsoluteLocalPath(path?: string): boolean {
-  const value = (path || "").trim();
-  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("/");
-}
-
-function pickSubAgentName(): string {
-  const index = Math.floor(Math.random() * VRCHAT_AVATAR_AGENT_NAMES.length);
-  return VRCHAT_AVATAR_AGENT_NAMES[index] || "Manuka";
-}
-
-function updateSubAgentList(current: SubAgentTaskList | null, task: SubAgentTask): SubAgentTaskList {
-  const existing = current?.tasks || [];
-  const tasks = [task, ...existing.filter((item) => item.id !== task.id)];
-  return {
-    ok: true,
-    schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
-    tasks,
-    count: tasks.length,
-    roles: current?.roles,
-    maxConcurrent: current?.maxConcurrent,
-    runningCount: tasks.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length,
-  };
-}
-
-function loadProjectUiPrefs(): ProjectUiPrefs {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_UI_PREFS_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (!parsed || typeof parsed !== "object") {
-      return { pinnedPaths: [], aliases: {} };
-    }
-    const pinnedPaths = Array.isArray(parsed.pinnedPaths)
-      ? parsed.pinnedPaths.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
-      : [];
-    const aliases =
-      parsed.aliases && typeof parsed.aliases === "object"
-        ? Object.fromEntries(
-            Object.entries(parsed.aliases).filter(
-              (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string" && entry[1].trim().length > 0,
-            ),
-          )
-        : {};
-    return { pinnedPaths, aliases };
-  } catch {
-    return { pinnedPaths: [], aliases: {} };
-  }
-}
-
-function loadThemePreference(): ThemeMode {
-  try {
-    const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return raw === "dark" || raw === "light" ? raw : "light";
-  } catch {
-    return "light";
-  }
-}
-
-function clampNumber(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.min(max, Math.max(min, value));
-}
-
-function loadLayoutPaneWidths(): LayoutPaneWidths {
-  try {
-    const raw = window.localStorage.getItem(LAYOUT_PANE_WIDTHS_KEY);
-    if (!raw) {
-      return { left: DEFAULT_LEFT_PANE_WIDTH, right: DEFAULT_RIGHT_PANE_WIDTH };
-    }
-    const parsed = raw ? JSON.parse(raw) : {};
-    return {
-      left: clampNumber(Number(parsed.left || DEFAULT_LEFT_PANE_WIDTH), MIN_LEFT_PANE_WIDTH, MAX_LEFT_PANE_WIDTH),
-      right: clampNumber(Number(parsed.right || DEFAULT_RIGHT_PANE_WIDTH), MIN_RIGHT_PANE_WIDTH, MAX_RIGHT_PANE_WIDTH),
-    };
-  } catch {
-    return { left: DEFAULT_LEFT_PANE_WIDTH, right: DEFAULT_RIGHT_PANE_WIDTH };
-  }
-}
-
-function isMarkdownSmokeMode(): boolean {
-  try {
-    return new URLSearchParams(window.location.search).get("markdownSmoke") === "1";
-  } catch {
-    return false;
-  }
-}
-
-function markdownSmokeCase(): string {
-  try {
-    return new URLSearchParams(window.location.search).get("case") || "";
-  } catch {
-    return "";
-  }
-}
-
-function isSubAgentContextSmokeMode(): boolean {
-  return isMarkdownSmokeMode() && markdownSmokeCase() === "subagent-context";
-}
-
-function isContextMeterSmokeMode(): boolean {
-  return isMarkdownSmokeMode() && markdownSmokeCase() === "context-meter";
-}
-
-function markdownSmokeContextPercent(): number {
-  try {
-    const raw = Number(new URLSearchParams(window.location.search).get("contextPct") || "1");
-    if (!Number.isFinite(raw)) {
-      return 1;
-    }
-    return Math.max(0, Math.min(100, Math.round(raw)));
-  } catch {
-    return 1;
-  }
-}
-
-const MARKDOWN_SMOKE_TEXT = [
-  "# Markdown Smoke H1",
-  "## Markdown Smoke H2",
-  "### Markdown Smoke H3",
-  "",
-  "Paragraph with **bold text**, *italic text*, ***bold italic text***, ~~deleted text~~, `inline code`, escaped \\*asterisks\\*, and a hard break  ",
-  "after two trailing spaces.",
-  "",
-  "Autolink literal: https://example.com and explicit [safe link](https://example.com/docs).",
-  "",
-  "> Blockquote with **formatting**.",
-  ">",
-  "> - Quote list item",
-  "",
-  "1. Ordered item",
-  "2. Nested item",
-  "   - Nested bullet",
-  "   - Another nested bullet with `code`",
-  "",
-  "- [x] Completed task",
-  "- [ ] Open task",
-  "",
-  "| Feature | Status | Notes |",
-  "| --- | :---: | ---: |",
-  "| Tables | **Rendered** | 1 |",
-  "| HTML | <mark>sanitized</mark> | 2 |",
-  "",
-  "```ts",
-  "const rendered: boolean = true;",
-  "console.log(rendered);",
-  "```",
-  "",
-  "![Markdown image](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lUXYkwAAAABJRU5ErkJggg==)",
-  "",
-  "Footnote reference[^1].",
-  "",
-  "[^1]: Footnote body rendered by GFM.",
-  "",
-  "<details><summary>Safe HTML summary</summary><kbd>Ctrl</kbd> + <kbd>K</kbd></details>",
-  "",
-  "<script>window.__vrcforgeMarkdownUnsafe = true</script>",
-  "<img src=x onerror=\"window.__vrcforgeMarkdownUnsafe = true\" />",
-].join("\n");
-
-function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: string } {
-  if (!isMarkdownSmokeMode()) {
-    return { chats: [], activeChatId: "" };
-  }
-  const chatId = "markdown-smoke-chat";
-  const contextPercent = isContextMeterSmokeMode() ? markdownSmokeContextPercent() : 1;
-  const smokeInputTokens = Math.round(1_048_576 * (contextPercent / 100));
-  const response: AgentRuntimeResponse = {
-    ok: true,
-    session_id: "markdown-smoke-session",
-    sessionId: "markdown-smoke-session",
-    turn_id: "markdown-smoke-turn",
-    turnId: "markdown-smoke-turn",
-    observe: {},
-    plan: {
-      summary: MARKDOWN_SMOKE_TEXT,
-      reply: MARKDOWN_SMOKE_TEXT,
-      planner: "markdown-smoke",
-      plannerLabel: "Markdown Smoke",
-      shellNeeded: false,
-      nextStep: "done",
-    },
-    contextUsage: {
-      schema: "vrcforge.context_usage.v1",
-      source: "provider_usage",
-      exact: true,
-      provider: "smoke",
-      providerLabel: "Smoke",
-      model: "CommonMark + GFM",
-      inputTokens: smokeInputTokens,
-      outputTokens: 321,
-      totalTokens: smokeInputTokens + 321,
-      requestCount: 1,
-      sentHistoryEntryCount: 1,
-      promptCharacterCount: 18000,
-    },
-  };
-  return {
-    activeChatId: chatId,
-    chats: [
-      {
-        id: chatId,
-        sessionId: "markdown-smoke-session",
-        title: "Markdown smoke",
-        projectPath: "",
-        items: [
-          {
-            id: "markdown-smoke-user",
-            type: "user",
-            text: MARKDOWN_SMOKE_TEXT,
-          },
-          {
-            id: "markdown-smoke-agent",
-            type: "agent",
-            response,
-            providerLabel: "Smoke",
-            model: "CommonMark + GFM",
-          },
-        ],
-      },
-    ],
-  };
-}
-
-function createSubAgentContextSmokeTask(): SubAgentTask | null {
-  if (!isSubAgentContextSmokeMode()) {
-    return null;
-  }
-  return {
-    id: "subagent-context-smoke",
-    role: "selected_context_review",
-    displayName: "New session question",
-    task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
-    parentSessionId: "markdown-smoke-session",
-    projectPath: "",
-    toolProfile: "read-only",
-    status: "completed",
-    createdAt: "2026-07-03T00:00:00Z",
-    startedAt: "2026-07-03T00:00:01Z",
-    stoppedAt: "2026-07-03T00:00:02Z",
-    updatedAt: "2026-07-03T00:00:02Z",
-    summary: "Selected context opened in a sub-agent thread: 1462 character(s).",
-    result: {
-      ok: true,
-      schema: "vrcforge.sub_agent.selected_context_review.v1",
-      role: "selected_context_review",
-      readOnly: true,
-      summaryText: "Selected context opened in a sub-agent thread: 1462 character(s).",
-      selectedTextPreview: "Tool sync and async execution notes selected from the transcript.",
-      selectedTextCharacters: 1462,
-    },
-    paramsSummary: {
-      source: "selection-menu",
-      selectedTextCharacters: 1462,
-    },
-    eventCount: 2,
-  };
-}
-
-function markdownSmokeAgentNotes(): string {
-  if (!isSubAgentContextSmokeMode()) {
-    return "";
-  }
-  return [
-    "Project instruction notes:",
-    "- Review project status before changing files.",
-    "- Keep user-facing changes scoped to the requested workflow.",
-    "- Preserve approval, checkpoint, validation, and rollback boundaries for writes.",
-    "- Prefer existing app APIs instead of bypassing the runtime.",
-    "- Keep heavyweight diagnostics outside first-screen startup.",
-  ].join("\n");
-}
-
-function markdownSmokeGoals(): AgentGoal[] {
-  if (!isSubAgentContextSmokeMode()) {
-    return [];
-  }
-  return [
-    {
-      goalId: "goal-context-smoke",
-      title: "Route selected text into a sub-agent workspace",
-      summary: "The right workspace owns the scoped follow-up thread and can close or reopen the detail panel.",
-      status: "active",
-      sessionId: "markdown-smoke-session",
-    },
-  ];
-}
-
-function markdownSmokeMemories(): AgentMemory[] {
-  if (!isSubAgentContextSmokeMode()) {
-    return [];
-  }
-  return [
-    {
-      memoryId: "memory-context-smoke",
-      scope: "project",
-      kind: "constraint",
-      text: "Context usage must include real prompt inputs: recent chat, current draft, attachments, project instructions, goals, and memories.",
-      status: "active",
-    },
-  ];
-}
-
-function isRuntimeSessionVerificationError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("runtime session verification failed") ||
-    normalized.includes("local runtime was replaced") ||
-    normalized.includes("does not accept this desktop session")
-  );
-}
 
 export default function App() {
   const { t } = useTranslation();

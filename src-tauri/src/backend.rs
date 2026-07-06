@@ -116,6 +116,8 @@ pub(crate) fn backend_json_request(
             if matches!(response.status, 401 | 403) {
                 clear_backend_session_verify_cache();
             }
+        } else {
+            return Err(runtime_session_verification_error());
         }
     }
     if response.ok {
@@ -467,10 +469,12 @@ pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String>
         Ok(())
     } else {
         clear_backend_session_verify_cache();
-        Err(
-            "VRCForge runtime session verification failed before an internal IPC request. Restart VRCForge if the local runtime was replaced.".to_string(),
-        )
+        Err(runtime_session_verification_error())
     }
+}
+
+pub(crate) fn runtime_session_verification_error() -> String {
+    "VRCForge runtime session verification failed before an internal IPC request. Restart VRCForge if the local runtime was replaced.".to_string()
 }
 
 pub(crate) fn backend_session_verify_cache() -> &'static Mutex<Option<Instant>> {

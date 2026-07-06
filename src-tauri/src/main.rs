@@ -198,10 +198,10 @@ mod tests {
     use super::{
         app_session_challenge_signature, app_session_challenge_signature_matches,
         extract_challenge_signature, hmac_sha256_hex, percent_encode_query_component,
-        prepare_runtime_files, provider_config_body, sanitize_backend_event,
-        sanitize_text_for_webview, sanitize_webview_response, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_project_folder_to_open, webview_error_message,
-        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        prepare_runtime_files, provider_config_body, runtime_session_verification_error,
+        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
+        try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open, webview_error_message, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -320,6 +320,14 @@ mod tests {
         assert!(extract_challenge_signature(&serde_json::json!({"signature": 42})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!({})).is_none());
         assert!(extract_challenge_signature(&serde_json::json!(null)).is_none());
+    }
+
+    #[test]
+    fn runtime_session_verification_error_stays_frontend_detectable() {
+        let error = runtime_session_verification_error();
+
+        assert!(error.contains("runtime session verification failed"));
+        assert!(error.contains("local runtime was replaced"));
     }
 
     #[test]
