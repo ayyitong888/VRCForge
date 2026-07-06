@@ -65,7 +65,7 @@ import {
 } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
-import { ConversationCard, RunningIndicator } from "./components/chat/conversation-card";
+import { ConversationCard } from "./components/chat/conversation-card";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace, buildOptimizationRequestOptions, type OptimizationActionOptions } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace, protectionPlanPayload } from "./components/protection/protection-workspace";
@@ -267,6 +267,8 @@ type ChatThread = {
   sessionId: string;
   title: string;
   projectPath: string;
+  createdAt?: string;
+  updatedAt?: string;
   agentName?: string;
   pinned?: boolean;
   archived?: boolean;
@@ -1524,6 +1526,8 @@ export default function App() {
           sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
           title: typeof chat.title === "string" ? chat.title : "",
           projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+          createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
+          updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
           agentName: typeof chat.agentName === "string" ? chat.agentName : "",
           pinned: chat.pinned === true,
           archived: chat.archived === true,
@@ -2174,8 +2178,12 @@ export default function App() {
     setChats((list) => list.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
   }
 
+  function touchChat(chat: ChatThread, timestamp = new Date().toISOString()): ChatThread {
+    return { ...chat, createdAt: chat.createdAt || timestamp, updatedAt: timestamp };
+  }
+
   function appendToChat(chatId: string, item: ConversationItem) {
-    updateChat(chatId, (chat) => ({ ...chat, items: [...chat.items, item] }));
+    updateChat(chatId, (chat) => touchChat({ ...chat, items: [...chat.items, item] }));
   }
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
@@ -2287,7 +2295,7 @@ export default function App() {
     setInput(item.text);
     setAttachments(cloneChatAttachments(item.attachments || []));
     updateChat(chat.id, (current) => ({
-      ...current,
+      ...touchChat(current),
       sessionId: "",
       items: current.items.slice(0, index),
     }));
@@ -2394,7 +2402,8 @@ export default function App() {
       return activeChat.id;
     }
     const id = `chat-${Date.now()}`;
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, items: [] }, ...list]);
+    const now = new Date().toISOString();
+    setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] }, ...list]);
     setActiveChatId(id);
     return id;
   }
@@ -2430,7 +2439,7 @@ export default function App() {
       summary = buildCompactSummary(items);
     }
     updateChat(chatId, (chat) => ({
-      ...chat,
+      ...touchChat(chat),
       sessionId: "",
       items: [{ id: `compact-${Date.now()}`, type: "compact", text: summary }],
     }));
@@ -2632,7 +2641,7 @@ export default function App() {
       };
       const message = turn.text;
       updateChat(chatId, (current) => ({
-        ...current,
+        ...touchChat(current),
         sessionId: options?.sessionId ?? current.sessionId,
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
         items: [...(options?.baseItems ?? current.items), userItem, streamingItem],
@@ -2648,7 +2657,7 @@ export default function App() {
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({
-        ...current,
+        ...touchChat(current),
         sessionId: response.sessionId || response.session_id || current.sessionId,
         items: [
           ...current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
@@ -2661,14 +2670,14 @@ export default function App() {
       const text = cause instanceof Error ? cause.message : String(cause);
       if (userItemId && text.toLowerCase().includes("cancel")) {
         updateChat(chatId, (current) => ({
-          ...current,
+          ...touchChat(current),
           sessionId: "",
           items: current.items.filter((item) => item.id !== userItemId),
         }));
       }
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       updateChat(chatId, (current) => ({
-        ...current,
+        ...touchChat(current),
         items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
       }));
       setError(text);
@@ -2845,7 +2854,8 @@ export default function App() {
       return;
     }
     const id = `chat-${Date.now()}`;
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", items: [] }, ...list]);
+    const now = new Date().toISOString();
+    setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", createdAt: now, updatedAt: now, items: [] }, ...list]);
     setActiveChatId(id);
   }
 
@@ -4932,6 +4942,7 @@ export default function App() {
                       <SidebarChat
                         key={chat.id}
                         title={chat.title || t("sidebar.newChat")}
+                        meta={formatChatSidebarTime(chat)}
                         active={activeView === "chat" && chat.id === activeChatId}
                         indent
                         pinned={chat.pinned}
@@ -4966,6 +4977,7 @@ export default function App() {
                 <SidebarChat
                   key={chat.id}
                   title={chat.title || t("sidebar.newChat")}
+                  meta={formatChatSidebarTime(chat)}
                   active={activeView === "chat" && chat.id === activeChatId}
                   pinned={chat.pinned}
                   renaming={renamingChatId === chat.id}
@@ -5520,7 +5532,6 @@ export default function App() {
                   onAttachFiles={(files) => void addComposerFiles(files)}
                   onRemoveAttachment={removeAttachment}
                   contextUsage={contextUsage}
-                  stopRequested={stopRequested}
                   providerLabel={providerSnapshot.providerLabel}
                   model={providerSnapshot.model}
                   projects={projectItems.map((project) => ({
@@ -5528,7 +5539,6 @@ export default function App() {
                     name: project.name || shortPath(project.path || ""),
                   }))}
                   onBindProject={bindProject}
-                  queuedCount={queued.length}
                 />
               </div>
             </div>
@@ -5563,9 +5573,6 @@ export default function App() {
                       />
                     );
                   })}
-                  {sending && currentTurn ? (
-                    <RunningIndicator startedAt={currentTurn.startedAt} provider={currentTurn.providerLabel} model={currentTurn.model} />
-                  ) : null}
                   {queued.map((turn, index) => (
                     <div key={turn.id} className="flex justify-end opacity-65">
                       <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
@@ -5602,7 +5609,6 @@ export default function App() {
                     onAttachFiles={(files) => void addComposerFiles(files)}
                     onRemoveAttachment={removeAttachment}
                     contextUsage={contextUsage}
-                    stopRequested={stopRequested}
                     providerLabel={providerSnapshot.providerLabel}
                     model={providerSnapshot.model}
                     projects={projectItems.map((project) => ({
@@ -5610,7 +5616,6 @@ export default function App() {
                       name: project.name || shortPath(project.path || ""),
                     }))}
                     onBindProject={bindProject}
-                    queuedCount={queued.length}
                   />
                 </div>
               </div>
@@ -6277,7 +6282,84 @@ function projectKey(project: { path?: string; name?: string }): string {
 }
 
 function sortChatsByPin(list: ChatThread[]): ChatThread[] {
-  return [...list].sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false));
+  return [...list].sort((a, b) => {
+    const pinDelta = Number(b.pinned ?? false) - Number(a.pinned ?? false);
+    if (pinDelta !== 0) {
+      return pinDelta;
+    }
+    return chatTimeMs(b) - chatTimeMs(a);
+  });
+}
+
+function formatChatSidebarTime(chat: ChatThread): string {
+  const ms = chatTimeMs(chat);
+  if (!ms) {
+    return "";
+  }
+  return formatCompactRelativeTime(ms);
+}
+
+function chatTimeMs(chat: ChatThread): number {
+  for (const candidate of [chat.updatedAt, chat.createdAt]) {
+    const parsed = parseChatTimeCandidate(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  for (let index = chat.items.length - 1; index >= 0; index -= 1) {
+    const parsed = parseChatTimeCandidate(chat.items[index]?.id);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return parseChatTimeCandidate(chat.id);
+}
+
+function parseChatTimeCandidate(value: unknown): number {
+  if (typeof value !== "string" || !value.trim()) {
+    return 0;
+  }
+  const dateValue = Date.parse(value);
+  if (Number.isFinite(dateValue)) {
+    return dateValue;
+  }
+  const match = value.match(/(?:^|[^0-9])([0-9]{13})(?:[^0-9]|$)/);
+  if (!match) {
+    return 0;
+  }
+  const timestamp = Number(match[1]);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function formatCompactRelativeTime(timestampMs: number): string {
+  const diffMs = Math.max(0, Date.now() - timestampMs);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  const month = 30 * day;
+  const zh = i18n.language.toLowerCase().startsWith("zh");
+  if (diffMs < minute) {
+    return zh ? "刚刚" : "now";
+  }
+  if (diffMs < hour) {
+    const value = Math.max(1, Math.floor(diffMs / minute));
+    return zh ? `${value} 分钟` : `${value}m`;
+  }
+  if (diffMs < day) {
+    const value = Math.max(1, Math.floor(diffMs / hour));
+    return zh ? `${value} 小时` : `${value}h`;
+  }
+  if (diffMs < week) {
+    const value = Math.max(1, Math.floor(diffMs / day));
+    return zh ? `${value} 天` : `${value}d`;
+  }
+  if (diffMs < month) {
+    const value = Math.max(1, Math.floor(diffMs / week));
+    return zh ? `${value} 周` : `${value}w`;
+  }
+  const value = Math.max(1, Math.floor(diffMs / month));
+  return zh ? `${value} 月` : `${value}mo`;
 }
 
 

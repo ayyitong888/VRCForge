@@ -143,6 +143,7 @@ export function SidebarProject({
 
 export function SidebarChat({
   title,
+  meta,
   active = false,
   indent = false,
   pinned = false,
@@ -156,6 +157,7 @@ export function SidebarChat({
   onRenameCommit,
 }: {
   title: string;
+  meta?: string;
   active?: boolean;
   indent?: boolean;
   pinned?: boolean;
@@ -195,17 +197,18 @@ export function SidebarChat({
     <div
       onContextMenu={onContextMenu}
       className={cn(
-        "group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-sm transition-colors",
+        "group flex h-9 w-full min-w-0 items-center rounded-md text-sm transition-colors",
         indent ? "pl-6" : "",
         active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
       )}
     >
-      <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left">
+      <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left">
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>
+        {meta ? <span className="shrink-0 text-xs text-muted-foreground/75 group-hover:hidden">{meta}</span> : null}
       </button>
       {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60 group-hover:hidden" /> : null}
-      <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+      <div className="hidden shrink-0 items-center gap-0.5 pr-1 group-hover:flex">
         <button
           type="button"
           title={pinned ? t("contextMenu.unpinChat") : t("contextMenu.pinChat")}

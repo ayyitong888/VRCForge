@@ -20,12 +20,12 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval, AgentReasoningTrace, AgentSkillResult } from "../../lib/api";
 import type { ApprovalActionState, ConversationItem, MessageFeedback } from "../../lib/chat-types";
-import { thinkingStatusForModelLabel, thinkingTraceLabel } from "../../lib/provider-ui";
+import { thinkingTraceLabel } from "../../lib/provider-ui";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -567,27 +567,6 @@ function RunRow({
         </Badge>
       </button>
       {open ? <div className="space-y-2 border-t border-border/70 px-2 py-2">{children}</div> : null}
-    </div>
-  );
-}
-
-export function RunningIndicator({ startedAt, provider, model }: { startedAt: number; provider: string; model: string }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-  const status = thinkingStatusForModelLabel(provider, model);
-  const providerModelLabel = model ? `${provider} / ${model}` : provider;
-  return (
-    <div className="flex justify-start">
-      <div className="flex max-w-[85%] min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs text-muted-foreground">
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
-        <span className="shrink-0 font-medium text-foreground">{status}</span>
-        <span className="min-w-0 truncate text-muted-foreground">{providerModelLabel}</span>
-        <span className="shrink-0 font-mono text-xs">{formatDuration(seconds)}</span>
-      </div>
     </div>
   );
 }

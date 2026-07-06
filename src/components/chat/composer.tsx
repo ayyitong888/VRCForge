@@ -1,4 +1,4 @@
-import { Archive, Camera, Check, ChevronDown, Globe, Loader2, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, X } from "lucide-react";
+import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -49,12 +49,10 @@ export function Composer({
   onAttachFiles,
   onRemoveAttachment,
   contextUsage,
-  stopRequested = false,
   providerLabel,
   model,
   projects: _projects = [],
   onBindProject: _onBindProject,
-  queuedCount = 0,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -74,12 +72,10 @@ export function Composer({
   onAttachFiles?: (files: FileList | null) => void;
   onRemoveAttachment?: (id: string) => void;
   contextUsage?: ContextUsage;
-  stopRequested?: boolean;
   providerLabel?: string;
   model?: string;
   projects?: Array<{ key: string; name: string }>;
   onBindProject?: (path: string) => void;
-  queuedCount?: number;
 }) {
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
@@ -257,12 +253,6 @@ export function Composer({
             {providerLabel || model ? (
               <Badge tone="muted" className="max-w-[260px] truncate">
                 {providerLabel || t("provider.apiProvider")}{model ? ` · ${model}` : ""}
-              </Badge>
-            ) : null}
-            {sending ? (
-              <Badge tone="warn" className="max-w-[240px] truncate">
-                <Loader2 className="mr-1 h-3 w-3 shrink-0 animate-spin" />
-                {stopRequested ? t("chat.stopping") : t("chat.executingHint")}{queuedCount > 0 ? t("chat.executingHintCount", { count: queuedCount }) : ""}
               </Badge>
             ) : null}
           </div>
