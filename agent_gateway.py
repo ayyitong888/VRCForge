@@ -2136,7 +2136,7 @@ class AgentGateway:
         cap_reached = False
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
-            if self._runtime_cancel_requested(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+            if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
@@ -2154,6 +2154,14 @@ class AgentGateway:
                 reasoning_trace=reasoning_trace,
             )
             iterations += 1
+            if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+                last_plan = {
+                    "summary": "Runtime turn was cancelled by the user.",
+                    "reply": "Request cancelled.",
+                    "planner": "runtime",
+                    "nextStep": "cancelled",
+                }
+                break
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
@@ -2723,7 +2731,7 @@ class AgentGateway:
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
         with self._lock:
-            if session_id:
+            if session_id and not (turn_id or client_turn_id):
                 self._cancelled_runtime_turns.add(session_id)
             if turn_id:
                 self._cancelled_runtime_turns.add(turn_id)
@@ -2752,6 +2760,22 @@ class AgentGateway:
             return False
         with self._lock:
             return any(item in self._cancelled_runtime_turns for item in candidates)
+
+    def _consume_runtime_cancel_request(
+        self,
+        *,
+        session_id: str = "",
+        turn_id: str = "",
+        client_turn_id: str = "",
+    ) -> bool:
+        candidates = [item for item in (client_turn_id, turn_id, session_id) if item]
+        if not candidates:
+            return False
+        with self._lock:
+            matched = [item for item in candidates if item in self._cancelled_runtime_turns]
+            for item in matched:
+                self._cancelled_runtime_turns.discard(item)
+            return bool(matched)
 
     def record_runtime_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}

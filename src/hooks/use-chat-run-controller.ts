@@ -24,6 +24,9 @@ export type QueuedTurn = {
   provider: string;
   model: string;
   queuedFrom?: boolean;
+  chatId?: string;
+  sessionId?: string;
+  projectPath?: string;
 };
 
 export type CurrentTurn = {
@@ -119,19 +122,27 @@ export function useChatRunController({
         setError(t("chat.queueFull", { max: MAX_QUEUED_TURNS }));
         return "queue_full";
       }
-      const queuedTurn = { ...turn, queuedFrom: true };
+      const ownerChatId = ensureActiveChat();
+      const ownerChat = getChatById(ownerChatId);
+      const queuedTurn = {
+        ...turn,
+        queuedFrom: true,
+        chatId: ownerChatId,
+        sessionId: ownerChat?.sessionId || sessionId || undefined,
+        projectPath: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
+      };
       queueRef.current.push(queuedTurn);
       setQueued([...queueRef.current]);
       void recordAgentRunQueued(endpoint, {
-        sessionId: sessionId || undefined,
+        sessionId: queuedTurn.sessionId,
         clientTurnId: turn.id,
         message: turn.text,
         attachments: serializeChatAttachments(turn.attachments),
         provider: turn.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
-        projectPath: activeRuntimeProjectPath || undefined,
-        projectRoot: activeRuntimeProjectPath || undefined,
+        projectPath: queuedTurn.projectPath,
+        projectRoot: queuedTurn.projectPath,
       })
         .then(() => refreshRuntimeRuns(false))
         .catch(() => undefined);
@@ -146,7 +157,7 @@ export function useChatRunController({
     try {
       let next: QueuedTurn | undefined = turn;
       while (next !== undefined) {
-        await runSingleTurn(chatId, next);
+        await runSingleTurn(next.chatId || chatId, next, next.sessionId ? { sessionId: next.sessionId } : undefined);
         if (stopRequestedRef.current) {
           queueRef.current = [];
           break;
@@ -285,9 +296,8 @@ export function useChatRunController({
     queueRef.current = [];
     setQueued([]);
     const current = currentTurn;
-    if (current?.clientTurnId || sessionId) {
+    if (current?.clientTurnId) {
       void requestAgentRunCancel(endpoint, {
-        sessionId: sessionId || undefined,
         clientTurnId: current?.clientTurnId,
         reason: "user_stop",
       })

@@ -1819,14 +1819,43 @@ class DashboardServerTests(unittest.TestCase):
     def test_agent_runtime_cancel_by_session_is_observed_by_turn(self) -> None:
         session_id = "sess-cancel-observed"
         dashboard_server.AGENT_GATEWAY.request_runtime_cancel({"session_id": session_id, "reason": "user_stop"})
-        try:
-            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
-                {"message": "hello after cancel", "session_id": session_id},
-            )
-        finally:
-            dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.discard(session_id)
+        payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+            {"message": "hello after cancel", "session_id": session_id},
+        )
 
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
+
+        followup = dashboard_server.AGENT_GATEWAY.runtime_message(
+            {"message": "hello after consumed cancel", "session_id": session_id},
+        )
+
+        self.assertNotEqual(followup["plan"].get("nextStep"), "cancelled")
+
+    def test_agent_runtime_cancel_after_planner_return_marks_turn_cancelled(self) -> None:
+        client_turn_id = "client-cancel-after-plan"
+
+        def fake_plan(*_args, **_kwargs):
+            dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
+                {"clientTurnId": client_turn_id, "reason": "user_stop"}
+            )
+            return {
+                "summary": "planner completed after stop",
+                "reply": "this should not surface",
+                "planner": "test",
+                "nextStep": "done",
+            }
+
+        with patch.object(dashboard_server.AGENT_GATEWAY, "_plan_agent_turn", side_effect=fake_plan):
+            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                {
+                    "message": "cancel after provider call",
+                    "session_id": "sess-cancel-after-plan",
+                    "clientTurnId": client_turn_id,
+                },
+            )
+
+        self.assertEqual(payload["plan"]["nextStep"], "cancelled")
+        self.assertEqual(payload["plan"]["reply"], "Request cancelled.")
 
     def test_agent_runtime_queue_records_request(self) -> None:
         with TestClient(dashboard_server.app) as client:

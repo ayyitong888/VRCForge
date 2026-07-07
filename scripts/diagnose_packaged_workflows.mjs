@@ -505,6 +505,64 @@ function summarizeVisionFetches(finalProbe, markerValue) {
     });
 }
 
+function fetchRows(finalProbe, urlPart) {
+  const fetches = finalProbe?.probe?.fetches;
+  if (!Array.isArray(fetches)) {
+    return [];
+  }
+  return fetches.filter((row) => String(row.url || "").includes(urlPart));
+}
+
+function markerResponseRows(finalProbe, markerValue) {
+  return fetchRows(finalProbe, "send_agent_message").filter((row) =>
+    JSON.stringify(row.responseJson || row.responseText || "").includes(markerValue),
+  );
+}
+
+function validateWorkflowOutput(output, markers) {
+  const failures = [];
+  const byName = new Map(output.scenarios.map((scenario) => [scenario.name, scenario]));
+  const base = byName.get("baseline-send");
+  if (!base?.completion?.ok) {
+    failures.push("baseline send did not complete");
+  }
+  const queue = byName.get("queue");
+  if (!queue?.queuedVisible?.ok || !queue?.firstCompletion?.ok || !queue?.secondCompletion?.ok) {
+    failures.push("queue did not show and complete both queued turns");
+  }
+  const cancel = byName.get("cancel");
+  if (!cancel?.running?.ok || !cancel?.stopClick?.ok || !cancel?.settled?.ok) {
+    failures.push("cancel controls did not reach running/stop/settled states");
+  }
+  const cancelRows = markerResponseRows(output.finalProbe, markers.cancelMarker);
+  const completedCancelRows = cancelRows.filter((row) => {
+    const plan = row.responseJson?.plan || {};
+    return row.status === 200 && plan.nextStep !== "cancelled";
+  });
+  if (completedCancelRows.length > 0) {
+    failures.push("cancelled turn still completed with a non-cancelled response");
+  }
+  if (!fetchRows(output.finalProbe, "request_agent_run_cancel").some((row) => row.status === 200)) {
+    failures.push("cancel request did not return HTTP 200");
+  }
+  const compact = byName.get("compact");
+  if (!compact?.settled?.ok) {
+    failures.push("compact did not settle");
+  }
+  const vision = byName.get("vision-attachment");
+  if (!vision?.attachment?.ok || !vision?.completion?.ok) {
+    failures.push("vision attachment was not attached and completed");
+  }
+  const visionRow = output.visionFetches[0];
+  if (!visionRow || visionRow.status !== 200 || visionRow.visionImageCount !== 1 || visionRow.firstStepKind !== "vision") {
+    failures.push("vision attachment did not reach the runtime vision step");
+  }
+  if (output.longTaskCount !== 0) {
+    failures.push(`renderer long tasks recorded: ${output.longTaskCount}`);
+  }
+  return failures;
+}
+
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
   await closeExistingVrcforgeProcesses();
@@ -624,12 +682,19 @@ async function main() {
     childPid: child.pid,
     maxWaitMs,
   };
+  output.assertions = {
+    failures: validateWorkflowOutput(output, { cancelMarker, visionMarker }),
+  };
   await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   cdp.close();
   child.kill();
   await sleep(500);
   await closeExistingVrcforgeProcesses();
   console.log(outPath);
+  if (output.assertions.failures.length > 0) {
+    console.error(`Packaged workflow probe failed: ${output.assertions.failures.join("; ")}`);
+    process.exit(1);
+  }
 }
 
 main().catch(async (error) => {
