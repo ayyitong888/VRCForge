@@ -175,15 +175,6 @@ export function SettingsWorkspace({
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
-  const titleBySection: Record<SettingsSection, string> = {
-    general: t("settings.navGeneral"),
-    permissions: t("settings.navPermissions"),
-    models: t("settings.navModels"),
-    storage: t("settings.navStorage"),
-    connectors: t("settings.navConnectors"),
-    instructions: t("settings.navInstructions"),
-    developer: t("settings.navDeveloper"),
-  };
   const updateDeveloperOptions = (enabled: boolean) => {
     onDeveloperOptionsChange(enabled);
     if (!enabled && visibleSection === "developer") {
@@ -194,16 +185,9 @@ export function SettingsWorkspace({
   return (
     <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
       <div className="mx-auto w-full max-w-3xl">
-        <h1 className="text-2xl font-semibold tracking-tight">{t("sidebar.settings")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t("settings.subtitle")}</p>
-
-        <div className="mt-8 flex min-w-0 items-center gap-2 border-b border-border pb-3">
-          <h2 className="min-w-0 flex-1 truncate text-lg font-semibold">{titleBySection[visibleSection]}</h2>
-        </div>
-
         {visibleSection === "general" ? (
           <>
-            <section className="mt-8">
+            <section>
               <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
               <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
               <div className="mt-4">
@@ -263,7 +247,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "permissions" ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
             <Badge tone={currentPermissionVisual.badgeTone} className="shrink-0">
@@ -304,7 +288,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "models" ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
           <div className="mt-4">
@@ -366,7 +350,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "developer" && developerOptionsEnabled ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
             {diagnosticsMessage ? (
@@ -426,7 +410,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "storage" ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <CheckpointStoragePanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -443,7 +427,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "connectors" ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -461,7 +445,7 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "instructions" ? (
-        <section className="mt-8 pb-6">
+        <section className="pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.customInstructions")}</h2>
             {notesMessage ? (
