@@ -293,6 +293,8 @@
     "contextUsageUnavailableTitle": "The provider did not return token usage for the last sent request. VRCForge is not showing an estimate.",
     "contextLimitUnknown": "unknown limit",
     "contextMeterTitle": "Context window",
+    "imagePreview": "Image preview",
+    "closeImagePreview": "Close image preview",
     "contextMeterUsed": "{{value}} used",
     "contextMeterPercentUsed": "{{percent}}% used",
     "contextMeterTokenDetail": "Used {{used}}, total {{limit}}",

@@ -20,11 +20,11 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { ReactNode, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval, AgentReasoningTrace, AgentSkillResult } from "../../lib/api";
-import type { ApprovalActionState, ConversationItem, MessageFeedback } from "../../lib/chat-types";
+import type { ApprovalActionState, ChatAttachment, ConversationItem, MessageFeedback } from "../../lib/chat-types";
 import { thinkingTraceLabel } from "../../lib/provider-ui";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -69,6 +69,9 @@ export function ConversationCard({
 }) {
   const { t } = useTranslation();
   if (item.type === "user") {
+    const attachments = item.attachments || [];
+    const imageAttachments = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
+    const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     return (
       <div className="group flex justify-end">
         <div className="relative flex max-w-[78%] flex-col items-end">
@@ -79,8 +82,9 @@ export function ConversationCard({
             </div>
           ) : null}
           <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
+            {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
             {item.text ? <ChatMarkdown text={item.text} variant="user" /> : null}
-            {item.attachments?.length ? <AttachmentStrip attachments={item.attachments} compact /> : null}
+            {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
           </div>
           <MessageActions
             align="right"
@@ -388,6 +392,74 @@ export function ConversationCard({
         />
       </div>
     </div>
+  );
+}
+
+export function UserImageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+  const [preview, setPreview] = useState<ChatAttachment | null>(null);
+  const { t } = useTranslation();
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeLabel = t("chat.closeImagePreview");
+  useEffect(() => {
+    if (!preview) {
+      return;
+    }
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreview(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [preview]);
+  if (!attachments.length) {
+    return null;
+  }
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap justify-end gap-2">
+        {attachments.map((attachment) => (
+          <button
+            key={attachment.id}
+            type="button"
+            className="group/image block overflow-hidden rounded-lg border border-primary-foreground/25 bg-primary-foreground/15 transition hover:border-primary-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary-foreground/70"
+            onClick={() => setPreview(attachment)}
+            aria-label={t("chat.imagePreview")}
+            title={attachment.name}
+          >
+            <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
+          </button>
+        ))}
+      </div>
+      {preview?.dataUrl ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("chat.imagePreview")}
+          onClick={() => setPreview(null)}
+        >
+          <div className="relative max-h-full max-w-full" onClick={(event) => event.stopPropagation()}>
+            <button
+              ref={closeButtonRef}
+              type="button"
+              className="absolute right-2 top-2 z-10 rounded-full bg-black/65 p-1.5 text-white transition hover:bg-black"
+              onClick={() => setPreview(null)}
+              aria-label={closeLabel}
+              title={closeLabel}
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <img src={preview.dataUrl} alt={preview.name} className="max-h-[82vh] max-w-[86vw] rounded-xl object-contain shadow-panel" />
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 

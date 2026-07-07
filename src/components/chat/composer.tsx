@@ -8,7 +8,6 @@ import { formatAttachmentSize } from "../../lib/chat-format";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCommand, ContextUsage } from "../../lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
 import type { PermissionState, ExecutionMode } from "../../lib/api";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 
 function composerActionIcon(action: ComposerActionId): ReactNode {
@@ -35,8 +34,6 @@ export function Composer({
   setInput,
   sending,
   permission,
-  statusLabel,
-  projectLabel,
   onSubmit,
   onStop,
   onSwitchMode,
@@ -58,8 +55,6 @@ export function Composer({
   setInput: (value: string) => void;
   sending: boolean;
   permission?: PermissionState;
-  statusLabel: string;
-  projectLabel: string;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
@@ -247,19 +242,16 @@ export function Composer({
                 </div>
               ) : null}
             </div>
-            {contextUsage ? (
-              <ContextUsageMeter usage={contextUsage} />
-            ) : null}
-            <Badge tone="muted" className="max-w-[220px] truncate">
-              {statusLabel}
-            </Badge>
             {providerLabel || model ? (
-              <Badge tone="muted" className="max-w-[260px] truncate">
+              <span className="max-w-[260px] truncate px-1 text-sm text-muted-foreground">
                 {providerLabel || t("provider.apiProvider")}{model ? ` · ${model}` : ""}
-              </Badge>
+              </span>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {contextUsage ? (
+              <ContextUsageMeter usage={contextUsage} className="w-36" />
+            ) : null}
             {sending ? (
               <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
                 <Square className="h-4 w-4" />
@@ -316,7 +308,7 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
           <div className="h-full w-full bg-muted-foreground/35" data-context-segment="unknown" />
         )}
       </div>
-      <div className="pointer-events-none absolute bottom-full left-0 z-40 mb-2 hidden w-52 rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-foreground shadow-panel group-hover:block group-focus:block">
+      <div className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-52 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>
         {tooltipDetail ? <div className="mt-1 text-muted-foreground">{tooltipDetail}</div> : null}

@@ -293,6 +293,8 @@
     "contextUsageUnavailableTitle": "provider は前回リクエストの token usage を返しませんでした。VRCForge は推定値を表示しません。",
     "contextLimitUnknown": "上限不明",
     "contextMeterTitle": "コンテキストウィンドウ",
+    "imagePreview": "画像プレビュー",
+    "closeImagePreview": "画像プレビューを閉じる",
     "contextMeterUsed": "{{value}} 使用済み",
     "contextMeterPercentUsed": "{{percent}}% 使用済み",
     "contextMeterTokenDetail": "使用済み {{used}}、合計 {{limit}}",

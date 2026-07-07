@@ -516,7 +516,6 @@ export default function App() {
   const projects = bootstrap?.health.projects?.projects ?? [];
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
   const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
-  const agentModeLabel = runtimeConnected ? t("agent.modeLabel.basicMode") : t("agent.modeLabel.notConnected");
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
   const chatDisabledReason = !runtimeConnected
@@ -2496,8 +2495,6 @@ export default function App() {
               setInput={setInput}
               sending={sending}
               permission={permission}
-              statusLabel={agentModeLabel}
-              projectLabel={activeProjectPath ? activeProjectName : ""}
               onSubmit={submitMessage}
               onStop={stopCurrentRun}
               onSwitchMode={switchMode}

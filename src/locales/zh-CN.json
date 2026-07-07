@@ -293,6 +293,8 @@
     "contextUsageUnavailableTitle": "provider 没有返回上次请求的 token usage。VRCForge 不显示估算值。",
     "contextLimitUnknown": "未知上限",
     "contextMeterTitle": "上下文窗口",
+    "imagePreview": "图片预览",
+    "closeImagePreview": "关闭图片预览",
     "contextMeterUsed": "已用 {{value}}",
     "contextMeterPercentUsed": "{{percent}}% 已用",
     "contextMeterTokenDetail": "已用 {{used}} 标记，共 {{limit}}",

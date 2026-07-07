@@ -81,6 +81,9 @@ const MARKDOWN_SMOKE_TEXT = [
   "<img src=x onerror=\"window.__vrcforgeMarkdownUnsafe = true\" />",
 ].join("\n");
 
+const MARKDOWN_SMOKE_IMAGE_DATA_URL =
+  "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNDAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgMjQwIDE2MCI+PHJlY3Qgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxNjAiIHJ4PSIyNCIgZmlsbD0iIzI1NjNlYiIvPjxjaXJjbGUgY3g9IjY0IiBjeT0iNTYiIHI9IjI0IiBmaWxsPSIjYmZkNGZmIi8+PHBhdGggZD0iTTI0IDEzNmw1Ni01NiA0MCA0MCAyNC0yNCA3MiA3MnoiIGZpbGw9IiNkYmU3ZmYiLz48dGV4dCB4PSIxMjAiIHk9Ijc2IiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZmYiPlZSQ0ZvcmdlPC90ZXh0Pjwvc3ZnPg==";
+
 export function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeChatId: string } {
   if (!isMarkdownSmokeMode()) {
     return { chats: [], activeChatId: "" };
@@ -131,6 +134,16 @@ export function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeCha
             id: "markdown-smoke-user",
             type: "user",
             text: MARKDOWN_SMOKE_TEXT,
+            attachments: [
+              {
+                id: "markdown-smoke-image",
+                name: "markdown-smoke-image.svg",
+                size: 431,
+                type: "image/svg+xml",
+                dataUrl: MARKDOWN_SMOKE_IMAGE_DATA_URL,
+                payloadKind: "data_url",
+              },
+            ],
           },
           {
             id: "markdown-smoke-agent",

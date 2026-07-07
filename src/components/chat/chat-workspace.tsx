@@ -12,7 +12,7 @@ import type {
   MessageFeedback,
 } from "../../lib/chat-types";
 import { AttachmentStrip, Composer } from "./composer";
-import { ConversationCard } from "./conversation-card";
+import { ConversationCard, UserImageAttachments } from "./conversation-card";
 
 export type QueuedChatTurn = {
   id: string;
@@ -26,8 +26,6 @@ export function ChatWorkspace({
   setInput,
   sending,
   permission,
-  statusLabel,
-  projectLabel,
   onSubmit,
   onStop,
   onSwitchMode,
@@ -68,8 +66,6 @@ export function ChatWorkspace({
   setInput: (value: string) => void;
   sending: boolean;
   permission?: PermissionState;
-  statusLabel: string;
-  projectLabel: string;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
@@ -112,8 +108,6 @@ export function ChatWorkspace({
       setInput={setInput}
       sending={sending}
       permission={permission}
-      statusLabel={statusLabel}
-      projectLabel={projectLabel}
       onSubmit={onSubmit}
       onStop={onStop}
       onSwitchMode={onSwitchMode}
@@ -175,18 +169,23 @@ export function ChatWorkspace({
               />
             );
           })}
-          {queued.map((turn, index) => (
-            <div key={turn.id} className="flex justify-end opacity-65">
-              <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
-                <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  {t("chat.queued")} {index + 1}
+          {queued.map((turn, index) => {
+            const imageAttachments = turn.attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
+            const otherAttachments = turn.attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+            return (
+              <div key={turn.id} className="flex justify-end opacity-65">
+                <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
+                  <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {t("chat.queued")} {index + 1}
+                  </div>
+                  {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
+                  <p className="whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
+                  {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
                 </div>
-                <p className="whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
-                {turn.attachments.length ? <AttachmentStrip attachments={turn.attachments} compact /> : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
           <div ref={conversationEndRef} />
         </div>
       </div>
