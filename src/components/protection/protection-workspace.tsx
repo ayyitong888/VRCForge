@@ -1,6 +1,7 @@
 import { Gauge, Loader2, RefreshCw, Shield, Sparkles } from "lucide-react";
 import i18n from "../../i18n";
 import type { AvatarEncryptionBenchmarkRow, AvatarEncryptionPlanResult, AvatarEncryptionProfileCard, AvatarListItem } from "../../lib/api";
+import { protectionPlanPayload } from "../../lib/protection-plan";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -310,12 +311,6 @@ function protectionRecord(value: unknown): Record<string, unknown> {
 
 function protectionArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
-}
-
-
-
-export function protectionPlanPayload(result: AvatarEncryptionPlanResult | null): Record<string, unknown> {
-  return protectionRecord(result?.plan);
 }
 
 
