@@ -228,7 +228,11 @@ function sanitizeProbeValue(value, depth = 0) {
   }
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    out[key] = sensitiveKeyPattern.test(key) ? "[redacted]" : sanitizeProbeValue(item, depth + 1);
+    if (sensitiveKeyPattern.test(key) && typeof item !== "boolean") {
+      out[key] = "[redacted]";
+      continue;
+    }
+    out[key] = sanitizeProbeValue(item, depth + 1);
   }
   return out;
 }
@@ -632,6 +636,10 @@ function markerResponseRows(finalProbe, markerValue) {
   );
 }
 
+function hasMarkerHttpOk(finalProbe, markerValue) {
+  return markerResponseRows(finalProbe, markerValue).some((row) => row.status === 200);
+}
+
 function validateWorkflowOutput(output, markers) {
   const failures = [];
   const byName = new Map(output.scenarios.map((scenario) => [scenario.name, scenario]));
@@ -641,9 +649,17 @@ function validateWorkflowOutput(output, markers) {
   if (!base?.completion?.ok) {
     failures.push("baseline send did not complete");
   }
+  if (base?.marker && !hasMarkerHttpOk(output.finalProbe, base.marker)) {
+    failures.push("baseline send did not return HTTP 200 with the expected marker");
+  }
   const queue = byName.get("queue");
   if (!queue?.queuedVisible?.ok || !queue?.firstCompletion?.ok || !queue?.secondCompletion?.ok) {
     failures.push("queue did not show and complete both queued turns");
+  }
+  for (const markerValue of queue?.markers || []) {
+    if (!hasMarkerHttpOk(output.finalProbe, markerValue)) {
+      failures.push(`queued send did not return HTTP 200 with expected marker: ${markerValue}`);
+    }
   }
   const cancel = byName.get("cancel");
   if (!cancel?.running?.ok || !cancel?.stopClick?.ok || !cancel?.settled?.ok) {
@@ -672,9 +688,15 @@ function validateWorkflowOutput(output, markers) {
   if (!visionRow || visionRow.status !== 200 || visionRow.visionImageCount !== 1 || visionRow.firstStepKind !== "vision") {
     failures.push("vision attachment did not reach the runtime vision step");
   }
+  if (vision?.marker && !hasMarkerHttpOk(output.finalProbe, vision.marker)) {
+    failures.push("vision attachment did not return HTTP 200 with the expected marker");
+  }
   const approval = byName.get("approval-interleave");
   if (!approval?.providerCompletion?.ok) {
     failures.push("approval interleave provider turn did not complete");
+  }
+  if (approval?.marker && !hasMarkerHttpOk(output.finalProbe, approval.marker)) {
+    failures.push("approval interleave provider turn did not return HTTP 200 with the expected marker");
   }
   if (!approval?.create?.ok || approval?.create?.payload?.shell?.status !== "pending_approval") {
     failures.push("approval interleave did not create a pending approval");
@@ -690,6 +712,12 @@ function validateWorkflowOutput(output, markers) {
   }
   if (approval?.permissionRestoreNeeded && !approval?.restorePermission?.ok) {
     failures.push("approval interleave did not restore the original permission mode");
+  }
+  if (
+    approval?.permissionRestoreNeeded &&
+    approval?.restorePermission?.payload?.permission?.executionMode !== approval?.previousPermissionMode
+  ) {
+    failures.push("approval interleave restored permission response did not match the original mode");
   }
   if (!providerMatrix.textProfile?.configured) {
     failures.push("configured text provider profile was not available");
@@ -913,11 +941,12 @@ async function main() {
   output.assertions = {
     failures: validateWorkflowOutput(output, { cancelMarker, visionMarker }),
   };
-  await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   cdp.close();
   child.kill();
   await sleep(500);
   await closeExistingVrcforgeProcesses();
+  output.afterCleanup = await processSnapshot();
+  await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   console.log(outPath);
   if (output.assertions.failures.length > 0) {
     console.error(`Packaged workflow probe failed: ${output.assertions.failures.join("; ")}`);

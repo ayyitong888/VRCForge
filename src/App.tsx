@@ -682,6 +682,10 @@ export default function App() {
     setError,
   });
   const sending = chatRunSending || compacting;
+  const visibleQueued = useMemo(
+    () => queued.filter((turn) => turn.chatId === activeChat?.id),
+    [activeChat?.id, queued],
+  );
   const {
     workspaceDiff,
     loadingWorkspaceDiff,
@@ -2436,7 +2440,7 @@ export default function App() {
               }))}
               onBindProject={bindProject}
               conversation={conversation}
-              queued={queued}
+              queued={visibleQueued}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
               onConversationScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
