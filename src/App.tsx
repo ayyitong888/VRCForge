@@ -53,6 +53,7 @@ import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
+import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
@@ -76,7 +77,6 @@ import {
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
-import { formatConnectorActionMessage } from "./lib/connector-ui";
 import {
   buildChatHistory,
   buildCompactSummary,
@@ -106,7 +106,6 @@ import {
   createMarkdownSmokeChatState,
   createSubAgentContextSmokeTask,
   isMarkdownSmokeMode,
-  markdownSmokeAgentNotes,
 } from "./lib/markdown-smoke";
 import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
 import {
@@ -122,9 +121,6 @@ import {
   ApiError,
   AppBootstrap,
   DoctorReport,
-  DiagnosticsStatus,
-  ExternalAgentConnectorClient,
-  ExternalAgentConnectorStatus,
   OptimizationPlannerReport,
   OptimizationProofDetail,
   OptimizationProofSummary,
@@ -138,12 +134,9 @@ import {
   createSubAgent,
   createSkill,
   deleteSkill,
-  exportSupportBundle,
   exportSkillPackage,
   fetchBootstrap,
-  fetchDiagnostics,
   fetchDoctor,
-  fetchExternalAgentConnectors,
   fetchOptimizationPlan,
   fetchOptimizationProof,
   fetchOptimizationProofs,
@@ -153,7 +146,6 @@ import {
   ExecutionMode,
   PermissionState,
   blockSkillPackage,
-  fetchAgentNotes,
   fetchAgentDesktopActions,
   fetchAgentGoals,
   fetchAgentMemory,
@@ -164,7 +156,6 @@ import {
   fetchAvatars,
   fetchSubAgent,
   fetchSubAgents,
-  installExternalAgentConnector,
   importSkillPackage,
   planAvatarEncryption,
   preflightSkillPackage,
@@ -176,16 +167,12 @@ import {
   repairUnityMcpBridge,
   revokeSkillPackageSigner,
   retrySubAgent,
-  saveAgentNotes,
   setSkillPackageSafeMode,
   setSkillPackageEnabled,
   setAppSessionToken,
   trustSkillPackageSigner,
-  updateDiagnostics,
-  updateExternalAgentGateway,
   updatePermission,
   updateSkill,
-  uninstallExternalAgentConnector,
   uninstallSkillPackage,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
@@ -341,19 +328,6 @@ export default function App() {
   const [repairingUnityBridge, setRepairingUnityBridge] = useState(false);
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
-  const [diagnosticsStatus, setDiagnosticsStatus] = useState<DiagnosticsStatus | null>(null);
-  const [loadingDiagnostics, setLoadingDiagnostics] = useState(false);
-  const [exportingSupportBundle, setExportingSupportBundle] = useState(false);
-  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
-  const [agentNotes, setAgentNotes] = useState(() => markdownSmokeAgentNotes());
-  const [agentNotesPath, setAgentNotesPath] = useState("");
-  const [agentNotesLoaded, setAgentNotesLoaded] = useState(() => Boolean(markdownSmokeAgentNotes()));
-  const [savingNotes, setSavingNotes] = useState(false);
-  const [notesMessage, setNotesMessage] = useState("");
-  const [connectorStatus, setConnectorStatus] = useState<ExternalAgentConnectorStatus | null>(null);
-  const [loadingConnectors, setLoadingConnectors] = useState(false);
-  const [connectorMessage, setConnectorMessage] = useState("");
-  const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("10240");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
@@ -430,6 +404,46 @@ export default function App() {
     startRuntime,
     refresh,
     setError,
+  });
+  const {
+    diagnosticsStatus,
+    loadingDiagnostics,
+    exportingSupportBundle,
+    diagnosticsMessage,
+    agentNotes,
+    agentNotesPath,
+    agentNotesLoaded,
+    savingNotes,
+    notesMessage,
+    connectorStatus,
+    loadingConnectors,
+    connectorMessage,
+    checkpointArchiveLimitInput,
+    openSettings,
+    loadDiagnostics,
+    setDebugLogging,
+    createSupportBundle,
+    loadConnectors,
+    updateGatewaySettings,
+    saveCheckpointArchiveLimit,
+    openCheckpointArchiveFolder,
+    pickCheckpointArchiveDirectory,
+    deleteCheckpointArchives,
+    relocateCheckpointArchives,
+    runConnectorAction,
+    saveNotes,
+    setCheckpointArchiveLimitInput,
+    updateAgentNotes,
+    copyConnectorText,
+  } = useSettingsWorkspaceController({
+    endpoint,
+    runtimeConnected,
+    activeProjectPath,
+    setActiveView,
+    startRuntime,
+    refresh,
+    setError,
+    setDoctorMessage,
   });
   const hasStartupIssue = startupIssue.trim().length > 0;
   const hasEnvironmentAttention = runtimeConnected && (healthErrors > 0 || healthWarnings > 0);
@@ -960,11 +974,6 @@ export default function App() {
     window.addEventListener("contextmenu", handler);
     return () => window.removeEventListener("contextmenu", handler);
   }, []);
-
-  useEffect(() => {
-    const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
-    setCheckpointArchiveLimitInput(typeof configuredLimit === "number" ? String(configuredLimit) : "10240");
-  }, [connectorStatus?.gateway?.checkpointArchiveMaxSizeMb]);
 
   useEffect(() => {
     try {
@@ -2612,251 +2621,6 @@ export default function App() {
     }
   }
 
-  async function openSettings() {
-    setActiveView("settings");
-    setError("");
-    setNotesMessage("");
-    setDiagnosticsMessage("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const notes = await fetchAgentNotes(targetEndpoint);
-      setAgentNotes(notes.content);
-      setAgentNotesPath(notes.path);
-      setAgentNotesLoaded(true);
-      void loadConnectors(targetEndpoint);
-      void loadDiagnostics(targetEndpoint);
-    } catch (cause) {
-      setAgentNotesLoaded(false);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  async function loadDiagnostics(target = endpoint) {
-    setLoadingDiagnostics(true);
-    try {
-      let targetEndpoint = target;
-      if (!runtimeConnected && target === endpoint) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      setDiagnosticsStatus(await fetchDiagnostics(targetEndpoint));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingDiagnostics(false);
-    }
-  }
-
-  async function setDebugLogging(enabled: boolean) {
-    setLoadingDiagnostics(true);
-    setDiagnosticsMessage("");
-    setError("");
-    try {
-      const payload = await updateDiagnostics(endpoint, { debugLogging: enabled });
-      setDiagnosticsStatus(payload);
-      setDiagnosticsMessage(enabled ? "Debug logging enabled" : "Debug logging disabled");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingDiagnostics(false);
-    }
-  }
-
-  async function createSupportBundle() {
-    setExportingSupportBundle(true);
-    setDoctorMessage("");
-    setError("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await exportSupportBundle(targetEndpoint, { logLimit: 200 });
-      setDoctorMessage(`Support bundle exported: ${payload.bundlePath}`);
-      setDiagnosticsMessage(`Support bundle exported: ${payload.bundlePath}`);
-      void loadDiagnostics(targetEndpoint);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setExportingSupportBundle(false);
-    }
-  }
-
-  async function loadConnectors(target = endpoint) {
-    setLoadingConnectors(true);
-    setConnectorMessage("");
-    try {
-      let targetEndpoint = target;
-      if (!runtimeConnected && target === endpoint) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      setConnectorStatus(await fetchExternalAgentConnectors(targetEndpoint, activeProjectPath || undefined));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingConnectors(false);
-    }
-  }
-
-  async function updateGatewaySettings(request: {
-    enabled?: boolean;
-    allowWriteRequests?: boolean;
-    revokeToken?: boolean;
-    checkpointArchiveMaxSizeMb?: number;
-    deleteCheckpointArchiveIds?: string[];
-    checkpointArchiveDirectory?: string;
-  }) {
-    setLoadingConnectors(true);
-    setConnectorMessage("");
-    setError("");
-    try {
-      const payload = await updateExternalAgentGateway(endpoint, request);
-      setConnectorStatus(payload);
-      const relocate = payload.gateway?.checkpointArchiveRelocate;
-      const del = payload.gateway?.checkpointArchiveDelete;
-      let message = "Gateway updated";
-      if (request.revokeToken) {
-        message = "Token revoked";
-      } else if (request.checkpointArchiveDirectory !== undefined) {
-        message = relocate?.ok
-          ? t("settings.checkpointArchiveRelocated", { count: relocate.copiedCount ?? 0 })
-          : t("settings.checkpointArchiveRelocateFailed", { reason: relocate?.error || relocate?.code || "" });
-      } else if (request.deleteCheckpointArchiveIds !== undefined) {
-        message = del?.ok
-          ? t("settings.checkpointArchiveDeleted", { count: del.deletedCount ?? 0 })
-          : t("settings.checkpointArchiveDeleteFailed", { reason: del?.error || "" });
-      } else if (request.checkpointArchiveMaxSizeMb !== undefined) {
-        message = t("settings.checkpointArchiveUpdated");
-      }
-      setConnectorMessage(message);
-      await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingConnectors(false);
-    }
-  }
-
-  async function saveCheckpointArchiveLimit() {
-    const trimmed = checkpointArchiveLimitInput.trim();
-    const parsed = Number(trimmed || "0");
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      setError(t("settings.checkpointArchiveLimitInvalid"));
-      return;
-    }
-    await updateGatewaySettings({ checkpointArchiveMaxSizeMb: Math.round(parsed) });
-  }
-
-  async function openCheckpointArchiveFolder(targetPath: string) {
-    if (!targetPath) {
-      return;
-    }
-    try {
-      if (!isTauriRuntime()) {
-        throw new Error("Open folder is available in the desktop app.");
-      }
-      await invoke("open_local_folder", { path: targetPath });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  async function pickCheckpointArchiveDirectory(currentPath: string) {
-    try {
-      if (!isTauriRuntime()) {
-        throw new Error("Folder picker is available in the desktop app.");
-      }
-      const selected = await invoke<string | null>("select_folder", {
-        initialPath: currentPath || undefined,
-      });
-      return selected || "";
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      return "";
-    }
-  }
-
-  async function deleteCheckpointArchives(ids: string[]) {
-    if (!ids.length) {
-      return;
-    }
-    await updateGatewaySettings({ deleteCheckpointArchiveIds: ids });
-  }
-
-  async function relocateCheckpointArchives(directory: string) {
-    const trimmed = directory.trim();
-    if (!trimmed) {
-      setError(t("settings.checkpointArchiveDirInvalid"));
-      return;
-    }
-    await updateGatewaySettings({ checkpointArchiveDirectory: trimmed });
-  }
-
-  async function runConnectorAction(client: ExternalAgentConnectorClient, action: "install" | "uninstall") {
-    setLoadingConnectors(true);
-    setConnectorMessage("");
-    setError("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const request = { client, projectPath: activeProjectPath || undefined };
-      const payload =
-        action === "install"
-          ? await installExternalAgentConnector(targetEndpoint, request)
-          : await uninstallExternalAgentConnector(targetEndpoint, request);
-      setConnectorStatus(payload);
-      setConnectorMessage(formatConnectorActionMessage(client, payload.lastConnectorAction));
-      await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingConnectors(false);
-    }
-  }
-
-  async function saveNotes(event?: FormEvent) {
-    event?.preventDefault();
-    if (savingNotes) {
-      return;
-    }
-    setSavingNotes(true);
-    setNotesMessage("");
-    setError("");
-    try {
-      const payload = await saveAgentNotes(endpoint, agentNotes);
-      setAgentNotesPath(payload.path);
-      setNotesMessage(t("settings.saved"));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSavingNotes(false);
-    }
-  }
-
   function selectSkill(skill: AgentSkill) {
     setSelectedSkillName(skill.name);
     setSkillDraft({ ...skill });
@@ -3229,16 +2993,8 @@ export default function App() {
               onLoadConnectors={() => void loadConnectors()}
               onUpdateGatewaySettings={(settings) => void updateGatewaySettings(settings)}
               onRunConnectorAction={(client, action) => void runConnectorAction(client, action)}
-              onCopyConnectorText={(text, label) => {
-                void navigator.clipboard
-                  .writeText(text)
-                  .then(() => setConnectorMessage(`${label} copied`))
-                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-              }}
-              onAgentNotesChange={(value) => {
-                setAgentNotes(value);
-                setNotesMessage("");
-              }}
+              onCopyConnectorText={copyConnectorText}
+              onAgentNotesChange={updateAgentNotes}
               onSaveNotes={saveNotes}
             />
           ) : (
