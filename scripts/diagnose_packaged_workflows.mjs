@@ -573,6 +573,51 @@ function summarizeVisionFetches(finalProbe, markerValue) {
     });
 }
 
+function summarizeProviderMatrix(output) {
+  const byName = new Map(output.scenarios.map((scenario) => [scenario.name, scenario]));
+  const apiConfig = output.bootstrap?.payload?.apiConfig || {};
+  const visionConfig = output.bootstrap?.payload?.visionConfig || {};
+  const textConfigured = Boolean(apiConfig.provider) && (!apiConfig.apiKeyRequired || Boolean(apiConfig.apiKeyPresent));
+  const visionConfigured =
+    Boolean(visionConfig.configured) &&
+    visionConfig.enabled !== false &&
+    (!visionConfig.apiKeyRequired || Boolean(visionConfig.apiKeyPresent));
+  const visionRow = output.visionFetches?.[0] || {};
+  return {
+    schema: "vrcforge.provider_matrix.v1",
+    textProfile: {
+      configured: textConfigured,
+      provider: apiConfig.provider || "",
+      providerLabel: apiConfig.providerLabel || "",
+      model: apiConfig.model || "",
+      apiKeyPresent: Boolean(apiConfig.apiKeyPresent),
+      apiKeyRequired: Boolean(apiConfig.apiKeyRequired),
+      checks: {
+        chat: Boolean(byName.get("baseline-send")?.completion?.ok),
+        queue: Boolean(byName.get("queue")?.queuedVisible?.ok && byName.get("queue")?.firstCompletion?.ok && byName.get("queue")?.secondCompletion?.ok),
+        cancel: Boolean(byName.get("cancel")?.running?.ok && byName.get("cancel")?.stopClick?.ok && byName.get("cancel")?.settled?.ok),
+        compact: Boolean(byName.get("compact")?.settled?.ok),
+        approvalInterleave: Boolean(byName.get("approval-interleave")?.providerCompletion?.ok),
+      },
+    },
+    visionProfile: {
+      configured: visionConfigured,
+      provider: visionConfig.provider || "",
+      providerLabel: visionConfig.providerLabel || "",
+      model: visionConfig.model || "",
+      enabled: visionConfig.enabled !== false,
+      apiKeyPresent: Boolean(visionConfig.apiKeyPresent),
+      apiKeyRequired: Boolean(visionConfig.apiKeyRequired),
+      status: visionRow.visionStatus || "",
+      source: visionRow.visionSource || "",
+      imageCount: visionRow.visionImageCount || 0,
+      firstStepKind: visionRow.firstStepKind || "",
+      firstStepStatus: visionRow.firstStepStatus || "",
+      reason: visionRow.visionReason || "",
+    },
+  };
+}
+
 function fetchRows(finalProbe, urlPart) {
   const fetches = finalProbe?.probe?.fetches;
   if (!Array.isArray(fetches)) {
@@ -590,6 +635,8 @@ function markerResponseRows(finalProbe, markerValue) {
 function validateWorkflowOutput(output, markers) {
   const failures = [];
   const byName = new Map(output.scenarios.map((scenario) => [scenario.name, scenario]));
+  const providerMatrix = output.providerMatrix || summarizeProviderMatrix(output);
+  const textChecks = providerMatrix.textProfile?.checks || {};
   const base = byName.get("baseline-send");
   if (!base?.completion?.ok) {
     failures.push("baseline send did not complete");
@@ -644,6 +691,17 @@ function validateWorkflowOutput(output, markers) {
   if (approval?.permissionRestoreNeeded && !approval?.restorePermission?.ok) {
     failures.push("approval interleave did not restore the original permission mode");
   }
+  if (!providerMatrix.textProfile?.configured) {
+    failures.push("configured text provider profile was not available");
+  }
+  for (const [name, ok] of Object.entries(textChecks)) {
+    if (!ok) {
+      failures.push(`provider matrix text check failed: ${name}`);
+    }
+  }
+  if (providerMatrix.visionProfile?.configured && providerMatrix.visionProfile?.status !== "analyzed") {
+    failures.push("configured vision profile did not analyze the attached image");
+  }
   if (output.longTaskCount !== 0) {
     failures.push(`renderer long tasks recorded: ${output.longTaskCount}`);
   }
@@ -682,6 +740,7 @@ async function main() {
     })()`,
     30000,
   );
+  const bootstrap = await appApi("/api/app/bootstrap", { timeoutMs: 30000 });
 
   const scenarios = [];
   const baseMarker = `${marker}_BASE`;
@@ -848,7 +907,9 @@ async function main() {
     performanceMetrics: perfMetrics.metrics,
     childPid: child.pid,
     maxWaitMs,
+    bootstrap,
   };
+  output.providerMatrix = summarizeProviderMatrix(output);
   output.assertions = {
     failures: validateWorkflowOutput(output, { cancelMarker, visionMarker }),
   };
