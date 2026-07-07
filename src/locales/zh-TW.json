@@ -196,7 +196,32 @@
     "unlimited": "不限制",
     "limitOn": "已限制",
     "visionProfile": "識圖模型",
-    "visionProfileDesc": "當主模型無法識圖（如 DeepSeek）時，圖片附件會自動委託給這裡設定的視覺模型分析，結果以帶標籤的執行步驟注入對話。視覺呼叫的 token 不會計入聊天上下文條。"
+    "visionProfileDesc": "當主模型無法識圖（如 DeepSeek）時，圖片附件會自動委託給這裡設定的視覺模型分析，結果以帶標籤的執行步驟注入對話。視覺呼叫的 token 不會計入聊天上下文條。",
+    "navPersonal": "設定",
+    "backToApp": "返回應用",
+    "navGeneral": "一般",
+    "navPermissions": "權限",
+    "navModels": "模型",
+    "navStorage": "儲存",
+    "navConnectors": "連接器",
+    "navInstructions": "指令",
+    "navDeveloper": "開發者",
+    "developerOptions": "開發者選項",
+    "developerOptionsDesc": "顯示診斷、快取和日誌介面。一般對話時建議關閉。",
+    "turnOnDeveloperOptions": "開啟開發者選項",
+    "turnOffDeveloperOptions": "關閉開發者選項",
+    "enabled": "已開啟",
+    "compactDebugTitle": "上下文壓縮日誌",
+    "compactDebugDesc": "壓縮摘要預設不顯示在對話裡，只在這裡供除錯查看。",
+    "compactDebugEntry": "{{count}} 條訊息 · {{time}}",
+    "compactDebugEmpty": "目前對話沒有壓縮摘要。",
+    "debugLogging": "除錯日誌",
+    "debugLoggingDesc": "正在記錄本機 API、MCP、智能體、檢查點和執行階段互動。",
+    "debugOn": "除錯已開",
+    "debugOff": "除錯已關",
+    "turnOn": "開啟",
+    "turnOff": "關閉",
+    "exportBundle": "匯出包"
   },
   "vision": {
     "notConfigured": "未設定",
@@ -294,7 +319,8 @@
     "slashGoal": "建立長期目標",
     "slashMemory": "儲存明確記憶",
     "slashDelegate": "把範圍明確的唯讀工作委派給子 agent",
-    "latestMessageActionOnly": "只能修改最新一則訊息。"
+    "latestMessageActionOnly": "只能修改最新一則訊息。",
+    "contextUsageCached": "快取上下文：{{value}}"
   },
   "agent": {
     "modeLabel": {
@@ -514,7 +540,11 @@
     "omitted": "（中間已省略 {{count}} 條訊息）",
     "summary": "（歷史壓縮摘要，共 {{count}} 條訊息）",
     "noContent": "目前會話還沒有可壓縮的內容。",
-    "modelSummary": "（模型壓縮摘要，共 {{count}} 條訊息）"
+    "modelSummary": "（模型壓縮摘要，共 {{count}} 條訊息）",
+    "running": "正在壓縮上下文",
+    "completed": "已壓縮上下文",
+    "entryCount": "{{count}} 條訊息",
+    "busy": "請等待目前回覆或佇列完成後再壓縮上下文。"
   },
   "outfit": {
     "title": "服裝匯入",

@@ -226,9 +226,12 @@ export function RightRuntimeSidebar({
               <div className="text-xs text-muted-foreground">{runtimeRunsError}</div>
             ) : (
               <div className="space-y-0.5">
-                {runtimeRuns.slice(0, 6).map((run, index) => (
+                {runtimeRuns.slice(0, 3).map((run, index) => (
                   <RuntimeRunRow key={run.id || run.turnId || run.clientTurnId || index} run={run} />
                 ))}
+                {runtimeRuns.length > 3 ? (
+                  <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(runtimeRuns.length - 3) })}</div>
+                ) : null}
               </div>
             )}
           </RuntimeSection>
@@ -309,9 +312,12 @@ export function RightRuntimeSidebar({
             count={<Badge tone="muted">{formatCount(runtimeReviewEvidence.length)}</Badge>}
           >
             <div className="space-y-0.5">
-              {runtimeReviewEvidence.map((item) => (
+              {runtimeReviewEvidence.slice(0, 3).map((item) => (
                 <RuntimeReviewEvidenceRow key={item.id} item={item} />
               ))}
+              {runtimeReviewEvidence.length > 3 ? (
+                <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(runtimeReviewEvidence.length - 3) })}</div>
+              ) : null}
             </div>
           </RuntimeSection>
         ) : null}

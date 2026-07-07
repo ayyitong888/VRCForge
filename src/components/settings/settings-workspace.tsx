@@ -2,6 +2,7 @@ import { Check, Download, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
 import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
+import type { SettingsSection } from "../../lib/app-view";
 import type {
   DiagnosticsStatus,
   ExecutionMode,
@@ -20,6 +21,8 @@ import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel"
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 
 type SettingsWorkspaceProps = {
+  activeSection: SettingsSection;
+  developerOptionsEnabled: boolean;
   permission: PermissionState | null;
   loading: boolean;
   runtimeConnected: boolean;
@@ -57,6 +60,9 @@ type SettingsWorkspaceProps = {
   agentNotesPath: string;
   notesMessage: string;
   savingNotes: boolean;
+  compactDebugEntries: Array<{ id: string; text: string; entryCount?: number; createdAt?: string }>;
+  onSectionChange: (section: SettingsSection) => void;
+  onDeveloperOptionsChange: (enabled: boolean) => void;
   onSwitchMode: (mode: ExecutionMode) => void;
   onRestartOnboarding: () => void;
   onLocaleChange: (code: string) => void;
@@ -91,6 +97,8 @@ type SettingsWorkspaceProps = {
 };
 
 export function SettingsWorkspace({
+  activeSection,
+  developerOptionsEnabled,
   permission,
   loading,
   runtimeConnected,
@@ -128,6 +136,9 @@ export function SettingsWorkspace({
   agentNotesPath,
   notesMessage,
   savingNotes,
+  compactDebugEntries,
+  onSectionChange,
+  onDeveloperOptionsChange,
   onSwitchMode,
   onRestartOnboarding,
   onLocaleChange,
@@ -163,6 +174,22 @@ export function SettingsWorkspace({
   const { t } = useTranslation();
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
+  const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
+  const titleBySection: Record<SettingsSection, string> = {
+    general: t("settings.navGeneral"),
+    permissions: t("settings.navPermissions"),
+    models: t("settings.navModels"),
+    storage: t("settings.navStorage"),
+    connectors: t("settings.navConnectors"),
+    instructions: t("settings.navInstructions"),
+    developer: t("settings.navDeveloper"),
+  };
+  const updateDeveloperOptions = (enabled: boolean) => {
+    onDeveloperOptionsChange(enabled);
+    if (!enabled && visibleSection === "developer") {
+      onSectionChange("general");
+    }
+  };
 
   return (
     <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
@@ -170,7 +197,73 @@ export function SettingsWorkspace({
         <h1 className="text-2xl font-semibold tracking-tight">{t("sidebar.settings")}</h1>
         <p className="mt-1 text-sm text-muted-foreground">{t("settings.subtitle")}</p>
 
-        <section className="mt-10">
+        <div className="mt-8 flex min-w-0 items-center gap-2 border-b border-border pb-3">
+          <h2 className="min-w-0 flex-1 truncate text-lg font-semibold">{titleBySection[visibleSection]}</h2>
+        </div>
+
+        {visibleSection === "general" ? (
+          <>
+            <section className="mt-8">
+              <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
+              <div className="mt-4">
+                <Button type="button" variant="outline" onClick={onRestartOnboarding}>
+                  <RefreshCw className="mr-1 h-4 w-4" />
+                  {t("settings.restartOnboarding")}
+                </Button>
+              </div>
+            </section>
+
+            <section className="mt-10">
+              <h2 className="text-base font-semibold">
+                <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
+                {t("settings.language")}
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">{t("settings.languageDesc")}</p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {SUPPORTED_LOCALES.map((loc) => (
+                  <button
+                    key={loc.code}
+                    type="button"
+                    onClick={() => onLocaleChange(loc.code)}
+                    className={cn(
+                      "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+                      currentLanguage === loc.code
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border bg-card text-foreground hover:bg-accent",
+                    )}
+                  >
+                    {loc.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="mt-10 pb-6">
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="flex min-w-0 flex-wrap items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{t("settings.developerOptions")}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{t("settings.developerOptionsDesc")}</div>
+                  </div>
+                  <Badge tone={developerOptionsEnabled ? "warn" : "muted"} className="shrink-0">
+                    {developerOptionsEnabled ? t("settings.enabled") : t("connector.off")}
+                  </Badge>
+                  <Button
+                    type="button"
+                    variant={developerOptionsEnabled ? "outline" : "primary"}
+                    onClick={() => updateDeveloperOptions(!developerOptionsEnabled)}
+                  >
+                    {developerOptionsEnabled ? t("settings.turnOffDeveloperOptions") : t("settings.turnOnDeveloperOptions")}
+                  </Button>
+                </div>
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {visibleSection === "permissions" ? (
+        <section className="mt-8 pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.permissionMode")}</h2>
             <Badge tone={currentPermissionVisual.badgeTone} className="shrink-0">
@@ -208,44 +301,10 @@ export function SettingsWorkspace({
             })}
           </div>
         </section>
+        ) : null}
 
-        <section className="mt-12">
-          <h2 className="text-base font-semibold">{t("settings.onboarding")}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{t("settings.onboardingDesc")}</p>
-          <div className="mt-4">
-            <Button type="button" variant="outline" onClick={onRestartOnboarding}>
-              <RefreshCw className="mr-1 h-4 w-4" />
-              {t("settings.restartOnboarding")}
-            </Button>
-          </div>
-        </section>
-
-        <section className="mt-12">
-          <h2 className="text-base font-semibold">
-            <Globe className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
-            {t("settings.language")}
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground">{t("settings.languageDesc")}</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {SUPPORTED_LOCALES.map((loc) => (
-              <button
-                key={loc.code}
-                type="button"
-                onClick={() => onLocaleChange(loc.code)}
-                className={cn(
-                  "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
-                  currentLanguage === loc.code
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border bg-card text-foreground hover:bg-accent",
-                )}
-              >
-                {loc.label}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="mt-12">
+        {visibleSection === "models" ? (
+        <section className="mt-8 pb-6">
           <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
           <div className="mt-4">
@@ -271,10 +330,7 @@ export function SettingsWorkspace({
               onSubmit={onSaveApiProvider}
             />
           </div>
-        </section>
-
-        <section className="mt-12">
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="mt-10 flex min-w-0 items-center gap-2">
             <h2 className="text-base font-semibold">
               <Eye className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
               {t("settings.visionProfile")}
@@ -307,8 +363,10 @@ export function SettingsWorkspace({
             />
           </div>
         </section>
+        ) : null}
 
-        <section className="mt-12">
+        {visibleSection === "developer" && developerOptionsEnabled ? (
+        <section className="mt-8 pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
             {diagnosticsMessage ? (
@@ -320,13 +378,13 @@ export function SettingsWorkspace({
           <div className="mt-4 rounded-lg border border-border bg-card p-4">
             <div className="flex min-w-0 flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">Debug logging</div>
+                <div className="truncate text-sm font-medium">{t("settings.debugLogging")}</div>
                 <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {diagnosticsStatus?.debugLogging ? "Recording local API, MCP, agent, checkpoint, and runtime interactions" : t("connector.off")}
+                  {diagnosticsStatus?.debugLogging ? t("settings.debugLoggingDesc") : t("connector.off")}
                 </div>
               </div>
               <Badge tone={diagnosticsStatus?.debugLogging ? "warn" : "muted"} className="shrink-0">
-                {diagnosticsStatus?.debugLogging ? "Debug on" : "Debug off"}
+                {diagnosticsStatus?.debugLogging ? t("settings.debugOn") : t("settings.debugOff")}
               </Badge>
               <Button
                 type="button"
@@ -335,18 +393,40 @@ export function SettingsWorkspace({
                 onClick={() => onSetDebugLogging(!diagnosticsStatus?.debugLogging)}
               >
                 {loadingDiagnostics ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                {diagnosticsStatus?.debugLogging ? "Turn off" : "Turn on"}
+                {diagnosticsStatus?.debugLogging ? t("settings.turnOff") : t("settings.turnOn")}
               </Button>
               <Button type="button" variant="outline" disabled={exportingSupportBundle} onClick={onCreateSupportBundle}>
                 {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                Export Bundle
+                {t("settings.exportBundle")}
               </Button>
             </div>
             {diagnosticsStatus?.logsDir ? <div className="mt-3 truncate text-xs text-muted-foreground/70">{diagnosticsStatus.logsDir}</div> : null}
           </div>
+          <div className="mt-6 rounded-lg border border-border bg-card p-4">
+            <div className="text-sm font-medium">{t("settings.compactDebugTitle")}</div>
+            <div className="mt-1 text-xs text-muted-foreground">{t("settings.compactDebugDesc")}</div>
+            <div className="mt-3 space-y-2">
+              {compactDebugEntries.length ? (
+                compactDebugEntries.map((entry) => (
+                  <details key={entry.id} className="rounded-md border border-border bg-background p-3 text-xs">
+                    <summary className="cursor-pointer font-medium">
+                      {t("settings.compactDebugEntry", { count: entry.entryCount ?? 0, time: entry.createdAt || "-" })}
+                    </summary>
+                    <pre className="app-scrollbar mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-muted-foreground">
+                      {entry.text}
+                    </pre>
+                  </details>
+                ))
+              ) : (
+                <div className="text-xs text-muted-foreground">{t("settings.compactDebugEmpty")}</div>
+              )}
+            </div>
+          </div>
         </section>
+        ) : null}
 
-        <section className="mt-12">
+        {visibleSection === "storage" ? (
+        <section className="mt-8 pb-6">
           <CheckpointStoragePanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -360,8 +440,10 @@ export function SettingsWorkspace({
             onRelocate={onRelocateCheckpointArchives}
           />
         </section>
+        ) : null}
 
-        <section className="mt-12">
+        {visibleSection === "connectors" ? (
+        <section className="mt-8 pb-6">
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}
@@ -376,8 +458,10 @@ export function SettingsWorkspace({
             onCopy={onCopyConnectorText}
           />
         </section>
+        ) : null}
 
-        <section className="mt-12 pb-6">
+        {visibleSection === "instructions" ? (
+        <section className="mt-8 pb-6">
           <div className="flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.customInstructions")}</h2>
             {notesMessage ? (
@@ -404,6 +488,7 @@ export function SettingsWorkspace({
             </div>
           </form>
         </section>
+        ) : null}
       </div>
     </div>
   );

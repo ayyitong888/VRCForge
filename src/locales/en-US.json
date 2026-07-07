@@ -196,7 +196,32 @@
     "unlimited": "Unlimited",
     "limitOn": "Limit on",
     "visionProfile": "Vision Model",
-    "visionProfileDesc": "When the main model cannot read images (e.g. DeepSeek), image attachments are automatically delegated to this vision model and the analysis is injected as a labeled run step. Vision tokens never count toward the chat context bar."
+    "visionProfileDesc": "When the main model cannot read images (e.g. DeepSeek), image attachments are automatically delegated to this vision model and the analysis is injected as a labeled run step. Vision tokens never count toward the chat context bar.",
+    "navPersonal": "Settings",
+    "backToApp": "Back to App",
+    "navGeneral": "General",
+    "navPermissions": "Permissions",
+    "navModels": "Models",
+    "navStorage": "Storage",
+    "navConnectors": "Connectors",
+    "navInstructions": "Instructions",
+    "navDeveloper": "Developer",
+    "developerOptions": "Developer Options",
+    "developerOptionsDesc": "Show diagnostic, cache, and log surfaces. Keep this off for normal chat work.",
+    "turnOnDeveloperOptions": "Turn on developer options",
+    "turnOffDeveloperOptions": "Turn off developer options",
+    "enabled": "Enabled",
+    "compactDebugTitle": "Context Compression Logs",
+    "compactDebugDesc": "Detailed compacted summaries are hidden from chat and kept here for debugging.",
+    "compactDebugEntry": "{{count}} messages · {{time}}",
+    "compactDebugEmpty": "No compacted summaries in the current chat.",
+    "debugLogging": "Debug logging",
+    "debugLoggingDesc": "Recording local API, MCP, agent, checkpoint, and runtime interactions.",
+    "debugOn": "Debug on",
+    "debugOff": "Debug off",
+    "turnOn": "Turn on",
+    "turnOff": "Turn off",
+    "exportBundle": "Export Bundle"
   },
   "vision": {
     "notConfigured": "Not configured",
@@ -294,7 +319,8 @@
     "slashGoal": "Create a long-running goal",
     "slashMemory": "Save explicit memory",
     "slashDelegate": "Delegate scoped read-only work to a sub-agent",
-    "latestMessageActionOnly": "Only the latest message can be changed."
+    "latestMessageActionOnly": "Only the latest message can be changed.",
+    "contextUsageCached": "Cached context: {{value}}"
   },
   "agent": {
     "modeLabel": {
@@ -514,7 +540,11 @@
     "omitted": "({{count}} messages omitted)",
     "summary": "(Compacted history summary, {{count}} messages)",
     "noContent": "Nothing to compact in this session.",
-    "modelSummary": "(Model-compressed summary, {{count}} messages)"
+    "modelSummary": "(Model-compressed summary, {{count}} messages)",
+    "running": "Compressing context",
+    "completed": "Context compressed",
+    "entryCount": "{{count}} messages",
+    "busy": "Wait for the current response or queue to finish before compressing context."
   },
   "outfit": {
     "title": "Outfit Import",

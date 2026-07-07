@@ -36,6 +36,7 @@ export type ContextUsage = {
   limitKnown: boolean;
   source: "provider_usage" | "unavailable";
   exact: boolean;
+  cached?: boolean;
   ratio: number;
   label: string;
   title: string;
@@ -48,7 +49,7 @@ export type ConversationItem =
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
   | { id: string; type: "error"; text: string }
-  | { id: string; type: "compact"; text: string }
+  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 
 export type ChatThread = {

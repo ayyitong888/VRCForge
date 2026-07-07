@@ -1,19 +1,25 @@
 import {
+  ArrowLeft,
   Bot,
+  Boxes,
+  Bug,
+  Database,
   FolderPlus,
   Gauge,
   History,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   RefreshCw,
   Settings,
   Shield,
+  SlidersHorizontal,
   Wrench,
 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../../lib/app-view";
+import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "../../lib/app-view";
 import type { ChatThread } from "../../lib/chat-types";
 import type { ChatSidebarGroups } from "../../lib/chat-thread";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
@@ -35,6 +41,8 @@ type SidebarProjectItem = {
 type AppSidebarProps = {
   collapsed: boolean;
   activeView: ActiveView;
+  activeSettingsSection: SettingsSection;
+  developerOptionsEnabled: boolean;
   temporaryChatActive: boolean;
   activeProjectPath: string;
   activeChatId: string;
@@ -60,6 +68,8 @@ type AppSidebarProps = {
   onOpenSkills: () => void;
   onOpenCheckpoints: () => void;
   onOpenSettings: () => void;
+  onOpenSettingsSection: (section: SettingsSection) => void;
+  onBackFromSettings: () => void;
   onRefreshProjects: () => void;
   onSelectProject: (path: string) => void;
   onToggleProjectCollapse: (path: string) => void;
@@ -77,6 +87,8 @@ type AppSidebarProps = {
 export function AppSidebar({
   collapsed,
   activeView,
+  activeSettingsSection,
+  developerOptionsEnabled,
   temporaryChatActive,
   activeProjectPath,
   activeChatId,
@@ -102,6 +114,8 @@ export function AppSidebar({
   onOpenSkills,
   onOpenCheckpoints,
   onOpenSettings,
+  onOpenSettingsSection,
+  onBackFromSettings,
   onRefreshProjects,
   onSelectProject,
   onToggleProjectCollapse,
@@ -116,6 +130,58 @@ export function AppSidebar({
   onChatRenameCommit,
 }: AppSidebarProps) {
   const { t } = useTranslation();
+  const settingsNavItems = ([
+    { section: "general", label: t("settings.navGeneral"), icon: <SlidersHorizontal className="h-4 w-4 shrink-0" /> },
+    { section: "permissions", label: t("settings.navPermissions"), icon: <Shield className="h-4 w-4 shrink-0" /> },
+    { section: "models", label: t("settings.navModels"), icon: <Bot className="h-4 w-4 shrink-0" /> },
+    { section: "storage", label: t("settings.navStorage"), icon: <Database className="h-4 w-4 shrink-0" /> },
+    { section: "connectors", label: t("settings.navConnectors"), icon: <Plug className="h-4 w-4 shrink-0" /> },
+    { section: "instructions", label: t("settings.navInstructions"), icon: <Boxes className="h-4 w-4 shrink-0" /> },
+    { section: "developer", label: t("settings.navDeveloper"), icon: <Bug className="h-4 w-4 shrink-0" />, developerOnly: true },
+  ] satisfies Array<{ section: SettingsSection; label: string; icon: ReactNode; developerOnly?: boolean }>).filter((item) => !item.developerOnly || developerOptionsEnabled);
+
+  if (activeView === "settings") {
+    return (
+      <aside
+        className={cn(
+          "sidebar-scrollbar flex h-screen min-w-0 flex-col overflow-y-auto border-r border-border/80 bg-sidebar px-2 py-3 transition-[width] max-md:[&_nav_button]:justify-center max-md:[&_nav_button]:px-0 max-md:[&_nav_span]:hidden",
+          collapsed ? "items-stretch [&_nav_button]:justify-center [&_nav_button]:px-0 [&_nav_span]:hidden" : "md:px-3",
+        )}
+      >
+        <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
+          <Settings className="h-4 w-4 shrink-0 text-primary" />
+          {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">{t("sidebar.settings")}</div>}
+          <button
+            type="button"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={onToggleSidebar}
+            title={collapsed ? t("sidebar.expandSidebar") : t("sidebar.collapseSidebar")}
+          >
+            {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
+        </div>
+        <nav className="mt-4 space-y-0.5">
+          <SidebarNavButton
+            icon={<ArrowLeft className="h-4 w-4 shrink-0" />}
+            label={t("settings.backToApp")}
+            onClick={onBackFromSettings}
+          />
+        </nav>
+        {collapsed ? null : <div className="mt-4 px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("settings.navPersonal")}</div>}
+        <nav className="mt-2 space-y-0.5">
+          {settingsNavItems.map((item) => (
+            <SidebarNavButton
+              key={item.section}
+              icon={item.icon}
+              label={item.label}
+              active={activeSettingsSection === item.section}
+              onClick={() => onOpenSettingsSection(item.section)}
+            />
+          ))}
+        </nav>
+      </aside>
+    );
+  }
 
   return (
     <aside
@@ -262,7 +328,7 @@ export function AppSidebar({
           title={t("sidebar.settings")}
           className={cn(
             "flex h-9 w-full min-w-0 items-center justify-center gap-2.5 rounded-md px-0 text-left text-sm transition-colors md:justify-start md:px-2.5",
-            activeView === "settings" ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            "text-muted-foreground hover:bg-muted hover:text-foreground",
           )}
         >
           <Settings className="h-4 w-4 shrink-0" />

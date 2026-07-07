@@ -247,6 +247,9 @@ export function Composer({
                 </div>
               ) : null}
             </div>
+            {contextUsage ? (
+              <ContextUsageMeter usage={contextUsage} />
+            ) : null}
             <Badge tone="muted" className="max-w-[220px] truncate">
               {statusLabel}
             </Badge>
@@ -257,15 +260,18 @@ export function Composer({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {contextUsage ? (
-              <ContextUsageMeter usage={contextUsage} />
-            ) : null}
             {sending ? (
               <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
                 <Square className="h-4 w-4" />
               </Button>
             ) : null}
-            <Button className="h-10 min-w-10 rounded-full px-3" disabled={!canSubmit} type="submit" title={sending ? t("chat.queue") : t("chat.send")}>
+            <Button
+              className="h-10 min-w-10 rounded-full px-3"
+              disabled={!canSubmit}
+              type="submit"
+              title={sending ? t("chat.queue") : t("chat.send")}
+              aria-label={sending ? t("chat.queue") : t("chat.send")}
+            >
               {sending ? <span className="text-xs">{t("chat.queue")}</span> : <Send className="h-4 w-4" />}
             </Button>
           </div>
@@ -281,14 +287,18 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const knownRatio = usage.limitKnown && usage.exact;
   const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
   const fillColorClass = percent >= 90 ? "bg-destructive" : percent >= 60 ? "bg-amber-500" : "bg-primary";
-  const tooltipTitle = knownRatio ? i18n.t("chat.contextMeterPercentUsed", { percent }) : i18n.t("chat.contextUsageUnavailable");
+  const tooltipTitle = usage.cached
+    ? i18n.t("chat.contextUsageCached", { value: knownRatio ? `${percent}%` : usage.label })
+    : knownRatio
+      ? i18n.t("chat.contextMeterPercentUsed", { percent })
+      : i18n.t("chat.contextUsageUnavailable");
   const tooltipDetail = knownRatio
     ? i18n.t("chat.contextMeterTokenDetail", { used: formatCount(usage.used), limit: formatCount(usage.limit) })
     : "";
   const nativeTitle = tooltipDetail ? `${tooltipTitle}\n${tooltipDetail}` : tooltipTitle;
   return (
     <div
-      className={cn("group relative flex h-10 w-32 shrink-0 items-center rounded-md px-1", className)}
+      className={cn("group relative flex h-8 w-32 shrink-0 items-center rounded-md px-1", className)}
       tabIndex={0}
       aria-label={nativeTitle}
       title={nativeTitle}
@@ -306,7 +316,7 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
           <div className="h-full w-full bg-muted-foreground/35" data-context-segment="unknown" />
         )}
       </div>
-      <div className="pointer-events-none absolute bottom-full right-0 z-40 mb-2 hidden w-52 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
+      <div className="pointer-events-none absolute bottom-full left-0 z-40 mb-2 hidden w-52 rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-foreground shadow-panel group-hover:block group-focus:block">
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>
         {tooltipDetail ? <div className="mt-1 text-muted-foreground">{tooltipDetail}</div> : null}

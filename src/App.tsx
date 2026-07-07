@@ -57,9 +57,10 @@ import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
-import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
+import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
+  DEVELOPER_OPTIONS_ENABLED_KEY,
   LAYOUT_PANE_WIDTHS_KEY,
   LEFT_SIDEBAR_COLLAPSED_KEY,
   MAX_LEFT_PANE_WIDTH,
@@ -74,6 +75,7 @@ import {
   THEME_STORAGE_KEY,
   clampNumber,
   loadLayoutPaneWidths,
+  loadDeveloperOptionsEnabled,
   loadThemePreference,
   type LayoutPaneWidths,
   type ThemeMode,
@@ -189,6 +191,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
+  const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(LEFT_SIDEBAR_COLLAPSED_KEY) === "true";
@@ -795,12 +799,33 @@ export default function App() {
     [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
   const latestContextUsage = useMemo(() => latestAgentContextUsage(conversation), [conversation]);
-  const contextUsage = useMemo(
+  const latestContextUsageDisplay = useRef<ContextUsage | undefined>(undefined);
+  const contextUsage = useMemo(() => {
+    if (!apiConfig && !smokeMode) {
+      latestContextUsageDisplay.current = undefined;
+      return undefined;
+    }
+    const nextUsage = buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t);
+    if (nextUsage?.source === "provider_usage") {
+      latestContextUsageDisplay.current = nextUsage;
+      return nextUsage;
+    }
+    if (latestContextUsageDisplay.current) {
+      return { ...latestContextUsageDisplay.current, cached: true };
+    }
+    return nextUsage;
+  }, [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  const compactDebugEntries = useMemo(
     () =>
-      apiConfig || smokeMode
-        ? buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t)
-        : undefined,
-    [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t],
+      (activeChat?.items || [])
+        .filter((item): item is Extract<ConversationItem, { type: "compact" }> => item.type === "compact" && Boolean(item.detail))
+        .map((item) => ({
+          id: item.id,
+          text: item.detail || "",
+          entryCount: item.entryCount,
+          createdAt: item.createdAt,
+        })),
+    [activeChat?.items],
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
@@ -1046,6 +1071,14 @@ export default function App() {
       // Runtime section layout is best-effort local UI state.
     }
   }, [rightRuntimeSectionsCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DEVELOPER_OPTIONS_ENABLED_KEY, String(developerOptionsEnabled));
+    } catch {
+      // Developer options are best-effort local UI state.
+    }
+  }, [developerOptionsEnabled]);
 
   useEffect(() => {
     if (!showOnboarding || !onboardingMinimized) {
@@ -1676,14 +1709,33 @@ export default function App() {
   }
 
   async function compactChat() {
+    if (isChatRunActive() || visibleQueued.length > 0 || compacting) {
+      setError(t("compact.busy"));
+      return;
+    }
     if (!activeChat || activeChat.items.length === 0) {
       setError(t("compact.noContent"));
       return;
     }
     const chatId = activeChat.id;
     const items = activeChat.items;
+    const compactId = `compact-${Date.now()}`;
+    updateChat(chatId, (chat) => ({
+      ...touchChat(chat),
+      sessionId: "",
+      items: [
+        {
+          id: compactId,
+          type: "compact",
+          text: t("compact.running"),
+          status: "running",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    }));
     setCompacting(true);
     let summary = "";
+    let entryCount = items.length;
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -1694,8 +1746,9 @@ export default function App() {
       }
       const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items, t));
       summary = (payload.summary || "").trim();
+      entryCount = payload.entryCount ?? items.length;
       if (summary) {
-        summary = `${t("compact.modelSummary", { count: payload.entryCount ?? items.length })}\n${summary}`;
+        summary = `${t("compact.modelSummary", { count: entryCount })}\n${summary}`;
       }
     } catch {
       summary = "";
@@ -1708,8 +1761,23 @@ export default function App() {
     updateChat(chatId, (chat) => ({
       ...touchChat(chat),
       sessionId: "",
-      items: [{ id: `compact-${Date.now()}`, type: "compact", text: summary }],
+      items: [
+        {
+          id: compactId,
+          type: "compact",
+          text: t("compact.completed"),
+          detail: summary,
+          status: "completed",
+          entryCount,
+          createdAt: new Date().toISOString(),
+        },
+      ],
     }));
+  }
+
+  function openSettingsSection(section: SettingsSection = "general") {
+    setActiveSettingsSection(section);
+    void openSettings();
   }
 
   async function createGoalFromSlash(raw: string) {
@@ -2120,6 +2188,8 @@ export default function App() {
         <AppSidebar
           collapsed={leftSidebarCollapsed}
           activeView={activeView}
+          activeSettingsSection={activeSettingsSection}
+          developerOptionsEnabled={developerOptionsEnabled}
           temporaryChatActive={activeView === "chat" && !activeProjectPath && !activeChat}
           activeProjectPath={activeProjectPath}
           activeChatId={activeChatId}
@@ -2147,7 +2217,9 @@ export default function App() {
           onOpenProtection={() => void openProtection()}
           onOpenSkills={() => void openSkills()}
           onOpenCheckpoints={() => void openCheckpoints()}
-          onOpenSettings={() => void openSettings()}
+          onOpenSettings={() => openSettingsSection("general")}
+          onOpenSettingsSection={openSettingsSection}
+          onBackFromSettings={() => setActiveView("chat")}
           onRefreshProjects={() => void refreshProjectList()}
           onSelectProject={selectProject}
           onToggleProjectCollapse={toggleProjectCollapse}
@@ -2215,7 +2287,7 @@ export default function App() {
               exportingSupportBundle={exportingSupportBundle}
               onRefresh={() => void loadDoctor()}
               onRepairUnityBridge={() => void repairUnityBridgeFromDoctor()}
-              onOpenSettings={() => void openSettings()}
+              onOpenSettings={() => openSettingsSection("general")}
               onExportSupportBundle={() => void createSupportBundle()}
               onCopy={() => {
                 if (!doctorReport) {
@@ -2343,6 +2415,8 @@ export default function App() {
             />
           ) : activeView === "settings" ? (
             <SettingsWorkspace
+              activeSection={activeSettingsSection}
+              developerOptionsEnabled={developerOptionsEnabled}
               permission={permission ?? null}
               loading={loading}
               runtimeConnected={runtimeConnected}
@@ -2380,6 +2454,9 @@ export default function App() {
               agentNotesPath={agentNotesPath}
               notesMessage={notesMessage}
               savingNotes={savingNotes}
+              compactDebugEntries={compactDebugEntries}
+              onSectionChange={setActiveSettingsSection}
+              onDeveloperOptionsChange={setDeveloperOptionsEnabled}
               onSwitchMode={(mode) => void switchMode(mode)}
               onRestartOnboarding={restartOnboarding}
               onLocaleChange={(code) => void setLocale(code)}
@@ -2456,7 +2533,7 @@ export default function App() {
               onApprove={approveShell}
               onReject={rejectShell}
               onModifyApproval={modifyApprovalInComposer}
-              onOpenSettings={() => void openSettings()}
+              onOpenSettings={() => openSettingsSection("models")}
               onOpenDoctor={() => void openDoctor()}
             />
           )}
@@ -2544,7 +2621,7 @@ export default function App() {
         onRetryRuntime={() => void startRuntime()}
         onOpenSettings={() => {
           setOnboardingMinimized(true);
-          void openSettings();
+          openSettingsSection("models");
         }}
         onOpenProjectPicker={() => {
           setOnboardingMinimized(true);

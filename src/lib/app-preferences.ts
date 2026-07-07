@@ -18,6 +18,7 @@ export const LEFT_SIDEBAR_COLLAPSED_KEY = "vrcforge_left_sidebar_collapsed";
 export const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
 export const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 export const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
+export const DEVELOPER_OPTIONS_ENABLED_KEY = "vrcforge_developer_options_enabled";
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
 export const DEFAULT_RIGHT_PANE_WIDTH = 320;
@@ -59,6 +60,14 @@ export function loadThemePreference(): ThemeMode {
     return raw === "dark" || raw === "light" ? raw : "light";
   } catch {
     return "light";
+  }
+}
+
+export function loadDeveloperOptionsEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(DEVELOPER_OPTIONS_ENABLED_KEY) === "true";
+  } catch {
+    return false;
   }
 }
 

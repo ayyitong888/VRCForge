@@ -196,7 +196,32 @@
     "unlimited": "不限制",
     "limitOn": "已限制",
     "visionProfile": "识图模型",
-    "visionProfileDesc": "当主模型无法识图（如 DeepSeek）时，图片附件会自动委托给这里配置的视觉模型分析，结果以带标签的执行步骤注入对话。视觉调用的 token 不会计入聊天上下文条。"
+    "visionProfileDesc": "当主模型无法识图（如 DeepSeek）时，图片附件会自动委托给这里配置的视觉模型分析，结果以带标签的执行步骤注入对话。视觉调用的 token 不会计入聊天上下文条。",
+    "navPersonal": "设置",
+    "backToApp": "返回应用",
+    "navGeneral": "常规",
+    "navPermissions": "权限",
+    "navModels": "模型",
+    "navStorage": "存储",
+    "navConnectors": "连接器",
+    "navInstructions": "指令",
+    "navDeveloper": "开发者",
+    "developerOptions": "开发者选项",
+    "developerOptionsDesc": "显示诊断、缓存和日志界面。普通对话时建议关闭。",
+    "turnOnDeveloperOptions": "开启开发者选项",
+    "turnOffDeveloperOptions": "关闭开发者选项",
+    "enabled": "已开启",
+    "compactDebugTitle": "上下文压缩日志",
+    "compactDebugDesc": "压缩摘要默认不显示在对话里，只在这里供调试查看。",
+    "compactDebugEntry": "{{count}} 条消息 · {{time}}",
+    "compactDebugEmpty": "当前对话没有压缩摘要。",
+    "debugLogging": "调试日志",
+    "debugLoggingDesc": "正在记录本地 API、MCP、智能体、检查点和运行时交互。",
+    "debugOn": "调试已开",
+    "debugOff": "调试已关",
+    "turnOn": "开启",
+    "turnOff": "关闭",
+    "exportBundle": "导出包"
   },
   "vision": {
     "notConfigured": "未配置",
@@ -294,7 +319,8 @@
     "slashGoal": "创建长期目标",
     "slashMemory": "保存显式记忆",
     "slashDelegate": "把范围明确的只读工作委派给子 agent",
-    "latestMessageActionOnly": "只能修改最新一条消息。"
+    "latestMessageActionOnly": "只能修改最新一条消息。",
+    "contextUsageCached": "缓存上下文：{{value}}"
   },
   "agent": {
     "modeLabel": {
@@ -514,7 +540,11 @@
     "omitted": "（中间已省略 {{count}} 条消息）",
     "summary": "（历史压缩摘要，共 {{count}} 条消息）",
     "noContent": "当前会话还没有可压缩的内容。",
-    "modelSummary": "（模型压缩摘要，共 {{count}} 条消息）"
+    "modelSummary": "（模型压缩摘要，共 {{count}} 条消息）",
+    "running": "正在压缩上下文",
+    "completed": "已压缩上下文",
+    "entryCount": "{{count}} 条消息",
+    "busy": "请等待当前回复或队列完成后再压缩上下文。"
   },
   "outfit": {
     "title": "服装导入",

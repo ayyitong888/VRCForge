@@ -196,7 +196,32 @@
     "unlimited": "無制限",
     "limitOn": "上限あり",
     "visionProfile": "画像認識モデル",
-    "visionProfileDesc": "メインモデルが画像を認識できない場合（DeepSeek など）、画像添付はここで設定したビジョンモデルに自動委任され、結果はラベル付き実行ステップとして会話に挿入されます。ビジョン呼び出しのトークンはチャットのコンテキストバーに計上されません。"
+    "visionProfileDesc": "メインモデルが画像を認識できない場合（DeepSeek など）、画像添付はここで設定したビジョンモデルに自動委任され、結果はラベル付き実行ステップとして会話に挿入されます。ビジョン呼び出しのトークンはチャットのコンテキストバーに計上されません。",
+    "navPersonal": "設定",
+    "backToApp": "アプリに戻る",
+    "navGeneral": "一般",
+    "navPermissions": "権限",
+    "navModels": "モデル",
+    "navStorage": "ストレージ",
+    "navConnectors": "コネクター",
+    "navInstructions": "指示",
+    "navDeveloper": "開発者",
+    "developerOptions": "開発者オプション",
+    "developerOptionsDesc": "診断、キャッシュ、ログ画面を表示します。通常のチャットではオフを推奨します。",
+    "turnOnDeveloperOptions": "開発者オプションをオン",
+    "turnOffDeveloperOptions": "開発者オプションをオフ",
+    "enabled": "有効",
+    "compactDebugTitle": "コンテキスト圧縮ログ",
+    "compactDebugDesc": "圧縮サマリーはチャットに表示せず、デバッグ用にここで確認します。",
+    "compactDebugEntry": "{{count}} 件 · {{time}}",
+    "compactDebugEmpty": "現在のチャットに圧縮サマリーはありません。",
+    "debugLogging": "デバッグログ",
+    "debugLoggingDesc": "ローカル API、MCP、エージェント、チェックポイント、ランタイムのやり取りを記録しています。",
+    "debugOn": "デバッグ有効",
+    "debugOff": "デバッグ無効",
+    "turnOn": "オン",
+    "turnOff": "オフ",
+    "exportBundle": "バンドルを書き出す"
   },
   "vision": {
     "notConfigured": "未設定",
@@ -294,7 +319,8 @@
     "slashGoal": "長期ゴールを作成",
     "slashMemory": "明示的なメモリを保存",
     "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任",
-    "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。"
+    "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。",
+    "contextUsageCached": "キャッシュ済みコンテキスト: {{value}}"
   },
   "agent": {
     "modeLabel": {
@@ -514,7 +540,11 @@
     "omitted": "（{{count}} 件のメッセージを省略）",
     "summary": "（履歴圧縮サマリー、全 {{count}} 件のメッセージ）",
     "noContent": "このセッションには圧縮する内容がありません。",
-    "modelSummary": "（モデル圧縮サマリー、{{count}} メッセージ）"
+    "modelSummary": "（モデル圧縮サマリー、{{count}} メッセージ）",
+    "running": "コンテキストを圧縮中",
+    "completed": "コンテキストを圧縮しました",
+    "entryCount": "{{count}} 件",
+    "busy": "現在の返信またはキューが完了してからコンテキストを圧縮してください。"
   },
   "outfit": {
     "title": "衣装インポート",

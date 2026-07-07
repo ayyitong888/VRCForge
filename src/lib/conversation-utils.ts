@@ -147,7 +147,7 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
         history.push({ role: "agent", text });
       }
     } else if (item.type === "compact") {
-      const text = item.text.trim();
+      const text = (item.detail || item.text).trim();
       if (text) {
         history.push({ role: "agent", text });
       }
@@ -227,7 +227,10 @@ export function conversationItemText(item: ConversationItem, t: TFunction): stri
   if (item.type === "result") {
     return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");
   }
-  if (item.type === "error" || item.type === "compact") {
+  if (item.type === "error") {
+    return item.text;
+  }
+  if (item.type === "compact") {
     return item.text;
   }
   if (item.type === "subagent") {

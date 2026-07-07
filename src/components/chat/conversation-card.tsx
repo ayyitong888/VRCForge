@@ -160,10 +160,18 @@ export function ConversationCard({
   }
 
   if (item.type === "compact") {
+    const running = item.status === "running";
     return (
-      <div className="group relative rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
-        <div className="mb-2 text-xs font-medium text-muted-foreground">{t("agent.compactedHistory")}</div>
-        <pre className="app-scrollbar max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">{item.text}</pre>
+      <div className="group relative max-w-[85%] rounded-xl border border-dashed border-border bg-muted/30 px-4 py-3 text-sm">
+        <div className="flex min-w-0 items-center gap-2">
+          {running ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" /> : <Check className="h-4 w-4 shrink-0 text-muted-foreground" />}
+          <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">{item.text}</span>
+        </div>
+        {item.entryCount || item.createdAt ? (
+          <div className="mt-1 truncate pl-6 text-xs text-muted-foreground/80">
+            {[item.entryCount ? t("compact.entryCount", { count: item.entryCount }) : "", item.createdAt || ""].filter(Boolean).join(" · ")}
+          </div>
+        ) : null}
         <MessageActions onCopy={() => onCopyItem?.(item)} />
       </div>
     );
