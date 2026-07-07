@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -8,6 +8,9 @@ const port = Number(process.env.VRCFORGE_CDP_PORT || "9341");
 const marker = `WORKFLOW_PROBE_${Date.now()}`;
 const outPath = resolve(repoRoot, "artifacts", "latency", `packaged-workflows-${marker}.json`);
 const maxWaitMs = Number(process.env.VRCFORGE_WORKFLOW_WAIT_MS || "240000");
+const appOrigin = "http://127.0.0.1:8757";
+const appRequestOrigin = "http://tauri.localhost";
+let appSessionToken = "";
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -146,7 +149,12 @@ async function evalValue(cdp, expression, timeout = 15000) {
     timeout,
   });
   if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.text || "Runtime.evaluate failed");
+    const detail =
+      result.exceptionDetails.exception?.description ||
+      result.exceptionDetails.exception?.value ||
+      result.exceptionDetails.text ||
+      "Runtime.evaluate failed";
+    throw new Error(String(detail));
   }
   return result.result?.value;
 }
@@ -201,6 +209,30 @@ function summarizeNetwork(events) {
     }));
 }
 
+function sanitizeProbeValue(value, depth = 0) {
+  const sensitiveKeyPattern = /api[_-]?key|secret|token|authorization/i;
+  if (depth > 6) {
+    return "[max-depth]";
+  }
+  if (typeof value === "string") {
+    if (value.startsWith("data:")) {
+      return `[data-url:${value.length}]`;
+    }
+    return value.length > 3000 ? `${value.slice(0, 3000)}[truncated]` : value;
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 32).map((item) => sanitizeProbeValue(item, depth + 1));
+  }
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = sensitiveKeyPattern.test(key) ? "[redacted]" : sanitizeProbeValue(item, depth + 1);
+  }
+  return out;
+}
+
 function localLongTaskCount(finalProbe) {
   return Array.isArray(finalProbe?.probe?.longTasks) ? finalProbe.probe.longTasks.length : 0;
 }
@@ -209,33 +241,7 @@ async function installProbe(cdp) {
   await evalValue(
     cdp,
     `(() => {
-      const sanitizeProbeValue = (value, depth = 0) => {
-        const sensitiveKeyPattern = new RegExp(["api" + "[_-]?" + "key", "sec" + "ret", "tok" + "en", "author" + "ization"].join("|"), "i");
-        if (depth > 6) {
-          return "[max-depth]";
-        }
-        if (typeof value === "string") {
-          if (value.startsWith("data:")) {
-            return "[data-url:" + value.length + "]";
-          }
-          return value.length > 2000 ? value.slice(0, 2000) + "[truncated]" : value;
-        }
-        if (!value || typeof value !== "object") {
-          return value;
-        }
-        if (Array.isArray(value)) {
-          return value.slice(0, 24).map((item) => sanitizeProbeValue(item, depth + 1));
-        }
-        const out = {};
-        for (const [key, item] of Object.entries(value)) {
-          if (sensitiveKeyPattern.test(key)) {
-            out[key] = "[redacted]";
-          } else {
-            out[key] = sanitizeProbeValue(item, depth + 1);
-          }
-        }
-        return out;
-      };
+      const sanitizeProbeValue = ${sanitizeProbeValue.toString()};
       const probe = window.__vrcWorkflowProbe = {
         installedAt: performance.now(),
         fetches: [],
@@ -254,7 +260,21 @@ async function installProbe(cdp) {
           row.status = response.status;
           row.end = performance.now();
           row.duration = row.end - start;
-          if (/send_agent_message|compact_agent_history|record_agent_run_queued|request_agent_run_cancel/i.test(url)) {
+          const capturedResponsePattern = new RegExp(
+            [
+              "send_agent_message",
+              "compact_agent_history",
+              "record_agent_run_queued",
+              "request_agent_run_cancel",
+              "api/app/agent/message",
+              "api/app/agent/approvals",
+              "fetch_agent_approvals",
+              "approve_agent_approval",
+              "reject_agent_approval",
+            ].join("|"),
+            "i",
+          );
+          if (capturedResponsePattern.test(url)) {
             try {
               const cloneText = await response.clone().text();
               row.responseLength = cloneText.length;
@@ -381,6 +401,54 @@ async function clickStop(cdp) {
       return { ok: true, duration: performance.now() - start, bodyLength: document.body.innerText.length };
     })()`,
   );
+}
+
+async function appApi(path, options = {}) {
+  const start = performance.now();
+  if (!appSessionToken) {
+    const tokenPath = resolve(
+      process.env.VRCFORGE_CONFIG_DIR || resolve(process.env.LOCALAPPDATA || "", "VRCForge", "agentic-app", "config"),
+      "app-session-token",
+    );
+    try {
+      appSessionToken = (await readFile(tokenPath, "utf8")).trim();
+    } catch {
+      const sessionResponse = await fetch(`${appOrigin}/api/app/session`, {
+        headers: { Origin: appRequestOrigin },
+      });
+      const sessionPayload = await sessionResponse.json();
+      appSessionToken = sessionPayload.appSessionToken || sessionPayload.app_session_token || "";
+    }
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+  try {
+    const response = await fetch(`${appOrigin}${path}`, {
+      method: options.method || "GET",
+      headers: {
+        Origin: appRequestOrigin,
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${appSessionToken}`,
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { text: text.slice(0, 1000) };
+    }
+    return {
+      ok: response.ok,
+      status: response.status,
+      duration: performance.now() - start,
+      payload: sanitizeProbeValue(payload),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function bodySnapshot(cdp, markerValue) {
@@ -557,6 +625,25 @@ function validateWorkflowOutput(output, markers) {
   if (!visionRow || visionRow.status !== 200 || visionRow.visionImageCount !== 1 || visionRow.firstStepKind !== "vision") {
     failures.push("vision attachment did not reach the runtime vision step");
   }
+  const approval = byName.get("approval-interleave");
+  if (!approval?.providerCompletion?.ok) {
+    failures.push("approval interleave provider turn did not complete");
+  }
+  if (!approval?.create?.ok || approval?.create?.payload?.shell?.status !== "pending_approval") {
+    failures.push("approval interleave did not create a pending approval");
+  }
+  if (!approval?.pendingBeforeReject?.payload?.approvals?.some((item) => item.id === approval.approvalId && item.status === "pending")) {
+    failures.push("approval interleave pending approval was not visible in the approval list");
+  }
+  if (!approval?.reject?.ok || approval?.reject?.payload?.approval?.status !== "rejected") {
+    failures.push("approval interleave did not reject the pending approval");
+  }
+  if (!approval?.pendingAfterReject?.payload?.approvals?.every((item) => item.id !== approval.approvalId || item.status !== "pending")) {
+    failures.push("approval interleave approval stayed pending after reject");
+  }
+  if (approval?.permissionRestoreNeeded && !approval?.restorePermission?.ok) {
+    failures.push("approval interleave did not restore the original permission mode");
+  }
   if (output.longTaskCount !== 0) {
     failures.push(`renderer long tasks recorded: ${output.longTaskCount}`);
   }
@@ -637,6 +724,86 @@ async function main() {
   const compactClick = await clickSubmit(cdp);
   const compactSettled = await waitForText(cdp, /\u538b\u7f29|compacted|compact|Nothing to compact|\u6ca1\u6709\u53ef\u538b\u7f29/i, 90000);
   scenarios.push({ name: "compact", input: compactInput, click: compactClick, settled: compactSettled });
+
+  const approvalMarker = `${marker}_APPROVAL`;
+  const approvalProviderInput = await typeComposer(
+    cdp,
+    `Do not use tools. Reply in one short sentence and include this exact token: ${approvalMarker}`,
+  );
+  const approvalProviderClick = await clickSubmit(cdp);
+  const approvalRunning = await waitForText(cdp, /\u6267\u884c\u4e2d|\u7b49\u5f85\u6a21\u578b\u54cd\u5e94|\u601d\u8003\u4e2d|running|thinking/i, 10000);
+  const permissionBefore = await appApi("/api/app/permission", { timeoutMs: 30000 });
+  const previousPermissionMode = String(permissionBefore?.payload?.permission?.executionMode || "approval");
+  const permissionRestoreNeeded = previousPermissionMode && previousPermissionMode !== "approval";
+  const setApprovalPermission = permissionRestoreNeeded
+    ? await appApi("/api/app/permission", {
+        method: "POST",
+        body: { execution_mode: "approval", acknowledge_roslyn_risk: true },
+        timeoutMs: 30000,
+      })
+    : { ok: true, skipped: true, payload: { permission: { executionMode: previousPermissionMode } } };
+  let approvalCreate = { ok: false, status: 0, payload: { error: "not run" } };
+  let approvalId = "";
+  let pendingBeforeReject = { ok: false, status: 0, payload: { error: "not run" } };
+  let approvalReject = { ok: false, status: 0, payload: { error: "not run" } };
+  let pendingAfterReject = { ok: false, status: 0, payload: { error: "not run" } };
+  let restorePermission = { ok: true, skipped: true, payload: { permission: { executionMode: previousPermissionMode } } };
+  try {
+    approvalCreate = await appApi("/api/app/agent/message", {
+      method: "POST",
+      body: {
+        message: `Packaged approval interleave probe ${approvalMarker}`,
+        shell_command: "Remove-Item -LiteralPath approval-probe-never-exec.txt -Force",
+        workspace_root: repoRoot,
+        cwd: repoRoot,
+      },
+      timeoutMs: 30000,
+    });
+    approvalId = String(approvalCreate?.payload?.shell?.approval_id || approvalCreate?.payload?.shell?.approvalId || "");
+    pendingBeforeReject = await appApi("/api/app/agent/approvals", { timeoutMs: 30000 });
+    approvalReject = approvalId
+      ? await appApi(`/api/app/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
+          method: "POST",
+          body: { globalOnly: true },
+          timeoutMs: 30000,
+        })
+      : { ok: false, status: 0, payload: { error: "missing approval id" } };
+    pendingAfterReject = await appApi("/api/app/agent/approvals", { timeoutMs: 30000 });
+  } finally {
+    if (permissionRestoreNeeded) {
+      try {
+        restorePermission = await appApi("/api/app/permission", {
+          method: "POST",
+          body: {
+            execution_mode: previousPermissionMode,
+            acknowledge_roslyn_risk: previousPermissionMode === "roslyn_full_auto",
+          },
+          timeoutMs: 30000,
+        });
+      } catch (error) {
+        restorePermission = { ok: false, status: 0, payload: { error: String(error && error.message || error) } };
+      }
+    }
+  }
+  const approvalProviderCompletion = await waitForMarkerComplete(cdp, approvalMarker, 90000);
+  scenarios.push({
+    name: "approval-interleave",
+    marker: approvalMarker,
+    providerInput: approvalProviderInput,
+    providerClick: approvalProviderClick,
+    running: approvalRunning,
+    permissionBefore,
+    previousPermissionMode,
+    permissionRestoreNeeded,
+    setApprovalPermission,
+    create: approvalCreate,
+    approvalId,
+    pendingBeforeReject,
+    reject: approvalReject,
+    pendingAfterReject,
+    restorePermission,
+    providerCompletion: approvalProviderCompletion,
+  });
 
   const visionMarker = `${marker}_VISION`;
   const visionAttachmentName = `${visionMarker}.png`;
