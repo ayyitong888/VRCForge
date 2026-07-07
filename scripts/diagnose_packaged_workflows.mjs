@@ -209,6 +209,33 @@ async function installProbe(cdp) {
   await evalValue(
     cdp,
     `(() => {
+      const sanitizeProbeValue = (value, depth = 0) => {
+        const sensitiveKeyPattern = new RegExp(["api" + "[_-]?" + "key", "sec" + "ret", "tok" + "en", "author" + "ization"].join("|"), "i");
+        if (depth > 6) {
+          return "[max-depth]";
+        }
+        if (typeof value === "string") {
+          if (value.startsWith("data:")) {
+            return "[data-url:" + value.length + "]";
+          }
+          return value.length > 2000 ? value.slice(0, 2000) + "[truncated]" : value;
+        }
+        if (!value || typeof value !== "object") {
+          return value;
+        }
+        if (Array.isArray(value)) {
+          return value.slice(0, 24).map((item) => sanitizeProbeValue(item, depth + 1));
+        }
+        const out = {};
+        for (const [key, item] of Object.entries(value)) {
+          if (sensitiveKeyPattern.test(key)) {
+            out[key] = "[redacted]";
+          } else {
+            out[key] = sanitizeProbeValue(item, depth + 1);
+          }
+        }
+        return out;
+      };
       const probe = window.__vrcWorkflowProbe = {
         installedAt: performance.now(),
         fetches: [],
@@ -227,6 +254,21 @@ async function installProbe(cdp) {
           row.status = response.status;
           row.end = performance.now();
           row.duration = row.end - start;
+          if (/send_agent_message|compact_agent_history|record_agent_run_queued|request_agent_run_cancel/i.test(url)) {
+            try {
+              const cloneText = await response.clone().text();
+              row.responseLength = cloneText.length;
+              if (cloneText.length <= 120000) {
+                try {
+                  row.responseJson = sanitizeProbeValue(JSON.parse(cloneText));
+                } catch {
+                  row.responseText = cloneText.slice(0, 2000);
+                }
+              }
+            } catch (error) {
+              row.responseCaptureError = String(error && error.message || error);
+            }
+          }
           return response;
         } catch (error) {
           row.error = String(error && error.message || error);
@@ -249,6 +291,39 @@ async function installProbe(cdp) {
         }
       }
       return true;
+    })()`,
+  );
+}
+
+async function attachProbeImage(cdp, name) {
+  return evalValue(
+    cdp,
+    `(async () => {
+      const input = document.querySelector("input[type='file']");
+      if (!input) {
+        return { ok: false, reason: "file input not found" };
+      }
+      const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP8z8Dwn4GBgYGJgYGBgQEAJ7MBBO9JwmsAAAAASUVORK5CYII=";
+      const binary = atob(pngBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      const file = new File([bytes], ${JSON.stringify(name)}, { type: "image/png" });
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      const start = performance.now();
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const body = document.body.innerText;
+      return {
+        ok: body.includes(${JSON.stringify(name)}),
+        duration: performance.now() - start,
+        fileCount: input.files ? input.files.length : null,
+        bodyLength: body.length,
+        tail: body.slice(-700),
+      };
     })()`,
   );
 }
@@ -400,6 +475,36 @@ async function runSend(cdp, name, text, markerValue, timeoutMs = 90000) {
   return { name, marker: markerValue, input, submitReady, click, completion };
 }
 
+function summarizeVisionFetches(finalProbe, markerValue) {
+  const fetches = finalProbe?.probe?.fetches;
+  if (!Array.isArray(fetches)) {
+    return [];
+  }
+  return fetches
+    .filter((row) => String(row.url || "").includes("send_agent_message"))
+    .filter((row) => JSON.stringify(row.responseJson || row.responseText || "").includes(markerValue))
+    .map((row) => {
+      const payload = row.responseJson || {};
+      const vision = payload.vision || {};
+      const steps = Array.isArray(payload.steps) ? payload.steps : [];
+      return {
+        status: row.status,
+        duration: row.duration,
+        responseLength: row.responseLength,
+        visionStatus: vision.status || "",
+        visionSource: vision.source || "",
+        visionProvider: vision.provider || "",
+        visionProviderLabel: vision.providerLabel || "",
+        visionModel: vision.model || "",
+        visionImageCount: vision.imageCount || 0,
+        visionReason: vision.reason || "",
+        firstStepKind: steps[0]?.kind || "",
+        firstStepStatus: steps[0]?.status || "",
+        firstStepImageCount: steps[0]?.imageCount || 0,
+      };
+    });
+}
+
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
   await closeExistingVrcforgeProcesses();
@@ -475,6 +580,18 @@ async function main() {
   const compactSettled = await waitForText(cdp, /\u538b\u7f29|compacted|compact|Nothing to compact|\u6ca1\u6709\u53ef\u538b\u7f29/i, 90000);
   scenarios.push({ name: "compact", input: compactInput, click: compactClick, settled: compactSettled });
 
+  const visionMarker = `${marker}_VISION`;
+  const visionAttachmentName = `${visionMarker}.png`;
+  const visionAttach = await attachProbeImage(cdp, visionAttachmentName);
+  const visionScenario = await runSend(
+    cdp,
+    "vision-attachment",
+    `Do not use tools. Reply in one short sentence and include this exact token: ${visionMarker}. Describe whether the attached image was analyzed or whether vision is unavailable.`,
+    visionMarker,
+    120000,
+  );
+  scenarios.push({ ...visionScenario, attachment: visionAttach });
+
   const finalProbe = await evalValue(
     cdp,
     `(() => ({
@@ -499,6 +616,7 @@ async function main() {
     attachMs: attachedAt - launchedAt,
     ready,
     scenarios,
+    visionFetches: summarizeVisionFetches(finalProbe, visionMarker),
     finalProbe,
     longTaskCount: localLongTaskCount(finalProbe),
     network,
