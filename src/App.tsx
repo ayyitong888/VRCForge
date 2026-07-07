@@ -56,6 +56,7 @@ import { useProtectionWorkspaceController } from "./hooks/use-protection-workspa
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
+import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "./lib/app-view";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
@@ -100,7 +101,6 @@ import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildRuntimeSchedule } from "./lib/runtime-schedule";
-import { emptySkillDraft } from "./lib/skill-draft";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
@@ -114,32 +114,20 @@ import {
   AgentApproval,
   AgentRuntimeResponse,
   AgentReasoningTrace,
-  AgentSkill,
-  AgentSkillRegistry,
   SubAgentTask,
   SubAgentTaskList,
   ApiError,
   AppBootstrap,
   DoctorReport,
-  SkillPackageEntry,
-  SkillPackagePreflight,
-  checkSkills,
   compactAgentHistory,
   cancelSubAgent,
   createAgentGoal,
   createAgentMemory,
   createSubAgent,
-  createSkill,
-  deleteSkill,
-  exportSkillPackage,
   fetchBootstrap,
   fetchDoctor,
-  fetchSkillPackages,
-  fetchSkills,
-  AgentSkillCheck,
   ExecutionMode,
   PermissionState,
-  blockSkillPackage,
   fetchAgentDesktopActions,
   fetchAgentGoals,
   fetchAgentMemory,
@@ -149,20 +137,12 @@ import {
   fetchAppHealth,
   fetchSubAgent,
   fetchSubAgents,
-  importSkillPackage,
-  preflightSkillPackage,
   requestAgentDesktopAction,
   refreshProjects,
   repairUnityMcpBridge,
-  revokeSkillPackageSigner,
-  retrySubAgent,
-  setSkillPackageSafeMode,
-  setSkillPackageEnabled,
   setAppSessionToken,
-  trustSkillPackageSigner,
+  retrySubAgent,
   updatePermission,
-  updateSkill,
-  uninstallSkillPackage,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
@@ -274,18 +254,6 @@ export default function App() {
   const [compacting, setCompacting] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
-  const [skillRegistry, setSkillRegistry] = useState<AgentSkillRegistry | null>(null);
-  const [skillCheck, setSkillCheck] = useState<AgentSkillCheck | null>(null);
-  const [selectedSkillName, setSelectedSkillName] = useState("");
-  const [skillDraft, setSkillDraft] = useState<Partial<AgentSkill>>(emptySkillDraft());
-  const [savingSkill, setSavingSkill] = useState(false);
-  const [skillPackages, setSkillPackages] = useState<SkillPackageEntry[]>([]);
-  const [skillPackageStore, setSkillPackageStore] = useState("");
-  const [skillPackageGovernance, setSkillPackageGovernance] = useState<Record<string, unknown>>({});
-  const [skillPackageAudit, setSkillPackageAudit] = useState<Array<Record<string, unknown>>>([]);
-  const [loadingSkillPackages, setLoadingSkillPackages] = useState(false);
-  const [skillPackageMessage, setSkillPackageMessage] = useState("");
-  const [skillPackageError, setSkillPackageError] = useState("");
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
@@ -410,6 +378,48 @@ export default function App() {
     setDoctorMessage,
   });
   const {
+    skills,
+    skillCount,
+    skillCheck,
+    selectedSkillName,
+    skillDraft,
+    savingSkill,
+    skillPackages,
+    skillPackageStore,
+    skillPackageGovernance,
+    skillPackageAudit,
+    loadingSkillPackages,
+    skillPackageMessage,
+    skillPackageError,
+    openSkills,
+    loadSkillPackages,
+    preflightVskPackage,
+    importVskPackage,
+    exportVskPackage,
+    setVskPackageEnabled,
+    uninstallVskPackage,
+    setVskPackageSafeMode,
+    trustVskPackageSigner,
+    revokeVskPackageSigner,
+    blockVskPackage,
+    selectSkill,
+    newSkill,
+    runSkillCheck,
+    saveSkill,
+    removeSelectedSkill,
+    setSkillDraft,
+  } = useSkillsWorkspaceController({
+    endpoint,
+    runtimeConnected,
+    bootstrapSkills: bootstrap?.agentManifest.skills ?? [],
+    activeView,
+    setActiveView,
+    startRuntime,
+    refresh,
+    setError,
+    t,
+  });
+  const {
     optimizationReport,
     optimizationTargetProfile,
     optimizationAvatarPath,
@@ -483,8 +493,6 @@ export default function App() {
   const showDoctorStartupPrompt =
     activeView !== "doctor" && dismissedDoctorPromptSignature !== doctorPromptSignature && (hasStartupIssue || hasEnvironmentAttention);
   const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
-  const skills = skillRegistry?.skills ?? bootstrap?.agentManifest.skills ?? [];
-  const skillCount = skillRegistry?.count ?? skills.length;
   const slashCommands = useMemo(() => {
     const list: Array<{ name: string; title: string }> = [
       { name: "compact", title: t("chat.slashCompact") },
@@ -2099,301 +2107,6 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setRepairingUnityBridge(false);
-    }
-  }
-
-  async function openSkills() {
-    setActiveView("skills");
-    setError("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const [payload] = await Promise.all([fetchSkills(targetEndpoint), loadSkillPackages(targetEndpoint)]);
-      setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(targetEndpoint));
-      if (!selectedSkillName && payload.skills.length > 0) {
-        const firstUserSkill = payload.skills.find((skill) => skill.source === "user") || payload.skills[0];
-        selectSkill(firstUserSkill);
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  async function loadSkillPackages(target = endpoint) {
-    setLoadingSkillPackages(true);
-    setSkillPackageError("");
-    try {
-      let targetEndpoint = target;
-      if (!runtimeConnected && target === endpoint) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return null;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = await fetchSkillPackages(targetEndpoint);
-      setSkillPackages(payload.installed || []);
-      setSkillPackageStore(payload.store || "");
-      setSkillPackageGovernance((payload.governance || {}) as Record<string, unknown>);
-      setSkillPackageAudit(payload.audit || []);
-      return payload;
-    } catch (cause) {
-      setSkillPackageError(cause instanceof Error ? cause.message : String(cause));
-      return null;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function preflightVskPackage(packagePath: string) {
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    const payload = await preflightSkillPackage(endpoint, { packagePath });
-    setSkillPackageMessage("Package preflight completed");
-    return payload;
-  }
-
-  async function importVskPackage(packagePath: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await importSkillPackage(endpoint, { packagePath });
-      setSkillPackageMessage(payload.changed === false ? "Package already installed" : t("package.messages.packageImported"));
-      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
-      await refresh(endpoint);
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function exportVskPackage(skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await exportSkillPackage(endpoint, { skillName, outputPath, release, privateKeyPath: privateKeyPath || undefined });
-      setSkillPackageMessage(release ? t("package.messages.releaseExported") : t("package.messages.devExported"));
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function setVskPackageEnabled(skillPackageId: string, enabled: boolean) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await setSkillPackageEnabled(endpoint, skillPackageId, { enabled, syncProjectedSkill: true });
-      setSkillPackageMessage(enabled ? t("package.messages.packageEnabled") : t("package.messages.packageDisabled"));
-      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
-      await refresh(endpoint);
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function uninstallVskPackage(skillPackageId: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await uninstallSkillPackage(endpoint, skillPackageId, { removeProjectedSkill: true });
-      setSkillPackageMessage(t("package.messages.packageUninstalled"));
-      const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
-      await refresh(endpoint);
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function refreshSkillWorkspaceState() {
-    const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-    setSkillRegistry(skillsPayload);
-    setSkillCheck(await checkSkills(endpoint));
-    await refresh(endpoint);
-  }
-
-  async function setVskPackageSafeMode(enabled: boolean, reason?: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await setSkillPackageSafeMode(endpoint, { enabled, reason: reason || undefined });
-      setSkillPackageMessage(enabled ? t("package.messages.safeModeEnabled") : t("package.labels.safeModeDisabled"));
-      await refreshSkillWorkspaceState();
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function trustVskPackageSigner(signerFingerprint: string, reason?: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await trustSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
-      setSkillPackageMessage(t("package.messages.signerTrusted"));
-      await refreshSkillWorkspaceState();
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function revokeVskPackageSigner(signerFingerprint: string, reason?: string) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await revokeSkillPackageSigner(endpoint, { signerFingerprint, reason: reason || undefined });
-      setSkillPackageMessage(t("package.messages.signerRevoked"));
-      await refreshSkillWorkspaceState();
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  async function blockVskPackage(request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) {
-    setLoadingSkillPackages(true);
-    setSkillPackageMessage("");
-    setSkillPackageError("");
-    try {
-      const payload = await blockSkillPackage(endpoint, request);
-      setSkillPackageMessage(t("package.messages.packageBlocked"));
-      await refreshSkillWorkspaceState();
-      return payload;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSkillPackageError(message);
-      throw cause;
-    } finally {
-      setLoadingSkillPackages(false);
-    }
-  }
-
-  function selectSkill(skill: AgentSkill) {
-    setSelectedSkillName(skill.name);
-    setSkillDraft({ ...skill });
-  }
-
-  function newSkill() {
-    setSelectedSkillName("");
-    setSkillDraft(emptySkillDraft());
-  }
-
-  async function runSkillCheck() {
-    setError("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      setSkillCheck(await checkSkills(targetEndpoint));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  async function saveSkill(event?: FormEvent) {
-    event?.preventDefault();
-    if (!skillDraft.name || savingSkill) {
-      return;
-    }
-    setSavingSkill(true);
-    setError("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
-      }
-      const payload = selectedSkillName
-        ? await updateSkill(targetEndpoint, selectedSkillName, skillDraft)
-        : await createSkill(targetEndpoint, skillDraft);
-      setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(targetEndpoint));
-      setSelectedSkillName(payload.skill.name);
-      setSkillDraft({ ...payload.skill });
-      await refresh(targetEndpoint);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSavingSkill(false);
-    }
-  }
-
-  async function removeSelectedSkill() {
-    if (!selectedSkillName || savingSkill) {
-      return;
-    }
-    setSavingSkill(true);
-    setError("");
-    try {
-      const payload = await deleteSkill(endpoint, selectedSkillName);
-      setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(endpoint));
-      setSelectedSkillName("");
-      setSkillDraft(emptySkillDraft());
-      await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSavingSkill(false);
     }
   }
 
