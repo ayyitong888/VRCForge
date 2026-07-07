@@ -2,6 +2,12 @@ import { AlertTriangle, Download, Eye, Gauge, History, Loader2, RefreshCw, Rotat
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AvatarListItem, OptimizationPlannerReport, OptimizationProofDetail, OptimizationProofSummary, PermissionState } from "../../lib/api";
+import {
+  isMeshiaOptimizationRequest,
+  isTttOptimizationRequest,
+  optimizationActionMissingRequiredOptions,
+  type OptimizationActionOptions,
+} from "../../lib/optimization-options";
 import { permissionVisualState } from "../../lib/permission-ui";
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
@@ -17,14 +23,6 @@ const OPTIMIZATION_TARGET_PROFILES = [
   { id: "event_light", label: "Event Light" },
   { id: "custom", label: "Custom" },
 ];
-
-
-
-export type OptimizationActionOptions = {
-  atlasTargetMaterials?: string;
-  rendererPath?: string;
-  relativeVertexCount?: string;
-};
 
 type OptimizationActionCardItem = NonNullable<OptimizationPlannerReport["actionCards"]>[number];
 
@@ -704,51 +702,6 @@ function shortPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
   const parts = normalized.split("/").filter(Boolean);
   return parts.slice(-2).join("/") || path;
-}
-
-function optimizationRequestSignature(card: OptimizationActionCardItem): string {
-  return `${card.id || ""} ${card.requestTool || ""} ${card.title || ""}`.toLowerCase();
-}
-
-function isTttOptimizationRequest(card: OptimizationActionCardItem): boolean {
-  const signature = optimizationRequestSignature(card);
-  return signature.includes("ttt") || signature.includes("textrans") || signature.includes("atlas");
-}
-
-function isMeshiaOptimizationRequest(card: OptimizationActionCardItem): boolean {
-  return optimizationRequestSignature(card).includes("meshia");
-}
-
-function splitOptimizationOptionLines(value?: string): string[] {
-  return String(value || "")
-    .split(/[\n,;]+/g)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-export function buildOptimizationRequestOptions(card: OptimizationActionCardItem, options: OptimizationActionOptions): Record<string, unknown> {
-  const payload: Record<string, unknown> = {};
-  if (isTttOptimizationRequest(card)) {
-    payload.atlasTargetMaterials = splitOptimizationOptionLines(options.atlasTargetMaterials);
-  }
-  if (isMeshiaOptimizationRequest(card)) {
-    payload.rendererPath = String(options.rendererPath || "").trim();
-    const ratio = Number(options.relativeVertexCount || "0.9");
-    if (Number.isFinite(ratio)) {
-      payload.relativeVertexCount = ratio;
-    }
-  }
-  return payload;
-}
-
-function optimizationActionMissingRequiredOptions(card: OptimizationActionCardItem, options: OptimizationActionOptions): boolean {
-  if (isTttOptimizationRequest(card)) {
-    return splitOptimizationOptionLines(options.atlasTargetMaterials).length === 0;
-  }
-  if (isMeshiaOptimizationRequest(card)) {
-    return !String(options.rendererPath || "").trim();
-  }
-  return false;
 }
 
 function dependencyTone(status?: string) {

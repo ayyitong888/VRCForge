@@ -676,9 +676,7 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
         lambda: AgentGatewayConfig(
             enabled=True,
             allow_write_requests=True,
-            allow_roslyn_advanced=True,
             execution_mode="roslyn_full_auto",
-            roslyn_risk_acknowledged=True,
         ),
     )
     try:
@@ -687,7 +685,6 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
             "Test full permission write.",
             "critical",
             write_handler,
-            advanced=True,
         )
         payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
             {
