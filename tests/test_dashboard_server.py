@@ -223,6 +223,61 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
 
+    def test_chat_transcripts_filter_unstarted_empty_chats_on_write_and_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            chats = [
+                {"id": "empty-temp", "projectPath": "", "title": "", "sessionId": "", "pinned": True, "items": []},
+                {"id": "empty-project", "projectPath": str(project), "title": "", "sessionId": "", "items": []},
+                {"id": "temp-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "temporary"}]},
+                {"id": "project-chat", "projectPath": str(project), "items": [{"id": "u2", "type": "user", "text": "project"}]},
+            ]
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/chats", json={"chats": chats})
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["count"], 2)
+                self.assertEqual(payload["appCount"], 1)
+                self.assertEqual(len(payload["projectPaths"]), 1)
+
+                app_path = Path(payload["path"])
+                project_path = project / ".vrcforge" / "chat-transcripts.json"
+                self.assertEqual([chat["id"] for chat in json.loads(app_path.read_text(encoding="utf-8"))["chats"]], ["temp-chat"])
+                self.assertEqual([chat["id"] for chat in json.loads(project_path.read_text(encoding="utf-8"))["chats"]], ["project-chat"])
+
+                app_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "chats": [
+                                {"id": "old-empty-temp", "projectPath": "", "title": "", "sessionId": "", "items": []},
+                                {"id": "temp-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "temporary"}]},
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                project_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "scope": "project",
+                            "chats": [
+                                {"id": "old-empty-project", "projectPath": str(project), "title": "", "sessionId": "", "items": []},
+                                {"id": "project-chat", "projectPath": str(project), "items": [{"id": "u2", "type": "user", "text": "project"}]},
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                read_response = client.get("/api/app/chats", params=[("projectPath", str(project))])
+                self.assertEqual(read_response.status_code, 200)
+                self.assertEqual({chat["id"] for chat in read_response.json()["chats"]}, {"temp-chat", "project-chat"})
+                self.assertEqual(read_response.json()["count"], 2)
+
     def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
 

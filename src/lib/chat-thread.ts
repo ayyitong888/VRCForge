@@ -1,4 +1,5 @@
-import type { ChatThread } from "./chat-types";
+import type { AgentContextUsage } from "./api";
+import type { ChatThread, ConversationItem } from "./chat-types";
 
 export type ChatSidebarGroups = {
   temporaryChats: ChatThread[];
@@ -17,6 +18,9 @@ export function groupSidebarChats(
   const projectChatsByPath = new Map<string, ChatThread[]>();
   for (const chat of list) {
     if (chat.archived) {
+      continue;
+    }
+    if (isUnstartedChat(chat)) {
       continue;
     }
     const key = normalizeProjectPath(chat.projectPath || "");
@@ -47,6 +51,58 @@ export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
     createdAt: chat.createdAt || isoFromTime(createdMs),
     updatedAt: chat.updatedAt || isoFromTime(updatedMs),
   };
+}
+
+export function cacheChatContextUsageFast(chat: ChatThread): ChatThread {
+  const latestUsage = latestExactAgentContextUsage(chat.items);
+  if (!latestUsage) {
+    if (chat.contextUsageCache) {
+      const { contextUsageCache: _contextUsageCache, ...rest } = chat;
+      return rest;
+    }
+    return chat;
+  }
+  return { ...chat, contextUsageCache: latestUsage };
+}
+
+export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
+  return list.filter((chat) => !isUnstartedChat(chat));
+}
+
+export function normalizeChatContextUsage(value: unknown): AgentContextUsage | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const usage = value as AgentContextUsage;
+  if (usage.exact !== true) {
+    return undefined;
+  }
+  const hasTokenCount =
+    typeof usage.inputTokens === "number" ||
+    typeof usage.totalTokens === "number" ||
+    typeof usage.outputTokens === "number";
+  return hasTokenCount ? usage : undefined;
+}
+
+function latestExactAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "agent") {
+      const usage = normalizeChatContextUsage(item.response.contextUsage);
+      if (usage) {
+        return usage;
+      }
+    }
+  }
+  return undefined;
+}
+
+function isUnstartedChat(chat: ChatThread): boolean {
+  return (
+    chat.items.length === 0 &&
+    !(chat.title || "").trim() &&
+    !(chat.sessionId || "").trim()
+  );
 }
 
 export function formatChatSidebarTime(chat: ChatThread, nowMs = Date.now(), language = "en"): string {

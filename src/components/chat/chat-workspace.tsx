@@ -174,14 +174,18 @@ export function ChatWorkspace({
             const otherAttachments = turn.attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
             return (
               <div key={turn.id} className="flex justify-end opacity-65">
-                <div className="max-w-[72%] rounded-2xl border border-border bg-muted/80 px-4 py-3 text-sm text-foreground">
-                  <div className="mb-1 flex items-center gap-1 text-[10px] opacity-90">
+                <div className="flex max-w-[72%] flex-col items-end gap-2 text-sm text-foreground">
+                  <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[10px] text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" />
                     {t("chat.queued")} {index + 1}
                   </div>
                   {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
-                  <p className="whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
-                  {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
+                  <p className="rounded-2xl bg-muted px-4 py-2.5 whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
+                  {otherAttachments.length ? (
+                    <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2">
+                      <AttachmentStrip attachments={otherAttachments} compact />
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );

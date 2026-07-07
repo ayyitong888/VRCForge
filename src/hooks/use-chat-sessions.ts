@@ -3,7 +3,13 @@ import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import { isTauriRuntime } from "../lib/app-runtime";
-import { cacheChatTimestampsFast, isStoredChat } from "../lib/chat-thread";
+import {
+  cacheChatContextUsageFast,
+  cacheChatTimestampsFast,
+  filterPersistableChats,
+  isStoredChat,
+  normalizeChatContextUsage,
+} from "../lib/chat-thread";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
 import { buildChatSidebarView } from "../lib/sidebar-view";
@@ -102,9 +108,10 @@ export function useChatSessions({
             agentName: typeof chat.agentName === "string" ? chat.agentName : "",
             pinned: chat.pinned === true,
             archived: chat.archived === true,
+            contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
             items: chat.items,
           };
-          const cached = cacheChatTimestampsFast(normalized);
+          const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
           shouldCacheRestoredTimestamps =
             shouldCacheRestoredTimestamps || cached.createdAt !== normalized.createdAt || cached.updatedAt !== normalized.updatedAt;
           return cached;
@@ -126,7 +133,7 @@ export function useChatSessions({
                 if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restored.length) {
                   return;
                 }
-                void saveChats(endpoint, chatsRef.current);
+                void saveChats(endpoint, filterPersistableChats(chatsRef.current));
               }, 3000);
             }
           }
@@ -150,7 +157,7 @@ export function useChatSessions({
     }
     const saveVersion = chatsSaveVersionRef.current;
     const timer = window.setTimeout(() => {
-      void saveChats(endpoint, chats)
+      void saveChats(endpoint, filterPersistableChats(chats))
         .then(() => {
           if (chatsSaveVersionRef.current === saveVersion) {
             chatsDirtyRef.current = false;
@@ -174,7 +181,7 @@ export function useChatSessions({
 
   function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
     markChatsDirty();
-    setChats((list) => list.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
+    setChats((list) => list.map((chat) => (chat.id === chatId ? cacheChatContextUsageFast(updater(chat)) : chat)));
   }
 
   function appendToChat(chatId: string, item: ConversationItem) {
@@ -248,16 +255,7 @@ export function useChatSessions({
     setActiveProjectPath("");
     setError("");
     expandProjectGroup(TEMP_CHATS_COLLAPSE_KEY);
-    const existingEmpty = chats.find((chat) => !chat.projectPath && !chat.archived && chat.items.length === 0);
-    if (existingEmpty) {
-      setActiveChatId(existingEmpty.id);
-      return;
-    }
-    const id = `chat-${Date.now()}`;
-    const now = new Date().toISOString();
-    markChatsDirty();
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: "", createdAt: now, updatedAt: now, items: [] }, ...list]);
-    setActiveChatId(id);
+    setActiveChatId("");
   }
 
   function archiveProjectChats(path: string, archived: boolean) {

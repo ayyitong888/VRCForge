@@ -440,6 +440,19 @@ export type AgentRuntimeResponse = {
   skill?: AgentSkillResult;
   result?: AgentShellResult;
   vision?: AgentVisionAnalysis;
+  steps?: Array<{
+    index?: number;
+    kind?: string;
+    tool?: string;
+    summary?: string;
+    status?: string;
+    provider?: string;
+    providerLabel?: string;
+    model?: string;
+    source?: string;
+    usage?: AgentContextUsage;
+    imageCount?: number;
+  }>;
 };
 
 export type AgentRuntimeRun = {

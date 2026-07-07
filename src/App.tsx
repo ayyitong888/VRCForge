@@ -798,22 +798,20 @@ export default function App() {
     [modelOptions, modelOptionsScope, providerSnapshot.model, providerSnapshot.provider, savedBaseUrl],
   );
   const latestContextUsage = useMemo(() => latestAgentContextUsage(conversation), [conversation]);
-  const latestContextUsageDisplay = useRef<ContextUsage | undefined>(undefined);
   const contextUsage = useMemo(() => {
     if (!apiConfig && !smokeMode) {
-      latestContextUsageDisplay.current = undefined;
       return undefined;
     }
     const nextUsage = buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t);
     if (nextUsage?.source === "provider_usage") {
-      latestContextUsageDisplay.current = nextUsage;
       return nextUsage;
     }
-    if (latestContextUsageDisplay.current) {
-      return { ...latestContextUsageDisplay.current, cached: true };
+    const cachedUsage = buildContextUsageFromRuntime(activeChat?.contextUsageCache, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t);
+    if (cachedUsage?.source === "provider_usage") {
+      return { ...cachedUsage, cached: true };
     }
     return nextUsage;
-  }, [apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  }, [activeChat?.contextUsageCache, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
   const compactDebugEntries = useMemo(
     () =>
       (activeChat?.items || [])

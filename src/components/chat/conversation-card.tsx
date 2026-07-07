@@ -23,7 +23,7 @@ import {
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import type { AgentApproval, AgentReasoningTrace, AgentSkillResult } from "../../lib/api";
+import type { AgentApproval, AgentReasoningTrace, AgentRuntimeResponse, AgentSkillResult } from "../../lib/api";
 import type { ApprovalActionState, ChatAttachment, ConversationItem, MessageFeedback } from "../../lib/chat-types";
 import { thinkingTraceLabel } from "../../lib/provider-ui";
 import { cn } from "../../lib/utils";
@@ -74,18 +74,24 @@ export function ConversationCard({
     const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     return (
       <div className="group flex justify-end">
-        <div className="relative flex max-w-[78%] flex-col items-end">
+        <div className="relative flex max-w-[78%] flex-col items-end gap-2">
           {item.queuedFrom ? (
-            <div className="mb-1 flex items-center gap-1 rounded-full border border-border bg-muted/80 px-2 py-1 text-[11px] text-muted-foreground">
+            <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
               <MessageSquare className="h-3 w-3" />
               {t("chat.queuedSent")}
             </div>
           ) : null}
-          <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
-            {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
-            {item.text ? <ChatMarkdown text={item.text} variant="user" /> : null}
-            {otherAttachments.length ? <AttachmentStrip attachments={otherAttachments} compact /> : null}
-          </div>
+          {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
+          {item.text ? (
+            <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">
+              <ChatMarkdown text={item.text} />
+            </div>
+          ) : null}
+          {otherAttachments.length ? (
+            <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
+              <AttachmentStrip attachments={otherAttachments} compact />
+            </div>
+          ) : null}
           <MessageActions
             align="right"
             onCopy={() => onCopyItem?.(item)}
@@ -166,17 +172,13 @@ export function ConversationCard({
   if (item.type === "compact") {
     const running = item.status === "running";
     return (
-      <div className="group relative max-w-[85%] rounded-xl border border-dashed border-border bg-muted/30 px-4 py-3 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          {running ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" /> : <Check className="h-4 w-4 shrink-0 text-muted-foreground" />}
-          <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">{item.text}</span>
+      <div className="group flex max-w-[85%] items-center gap-3 py-1 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border/70" />
+        <div className="flex shrink-0 items-center gap-1.5">
+          {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+          <span>{item.text}</span>
         </div>
-        {item.entryCount || item.createdAt ? (
-          <div className="mt-1 truncate pl-6 text-xs text-muted-foreground/80">
-            {[item.entryCount ? t("compact.entryCount", { count: item.entryCount }) : "", item.createdAt || ""].filter(Boolean).join(" · ")}
-          </div>
-        ) : null}
-        <MessageActions onCopy={() => onCopyItem?.(item)} />
+        <div className="h-px flex-1 bg-border/70" />
       </div>
     );
   }
@@ -212,6 +214,7 @@ export function ConversationCard({
   const shell = response.shell;
   const skill = response.skill;
   const vision = response.vision;
+  const timelineOrder = buildAgentTimelineOrder(response);
   const awaitingApproval = shell?.status === "pending_approval";
   const localIdle =
     response.plan.planner === "deterministic-local" &&
@@ -246,8 +249,8 @@ export function ConversationCard({
 
   return (
     <div className="group flex justify-start">
-      <div className="relative w-full max-w-[85%] space-y-1.5">
-        <div className="px-1 text-sm">
+      <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
+        <div className="order-last px-1 text-sm">
           <ChatMarkdown text={response.plan.reply || response.plan.summary} />
           {false && showIntent ? (
             <p className="hidden">
@@ -270,6 +273,7 @@ export function ConversationCard({
             title={displayStep(nextStep)}
             statusTone="muted"
             statusLabel={response.plan.skillTool ? "tool planned" : response.plan.shellCommand ? "command planned" : "planned"}
+            timelineOrder={timelineOrder.plan}
           >
             <DataLine label="Planner" value={response.plan.plannerLabel || displayPlanner(response.plan.planner)} />
             {response.plan.skillTool ? <DataLine label="Tool" value={response.plan.skillTool} mono /> : null}
@@ -283,6 +287,7 @@ export function ConversationCard({
           trace={response.reasoning}
           fallbackLabel={item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}
           elapsedSeconds={item.elapsedSeconds}
+          timelineOrder={timelineOrder.reasoning}
         />
 
         {vision ? (
@@ -303,6 +308,7 @@ export function ConversationCard({
                   ? t("skillStatus.failed")
                   : t("vision.stepUnconfigured")
             }
+            timelineOrder={timelineOrder.vision}
           >
             {vision.imageNames && vision.imageNames.length > 0 ? (
               <DataLine label={t("vision.images")} value={vision.imageNames.join(", ")} />
@@ -331,6 +337,7 @@ export function ConversationCard({
                   ? t("shell.awaitConfirmation")
                   : t("shell.riskLevel", { level: shell.classification.risk })
             }
+            timelineOrder={timelineOrder.shell}
           >
             <DataLine label={t("approval.directory")} value={shell.classification.cwd} />
             <div className="overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
@@ -356,7 +363,13 @@ export function ConversationCard({
         ) : null}
 
         {skill ? (
-          <RunRow icon="skill" title={skill.tool || t("skills.skillCall")} statusTone={skillTone(skill)} statusLabel={displaySkillStatus(skill.status)}>
+          <RunRow
+            icon="skill"
+            title={skill.tool || t("skills.skillCall")}
+            statusTone={skillTone(skill)}
+            statusLabel={displaySkillStatus(skill.status)}
+            timelineOrder={timelineOrder.skill}
+          >
             <DataLine label={t("skills.tool")} value={skill.tool || "-"} mono />
             {skill.category ? <DataLine label={t("skills.category")} value={skill.category} /> : null}
             {skill.error ? <DataLine label={t("skills.error")} value={skill.error} /> : null}
@@ -365,21 +378,23 @@ export function ConversationCard({
         ) : null}
 
         {approval ? (
-          <InlineApprovalCard
-            approval={approval}
-            action={approvalAction}
-            onApprove={onApprove}
-            onReject={onReject}
-            onModify={onModifyApproval}
-          />
+          <div style={{ order: timelineOrder.approval }}>
+            <InlineApprovalCard
+              approval={approval}
+              action={approvalAction}
+              onApprove={onApprove}
+              onReject={onReject}
+              onModify={onModifyApproval}
+            />
+          </div>
         ) : awaitingApproval ? (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
+          <div className="flex items-center gap-2 px-1 py-1 text-xs text-amber-700" style={{ order: timelineOrder.approval }}>
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span>{t("approval.awaitingInline")}</span>
           </div>
         ) : null}
         {shell?.error ? (
-          <RunRow icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")}>
+          <RunRow icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")} timelineOrder={timelineOrder.shellError}>
             <DataLine label={t("skills.error")} value={shell.error} />
           </RunRow>
         ) : null}
@@ -422,12 +437,12 @@ export function UserImageAttachments({ attachments }: { attachments: ChatAttachm
   }
   return (
     <>
-      <div className="mb-2 flex flex-wrap justify-end gap-2">
+      <div className="flex flex-wrap justify-end gap-2">
         {attachments.map((attachment) => (
           <button
             key={attachment.id}
             type="button"
-            className="group/image block overflow-hidden rounded-lg border border-primary-foreground/25 bg-primary-foreground/15 transition hover:border-primary-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary-foreground/70"
+            className="group/image block overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
             onClick={() => setPreview(attachment)}
             aria-label={t("chat.imagePreview")}
             title={attachment.name}
@@ -444,11 +459,11 @@ export function UserImageAttachments({ attachments }: { attachments: ChatAttachm
           aria-label={t("chat.imagePreview")}
           onClick={() => setPreview(null)}
         >
-          <div className="relative max-h-full max-w-full" onClick={(event) => event.stopPropagation()}>
+          <div className="relative flex max-h-full max-w-full items-center justify-center" onClick={(event) => event.stopPropagation()}>
             <button
               ref={closeButtonRef}
               type="button"
-              className="absolute right-2 top-2 z-10 rounded-full bg-black/65 p-1.5 text-white transition hover:bg-black"
+              className="fixed right-5 top-5 z-10 rounded-full bg-black/70 p-2 text-white transition hover:bg-black focus:outline-none focus:ring-2 focus:ring-white/80"
               onClick={() => setPreview(null)}
               aria-label={closeLabel}
               title={closeLabel}
@@ -488,7 +503,7 @@ function MessageActions({
   return (
     <div
       className={cn(
-        "mt-1 flex items-center gap-1 px-1 text-muted-foreground",
+        "order-last mt-1 flex items-center gap-1 px-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
       )}
     >
@@ -557,14 +572,75 @@ function MessageActions({
   );
 }
 
+type AgentTimelineKey = "plan" | "reasoning" | "vision" | "shell" | "skill" | "approval" | "shellError";
+
+type AgentTimelineOrder = Record<AgentTimelineKey, number>;
+
+const DEFAULT_AGENT_TIMELINE_ORDER: AgentTimelineOrder = {
+  plan: 10,
+  reasoning: 20,
+  vision: 30,
+  shell: 40,
+  skill: 50,
+  approval: 60,
+  shellError: 70,
+};
+
+function buildAgentTimelineOrder(response: AgentRuntimeResponse): AgentTimelineOrder {
+  const order: AgentTimelineOrder = { ...DEFAULT_AGENT_TIMELINE_ORDER };
+  const assigned = new Set<AgentTimelineKey>();
+  const steps = [...(response.steps || [])].sort((left, right) => {
+    const leftIndex = typeof left.index === "number" ? left.index : Number.MAX_SAFE_INTEGER;
+    const rightIndex = typeof right.index === "number" ? right.index : Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+    return 0;
+  });
+  let nextOrder = 10;
+  for (const step of steps) {
+    const key = agentTimelineKeyForStep(step.kind, step.tool);
+    if (!key || assigned.has(key)) {
+      continue;
+    }
+    order[key] = nextOrder;
+    assigned.add(key);
+    nextOrder += 10;
+  }
+  return order;
+}
+
+function agentTimelineKeyForStep(kind?: string, tool?: string): AgentTimelineKey | undefined {
+  const normalizedKind = (kind || "").toLowerCase();
+  const normalizedTool = (tool || "").toLowerCase();
+  if (normalizedKind.includes("vision")) {
+    return "vision";
+  }
+  if (normalizedKind.includes("approval")) {
+    return "approval";
+  }
+  if (normalizedKind.includes("shell") || normalizedTool.includes("shell")) {
+    return "shell";
+  }
+  if (normalizedKind.includes("skill") || normalizedKind.includes("tool")) {
+    return "skill";
+  }
+  if (normalizedKind.includes("plan")) {
+    return "plan";
+  }
+  return undefined;
+}
+
 function ReasoningTracePanel({
   trace,
   fallbackLabel,
   elapsedSeconds,
+  timelineOrder,
 }: {
   trace?: AgentReasoningTrace;
   fallbackLabel: string;
   elapsedSeconds?: number;
+  timelineOrder?: number;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -577,26 +653,26 @@ function ReasoningTracePanel({
   const model = trace?.model || "";
   const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-panel">
+    <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/50"
+        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
         {open ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         ) : (
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         )}
-        <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 flex-1 truncate text-xs">{title}</span>
+        <Sparkles className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 truncate text-xs">{title}</span>
         {elapsedSeconds ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{formatDuration(elapsedSeconds)}</span> : null}
-        <Badge tone={trace?.redacted ? "warn" : "muted"} className="shrink-0">
+        <span className={cn("shrink-0 text-xs", trace?.redacted ? "text-amber-600" : "text-muted-foreground")}>
           {items.length}
-        </Badge>
+        </span>
       </button>
       {open ? (
-        <div className="space-y-2 border-t border-border/70 px-2 py-2">
+        <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
           <DataLine label={t("thinking.provider")} value={provider} />
           {model ? <DataLine label={t("thinking.model")} value={model} mono /> : null}
           {trace?.source ? <DataLine label={t("thinking.source")} value={trace.source} mono /> : null}
@@ -619,34 +695,36 @@ function RunRow({
   statusTone,
   statusLabel,
   children,
+  timelineOrder,
 }: {
   icon: "shell" | "skill" | "plan" | "vision";
   title: string;
   statusTone: "ok" | "warn" | "danger" | "muted";
   statusLabel: string;
   children: ReactNode;
+  timelineOrder?: number;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
   return (
-    <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
+    <div className="group/run text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/50"
+        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
         {open ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         ) : (
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         )}
-        <Icon className="h-3.5 w-3.5 shrink-0 text-primary" />
-        <span className={cn("min-w-0 flex-1 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{title}</span>
-        <Badge tone={statusTone} className="shrink-0">
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className={cn("min-w-0 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{title}</span>
+        <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
-        </Badge>
+        </span>
       </button>
-      {open ? <div className="space-y-2 border-t border-border/70 px-2 py-2">{children}</div> : null}
+      {open ? <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">{children}</div> : null}
     </div>
   );
 }

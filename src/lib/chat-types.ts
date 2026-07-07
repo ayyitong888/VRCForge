@@ -1,4 +1,4 @@
-import type { AgentRuntimeResponse, AgentShellResult, SubAgentTask } from "./api";
+import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, SubAgentTask } from "./api";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 
@@ -62,6 +62,7 @@ export type ChatThread = {
   agentName?: string;
   pinned?: boolean;
   archived?: boolean;
+  contextUsageCache?: AgentContextUsage;
   items: ConversationItem[];
 };
 

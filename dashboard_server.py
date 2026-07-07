@@ -2560,7 +2560,7 @@ def load_chat_transcript_file(path: Path) -> list[dict[str, Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and isinstance(payload.get("chats"), list):
-                chats = [item for item in payload["chats"] if isinstance(item, dict)]
+                chats = [item for item in payload["chats"] if isinstance(item, dict) and not is_empty_chat_transcript(item)]
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=f"无法读取会话记录: {exc}") from exc
     return chats
@@ -2593,7 +2593,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    chats = request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS]
+    chats = [chat for chat in request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS] if not is_empty_chat_transcript(chat)]
     app_chats: list[dict[str, Any]] = []
     project_groups: dict[str, dict[str, Any]] = {}
     for chat in chats:
@@ -2640,6 +2640,13 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
         raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
     project_paths = [{"path": str(path), "count": count} for path, _payload, count in project_serialized]
     return {"ok": True, "path": str(app_path), "count": len(chats), "appCount": len(app_chats), "projectPaths": project_paths}
+
+
+def is_empty_chat_transcript(chat: dict[str, Any]) -> bool:
+    items = chat.get("items")
+    title = str(chat.get("title") or "").strip()
+    session_id = str(chat.get("sessionId") or chat.get("session_id") or "").strip()
+    return isinstance(items, list) and not items and not title and not session_id
 
 
 PROJECT_PREFS_MAX_PATHS = 64
