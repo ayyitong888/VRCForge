@@ -762,6 +762,49 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["attachments"][0]["replayable"])
         self.assertTrue(payload["attachments"][0]["payloadHash"])
 
+    def test_agent_runtime_message_keeps_vision_fallback_out_of_reply(self) -> None:
+        previous_hook = dashboard_server.AGENT_GATEWAY.vision_analyze_fn
+
+        def fake_vision(_message, images):
+            return {
+                "status": "unconfigured",
+                "reason": "Main model is not vision-capable and no vision profile is configured.",
+                "imageCount": len(images),
+                "imageNames": [image.get("name") for image in images],
+                "notice": "(vision fallback notice should stay out of assistant text)",
+            }
+
+        try:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "describe the attached image",
+                        "attachments": [
+                            {
+                                "id": "att-image",
+                                "name": "probe.png",
+                                "type": "image/png",
+                                "size": 68,
+                                "dataUrl": "data:image/png;base64,iVBORw0KGgo=",
+                                "payloadKind": "data_url",
+                            }
+                        ],
+                    },
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = previous_hook
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["vision"]["status"], "unconfigured")
+        self.assertEqual(payload["vision"]["imageCount"], 1)
+        self.assertEqual(payload["steps"][0]["kind"], "vision")
+        self.assertEqual(payload["steps"][0]["imageCount"], 1)
+        self.assertNotIn("vision fallback notice should stay out", payload["plan"].get("reply", ""))
+        self.assertEqual(payload["plan"].get("visionStatus"), "unconfigured")
+
     def test_agent_runtime_message_runs_off_event_loop(self) -> None:
         with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
             with TestClient(dashboard_server.app) as client:

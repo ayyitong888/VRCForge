@@ -1,5 +1,5 @@
 import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, X } from "lucide-react";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
+import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
@@ -28,6 +28,8 @@ function composerActionIcon(action: ComposerActionId): ReactNode {
 }
 
 
+
+type ComposerFileInput = FileList | File[] | null;
 
 export function Composer({
   input,
@@ -64,7 +66,7 @@ export function Composer({
   compact?: boolean;
   disabledReason?: string;
   attachments?: ChatAttachment[];
-  onAttachFiles?: (files: FileList | null) => void;
+  onAttachFiles?: (files: ComposerFileInput) => void;
   onRemoveAttachment?: (id: string) => void;
   contextUsage?: ContextUsage;
   providerLabel?: string;
@@ -75,6 +77,7 @@ export function Composer({
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
@@ -92,8 +95,74 @@ export function Composer({
   const visibleActions: ComposerAction[] = actions.length
     ? actions
     : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
+  const dragActive = dragDepth > 0;
+  const hasDraggedFiles = (event: DragEvent) => Array.from(event.dataTransfer.types || []).includes("Files");
+  const handleDragEnter = (event: DragEvent<HTMLFormElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDragDepth((depth) => depth + 1);
+  };
+  const handleDragOver = (event: DragEvent<HTMLFormElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+  };
+  const handleDragLeave = (event: DragEvent<HTMLFormElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDragDepth((depth) => Math.max(0, depth - 1));
+  };
+  const handleDrop = (event: DragEvent<HTMLFormElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDragDepth(0);
+    onAttachFiles?.(event.dataTransfer.files);
+  };
+  const handlePaste = (event: ClipboardEvent<HTMLFormElement>) => {
+    const pastedFiles = [
+      ...Array.from(event.clipboardData.files || []),
+      ...Array.from(event.clipboardData.items || [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file)),
+    ];
+    const seen = new Set<string>();
+    const files = pastedFiles.filter((file) => {
+      const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+    if (!files.length) {
+      return;
+    }
+    event.preventDefault();
+    onAttachFiles?.(files);
+  };
   return (
-    <form onSubmit={onSubmit} className="relative rounded-3xl bg-muted/70 shadow-composer">
+    <form
+      onSubmit={onSubmit}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      onPaste={handlePaste}
+      className={cn("relative rounded-3xl bg-muted/70 shadow-composer", dragActive && "ring-2 ring-primary/35")}
+    >
       {slashMatches.length > 0 ? (
         <div className="absolute bottom-full left-0 right-0 z-20 mb-2 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
           {slashMatches.map((command) => (
@@ -123,7 +192,7 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className={cn("rounded-3xl border border-border bg-card", compact ? "p-3" : "p-4")}>
+      <div className={cn("rounded-3xl border bg-card transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
         <textarea
           value={input}
           onChange={(event) => setInput(event.target.value)}
@@ -332,6 +401,72 @@ export function AttachmentStrip({
   if (!attachments.length) {
     return null;
   }
+  if (!compact) {
+    return (
+      <div className="flex min-w-0 flex-wrap gap-2">
+        {attachments.map((attachment) => {
+          const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
+          const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
+          const extension = attachmentExtension(attachment, t("attachments.fileTypeFallback"));
+          const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
+          return (
+            <div
+              key={attachment.id}
+              className={cn(
+                "group relative overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-sm",
+                isImage ? "h-28 w-28" : "h-[72px] w-[220px]",
+                isSelectedText && "h-auto min-h-10 w-auto max-w-full rounded-full px-3 py-2",
+              )}
+              title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+            >
+              {isImage && attachment.dataUrl ? (
+                <img src={attachment.dataUrl} alt={attachment.name} className="h-full w-full object-cover" />
+              ) : isSelectedText ? (
+                <div className="flex min-w-0 items-center gap-2 text-xs">
+                  <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 max-w-[220px] truncate">{t("attachments.selectedText", { count: 1 })}</span>
+                </div>
+              ) : (
+                <div className="flex h-full min-w-0 items-center gap-3 px-3">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-muted">
+                    <Archive className="h-5 w-5 text-muted-foreground" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{attachment.name}</div>
+                    <div className="mt-0.5 flex items-center gap-2 text-xs uppercase text-muted-foreground">
+                      <span>{extension}</span>
+                      {attachment.truncated ? <span className="normal-case text-amber-700">{t("attachments.metadataOnly")}</span> : null}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {isSelectedText && selectedPreview ? (
+                <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
+                  {selectedPreview}
+                  {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
+                </div>
+              ) : null}
+              {onRemove ? (
+                <button
+                  type="button"
+                  className={cn(
+                    "absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full transition-colors",
+                    isImage ? "bg-foreground text-background hover:bg-foreground/85" : "bg-foreground text-background hover:bg-foreground/85",
+                    isSelectedText && "static ml-2 inline-flex align-middle",
+                  )}
+                  onClick={() => onRemove(attachment.id)}
+                  title={t("attachments.remove")}
+                  aria-label={t("attachments.remove")}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   return (
     <div className={cn("flex min-w-0 flex-wrap gap-2", compact ? "mt-2" : "")}>
       {attachments.map((attachment) => {
@@ -375,4 +510,13 @@ export function AttachmentStrip({
       })}
     </div>
   );
+}
+
+function attachmentExtension(attachment: ChatAttachment, fallback: string): string {
+  const namePart = attachment.name.includes(".") ? attachment.name.split(".").pop() || "" : "";
+  if (namePart) {
+    return namePart.slice(0, 8);
+  }
+  const typePart = attachment.type.includes("/") ? attachment.type.split("/").pop() || "" : attachment.type;
+  return (typePart || fallback).slice(0, 10);
 }

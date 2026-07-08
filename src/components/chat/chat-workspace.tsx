@@ -74,7 +74,7 @@ export function ChatWorkspace({
   onAction: (action: ComposerActionId) => void | Promise<void>;
   disabledReason: string;
   attachments: ChatAttachment[];
-  onAttachFiles: (files: FileList | null) => void;
+  onAttachFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (id: string) => void;
   contextUsage?: ContextUsage;
   providerLabel: string;

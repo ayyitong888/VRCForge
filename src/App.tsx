@@ -1875,7 +1875,7 @@ export default function App() {
     }
   }
 
-  async function addComposerFiles(files: FileList | null) {
+  async function addComposerFiles(files: FileList | File[] | null) {
     if (!files || files.length === 0) {
       return;
     }

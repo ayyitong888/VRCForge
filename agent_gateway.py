@@ -2297,16 +2297,15 @@ class AgentGateway:
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
 
-        # 视觉委托失败/未配置 → 诚实提示必须出现在给用户的回复里（不静默丢图）。
+        # Non-analyzed image state is rendered by the structured vision step.
         if (
             vision_payload is not None
             and str(vision_payload.get("status") or "") != "analyzed"
             and isinstance(top_plan, dict)
         ):
-            vision_notice = str(vision_payload.get("notice") or "").strip()
-            base_reply = str(top_plan.get("reply") or "").rstrip()
-            if vision_notice and vision_notice not in base_reply:
-                top_plan["reply"] = f"{base_reply}\n\n{vision_notice}".strip() if base_reply else vision_notice
+            # The transcript renders vision availability as a structured step.
+            # Keep fallback notices out of assistant text to avoid duplicate
+            # "image not analyzed" messaging in the user-facing chat flow.
             top_plan["visionStatus"] = vision_payload.get("status")
 
         turn = {
