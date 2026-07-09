@@ -895,7 +895,10 @@ class DashboardServerTests(unittest.TestCase):
                 json={
                     "header": "Accept?",
                     "question": "Which proof should run?",
-                    "options": [{"id": "actual", "label": "Actual app", "value": "Run actual app proof"}],
+                    "options": [
+                        {"id": "actual", "label": "Actual app", "value": "Run actual app proof"},
+                        {"id": "browser", "label": "Browser precheck", "value": "Run browser precheck"},
+                    ],
                     "sessionId": "sess-question",
                     "projectRoot": "ProjectA",
                 },
@@ -913,6 +916,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(answered.status_code, 200)
         self.assertEqual(answered.json()["question"]["selectedOptionId"], "actual")
         self.assertEqual(after_answer.json()["count"], 0)
+
+    def test_agent_questions_require_at_least_two_options(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            created = client.post(
+                "/api/app/agent/questions",
+                json={
+                    "question": "Pick a path",
+                    "options": [{"id": "only", "label": "Only one"}],
+                    "sessionId": "sess-question-min",
+                },
+            )
+
+        self.assertEqual(created.status_code, 400)
+        self.assertIn("at least two options", created.json()["detail"])
+
+    def test_agent_questions_keep_more_than_three_options(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            created = client.post(
+                "/api/app/agent/questions",
+                json={
+                    "question": "Pick a path",
+                    "options": [
+                        {"id": "a", "label": "Recommended"},
+                        {"id": "b", "label": "Conservative"},
+                        {"id": "c", "label": "Broad"},
+                        {"id": "d", "label": "Split work"},
+                    ],
+                    "sessionId": "sess-question-many",
+                },
+            )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual([option["id"] for option in created.json()["question"]["options"]], ["a", "b", "c", "d"])
 
     def test_agent_progress_and_question_tools_are_callable(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -942,7 +978,23 @@ class DashboardServerTests(unittest.TestCase):
                         "sessionId": "sess-tool-progress",
                         "projectRoot": "ProjectA",
                         "question": "Pick a proof path",
-                        "options": [{"id": "actual", "label": "Actual app"}],
+                        "options": [
+                            {"id": "actual", "label": "Actual app"},
+                            {"id": "browser", "label": "Browser precheck"},
+                        ],
+                    },
+                },
+            )
+            desktop_action = client.post(
+                "/api/agent/tool/vrcforge_agent_desktop_action",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "action": "computer_use",
+                        "prompt": "Observe current desktop state only.",
                     },
                 },
             )
@@ -950,6 +1002,9 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(progress.status_code, 200)
         self.assertEqual(question.status_code, 200)
+        self.assertEqual(desktop_action.status_code, 200)
+        self.assertEqual(desktop_action.json()["result"]["action"], "computer_use")
+        self.assertEqual(desktop_action.json()["result"]["status"], "unavailable")
         self.assertEqual(snapshot.json()["progress"]["items"][0]["progressId"], "tool-step")
         self.assertEqual(snapshot.json()["questions"]["questions"][0]["question"], "Pick a proof path")
 
@@ -2820,6 +2875,7 @@ class DashboardServerTests(unittest.TestCase):
         tool_names = {tool["name"] for tool in payload["tools"]}
         self.assertIn("vrcforge_agent_observe", tool_names)
         self.assertIn("vrcforge_agent_message", tool_names)
+        self.assertIn("vrcforge_agent_desktop_action", tool_names)
         self.assertIn("vrcforge_progress_replace", tool_names)
         self.assertIn("vrcforge_progress_update", tool_names)
         self.assertIn("vrcforge_progress_delete", tool_names)

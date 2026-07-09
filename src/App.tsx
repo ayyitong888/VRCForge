@@ -1004,7 +1004,6 @@ export default function App() {
     setActiveView("chat");
   };
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
-    setInput(value);
     setActiveView("chat");
     try {
       await answerAgentQuestion(endpoint, questionId, {
@@ -2634,6 +2633,8 @@ export default function App() {
               onBindProject={bindProject}
               conversation={conversation}
               queued={visibleQueued}
+              agentQuestions={agentQuestions}
+              onAnswerQuestion={answerRuntimeQuestion}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
               onConversationScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
@@ -2697,7 +2698,6 @@ export default function App() {
               rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
               agentGoals={agentGoals}
               agentProgress={agentProgress}
-              agentQuestions={agentQuestions}
               agentMemory={agentMemory}
               desktopActions={desktopActions}
               workspaceStateError={workspaceStateError}
@@ -2710,7 +2710,6 @@ export default function App() {
               loadingWorkspaceDiffPatch={loadingWorkspaceDiffPatch}
               runtimePlanItems={runtimePlanItems}
               onChoosePlanOption={chooseRuntimePlanOption}
-              onAnswerQuestion={answerRuntimeQuestion}
               runtimeSchedule={runtimeSchedule}
               visibleSubAgentTasks={visibleSubAgentTasks}
               selectedSubAgent={selectedSubAgent}

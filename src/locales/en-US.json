@@ -860,6 +860,19 @@
       "packageBlocked": "Package blocked"
     }
   },
+  "questionCard": {
+    "label": "Agent question",
+    "title": "Question",
+    "position": "{{current}} of {{total}}",
+    "previous": "Previous question",
+    "next": "Next question",
+    "somethingElse": "Something else",
+    "recommended": "Recommended",
+    "customPlaceholder": "Type another answer...",
+    "answer": "Answer",
+    "skip": "Skip",
+    "skipAnswer": "Skipped"
+  },
   "common": {
     "refresh": "Refresh",
     "cancel": "Cancel",

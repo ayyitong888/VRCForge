@@ -860,6 +860,19 @@
       "packageBlocked": "パッケージをブロックしました"
     }
   },
+  "questionCard": {
+    "label": "エージェントの質問",
+    "title": "質問",
+    "position": "{{current}} / {{total}}",
+    "previous": "前の質問",
+    "next": "次の質問",
+    "somethingElse": "別の回答",
+    "recommended": "推奨",
+    "customPlaceholder": "別の回答を入力...",
+    "answer": "回答",
+    "skip": "スキップ",
+    "skipAnswer": "スキップしました"
+  },
   "common": {
     "refresh": "更新",
     "cancel": "キャンセル",

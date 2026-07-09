@@ -860,6 +860,19 @@
       "packageBlocked": "套件已封鎖"
     }
   },
+  "questionCard": {
+    "label": "智慧體提問",
+    "title": "問題",
+    "position": "{{current}} / {{total}}",
+    "previous": "上一個問題",
+    "next": "下一個問題",
+    "somethingElse": "其他回答",
+    "recommended": "推薦",
+    "customPlaceholder": "輸入其他回答...",
+    "answer": "回答",
+    "skip": "跳過",
+    "skipAnswer": "已跳過"
+  },
   "common": {
     "refresh": "重新整理",
     "cancel": "取消",

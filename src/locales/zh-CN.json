@@ -860,6 +860,19 @@
       "packageBlocked": "Package blocked"
     }
   },
+  "questionCard": {
+    "label": "智能体提问",
+    "title": "问题",
+    "position": "{{current}} / {{total}}",
+    "previous": "上一个问题",
+    "next": "下一个问题",
+    "somethingElse": "其他回答",
+    "recommended": "推荐",
+    "customPlaceholder": "输入其他回答...",
+    "answer": "回答",
+    "skip": "跳过",
+    "skipAnswer": "已跳过"
+  },
   "common": {
     "refresh": "刷新",
     "cancel": "取消",

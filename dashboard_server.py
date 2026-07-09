@@ -5155,6 +5155,8 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
         await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_ask_user":
         await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=session_id, project_root=project_root))
+    elif tool_name == "vrcforge_agent_desktop_action":
+        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
     return payload
 
 
@@ -18905,6 +18907,7 @@ def register_agent_gateway_tools() -> None:
         ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
+    AGENT_GATEWAY.register_tool("vrcforge_agent_desktop_action", "Request a desktop-side action such as screenshot, annotation, browser handoff, Desktop Rescue, or Computer Use.", "plan/preview", AGENT_GATEWAY.request_desktop_action)
     AGENT_GATEWAY.register_tool("vrcforge_progress_list", "List the current agent progress items for a session or project.", "read/debug", lambda params: AGENT_GATEWAY.list_agent_progress(limit=int(ensure_dict(params or {}).get("limit") or 50), session_id=str(ensure_dict(params or {}).get("sessionId") or ensure_dict(params or {}).get("session_id") or ""), project_root=str(ensure_dict(params or {}).get("projectRoot") or ensure_dict(params or {}).get("project_root") or ensure_dict(params or {}).get("projectPath") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_progress_replace", "Replace the visible agent progress list, similar to a TodoWrite plan update.", "plan/preview", lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_create", "Create one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_progress(params or {}))

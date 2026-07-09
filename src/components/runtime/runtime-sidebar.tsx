@@ -1,7 +1,7 @@
 import { Bot, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightClose, RefreshCw, Sparkles, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
-import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentQuestion, AgentRuntimeRun, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
+import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
 import type { RuntimeFileReference, RuntimePlanItem, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -38,7 +38,6 @@ export function RightRuntimeSidebar({
   rightRuntimeSectionsCollapsed,
   agentGoals,
   agentProgress,
-  agentQuestions,
   agentMemory,
   desktopActions,
   workspaceStateError,
@@ -51,7 +50,6 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiffPatch,
   runtimePlanItems,
   onChoosePlanOption,
-  onAnswerQuestion,
   runtimeSchedule,
   visibleSubAgentTasks,
   selectedSubAgent,
@@ -96,7 +94,6 @@ export function RightRuntimeSidebar({
   rightRuntimeSectionsCollapsed: Record<string, boolean>;
   agentGoals: AgentGoal[];
   agentProgress: AgentProgress[];
-  agentQuestions: AgentQuestion[];
   agentMemory: AgentMemory[];
   desktopActions: AgentDesktopAction[];
   workspaceStateError: string;
@@ -109,7 +106,6 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiffPatch: boolean;
   runtimePlanItems: RuntimePlanItem[];
   onChoosePlanOption: (value: string) => void;
-  onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   runtimeSchedule: RuntimeScheduleItem[];
   visibleSubAgentTasks: SubAgentTask[];
   selectedSubAgent: SubAgentTask | null;
@@ -162,60 +158,34 @@ export function RightRuntimeSidebar({
         </button>
       </div>
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {agentQuestions.length ? (
-          <section className="border-b border-border pb-3">
-            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-              <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.questions")}</h2>
-              <Badge tone="warn">{formatCount(agentQuestions.length)}</Badge>
-            </div>
-            <div className="space-y-2">
-              {agentQuestions.slice(0, 3).map((question) => (
-                <div key={question.questionId} className="rounded-md border border-border bg-background/70 p-2 text-xs">
-                  {question.header ? <div className="mb-1 truncate font-medium text-muted-foreground">{question.header}</div> : null}
-                  <div className="font-medium text-foreground">{question.question}</div>
-                  {question.options?.length ? (
-                    <div className="mt-2 grid gap-1">
-                      {question.options.slice(0, 4).map((option) => (
-                        <button
-                          key={option.id}
-                          type="button"
-                          className="rounded-md border border-border bg-background px-2 py-1 text-left transition-colors hover:bg-muted"
-                          onClick={() => void onAnswerQuestion(question.questionId, option.id, option.value || option.label)}
-                        >
-                          <span className="block truncate font-medium">{option.label}</span>
-                          {option.description ? <span className="block truncate text-muted-foreground">{option.description}</span> : null}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
         {showProgressSection ? (
-          <section className="border-b border-border pb-3">
-            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-              <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.progress")}</h2>
-              {progressItems.length ? <Badge tone="muted">{formatCount(progressItems.length)}</Badge> : null}
-            </div>
+          <RuntimeSection
+            title={t("workspace.progress")}
+            collapsed={rightRuntimeSectionsCollapsed.progress}
+            onToggle={() => toggleRightRuntimeSection("progress")}
+            count={progressItems.length ? <Badge tone="muted">{formatCount(progressItems.length)}</Badge> : null}
+          >
             {progressItems.length ? (
               <div className="space-y-1">
-                {progressItems.slice(0, 8).map((item) => (
-                  <div key={item.id} className="rounded-md px-1 py-1.5 text-xs hover:bg-muted/60">
-                    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2">
-                      <span className={cn("flex h-4 w-4 items-center justify-center rounded-full border", progressStatusClass(item.status || "pending"))} />
+                {progressItems.slice(0, 8).map((item, index) => {
+                  const status = item.status || "pending";
+                  const completed = isProgressDone(status);
+                  return (
+                  <div key={item.id} tabIndex={item.choices?.length ? 0 : undefined} className="group rounded-md px-1 py-1.5 text-xs outline-none transition-colors hover:bg-muted/60 focus-visible:bg-muted/60">
+                    <div className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-2">
+                      <span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-xs font-semibold", progressStatusClass(status))}>
+                        {formatCount(index + 1)}
+                      </span>
                       <span className="min-w-0">
-                        <span className="block truncate font-medium text-foreground" title={item.title}>
+                        <span className={cn("block truncate font-medium text-foreground", completed && "text-muted-foreground line-through")} title={item.title}>
                           {item.title}
                         </span>
-                        {item.meta ? <span className="block truncate text-muted-foreground">{item.meta}</span> : null}
+                        {item.meta ? <span className={cn("block truncate text-muted-foreground", completed && "line-through")}>{item.meta}</span> : null}
                       </span>
-                      <span className="shrink-0 text-muted-foreground">{progressStatusLabel(item.status || "pending", t)}</span>
+                      <span className="shrink-0 text-muted-foreground">{progressStatusLabel(status, t)}</span>
                     </div>
                     {item.choices?.length ? (
-                      <div className="mt-2 grid gap-1 pl-6">
+                      <div className="mt-2 hidden gap-1 pl-8 group-hover:grid group-focus-within:grid">
                         {item.choices.slice(0, 3).map((choice) => (
                           <button
                             key={choice.id}
@@ -230,28 +200,35 @@ export function RightRuntimeSidebar({
                       </div>
                     ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="rounded-md border border-dashed border-border px-2 py-2 text-xs text-muted-foreground">{t("workspace.noProgress")}</div>
             )}
-          </section>
+          </RuntimeSection>
         ) : null}
 
         {showStatusSummary ? (
-        <section className="border-b border-border pb-3">
-          <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-            <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.projectStatus")}</h2>
-            {hasEnvironmentAttention || hasStartupIssue ? (
+        <RuntimeSection
+          title={t("workspace.projectStatus")}
+          collapsed={rightRuntimeSectionsCollapsed.status}
+          onToggle={() => toggleRightRuntimeSection("status")}
+          action={
+            hasEnvironmentAttention || hasStartupIssue ? (
               <button
                 type="button"
                 className="shrink-0 rounded-md border border-amber-300/70 px-2 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-50 dark:border-amber-900/50 dark:text-amber-300 dark:hover:bg-amber-950/30"
-                onClick={() => void openDoctor()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void openDoctor();
+                }}
               >
                 {t("sidebar.doctor")}
               </button>
-            ) : null}
-          </div>
+            ) : null
+          }
+        >
           <div className="space-y-1">
             <RuntimeInfoRow
               icon={<Folder className="h-4 w-4" />}
@@ -315,7 +292,7 @@ export function RightRuntimeSidebar({
               {t("workspace.inlineApprovalHint")}
             </div>
           ) : null}
-        </section>
+        </RuntimeSection>
         ) : null}
 
         {runtimeRuns.length || runtimeRunsError ? (
@@ -619,13 +596,17 @@ function progressStatusLabel(status: string, t: (key: string) => string) {
 function progressStatusClass(status: string) {
   const normalized = status.trim().toLowerCase();
   if (["in_progress", "running", "question"].includes(normalized)) {
-    return "border-primary bg-primary";
+    return "border-primary/25 bg-primary/5 text-foreground";
   }
   if (normalized === "completed") {
-    return "border-emerald-500 bg-emerald-500";
+    return "border-border bg-muted/50 text-muted-foreground";
   }
-  if (["blocked", "cancelled"].includes(normalized)) {
-    return "border-amber-500 bg-amber-500";
+  if (normalized === "blocked") {
+    return "border-amber-400/60 bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300";
   }
-  return "border-muted-foreground/50 bg-transparent";
+  return "border-border bg-transparent text-muted-foreground";
+}
+
+function isProgressDone(status: string) {
+  return ["completed", "cancelled", "deleted"].includes(status.trim().toLowerCase());
 }

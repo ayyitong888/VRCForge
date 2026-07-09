@@ -3092,7 +3092,7 @@ class AgentGateway:
             raise AgentGatewayError("Question is required.", status_code=400)
         raw_options = ensure_list(params.get("options") or params.get("choices"))
         options: list[dict[str, Any]] = []
-        for index, option in enumerate(raw_options[:8]):
+        for index, option in enumerate(raw_options):
             if isinstance(option, str):
                 label = summarize_text(option, 160)
                 value = label
@@ -3107,6 +3107,8 @@ class AgentGateway:
                 continue
             if label:
                 options.append({"id": option_id, "label": label, "value": value, "description": description})
+        if len(options) < 2:
+            raise AgentGatewayError("Question choices require at least two options.", status_code=400)
         question_id = f"question_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         event = {
             "event": "question_created",

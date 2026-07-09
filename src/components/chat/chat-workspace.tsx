@@ -1,7 +1,7 @@
 import { Loader2 } from "lucide-react";
-import type { FormEvent, Ref } from "react";
+import { useMemo, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentApproval, AgentRuntimeResponse, PermissionState } from "../../lib/api";
+import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -12,6 +12,7 @@ import type {
   MessageFeedback,
 } from "../../lib/chat-types";
 import { AttachmentStrip, Composer } from "./composer";
+import { AgentQuestionCard } from "./agent-question-card";
 import { ConversationCard, UserImageAttachments } from "./conversation-card";
 
 export type QueuedChatTurn = {
@@ -45,6 +46,8 @@ export function ChatWorkspace({
   onBindProject,
   conversation,
   queued,
+  agentQuestions,
+  onAnswerQuestion,
   conversationEndRef,
   onConversationMouseUp,
   onConversationScroll,
@@ -87,6 +90,8 @@ export function ChatWorkspace({
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
   queued: QueuedChatTurn[];
+  agentQuestions: AgentQuestion[];
+  onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
   onConversationScroll: () => void;
@@ -106,6 +111,13 @@ export function ChatWorkspace({
   onOpenDoctor: () => void;
 }) {
   const { t } = useTranslation();
+  const pendingAgentQuestions = useMemo(
+    () =>
+      agentQuestions.filter(
+        (question) => (question.status || "pending").toLowerCase() === "pending" && (question.options || []).filter((option) => option.label).length >= 2,
+      ),
+    [agentQuestions],
+  );
   const composer = (compact = false) => (
     <Composer
       input={input}
@@ -138,6 +150,11 @@ export function ChatWorkspace({
       <div className="flex min-h-0 flex-1 items-center justify-center p-5 md:p-8">
         <div className="w-full max-w-3xl">
           {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+          {pendingAgentQuestions.length ? (
+            <div className="mb-3">
+              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+            </div>
+          ) : null}
           {composer(false)}
         </div>
       </div>
@@ -200,7 +217,14 @@ export function ChatWorkspace({
         </div>
       </div>
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2">
-        <div className="mx-auto max-w-3xl">{composer(true)}</div>
+        <div className="mx-auto max-w-3xl">
+          {pendingAgentQuestions.length ? (
+            <div className="mb-3">
+              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+            </div>
+          ) : null}
+          {composer(true)}
+        </div>
       </div>
     </>
   );
