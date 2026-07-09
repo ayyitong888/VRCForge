@@ -50,6 +50,8 @@ export function Composer({
   contextUsage,
   providerLabel,
   model,
+  editing = false,
+  onCancelEdit,
   projects: _projects = [],
   onBindProject: _onBindProject,
 }: {
@@ -71,6 +73,8 @@ export function Composer({
   contextUsage?: ContextUsage;
   providerLabel?: string;
   model?: string;
+  editing?: boolean;
+  onCancelEdit?: () => void;
   projects?: Array<{ key: string; name: string }>;
   onBindProject?: (path: string) => void;
 }) {
@@ -87,7 +91,7 @@ export function Composer({
     title: action.disabled ? action.disabledReason || action.description : action.description,
     action,
   }));
-  const slashQuery = input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
+  const slashQuery = !editing && input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
   const slashMatches: ComposerSlashCommand[] =
     slashQuery !== null
       ? [...commands.map((command) => ({ ...command })), ...commandActions].filter((command) => command.name.toLowerCase().includes(slashQuery)).slice(0, 8)
@@ -96,7 +100,10 @@ export function Composer({
     ? actions
     : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   const dragActive = dragDepth > 0;
-  const hasDraggedFiles = (event: DragEvent) => Array.from(event.dataTransfer.types || []).includes("Files");
+  const hasDraggedFiles = (event: DragEvent) =>
+    Array.from(event.dataTransfer.types || []).includes("Files") ||
+    event.dataTransfer.files.length > 0 ||
+    Array.from(event.dataTransfer.items || []).some((item) => item.kind === "file");
   const handleDragEnter = (event: DragEvent<HTMLFormElement>) => {
     if (!hasDraggedFiles(event)) {
       return;
@@ -321,20 +328,30 @@ export function Composer({
             {contextUsage ? (
               <ContextUsageMeter usage={contextUsage} className="w-36" />
             ) : null}
-            {sending ? (
+            {editing && !sending ? (
+              <>
+                <Button type="button" variant="outline" className="h-9 rounded-md px-3" onClick={onCancelEdit} title={t("chat.cancelEdit")}>
+                  {t("chat.cancelEdit")}
+                </Button>
+                <Button className="h-9 rounded-md px-3" disabled={!canSubmit} type="submit" title={t("chat.saveEdit")} aria-label={t("chat.saveEdit")}>
+                  {t("chat.saveEdit")}
+                </Button>
+              </>
+            ) : sending ? (
               <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
                 <Square className="h-4 w-4" />
               </Button>
-            ) : null}
-            <Button
-              className="h-10 min-w-10 rounded-full px-3"
-              disabled={!canSubmit}
-              type="submit"
-              title={sending ? t("chat.queue") : t("chat.send")}
-              aria-label={sending ? t("chat.queue") : t("chat.send")}
-            >
-              {sending ? <span className="text-xs">{t("chat.queue")}</span> : <Send className="h-4 w-4" />}
-            </Button>
+            ) : (
+              <Button
+                className="h-10 min-w-10 rounded-full px-3"
+                disabled={!canSubmit}
+                type="submit"
+                title={t("chat.send")}
+                aria-label={t("chat.send")}
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         </div>
       </div>

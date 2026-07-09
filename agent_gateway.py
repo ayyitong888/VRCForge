@@ -1496,6 +1496,14 @@ class AgentGateway:
         return self.audit_dir / "agent-goals.jsonl"
 
     @property
+    def agent_progress_log_path(self) -> Path:
+        return self.audit_dir / "agent-progress.jsonl"
+
+    @property
+    def agent_question_log_path(self) -> Path:
+        return self.audit_dir / "agent-questions.jsonl"
+
+    @property
     def desktop_action_log_path(self) -> Path:
         return self.audit_dir / "desktop-actions.jsonl"
 
@@ -2976,6 +2984,180 @@ class AgentGateway:
         goals.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         goals = goals[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
+
+    def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        raw_items = ensure_list(params.get("items") or params.get("plan"))
+        project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        normalized_items: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                continue
+            title = summarize_text(str(item.get("title") or item.get("step") or item.get("content") or "").strip(), 240)
+            if not title:
+                continue
+            status = str(item.get("status") or "pending").strip().lower()
+            if status not in {"pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"}:
+                status = "pending"
+            normalized_items.append(
+                {
+                    "progressId": summarize_text(str(item.get("progressId") or item.get("id") or f"progress-{index + 1}"), 120),
+                    "title": title,
+                    "summary": summarize_text(str(item.get("summary") or item.get("description") or ""), 1000),
+                    "status": status,
+                    "order": int(item.get("order") if isinstance(item.get("order"), int) else index),
+                    "owner": summarize_text(str(item.get("owner") or "agent"), 80),
+                }
+            )
+        event = {
+            "event": "progress_replaced",
+            "projectRoot": project_root,
+            "sessionId": session_id,
+            "items": normalized_items,
+        }
+        self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
+        return self.list_agent_progress(limit=50, project_root=project_root, session_id=session_id)
+
+    def create_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        title = summarize_text(str(params.get("title") or params.get("step") or params.get("content") or "").strip(), 240)
+        if not title:
+            raise AgentGatewayError("Progress title is required.", status_code=400)
+        progress_id = f"progress_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        event = {
+            "event": "progress_created",
+            "status": str(params.get("status") or "pending").strip().lower() or "pending",
+            "progressId": progress_id,
+            "title": title,
+            "summary": summarize_text(str(params.get("summary") or params.get("description") or ""), 1000),
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+            "owner": summarize_text(str(params.get("owner") or "agent"), 80),
+            "order": int(params.get("order")) if isinstance(params.get("order"), int) else 0,
+        }
+        self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
+        return {"ok": True, "progress": self._project_agent_progress(include_deleted=True)[progress_id]}
+
+    def update_agent_progress(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        progress_id = str(progress_id or "").strip()
+        if not progress_id:
+            raise AgentGatewayError("progressId is required.", status_code=400)
+        current = self._project_agent_progress(include_deleted=True)
+        if progress_id not in current:
+            raise AgentGatewayError(f"Progress item was not found: {progress_id}", status_code=404)
+        existing = current[progress_id]
+        status = str(params.get("status") or existing.get("status") or "pending").strip().lower()
+        if status not in {"pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"}:
+            raise AgentGatewayError("Progress status must be pending, in_progress, running, completed, cancelled, blocked, or deleted.", status_code=400)
+        event = {
+            "event": "progress_updated",
+            "status": status,
+            "progressId": progress_id,
+            "title": summarize_text(str(params.get("title") or existing.get("title") or ""), 240),
+            "summary": summarize_text(str(params.get("summary") or params.get("description") or existing.get("summary") or ""), 1000),
+            "projectRoot": str(params.get("projectRoot") or existing.get("projectRoot") or ""),
+            "sessionId": str(params.get("sessionId") or existing.get("sessionId") or ""),
+            "owner": summarize_text(str(params.get("owner") or existing.get("owner") or "agent"), 80),
+            "order": int(params.get("order")) if isinstance(params.get("order"), int) else int(existing.get("order") or 0),
+        }
+        self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
+        return {"ok": True, "progress": self._project_agent_progress(include_deleted=True)[progress_id]}
+
+    def delete_agent_progress(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        return self.update_agent_progress(progress_id, {**params, "status": "deleted"})
+
+    def list_agent_progress(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
+        progress = list(self._project_agent_progress().values())
+        if project_root:
+            normalized_project_root = normalize_filesystem_path(project_root)
+            progress = [
+                item
+                for item in progress
+                if not str(item.get("projectRoot") or "").strip()
+                or normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
+            ]
+        if session_id:
+            progress = [item for item in progress if str(item.get("sessionId") or "") in {"", session_id}]
+        progress.sort(key=lambda item: (int(item.get("order") or 0), str(item.get("createdAt") or "")))
+        progress = progress[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in progress], "count": len(progress)}
+
+    def create_agent_question(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        question = summarize_text(str(params.get("question") or params.get("prompt") or "").strip(), 1000)
+        if not question:
+            raise AgentGatewayError("Question is required.", status_code=400)
+        raw_options = ensure_list(params.get("options") or params.get("choices"))
+        options: list[dict[str, Any]] = []
+        for index, option in enumerate(raw_options[:8]):
+            if isinstance(option, str):
+                label = summarize_text(option, 160)
+                value = label
+                description = ""
+                option_id = f"option-{index + 1}"
+            elif isinstance(option, dict):
+                label = summarize_text(str(option.get("label") or option.get("value") or ""), 160)
+                value = summarize_text(str(option.get("value") or label), 500)
+                description = summarize_text(str(option.get("description") or ""), 500)
+                option_id = summarize_text(str(option.get("id") or f"option-{index + 1}"), 120)
+            else:
+                continue
+            if label:
+                options.append({"id": option_id, "label": label, "value": value, "description": description})
+        question_id = f"question_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        event = {
+            "event": "question_created",
+            "status": "pending",
+            "questionId": question_id,
+            "header": summarize_text(str(params.get("header") or ""), 120),
+            "question": question,
+            "options": options,
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+            "owner": summarize_text(str(params.get("owner") or "agent"), 80),
+        }
+        self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
+        return {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
+
+    def answer_agent_question(self, question_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        question_id = str(question_id or "").strip()
+        if not question_id:
+            raise AgentGatewayError("questionId is required.", status_code=400)
+        current = self._project_agent_questions(include_answered=True)
+        if question_id not in current:
+            raise AgentGatewayError(f"Question was not found: {question_id}", status_code=404)
+        existing = current[question_id]
+        event = {
+            "event": "question_answered",
+            "status": "answered",
+            "questionId": question_id,
+            "answer": summarize_text(str(params.get("answer") or params.get("value") or ""), 1000),
+            "selectedOptionId": summarize_text(str(params.get("selectedOptionId") or params.get("optionId") or ""), 120),
+            "projectRoot": str(params.get("projectRoot") or existing.get("projectRoot") or ""),
+            "sessionId": str(params.get("sessionId") or existing.get("sessionId") or ""),
+        }
+        self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
+        return {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
+
+    def list_agent_questions(self, *, limit: int = 50, project_root: str = "", session_id: str = "", include_answered: bool = False) -> dict[str, Any]:
+        questions = list(self._project_agent_questions(include_answered=include_answered).values())
+        if project_root:
+            normalized_project_root = normalize_filesystem_path(project_root)
+            questions = [
+                item
+                for item in questions
+                if not str(item.get("projectRoot") or "").strip()
+                or normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
+            ]
+        if session_id:
+            questions = [item for item in questions if str(item.get("sessionId") or "") in {"", session_id}]
+        questions.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        questions = questions[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        return {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [redact_sensitive(item) for item in questions], "count": len(questions)}
 
     def create_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -6410,6 +6592,91 @@ class AgentGateway:
                 merged["title"] = event.get("title")
             goals[goal_id] = merged
         return goals
+
+    def _project_agent_progress(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
+        progress: dict[str, dict[str, Any]] = {}
+        deleted: set[str] = set()
+        for event in self._read_jsonl(self.agent_progress_log_path, limit=0):
+            event_name = str(event.get("event") or "")
+            if event_name == "progress_replaced":
+                session_id = str(event.get("sessionId") or "")
+                project_root = str(event.get("projectRoot") or "")
+                normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
+                for existing_id, existing in list(progress.items()):
+                    existing_project = str(existing.get("projectRoot") or "")
+                    same_session = str(existing.get("sessionId") or "") == session_id
+                    same_project = (
+                        normalize_filesystem_path(existing_project) == normalized_project_root
+                        if normalized_project_root and existing_project
+                        else existing_project == project_root
+                    )
+                    if same_session and same_project:
+                        deleted.add(existing_id)
+                for item in ensure_list(event.get("items")):
+                    if not isinstance(item, dict):
+                        continue
+                    progress_id = str(item.get("progressId") or item.get("id") or "").strip()
+                    if not progress_id:
+                        continue
+                    deleted.discard(progress_id)
+                    previous = progress.get(progress_id, {})
+                    progress[progress_id] = {
+                        **previous,
+                        **item,
+                        "id": progress_id,
+                        "progressId": progress_id,
+                        "projectRoot": project_root,
+                        "sessionId": session_id,
+                        "createdAt": previous.get("createdAt") or event.get("createdAt"),
+                        "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+                    }
+                continue
+            progress_id = str(event.get("progressId") or "").strip()
+            if not progress_id:
+                continue
+            if str(event.get("status") or "") == "deleted" or event_name == "progress_deleted":
+                deleted.add(progress_id)
+            previous = progress.get(progress_id, {})
+            progress[progress_id] = {
+                **previous,
+                **event,
+                "id": progress_id,
+                "progressId": progress_id,
+                "createdAt": previous.get("createdAt") or event.get("createdAt"),
+                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+            }
+        if include_deleted:
+            return progress
+        return {progress_id: item for progress_id, item in progress.items() if progress_id not in deleted and str(item.get("status") or "") != "deleted"}
+
+    def _project_agent_questions(self, *, include_answered: bool = False) -> dict[str, dict[str, Any]]:
+        questions: dict[str, dict[str, Any]] = {}
+        answered: set[str] = set()
+        for event in self._read_jsonl(self.agent_question_log_path, limit=0):
+            question_id = str(event.get("questionId") or "").strip()
+            if not question_id:
+                continue
+            if str(event.get("status") or "") in {"answered", "cancelled"} or str(event.get("event") or "") == "question_answered":
+                answered.add(question_id)
+            previous = questions.get(question_id, {})
+            merged = {
+                **previous,
+                **event,
+                "id": question_id,
+                "questionId": question_id,
+                "createdAt": previous.get("createdAt") or event.get("createdAt"),
+                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
+            }
+            if not event.get("options") and previous.get("options"):
+                merged["options"] = previous.get("options")
+            if not event.get("question") and previous.get("question"):
+                merged["question"] = previous.get("question")
+            if not event.get("header") and previous.get("header"):
+                merged["header"] = previous.get("header")
+            questions[question_id] = merged
+        if include_answered:
+            return questions
+        return {question_id: item for question_id, item in questions.items() if question_id not in answered and str(item.get("status") or "") == "pending"}
 
     def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         memories: dict[str, dict[str, Any]] = {}

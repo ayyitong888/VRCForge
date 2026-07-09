@@ -44,11 +44,11 @@ export type ContextUsage = {
 };
 
 export type ConversationItem =
-  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean }
-  | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string }
-  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string }
-  | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string }
-  | { id: string; type: "error"; text: string }
+  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean; createdAt?: string }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
+  | { id: string; type: "error"; text: string; createdAt?: string }
   | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 

@@ -2,7 +2,7 @@ import type { TFunction } from "i18next";
 import type { AgentApproval, AgentRuntimeRun, WorkspaceDiffSummary } from "./api";
 import type { ConversationItem } from "./chat-types";
 import { buildRuntimeFileReferences } from "./runtime-file-references";
-import type { RuntimeFileReference, RuntimeReviewEvidence } from "./runtime-ui-types";
+import type { RuntimeFileReference, RuntimePlanChoice, RuntimePlanItem, RuntimeReviewEvidence, RuntimeScheduleItem } from "./runtime-ui-types";
 import { formatCount } from "./utils";
 
 type ComponentStatus = { status: string; message?: string } | null | undefined;
@@ -10,6 +10,7 @@ type ComponentStatus = { status: string; message?: string } | null | undefined;
 export type RuntimeWorkspaceViewModel = {
   workspaceDiffFiles: WorkspaceDiffSummary["files"];
   workspaceDiffChanged: boolean;
+  runtimePlanItems: RuntimePlanItem[];
   runtimeFileReferences: RuntimeFileReference[];
   runtimeReviewEvidence: RuntimeReviewEvidence[];
   localizeHealthMessage: (message?: string | null) => string;
@@ -47,6 +48,7 @@ export function buildRuntimeWorkspaceViewModel({
   workspaceDiff,
   pendingApprovalItems,
   runtimeRuns,
+  runtimeSchedule,
   workspaceProjectLabel,
   runtimeConnected,
   unityBridgeComponent,
@@ -66,6 +68,7 @@ export function buildRuntimeWorkspaceViewModel({
   workspaceDiff: WorkspaceDiffSummary | null;
   pendingApprovalItems: AgentApproval[];
   runtimeRuns: AgentRuntimeRun[];
+  runtimeSchedule: RuntimeScheduleItem[];
   workspaceProjectLabel: string;
   runtimeConnected: boolean;
   unityBridgeComponent: ComponentStatus;
@@ -83,6 +86,7 @@ export function buildRuntimeWorkspaceViewModel({
   const workspaceDiffFiles = workspaceDiff?.files ?? [];
   const workspaceDiffChanged = workspaceDiff?.status === "changed" && workspaceDiff.fileCount > 0;
   const localizeHealthMessage = (message?: string | null) => localizeRuntimeHealthMessage(t, message);
+  const runtimePlanItems = buildRuntimePlanItems({ t, conversation, runtimeSchedule });
   const runtimeFileReferences = buildRuntimeFileReferences(conversation, workspaceDiffFiles);
   const runtimeReviewEvidence = buildRuntimeReviewEvidence({
     t,
@@ -122,6 +126,7 @@ export function buildRuntimeWorkspaceViewModel({
   return {
     workspaceDiffFiles,
     workspaceDiffChanged,
+    runtimePlanItems,
     runtimeFileReferences,
     runtimeReviewEvidence,
     localizeHealthMessage,
@@ -132,6 +137,68 @@ export function buildRuntimeWorkspaceViewModel({
     reviewSummaryLabel,
     changeSummaryLabel,
   };
+}
+
+function buildRuntimePlanItems({
+  t,
+  conversation,
+  runtimeSchedule,
+}: {
+  t: TFunction;
+  conversation: ConversationItem[];
+  runtimeSchedule: RuntimeScheduleItem[];
+}): RuntimePlanItem[] {
+  const items: RuntimePlanItem[] = runtimeSchedule.map((item) => ({
+    id: `schedule-${item.id}`,
+    title: item.title,
+    meta: item.meta,
+    status: item.status,
+  }));
+  const latestAgent = [...conversation].reverse().find((item) => item.type === "agent");
+  if (latestAgent?.type !== "agent") {
+    return items.slice(0, 8);
+  }
+  const response = latestAgent.response;
+  const promptChoices = normalizeRuntimeChoices(response.choicePrompt?.choices ?? response.plan.choices);
+  const question = response.choicePrompt?.question || (promptChoices.length ? response.plan.nextStep || response.plan.summary : "");
+  if (question && promptChoices.length) {
+    items.unshift({
+      id: `question-${response.choicePrompt?.id || response.turnId || response.turn_id || latestAgent.id}`,
+      title: question,
+      meta: t("workspace.awaitingUserChoice"),
+      status: "question",
+      choices: promptChoices,
+    });
+  }
+  if (response.plan.summary) {
+    items.push({
+      id: `plan-${response.turnId || response.turn_id || latestAgent.id}`,
+      title: response.plan.summary,
+      meta: response.plan.expectedResult || response.plan.nextStep || response.plan.plannerLabel || response.plan.planner,
+      status: response.ok ? "completed" : "running",
+    });
+  }
+  for (const step of response.steps ?? []) {
+    const title = step.summary || step.tool || step.kind || t("workspace.planStep");
+    items.push({
+      id: `step-${response.turnId || response.turn_id || latestAgent.id}-${step.index ?? items.length}`,
+      title,
+      meta: [step.kind, step.providerLabel || step.provider, step.model].filter(Boolean).join(" / "),
+      status: step.status || "completed",
+    });
+  }
+  return items.slice(0, 8);
+}
+
+function normalizeRuntimeChoices(choices?: Array<{ id?: string; label?: string; description?: string; value?: string }>): RuntimePlanChoice[] {
+  return (choices ?? [])
+    .map((choice, index) => ({
+      id: choice.id || `choice-${index + 1}`,
+      label: String(choice.label || choice.value || "").trim(),
+      description: choice.description,
+      value: choice.value,
+    }))
+    .filter((choice) => choice.label);
 }
 
 function buildRuntimeReviewEvidence({

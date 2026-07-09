@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentMemory, AgentMessageAttachment, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopRuntimeSnapshot } from "./types";
 
 export type ChatHistoryEntry = {
   role: "user" | "agent";
@@ -205,6 +205,160 @@ export async function updateAgentGoal(
     });
   }
   return requestJson(`${endpoint}/api/app/agent/goals/${encodeURIComponent(goalId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAgentProgress(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; schema?: string; items: AgentProgress[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_agent_progress", {
+      request: { ...params, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/progress${suffix}`, { preferTauriIpc: true });
+}
+
+export async function replaceAgentProgress(
+  endpoint: string,
+  payload: { items?: Array<Partial<AgentProgress> & { step?: string; content?: string }>; plan?: Array<Partial<AgentProgress> & { step?: string; content?: string }>; sessionId?: string; projectPath?: string; projectRoot?: string },
+): Promise<{ ok: boolean; schema?: string; items: AgentProgress[]; count: number }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("replace_agent_progress", {
+      request: { body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/progress/replace`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function createAgentProgress(
+  endpoint: string,
+  payload: Partial<AgentProgress> & { step?: string; content?: string; sessionId?: string; projectPath?: string; projectRoot?: string },
+): Promise<{ ok: boolean; progress: AgentProgress }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("create_agent_progress", {
+      request: { body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAgentProgress(
+  endpoint: string,
+  progressId: string,
+  payload: Partial<AgentProgress> & { description?: string; sessionId?: string; projectRoot?: string },
+): Promise<{ ok: boolean; progress: AgentProgress }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("update_agent_progress", {
+      request: { id: progressId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/progress/${encodeURIComponent(progressId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAgentProgress(
+  endpoint: string,
+  progressId: string,
+  payload: { sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; progress: AgentProgress }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("delete_agent_progress", {
+      request: { id: progressId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  const query = new URLSearchParams();
+  if (payload.sessionId) {
+    query.set("sessionId", payload.sessionId);
+  }
+  if (payload.projectRoot) {
+    query.set("projectRoot", payload.projectRoot);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/progress/${encodeURIComponent(progressId)}${suffix}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchAgentQuestions(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string; includeAnswered?: boolean } = {},
+): Promise<{ ok: boolean; schema?: string; questions: AgentQuestion[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  if (params.includeAnswered) {
+    query.set("includeAnswered", "true");
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_agent_questions", {
+      request: { ...params, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/questions${suffix}`, { preferTauriIpc: true });
+}
+
+export async function createAgentQuestion(
+  endpoint: string,
+  payload: { header?: string; question?: string; prompt?: string; options?: unknown[]; choices?: unknown[]; owner?: string; sessionId?: string; projectPath?: string; projectRoot?: string },
+): Promise<{ ok: boolean; question: AgentQuestion }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("create_agent_question", {
+      request: { body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/questions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function answerAgentQuestion(
+  endpoint: string,
+  questionId: string,
+  payload: { answer?: string; value?: string; optionId?: string; selectedOptionId?: string; sessionId?: string; projectRoot?: string },
+): Promise<{ ok: boolean; question: AgentQuestion }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("answer_agent_question", {
+      request: { id: questionId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/questions/${encodeURIComponent(questionId)}/answer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

@@ -1533,6 +1533,95 @@ pub fn update_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json
 }
 
 #[tauri::command]
+pub async fn fetch_agent_progress(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/progress{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn replace_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/agent/progress/replace", request, 60_000)
+}
+
+#[tauri::command]
+pub fn create_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/agent/progress", request, 60_000)
+}
+
+#[tauri::command]
+pub fn update_agent_progress(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/progress/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+pub fn delete_agent_progress(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "DELETE",
+        format!(
+            "/api/app/agent/progress/{}",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
+pub async fn fetch_agent_questions(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/questions{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn create_agent_question(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    post_json_body_command("/api/app/agent/questions", request, 60_000)
+}
+
+#[tauri::command]
+pub fn answer_agent_question(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/questions/{}/answer",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
 pub async fn fetch_agent_memory(
     request: DesktopAgentListRequest,
 ) -> Result<serde_json::Value, String> {

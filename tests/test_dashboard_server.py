@@ -861,6 +861,98 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(goals[0]["status"], "completed")
         self.assertEqual(goals[0]["title"], "Finish avatar QA")
 
+    def test_agent_progress_replace_update_and_delete(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            replaced = client.post(
+                "/api/app/agent/progress/replace",
+                json={
+                    "sessionId": "sess-progress",
+                    "projectRoot": "ProjectA",
+                    "items": [
+                        {"id": "step-a", "title": "Read requirements", "status": "completed"},
+                        {"id": "step-b", "title": "Run app proof", "status": "in_progress"},
+                    ],
+                },
+            )
+            updated = client.post(
+                "/api/app/agent/progress/step-b",
+                json={"status": "completed", "summary": "Actual app proof captured", "sessionId": "sess-progress", "projectRoot": "ProjectA"},
+            )
+            deleted = client.request("DELETE", "/api/app/agent/progress/step-a", json={"sessionId": "sess-progress", "projectRoot": "ProjectA"})
+            listing = client.get("/api/app/agent/progress", params={"sessionId": "sess-progress", "projectRoot": "ProjectA"})
+
+        self.assertEqual(replaced.status_code, 200)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        items = listing.json()["items"]
+        self.assertEqual([item["progressId"] for item in items], ["step-b"])
+        self.assertEqual(items[0]["status"], "completed")
+
+    def test_agent_questions_can_be_answered_and_snapshot(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            created = client.post(
+                "/api/app/agent/questions",
+                json={
+                    "header": "Accept?",
+                    "question": "Which proof should run?",
+                    "options": [{"id": "actual", "label": "Actual app", "value": "Run actual app proof"}],
+                    "sessionId": "sess-question",
+                    "projectRoot": "ProjectA",
+                },
+            )
+            question_id = created.json()["question"]["questionId"]
+            before_answer = client.get("/api/app/runtime/snapshot", params={"sessionId": "sess-question", "projectRoot": "ProjectA"})
+            answered = client.post(
+                f"/api/app/agent/questions/{question_id}/answer",
+                json={"selectedOptionId": "actual", "answer": "Run actual app proof", "sessionId": "sess-question", "projectRoot": "ProjectA"},
+            )
+            after_answer = client.get("/api/app/agent/questions", params={"sessionId": "sess-question", "projectRoot": "ProjectA"})
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(before_answer.json()["questions"]["count"], 1)
+        self.assertEqual(answered.status_code, 200)
+        self.assertEqual(answered.json()["question"]["selectedOptionId"], "actual")
+        self.assertEqual(after_answer.json()["count"], 0)
+
+    def test_agent_progress_and_question_tools_are_callable(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            progress = client.post(
+                "/api/agent/tool/vrcforge_progress_replace",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "items": [{"id": "tool-step", "title": "Tool-visible progress", "status": "in_progress"}],
+                    },
+                },
+            )
+            question = client.post(
+                "/api/agent/tool/vrcforge_ask_user",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "question": "Pick a proof path",
+                        "options": [{"id": "actual", "label": "Actual app"}],
+                    },
+                },
+            )
+            snapshot = client.get("/api/app/runtime/snapshot", params={"sessionId": "sess-tool-progress", "projectRoot": "ProjectA"})
+
+        self.assertEqual(progress.status_code, 200)
+        self.assertEqual(question.status_code, 200)
+        self.assertEqual(snapshot.json()["progress"]["items"][0]["progressId"], "tool-step")
+        self.assertEqual(snapshot.json()["questions"]["questions"][0]["question"], "Pick a proof path")
+
     def test_agent_memory_can_be_inspected_deleted_and_cleared(self) -> None:
         with TestClient(dashboard_server.app) as client:
             first = client.post(
@@ -2728,6 +2820,10 @@ class DashboardServerTests(unittest.TestCase):
         tool_names = {tool["name"] for tool in payload["tools"]}
         self.assertIn("vrcforge_agent_observe", tool_names)
         self.assertIn("vrcforge_agent_message", tool_names)
+        self.assertIn("vrcforge_progress_replace", tool_names)
+        self.assertIn("vrcforge_progress_update", tool_names)
+        self.assertIn("vrcforge_progress_delete", tool_names)
+        self.assertIn("vrcforge_ask_user", tool_names)
         self.assertIn("vrcforge_classify_shell", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
         self.assertNotIn("vrcforge_execute_approved_shell", tool_names)

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
-import { isTauriRuntime } from "../lib/app-runtime";
 import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
@@ -55,6 +54,7 @@ export function useChatSessions({
   const [deleteTargetId, setDeleteTargetId] = useState("");
 
   const chatsLoadedRef = useRef(false);
+  const restoredChatPathKeyRef = useRef("");
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
@@ -80,21 +80,22 @@ export function useChatSessions({
   );
 
   useEffect(() => {
-    if (!runtimeConnected || chatsLoadedRef.current || !projectPrefsReady) {
+    if (!runtimeConnected || !projectPrefsReady) {
+      return;
+    }
+    const restoreProjectPaths = Array.from(
+      new Set([...projectPaths.filter(Boolean), ...customProjectPaths.filter(Boolean)]),
+    );
+    const restorePathKey = restoreProjectPaths.map((path) => normalizeProjectPathKey(path)).sort().join("\n");
+    if (chatsLoadedRef.current && restoredChatPathKeyRef.current === restorePathKey) {
       return;
     }
     let restoreCancelled = false;
     let restoreCompleted = false;
     chatsLoadedRef.current = true;
+    restoredChatPathKeyRef.current = restorePathKey;
     void (async () => {
       try {
-        await new Promise((resolve) => window.setTimeout(resolve, isTauriRuntime() ? 1000 : 0));
-        if (restoreCancelled) {
-          return;
-        }
-        const restoreProjectPaths = Array.from(
-          new Set([...projectPaths.filter(Boolean), ...customProjectPaths.filter(Boolean)]),
-        );
         const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
         let shouldCacheRestoredTimestamps = false;
         const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
@@ -121,35 +122,52 @@ export function useChatSessions({
         }
         if (restored.length > 0) {
           const initialSaveVersion = chatsSaveVersionRef.current;
-          const canRestore = chatsRef.current.length === 0;
-          if (canRestore) {
-            setChats(restored);
+          let restoredLengthAfterMerge = restored.length;
+          setChats((current) => {
+            if (current.length === 0) {
+              restoredLengthAfterMerge = restored.length;
+              return restored;
+            }
+            const existingIds = new Set(current.map((chat) => chat.id));
+            const additions = restored.filter((chat) => !existingIds.has(chat.id));
+            restoredLengthAfterMerge = current.length + additions.length;
+            return additions.length ? [...current, ...additions] : current;
+          });
+          if (!activeChatId && activeProjectPath) {
+            const activeProjectKey = normalizeProjectPathKey(activeProjectPath);
+            const latest = restored.find((chat) => normalizeProjectPathKey(chat.projectPath) === activeProjectKey && !chat.archived);
+            if (latest) {
+              setActiveChatId(latest.id);
+              expandProjectGroup(latest.projectPath);
+            }
+          }
             if (shouldCacheRestoredTimestamps) {
               if (chatTimestampCacheTimerRef.current) {
                 window.clearTimeout(chatTimestampCacheTimerRef.current);
               }
               chatTimestampCacheTimerRef.current = window.setTimeout(() => {
                 chatTimestampCacheTimerRef.current = null;
-                if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restored.length) {
+                if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restoredLengthAfterMerge) {
                   return;
                 }
                 void saveChats(endpoint, filterPersistableChats(chatsRef.current));
               }, 3000);
             }
-          }
         }
         restoreCompleted = true;
       } catch {
         chatsLoadedRef.current = false;
+        restoredChatPathKeyRef.current = "";
       }
     })();
     return () => {
       restoreCancelled = true;
       if (!restoreCompleted) {
         chatsLoadedRef.current = false;
+        restoredChatPathKeyRef.current = "";
       }
     };
-  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady]);
+  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeChatId, activeProjectPath, expandProjectGroup]);
 
   useEffect(() => {
     if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current) {

@@ -122,6 +122,7 @@ import {
   AppBootstrap,
   DoctorReport,
   compactAgentHistory,
+  answerAgentQuestion,
   cancelSubAgent,
   createAgentGoal,
   createAgentMemory,
@@ -171,6 +172,13 @@ type BackendEventMessage = {
   textDelta?: string;
   done?: boolean;
   payload?: unknown;
+};
+
+type EditingMessageDraft = {
+  chatId: string;
+  itemId: string;
+  priorInput: string;
+  priorAttachments: ChatAttachment[];
 };
 
 const MAX_ATTACHMENTS_PER_TURN = 8;
@@ -257,6 +265,7 @@ export default function App() {
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [compacting, setCompacting] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
@@ -423,6 +432,8 @@ export default function App() {
     setError,
     t,
   });
+  const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
+  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
   const {
     optimizationReport,
     optimizationTargetProfile,
@@ -452,6 +463,7 @@ export default function App() {
   } = useOptimizationWorkspaceController({
     endpoint,
     runtimeConnected,
+    unityToolsReady: vrcForgeToolsReady,
     activeView,
     activeProjectPath,
     setActiveView,
@@ -514,8 +526,6 @@ export default function App() {
     return list;
   }, [skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
-  const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
-  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
   const chatDisabledReason = !runtimeConnected
@@ -700,6 +710,8 @@ export default function App() {
     runtimeRunsError,
     desktopActions,
     agentGoals,
+    agentProgress,
+    agentQuestions,
     agentMemory,
     workspaceStateError,
     runtimeNotice,
@@ -725,6 +737,15 @@ export default function App() {
     setError,
   });
   refreshRuntimeRunsRef.current = refreshRuntimeRuns;
+  useEffect(() => {
+    if (!editingMessage || editingMessage.chatId === activeChatId) {
+      return;
+    }
+    setEditingMessage(null);
+    setInput("");
+    setAttachments([]);
+    setRuntimeNotice("");
+  }, [activeChatId, editingMessage, setRuntimeNotice]);
   const {
     checkpoints,
     interruptedRecoveries,
@@ -924,6 +945,7 @@ export default function App() {
         workspaceDiff,
         pendingApprovalItems,
         runtimeRuns,
+        runtimeSchedule,
         workspaceProjectLabel: activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat"),
         runtimeConnected,
         unityBridgeComponent,
@@ -949,6 +971,7 @@ export default function App() {
       providerSnapshot.providerLabel,
       runtimeConnected,
       runtimeRuns,
+      runtimeSchedule,
       t,
       toggleWorkspaceDiffReview,
       unityBridgeComponent,
@@ -962,6 +985,7 @@ export default function App() {
   const {
     workspaceDiffFiles,
     workspaceDiffChanged,
+    runtimePlanItems,
     runtimeFileReferences,
     runtimeReviewEvidence,
     localizeHealthMessage,
@@ -972,6 +996,28 @@ export default function App() {
     reviewSummaryLabel,
     changeSummaryLabel,
   } = runtimeWorkspaceView;
+  const hasRightSidebarProjectContext = Boolean(activeRuntimeProjectPath);
+  const showRightSidebarStatusSummary = !hasRightSidebarProjectContext && !activeChat;
+  const showRightSidebarWorkspaceArtifacts = hasRightSidebarProjectContext;
+  const chooseRuntimePlanOption = (value: string) => {
+    setInput(value);
+    setActiveView("chat");
+  };
+  const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
+    setInput(value);
+    setActiveView("chat");
+    try {
+      await answerAgentQuestion(endpoint, questionId, {
+        answer: value,
+        selectedOptionId: optionId,
+        sessionId,
+        projectRoot: activeRuntimeProjectPath || undefined,
+      });
+      void refreshRuntimeRuns(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
   const emptyProjectState = useMemo(
     () =>
@@ -1150,6 +1196,8 @@ export default function App() {
       "agentDesktopActions",
       "agentGoals",
       "agentMemory",
+      "agentProgress",
+      "agentQuestions",
       "agentPermission",
       "agentRuntimeCancel",
       "agentRuntimeQueue",
@@ -1586,6 +1634,10 @@ export default function App() {
   }
 
   function editConversationMessage(itemId: string) {
+    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
+      setError(t("chat.cannotActionWhileRunning"));
+      return;
+    }
     const chat = getChatById(activeChatId);
     if (!chat) {
       return;
@@ -1599,14 +1651,77 @@ export default function App() {
     if (!item || item.type !== "user") {
       return;
     }
+    setEditingMessage({
+      chatId: chat.id,
+      itemId,
+      priorInput: input,
+      priorAttachments: cloneChatAttachments(attachments),
+    });
     setInput(item.text);
     setAttachments(cloneChatAttachments(item.attachments || []));
-    updateChat(chat.id, (current) => ({
-      ...touchChat(current),
-      sessionId: "",
-      items: current.items.slice(0, index),
-    }));
     setRuntimeNotice(t("chat.editingMessage"));
+  }
+
+  function cancelMessageEdit() {
+    if (!editingMessage) {
+      return;
+    }
+    setInput(editingMessage.priorInput);
+    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
+    setEditingMessage(null);
+    setRuntimeNotice("");
+  }
+
+  function discardMessageEdit() {
+    setEditingMessage(null);
+    setRuntimeNotice("");
+  }
+
+  async function saveMessageEdit(message: string) {
+    if (!editingMessage) {
+      return false;
+    }
+    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
+      setError(t("chat.cannotActionWhileRunning"));
+      return true;
+    }
+    const chat = getChatById(editingMessage.chatId);
+    if (!chat || chat.id !== activeChatId) {
+      discardMessageEdit();
+      return true;
+    }
+    const index = chat.items.findIndex((item) => item.id === editingMessage.itemId);
+    const item = index >= 0 ? chat.items[index] : null;
+    if (!item || item.type !== "user") {
+      discardMessageEdit();
+      return true;
+    }
+    if (latestConversationItemId(chat.items, (entry) => entry.type === "user") !== editingMessage.itemId) {
+      setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
+      return true;
+    }
+    const turn: QueuedTurn = {
+      id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      text: message,
+      attachments: cloneChatAttachments(attachments),
+      providerLabel: providerSnapshot.providerLabel,
+      provider: providerSnapshot.provider,
+      model: providerSnapshot.model,
+    };
+    setEditingMessage(null);
+    setInput("");
+    setAttachments([]);
+    await runTurnNow(chat.id, turn, {
+      baseItems: chat.items.slice(0, index),
+      sessionId: "",
+      restoreOnFailure: {
+        items: chat.items,
+        sessionId: chat.sessionId,
+        title: chat.title,
+        updatedAt: chat.updatedAt,
+      },
+    });
+    return true;
   }
 
   function retryConversationItem(itemId: string) {
@@ -1832,6 +1947,10 @@ export default function App() {
     setError("");
     if (!chatAvailable) {
       setError(chatDisabledReason || t("chat.connectProviderBeforeSend"));
+      return;
+    }
+    if (editingMessage) {
+      await saveMessageEdit(message);
       return;
     }
     if (message === "/compact" || message.startsWith("/compact ")) {
@@ -2506,6 +2625,8 @@ export default function App() {
               contextUsage={contextUsage}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
+              editing={Boolean(editingMessage && editingMessage.chatId === activeChatId)}
+              onCancelEdit={cancelMessageEdit}
               projects={projectItems.map((project) => ({
                 key: projectKey(project),
                 name: project.name || shortPath(project.path || ""),
@@ -2565,6 +2686,8 @@ export default function App() {
               providerComponent={providerComponent}
               reviewSummaryLabel={reviewSummaryLabel}
               changeSummaryLabel={changeSummaryLabel}
+              showStatusSummary={showRightSidebarStatusSummary}
+              showWorkspaceArtifacts={showRightSidebarWorkspaceArtifacts}
               workspaceDiffChanged={workspaceDiffChanged}
               workspaceDiff={workspaceDiff}
               runtimeNotice={runtimeNotice}
@@ -2573,6 +2696,8 @@ export default function App() {
               runtimeRunsError={runtimeRunsError}
               rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
               agentGoals={agentGoals}
+              agentProgress={agentProgress}
+              agentQuestions={agentQuestions}
               agentMemory={agentMemory}
               desktopActions={desktopActions}
               workspaceStateError={workspaceStateError}
@@ -2583,6 +2708,9 @@ export default function App() {
               loadingWorkspaceDiff={loadingWorkspaceDiff}
               workspaceDiffReviewOpen={workspaceDiffReviewOpen}
               loadingWorkspaceDiffPatch={loadingWorkspaceDiffPatch}
+              runtimePlanItems={runtimePlanItems}
+              onChoosePlanOption={chooseRuntimePlanOption}
+              onAnswerQuestion={answerRuntimeQuestion}
               runtimeSchedule={runtimeSchedule}
               visibleSubAgentTasks={visibleSubAgentTasks}
               selectedSubAgent={selectedSubAgent}

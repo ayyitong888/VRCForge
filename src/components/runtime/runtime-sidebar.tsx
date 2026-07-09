@@ -1,8 +1,8 @@
 import { Bot, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightClose, RefreshCw, Sparkles, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
-import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentRuntimeRun, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
-import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
+import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentQuestion, AgentRuntimeRun, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
+import type { RuntimeFileReference, RuntimePlanItem, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { DataLine } from "../ui/data-line";
@@ -27,6 +27,8 @@ export function RightRuntimeSidebar({
   providerComponent,
   reviewSummaryLabel,
   changeSummaryLabel,
+  showStatusSummary,
+  showWorkspaceArtifacts,
   workspaceDiffChanged,
   workspaceDiff,
   runtimeNotice,
@@ -35,6 +37,8 @@ export function RightRuntimeSidebar({
   runtimeRunsError,
   rightRuntimeSectionsCollapsed,
   agentGoals,
+  agentProgress,
+  agentQuestions,
   agentMemory,
   desktopActions,
   workspaceStateError,
@@ -45,6 +49,9 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiff,
   workspaceDiffReviewOpen,
   loadingWorkspaceDiffPatch,
+  runtimePlanItems,
+  onChoosePlanOption,
+  onAnswerQuestion,
   runtimeSchedule,
   visibleSubAgentTasks,
   selectedSubAgent,
@@ -78,6 +85,8 @@ export function RightRuntimeSidebar({
   providerComponent: ComponentStatus;
   reviewSummaryLabel: string;
   changeSummaryLabel: string;
+  showStatusSummary: boolean;
+  showWorkspaceArtifacts: boolean;
   workspaceDiffChanged: boolean;
   workspaceDiff: WorkspaceDiffSummary | null;
   runtimeNotice: string;
@@ -86,6 +95,8 @@ export function RightRuntimeSidebar({
   runtimeRunsError: string;
   rightRuntimeSectionsCollapsed: Record<string, boolean>;
   agentGoals: AgentGoal[];
+  agentProgress: AgentProgress[];
+  agentQuestions: AgentQuestion[];
   agentMemory: AgentMemory[];
   desktopActions: AgentDesktopAction[];
   workspaceStateError: string;
@@ -96,6 +107,9 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiff: boolean;
   workspaceDiffReviewOpen: boolean;
   loadingWorkspaceDiffPatch: boolean;
+  runtimePlanItems: RuntimePlanItem[];
+  onChoosePlanOption: (value: string) => void;
+  onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   runtimeSchedule: RuntimeScheduleItem[];
   visibleSubAgentTasks: SubAgentTask[];
   selectedSubAgent: SubAgentTask | null;
@@ -116,6 +130,15 @@ export function RightRuntimeSidebar({
   formatPayload: (value: unknown) => string;
 }) {
   const { t } = useTranslation();
+  const progressItems: RuntimePlanItem[] = agentProgress.length
+    ? agentProgress.map((item) => ({
+        id: item.progressId,
+        title: item.title || item.progressId,
+        meta: item.summary || item.owner || "",
+        status: item.status || "pending",
+      }))
+    : runtimePlanItems;
+  const showProgressSection = !showStatusSummary || progressItems.length > 0;
   return (
     <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3">
@@ -139,6 +162,83 @@ export function RightRuntimeSidebar({
         </button>
       </div>
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {agentQuestions.length ? (
+          <section className="border-b border-border pb-3">
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+              <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.questions")}</h2>
+              <Badge tone="warn">{formatCount(agentQuestions.length)}</Badge>
+            </div>
+            <div className="space-y-2">
+              {agentQuestions.slice(0, 3).map((question) => (
+                <div key={question.questionId} className="rounded-md border border-border bg-background/70 p-2 text-xs">
+                  {question.header ? <div className="mb-1 truncate font-medium text-muted-foreground">{question.header}</div> : null}
+                  <div className="font-medium text-foreground">{question.question}</div>
+                  {question.options?.length ? (
+                    <div className="mt-2 grid gap-1">
+                      {question.options.slice(0, 4).map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className="rounded-md border border-border bg-background px-2 py-1 text-left transition-colors hover:bg-muted"
+                          onClick={() => void onAnswerQuestion(question.questionId, option.id, option.value || option.label)}
+                        >
+                          <span className="block truncate font-medium">{option.label}</span>
+                          {option.description ? <span className="block truncate text-muted-foreground">{option.description}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {showProgressSection ? (
+          <section className="border-b border-border pb-3">
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+              <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.progress")}</h2>
+              {progressItems.length ? <Badge tone="muted">{formatCount(progressItems.length)}</Badge> : null}
+            </div>
+            {progressItems.length ? (
+              <div className="space-y-1">
+                {progressItems.slice(0, 8).map((item) => (
+                  <div key={item.id} className="rounded-md px-1 py-1.5 text-xs hover:bg-muted/60">
+                    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2">
+                      <span className={cn("flex h-4 w-4 items-center justify-center rounded-full border", progressStatusClass(item.status || "pending"))} />
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium text-foreground" title={item.title}>
+                          {item.title}
+                        </span>
+                        {item.meta ? <span className="block truncate text-muted-foreground">{item.meta}</span> : null}
+                      </span>
+                      <span className="shrink-0 text-muted-foreground">{progressStatusLabel(item.status || "pending", t)}</span>
+                    </div>
+                    {item.choices?.length ? (
+                      <div className="mt-2 grid gap-1 pl-6">
+                        {item.choices.slice(0, 3).map((choice) => (
+                          <button
+                            key={choice.id}
+                            type="button"
+                            className="rounded-md border border-border bg-background px-2 py-1 text-left text-xs transition-colors hover:bg-muted"
+                            onClick={() => onChoosePlanOption(choice.value || choice.label)}
+                          >
+                            <span className="block truncate font-medium">{choice.label}</span>
+                            {choice.description ? <span className="block truncate text-muted-foreground">{choice.description}</span> : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed border-border px-2 py-2 text-xs text-muted-foreground">{t("workspace.noProgress")}</div>
+            )}
+          </section>
+        ) : null}
+
+        {showStatusSummary ? (
         <section className="border-b border-border pb-3">
           <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
             <h2 className="truncate text-xs font-semibold uppercase text-muted-foreground">{t("workspace.projectStatus")}</h2>
@@ -182,26 +282,28 @@ export function RightRuntimeSidebar({
               value={providerCompactLabel}
               suffix={providerComponent ? <StatusDot status={providerComponent.status} /> : null}
             />
-            <RuntimeInfoRow
-              icon={<ListChecks className="h-4 w-4" />}
-              label={t("workspace.review")}
-              value={reviewSummaryLabel}
-            />
-            <RuntimeInfoRow
-              icon={<FileText className="h-4 w-4" />}
-              label={t("workspace.changes")}
-              value={
-                changeSummaryLabel
-              }
-              suffix={
-                workspaceDiffChanged ? (
-                  <span className="font-mono">
-                    <span className="text-emerald-600">+{formatCount(workspaceDiff?.additions || 0)}</span>{" "}
-                    <span className="text-destructive">-{formatCount(workspaceDiff?.deletions || 0)}</span>
-                  </span>
-                ) : null
-              }
-            />
+            {showWorkspaceArtifacts ? (
+              <>
+                <RuntimeInfoRow
+                  icon={<ListChecks className="h-4 w-4" />}
+                  label={t("workspace.review")}
+                  value={reviewSummaryLabel}
+                />
+                <RuntimeInfoRow
+                  icon={<FileText className="h-4 w-4" />}
+                  label={t("workspace.changes")}
+                  value={changeSummaryLabel}
+                  suffix={
+                    workspaceDiffChanged ? (
+                      <span className="font-mono">
+                        <span className="text-emerald-600">+{formatCount(workspaceDiff?.additions || 0)}</span>{" "}
+                        <span className="text-destructive">-{formatCount(workspaceDiff?.deletions || 0)}</span>
+                      </span>
+                    ) : null
+                  }
+                />
+              </>
+            ) : null}
           </div>
           {runtimeNotice ? (
             <div className="mt-3 rounded-md border border-border bg-muted/50 px-2 py-2 text-xs text-muted-foreground">
@@ -214,6 +316,7 @@ export function RightRuntimeSidebar({
             </div>
           ) : null}
         </section>
+        ) : null}
 
         {runtimeRuns.length || runtimeRunsError ? (
           <RuntimeSection
@@ -304,7 +407,7 @@ export function RightRuntimeSidebar({
 
         {workspaceStateError ? <div className="px-1 py-2 text-xs text-muted-foreground">{workspaceStateError}</div> : null}
 
-        {runtimeReviewEvidence.length ? (
+        {showWorkspaceArtifacts && runtimeReviewEvidence.length ? (
           <RuntimeSection
             title={t("workspace.reviewEvidence")}
             collapsed={rightRuntimeSectionsCollapsed.reviewEvidence}
@@ -322,7 +425,7 @@ export function RightRuntimeSidebar({
           </RuntimeSection>
         ) : null}
 
-        {runtimeFileReferences.length ? (
+        {showWorkspaceArtifacts && runtimeFileReferences.length ? (
           <RuntimeSection
             title={t("workspace.filesSeen")}
             collapsed={rightRuntimeSectionsCollapsed.files}
@@ -337,7 +440,7 @@ export function RightRuntimeSidebar({
           </RuntimeSection>
         ) : null}
 
-        {workspaceDiffFiles.length || workspaceDiffError || workspaceDiff ? (
+        {showWorkspaceArtifacts && (workspaceDiffFiles.length || workspaceDiffError || workspaceDiff) ? (
           <RuntimeSection
             title={t("workspace.changes")}
             collapsed={rightRuntimeSectionsCollapsed.diff}
@@ -497,4 +600,32 @@ export function RightRuntimeSidebar({
       </div>
     </aside>
   );
+}
+
+function progressStatusLabel(status: string, t: (key: string) => string) {
+  const normalized = status.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    pending: t("workspace.progressPending"),
+    in_progress: t("workspace.progressInProgress"),
+    running: t("workspace.progressInProgress"),
+    completed: t("workspace.progressCompleted"),
+    cancelled: t("workspace.progressCancelled"),
+    blocked: t("workspace.progressBlocked"),
+    question: t("workspace.progressQuestion"),
+  };
+  return labels[normalized] || status || t("workspace.runStatusUnknown");
+}
+
+function progressStatusClass(status: string) {
+  const normalized = status.trim().toLowerCase();
+  if (["in_progress", "running", "question"].includes(normalized)) {
+    return "border-primary bg-primary";
+  }
+  if (normalized === "completed") {
+    return "border-emerald-500 bg-emerald-500";
+  }
+  if (["blocked", "cancelled"].includes(normalized)) {
+    return "border-amber-500 bg-amber-500";
+  }
+  return "border-muted-foreground/50 bg-transparent";
 }

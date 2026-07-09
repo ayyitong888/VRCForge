@@ -78,6 +78,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             apply_adjustment_checkpoint,
+            answer_agent_question,
             approve_agent_approval,
             block_skill_package,
             cancel_sub_agent,
@@ -87,10 +88,13 @@ fn main() {
             create_adjustment_checkpoint,
             create_agent_goal,
             create_agent_memory,
+            create_agent_progress,
+            create_agent_question,
             create_skill,
             create_sub_agent,
             delete_adjustment_checkpoint,
             delete_agent_memory,
+            delete_agent_progress,
             delete_skill,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
@@ -101,6 +105,8 @@ fn main() {
             fetch_agent_goals,
             fetch_agent_memory,
             fetch_agent_notes,
+            fetch_agent_progress,
+            fetch_agent_questions,
             fetch_agent_runs,
             fetch_adjustment_checkpoints,
             fetch_app_bootstrap,
@@ -148,6 +154,7 @@ fn main() {
             request_restore_interrupted_apply_recovery,
             resolve_interrupted_apply_recovery,
             retry_sub_agent,
+            replace_agent_progress,
             revoke_skill_package_signer,
             save_agent_notes,
             save_chats,
@@ -161,6 +168,7 @@ fn main() {
             uninstall_external_agent_connector,
             update_adjustment_checkpoint,
             update_agent_goal,
+            update_agent_progress,
             update_api_config,
             update_diagnostics,
             update_external_agent_gateway,
@@ -179,7 +187,9 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle().clone();
+                shutdown_managed_backend(&app);
+                app.exit(0);
             }
         })
         .run(tauri::generate_context!())

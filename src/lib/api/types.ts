@@ -408,6 +408,22 @@ export type AgentRuntimeResponse = {
     skillReason?: string;
     expectedResult?: string;
     nextStep?: string;
+    choices?: Array<{
+      id?: string;
+      label: string;
+      description?: string;
+      value?: string;
+    }>;
+  };
+  choicePrompt?: {
+    id?: string;
+    question: string;
+    choices: Array<{
+      id?: string;
+      label: string;
+      description?: string;
+      value?: string;
+    }>;
   };
   reasoning?: AgentReasoningTrace;
   contextUsage?: AgentContextUsage;
@@ -521,6 +537,8 @@ export type DesktopRuntimeSnapshot = {
   runs?: AgentRuntimeRunLedger;
   desktopActions?: { actions?: AgentDesktopAction[]; count?: number };
   goals?: { goals?: AgentGoal[]; count?: number };
+  progress?: { items?: AgentProgress[]; count?: number };
+  questions?: { questions?: AgentQuestion[]; count?: number };
   memory?: { memories?: AgentMemory[]; count?: number };
 };
 
@@ -549,6 +567,45 @@ export type AgentGoal = {
   projectRoot?: string;
   sessionId?: string;
   approvalPolicy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentProgress = {
+  schema?: string;
+  id?: string;
+  progressId: string;
+  title?: string;
+  summary?: string;
+  status?: "pending" | "in_progress" | "running" | "completed" | "cancelled" | "blocked" | "deleted" | string;
+  projectRoot?: string;
+  sessionId?: string;
+  owner?: string;
+  order?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentQuestionOption = {
+  id: string;
+  label: string;
+  value?: string;
+  description?: string;
+};
+
+export type AgentQuestion = {
+  schema?: string;
+  id?: string;
+  questionId: string;
+  header?: string;
+  question?: string;
+  options?: AgentQuestionOption[];
+  status?: "pending" | "answered" | "cancelled" | string;
+  answer?: string;
+  selectedOptionId?: string;
+  projectRoot?: string;
+  sessionId?: string;
+  owner?: string;
   createdAt?: string;
   updatedAt?: string;
 };

@@ -826,6 +826,59 @@ class AgentGoalUpdateRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentProgressItemRequest(BaseModel):
+    id: str | None = None
+    progress_id: str | None = Field(default=None, alias="progressId")
+    title: str = ""
+    step: str = ""
+    content: str = ""
+    summary: str = ""
+    description: str = ""
+    status: str = "pending"
+    order: int | None = None
+    owner: str = "agent"
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentProgressReplaceRequest(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    plan: list[dict[str, Any]] = Field(default_factory=list)
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentQuestionCreateRequest(BaseModel):
+    header: str = ""
+    question: str = ""
+    prompt: str = ""
+    options: list[Any] = Field(default_factory=list)
+    choices: list[Any] = Field(default_factory=list)
+    owner: str = "agent"
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_path: str | None = Field(default=None, alias="projectPath")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentQuestionAnswerRequest(BaseModel):
+    answer: str = ""
+    value: str = ""
+    option_id: str = Field(default="", alias="optionId")
+    selected_option_id: str = Field(default="", alias="selectedOptionId")
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentMemoryCreateRequest(BaseModel):
     text: str = ""
     content: str = ""
@@ -1804,11 +1857,15 @@ def read_app_runtime_snapshot(
         runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
         desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
         goals = AGENT_GATEWAY.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
+        progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
+        questions = AGENT_GATEWAY.list_agent_questions(limit=6, session_id=sessionId, project_root=projectRoot)
         memory = AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot)
     else:
         runs = {"ok": True, "schema": "vrcforge.runtime_runs.v1", "runs": [], "events": [], "count": 0}
         desktop_actions = {"ok": True, "schema": "vrcforge.desktop_actions.v1", "actions": [], "count": 0}
         goals = {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [], "count": 0}
+        progress = {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [], "count": 0}
+        questions = {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [], "count": 0}
         memory = {"ok": True, "schema": "vrcforge.agent_memory_list.v1", "memories": [], "count": 0}
     return {
         "ok": True,
@@ -1818,6 +1875,8 @@ def read_app_runtime_snapshot(
         "runs": runs,
         "desktopActions": desktop_actions,
         "goals": goals,
+        "progress": progress,
+        "questions": questions,
         "memory": memory,
     }
 
@@ -2080,6 +2139,135 @@ async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/progress")
+def app_agent_progress(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_agent_progress(limit=limit, session_id=sessionId, project_root=projectRoot)
+
+
+@app.post("/api/app/agent/progress/replace")
+async def app_replace_agent_progress(request: AgentProgressReplaceRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.replace_agent_progress(
+            {
+                "items": request.items,
+                "plan": request.plan,
+                "sessionId": request.session_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    return payload
+
+
+@app.post("/api/app/agent/progress")
+async def app_create_agent_progress(request: AgentProgressItemRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.create_agent_progress(
+            {
+                "title": request.title,
+                "step": request.step,
+                "content": request.content,
+                "summary": request.summary,
+                "description": request.description,
+                "status": request.status,
+                "order": request.order,
+                "owner": request.owner,
+                "sessionId": request.session_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    return payload
+
+
+@app.post("/api/app/agent/progress/{progress_id}")
+async def app_update_agent_progress(progress_id: str, request: AgentProgressItemRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.update_agent_progress(
+            progress_id,
+            {
+                "title": request.title,
+                "step": request.step,
+                "content": request.content,
+                "summary": request.summary,
+                "description": request.description,
+                "status": request.status,
+                "order": request.order,
+                "owner": request.owner,
+                "sessionId": request.session_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    return payload
+
+
+@app.delete("/api/app/agent/progress/{progress_id}")
+async def app_delete_agent_progress(progress_id: str, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.delete_agent_progress(progress_id, {"sessionId": sessionId, "projectRoot": projectRoot})
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=sessionId or "", project_root=projectRoot or ""))
+    return payload
+
+
+@app.get("/api/app/agent/questions")
+def app_agent_questions(limit: int = 50, sessionId: str = "", projectRoot: str = "", includeAnswered: bool = False) -> dict[str, Any]:
+    return AGENT_GATEWAY.list_agent_questions(limit=limit, session_id=sessionId, project_root=projectRoot, include_answered=includeAnswered)
+
+
+@app.post("/api/app/agent/questions")
+async def app_create_agent_question(request: AgentQuestionCreateRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.create_agent_question(
+            {
+                "header": request.header,
+                "question": request.question,
+                "prompt": request.prompt,
+                "options": request.options,
+                "choices": request.choices,
+                "owner": request.owner,
+                "sessionId": request.session_id,
+                "projectPath": request.project_path,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    return payload
+
+
+@app.post("/api/app/agent/questions/{question_id}/answer")
+async def app_answer_agent_question(question_id: str, request: AgentQuestionAnswerRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.answer_agent_question(
+            question_id,
+            {
+                "answer": request.answer,
+                "value": request.value,
+                "optionId": request.option_id,
+                "selectedOptionId": request.selected_option_id,
+                "sessionId": request.session_id,
+                "projectRoot": request.project_root,
+            },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     return payload
 
 
@@ -4954,12 +5142,20 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/agent/tool/{tool_name}")
-def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
+async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
     try:
-        return AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
+        payload = AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    params = ensure_dict(tool_request.params or {})
+    session_id = str(params.get("sessionId") or params.get("session_id") or "")
+    project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "")
+    if tool_name.startswith("vrcforge_progress_"):
+        await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=session_id, project_root=project_root))
+    elif tool_name == "vrcforge_ask_user":
+        await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=session_id, project_root=project_root))
+    return payload
 
 
 @app.get("/api/agent/approvals")
@@ -18709,6 +18905,12 @@ def register_agent_gateway_tools() -> None:
         ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
+    AGENT_GATEWAY.register_tool("vrcforge_progress_list", "List the current agent progress items for a session or project.", "read/debug", lambda params: AGENT_GATEWAY.list_agent_progress(limit=int(ensure_dict(params or {}).get("limit") or 50), session_id=str(ensure_dict(params or {}).get("sessionId") or ensure_dict(params or {}).get("session_id") or ""), project_root=str(ensure_dict(params or {}).get("projectRoot") or ensure_dict(params or {}).get("project_root") or ensure_dict(params or {}).get("projectPath") or "")))
+    AGENT_GATEWAY.register_tool("vrcforge_progress_replace", "Replace the visible agent progress list, similar to a TodoWrite plan update.", "plan/preview", lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_progress_create", "Create one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_progress(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_question(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)

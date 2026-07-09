@@ -39,6 +39,8 @@ export function ChatWorkspace({
   contextUsage,
   providerLabel,
   model,
+  editing,
+  onCancelEdit,
   projects,
   onBindProject,
   conversation,
@@ -79,6 +81,8 @@ export function ChatWorkspace({
   contextUsage?: ContextUsage;
   providerLabel: string;
   model: string;
+  editing: boolean;
+  onCancelEdit: () => void;
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
@@ -122,6 +126,8 @@ export function ChatWorkspace({
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}
+      editing={editing}
+      onCancelEdit={onCancelEdit}
       projects={projects}
       onBindProject={onBindProject}
     />
@@ -156,7 +162,7 @@ export function ChatWorkspace({
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 feedback={messageFeedback[item.id]}
                 canRetry={!sending && item.id === latestRetryableItemId}
-                canEdit={!sending && item.id === latestEditableUserItemId}
+                canEdit={!sending && queued.length === 0 && item.id === latestEditableUserItemId}
                 onCopyItem={onCopyItem}
                 onRetryItem={onRetryItem}
                 onEditItem={onEditItem}

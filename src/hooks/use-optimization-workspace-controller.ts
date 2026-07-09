@@ -25,6 +25,7 @@ type OptimizationDependencyItem = NonNullable<NonNullable<OptimizationPlannerRep
 type UseOptimizationWorkspaceControllerParams = {
   endpoint: string;
   runtimeConnected: boolean;
+  unityToolsReady: boolean;
   activeView: ActiveView;
   activeProjectPath: string;
   setActiveView: (view: ActiveView) => void;
@@ -36,6 +37,7 @@ type UseOptimizationWorkspaceControllerParams = {
 export function useOptimizationWorkspaceController({
   endpoint,
   runtimeConnected,
+  unityToolsReady,
   activeView,
   activeProjectPath,
   setActiveView,
@@ -58,28 +60,65 @@ export function useOptimizationWorkspaceController({
   const [selectedOptimizationProof, setSelectedOptimizationProof] = useState<OptimizationProofDetail | null>(null);
   const [loadingOptimizationProofs, setLoadingOptimizationProofs] = useState(false);
   const [optimizationProofMessage, setOptimizationProofMessage] = useState("");
+  const canRunUnityOptimization = runtimeConnected && unityToolsReady && Boolean(activeProjectPath);
 
   useEffect(() => {
-    if (activeView === "optimization" && runtimeConnected) {
+    if (activeView === "optimization" && canRunUnityOptimization) {
       void loadOptimizationPlan();
+    } else if (activeView === "optimization") {
+      skipUnityOptimizationLoads();
     }
-  }, [activeView, runtimeConnected, endpoint, activeProjectPath, optimizationTargetProfile]);
+  }, [activeView, canRunUnityOptimization, endpoint, activeProjectPath, optimizationTargetProfile]);
 
   useEffect(() => {
-    if (activeView === "optimization" && runtimeConnected) {
+    if (activeView === "optimization" && canRunUnityOptimization) {
       void loadOptimizationAvatars();
     }
-  }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
+  }, [activeView, canRunUnityOptimization, endpoint, activeProjectPath]);
 
-  async function openOptimization() {
+  function openOptimization() {
     setActiveView("optimization");
     setError("");
-    await loadOptimizationPlan();
-    await loadOptimizationAvatars();
-    await loadOptimizationProofs();
+    if (runtimeConnected) {
+      void loadOptimizationProofs();
+    } else {
+      setLoadingOptimizationProofs(false);
+      setOptimizationProofMessage("Core is offline. Optimizer proof history skipped.");
+    }
+    if (canRunUnityOptimization) {
+      void Promise.allSettled([loadOptimizationPlan(), loadOptimizationAvatars()]);
+    } else {
+      skipUnityOptimizationLoads();
+    }
+  }
+
+  function skipUnityOptimizationLoads() {
+    setLoadingOptimization(false);
+    setLoadingOptimizationAvatars(false);
+    setOptimizationAvatars([]);
+    setOptimizationAvatarPath("");
+    setOptimizationReport(null);
+    if (!activeProjectPath) {
+      setOptimizationMessage("Select a Unity project before scanning optimization data.");
+      setOptimizationAvatarMessage("Select a Unity project before scanning avatars.");
+      return;
+    }
+    if (!runtimeConnected) {
+      setOptimizationMessage("Core is offline. Connect the backend before optimization scans.");
+      setOptimizationAvatarMessage("Core is offline. Avatar scan skipped.");
+      return;
+    }
+    if (!unityToolsReady) {
+      setOptimizationMessage("Unity MCP is unavailable. Optimization scan skipped.");
+      setOptimizationAvatarMessage("Unity MCP is unavailable. Avatar scan skipped.");
+    }
   }
 
   async function loadOptimizationPlan(target = endpoint, profile = optimizationTargetProfile) {
+    if (target === endpoint && !canRunUnityOptimization) {
+      skipUnityOptimizationLoads();
+      return;
+    }
     setLoadingOptimization(true);
     setOptimizationMessage("");
     try {
@@ -143,6 +182,10 @@ export function useOptimizationWorkspaceController({
   }
 
   async function loadOptimizationAvatars(target = endpoint) {
+    if (target === endpoint && !canRunUnityOptimization) {
+      skipUnityOptimizationLoads();
+      return;
+    }
     setLoadingOptimizationAvatars(true);
     setOptimizationAvatarMessage("");
     try {

@@ -168,6 +168,8 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
             | "agentDesktopActions"
             | "agentGoals"
             | "agentMemory"
+            | "agentProgress"
+            | "agentQuestions"
             | "agentPermission"
             | "agentRuntimeCancel"
             | "agentRuntimeDelta"

@@ -40,6 +40,13 @@ export type CurrentTurn = {
 export type RunSingleTurnOptions = {
   baseItems?: ConversationItem[];
   sessionId?: string;
+  restoreOnFailure?: {
+    items: ConversationItem[];
+    sessionId: string;
+    title?: string;
+    updatedAt?: string;
+  };
+  onFailure?: (message: string) => void;
 };
 
 type SubmitTurnResult = "started" | "queued" | "queue_full";
@@ -179,14 +186,14 @@ export function useChatRunController({
   async function runTurnNow(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
     if (sendingRef.current) {
       setError(t("chat.cannotActionWhileRunning"));
-      return;
+      return false;
     }
     sendingRef.current = true;
     setSending(true);
     setStopRequested(false);
     stopRequestedRef.current = false;
     try {
-      await runSingleTurn(chatId, turn, options);
+      return await runSingleTurn(chatId, turn, options);
     } finally {
       queueRef.current = [];
       setQueued([]);
@@ -197,7 +204,7 @@ export function useChatRunController({
     }
   }
 
-  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions) {
+  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions): Promise<boolean> {
     const chat = getChatById(chatId);
     const baseItems = options?.baseItems ?? chat?.items ?? [];
     const chatSessionId = options?.sessionId ?? chat?.sessionId ?? "";
@@ -224,6 +231,7 @@ export function useChatRunController({
         text: turn.text,
         attachments: turn.attachments,
         queuedFrom: Boolean(turn.queuedFrom),
+        createdAt: new Date(startedAt).toISOString(),
       };
       userItemId = userItem.id;
       const streamingItem: ConversationItem = {
@@ -233,6 +241,7 @@ export function useChatRunController({
         text: "",
         providerLabel: turn.providerLabel,
         model: turn.model,
+        createdAt: new Date(startedAt).toISOString(),
       };
       const message = turn.text;
       streamingTurnChatRef.current.set(turn.id, chatId);
@@ -257,13 +266,25 @@ export function useChatRunController({
         sessionId: response.sessionId || response.session_id || current.sessionId,
         items: [
           ...current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
-          { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model },
+          { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
         ],
       }));
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
+      return true;
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
+      if (options?.restoreOnFailure) {
+        const snapshot = options.restoreOnFailure;
+        updateChat(chatId, (current) => ({
+          ...current,
+          sessionId: snapshot.sessionId,
+          title: snapshot.title || current.title,
+          updatedAt: snapshot.updatedAt || current.updatedAt,
+          items: snapshot.items,
+        }));
+        options.onFailure?.(text);
+      } else {
       if (userItemId && text.toLowerCase().includes("cancel")) {
         updateChat(chatId, (current) => ({
           ...touchChat(current),
@@ -276,11 +297,13 @@ export function useChatRunController({
         ...touchChat(current),
         items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
       }));
+      }
       if (isRuntimeSessionVerificationError(text)) {
         handleRuntimeSessionFailure(text);
       } else {
         setError(text);
       }
+      return false;
     } finally {
       if (activeTurnAbortRef.current === abortController) {
         activeTurnAbortRef.current = null;

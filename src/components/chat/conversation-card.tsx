@@ -94,6 +94,7 @@ export function ConversationCard({
           ) : null}
           <MessageActions
             align="right"
+            createdAt={item.createdAt || item.id}
             onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
@@ -161,6 +162,7 @@ export function ConversationCard({
             ) : null}
           </RunRow>
           <MessageActions
+            createdAt={item.createdAt || item.id}
             onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
@@ -399,6 +401,7 @@ export function ConversationCard({
           </RunRow>
         ) : null}
         <MessageActions
+          createdAt={item.createdAt || item.id}
           onCopy={() => onCopyItem?.(item)}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           onFeedbackUp={() => onFeedbackItem?.(item.id, "up")}
@@ -480,6 +483,7 @@ export function UserImageAttachments({ attachments }: { attachments: ChatAttachm
 
 function MessageActions({
   align = "left",
+  createdAt,
   feedback,
   onCopy,
   onRetry,
@@ -488,6 +492,7 @@ function MessageActions({
   onFeedbackDown,
 }: {
   align?: "left" | "right";
+  createdAt?: string;
   feedback?: MessageFeedback;
   onCopy?: () => void;
   onRetry?: () => void;
@@ -497,6 +502,7 @@ function MessageActions({
 }) {
   const { t } = useTranslation();
   const hasActions = onCopy || onRetry || onEdit || onFeedbackUp || onFeedbackDown;
+  const timeLabel = formatMessageTime(createdAt, i18n.language);
   if (!hasActions) {
     return null;
   }
@@ -507,6 +513,7 @@ function MessageActions({
         align === "right" ? "justify-end" : "justify-start",
       )}
     >
+      {timeLabel ? <span className="px-1 text-xs text-muted-foreground/80">{timeLabel}</span> : null}
       {onCopy ? (
         <button
           type="button"
@@ -570,6 +577,48 @@ function MessageActions({
       ) : null}
     </div>
   );
+}
+
+function formatMessageTime(value: string | undefined, language: string): string {
+  const ms = parseMessageTime(value);
+  if (!ms) {
+    return "";
+  }
+  const now = new Date();
+  const date = new Date(ms);
+  const sameDay = now.toDateString() === date.toDateString();
+  if (sameDay) {
+    return new Intl.DateTimeFormat(language || undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (yesterday.toDateString() === date.toDateString()) {
+    const normalizedLanguage = language.toLowerCase();
+    if (normalizedLanguage.startsWith("zh")) {
+      return "昨天";
+    }
+    if (normalizedLanguage.startsWith("ja")) {
+      return "昨日";
+    }
+    return "yesterday";
+  }
+  return new Intl.DateTimeFormat(language || undefined, { month: "short", day: "numeric" }).format(date);
+}
+
+function parseMessageTime(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+  const match = value.match(/(?:^|[^0-9])([0-9]{13})(?:[^0-9]|$)/);
+  if (!match) {
+    return 0;
+  }
+  const timestamp = Number(match[1]);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 type AgentTimelineKey = "plan" | "reasoning" | "vision" | "shell" | "skill" | "approval" | "shellError";

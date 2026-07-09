@@ -5,6 +5,8 @@ import {
   AgentDesktopAction,
   AgentGoal,
   AgentMemory,
+  AgentProgress,
+  AgentQuestion,
   AgentRuntimeRun,
   AppBootstrap,
   DesktopRuntimeSnapshot,
@@ -54,6 +56,8 @@ export function useRuntimeWorkspace({
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
   const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
+  const [agentProgress, setAgentProgress] = useState<AgentProgress[]>([]);
+  const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
   const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
@@ -162,6 +166,8 @@ export function useRuntimeWorkspace({
       setRuntimeRunsError("");
       setDesktopActions([]);
       setAgentGoals([]);
+      setAgentProgress([]);
+      setAgentQuestions([]);
       setAgentMemory([]);
       setAgentApprovals(null);
       setWorkspaceStateError("");
@@ -188,6 +194,8 @@ export function useRuntimeWorkspace({
       setRuntimeRuns(snapshot.runs?.runs ?? []);
       setDesktopActions(snapshot.desktopActions?.actions ?? []);
       setAgentGoals(snapshot.goals?.goals ?? []);
+      setAgentProgress(snapshot.progress?.items ?? []);
+      setAgentQuestions(snapshot.questions?.questions ?? []);
       setAgentMemory(snapshot.memory?.memories ?? []);
       setRuntimeRunsError("");
       setWorkspaceStateError("");
@@ -222,6 +230,14 @@ export function useRuntimeWorkspace({
     setAgentGoals((items) => [goal, ...items.filter((item) => item.goalId !== goal.goalId)].slice(0, 8));
   }
 
+  function upsertAgentProgress(progress: AgentProgress) {
+    setAgentProgress((items) => [progress, ...items.filter((item) => item.progressId !== progress.progressId)].slice(0, 12));
+  }
+
+  function upsertAgentQuestion(question: AgentQuestion) {
+    setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
+  }
+
   function upsertAgentMemory(memory: AgentMemory) {
     setAgentMemory((items) => [memory, ...items.filter((item) => item.memoryId !== memory.memoryId)].slice(0, 8));
   }
@@ -237,6 +253,8 @@ export function useRuntimeWorkspace({
     runtimeRunsError,
     desktopActions,
     agentGoals,
+    agentProgress,
+    agentQuestions,
     agentMemory,
     workspaceStateError,
     runtimeNotice,
@@ -247,6 +265,8 @@ export function useRuntimeWorkspace({
     toggleWorkspaceDiffReview,
     prependDesktopAction,
     upsertAgentGoal,
+    upsertAgentProgress,
+    upsertAgentQuestion,
     upsertAgentMemory,
   };
 }
