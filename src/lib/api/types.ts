@@ -9,9 +9,18 @@ export type PermissionState = {
   fullPermission?: boolean;
   permissionLabel?: string;
   roslynRiskAcknowledged: boolean;
+  roslynFullAutoEverEnabled?: boolean;
   allowWriteRequests: boolean;
   allowRoslynAdvanced: boolean;
   roslynEnvEnabled: boolean;
+};
+
+export type AdvancedSettingsState = {
+  developerOptionsEnabled: boolean;
+  developerOptionsEverEnabled: boolean;
+  computerUseEnabled: boolean;
+  computerUseEverEnabled: boolean;
+  roslynFullAutoEverEnabled: boolean;
 };
 
 export type AgentNotes = {
@@ -536,6 +545,7 @@ export type DesktopRuntimeSnapshot = {
   approvals?: { approvals?: AgentApproval[]; count?: number };
   runs?: AgentRuntimeRunLedger;
   desktopActions?: { actions?: AgentDesktopAction[]; count?: number };
+  activeDesktopActions?: { actions?: AgentDesktopAction[]; count?: number };
   desktopBridge?: DesktopBridgeStatus;
   goals?: { goals?: AgentGoal[]; count?: number };
   progress?: { items?: AgentProgress[]; count?: number };
@@ -553,11 +563,17 @@ export type AgentDesktopAction = {
   clientTurnId?: string;
   projectRoot?: string;
   promptSummary?: string;
+  params?: Record<string, unknown>;
+  paramsSummary?: Record<string, unknown>;
+  result?: Record<string, unknown>;
   resultSummary?: Record<string, unknown>;
   error?: string;
+  cancelReason?: string;
   bridgeId?: string;
   bridgeName?: string;
   provider?: string;
+  claimRequestId?: string;
+  claimedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -568,6 +584,7 @@ export type DesktopBridgeInfo = {
   name?: string;
   provider?: string;
   capabilities?: string[];
+  operations?: string[];
   status?: string;
   registeredAt?: string;
   lastHeartbeatAt?: string;
@@ -582,6 +599,7 @@ export type DesktopBridgeStatus = {
   pendingActionCount?: number;
   heartbeatTtlSeconds?: number;
   supportedActions?: string[];
+  supportedOperations?: string[];
 };
 
 export type AgentGoal = {
@@ -762,6 +780,7 @@ export type AppBootstrap = {
     pendingApprovalCount: number;
   };
   permission: PermissionState;
+  advancedSettings?: AdvancedSettingsState;
   approvals: AgentApproval[];
 };
 

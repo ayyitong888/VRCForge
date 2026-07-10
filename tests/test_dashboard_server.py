@@ -96,6 +96,12 @@ class DashboardServerTests(unittest.TestCase):
             tuning_root / "agent_gateway.json",
             tuning_root / "agent_gateway",
         )
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.developer_options_enabled = True
+        config.developer_options_ever_enabled = True
+        config.computer_use_enabled = True
+        config.computer_use_ever_enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
         dashboard_server.AGENT_GATEWAY._desktop_bridges.clear()
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
@@ -816,6 +822,98 @@ class DashboardServerTests(unittest.TestCase):
             any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.runtime_message for call in to_thread.call_args_list)
         )
 
+    def test_advanced_settings_remember_only_ever_enabled_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            audit_path = root / "audit"
+            gateway = AgentGateway(config_path, audit_path)
+
+            self.assertEqual(
+                gateway.advanced_settings_state(),
+                {
+                    "developerOptionsEnabled": False,
+                    "developerOptionsEverEnabled": False,
+                    "computerUseEnabled": False,
+                    "computerUseEverEnabled": False,
+                    "roslynFullAutoEverEnabled": False,
+                },
+            )
+            gateway.update_advanced_settings(
+                developer_options_enabled=True,
+                computer_use_enabled=True,
+            )
+            gateway.update_advanced_settings(
+                developer_options_enabled=False,
+                computer_use_enabled=False,
+            )
+
+            reloaded = AgentGateway(config_path, audit_path)
+            state = reloaded.advanced_settings_state()
+
+        self.assertFalse(state["developerOptionsEnabled"])
+        self.assertFalse(state["computerUseEnabled"])
+        self.assertTrue(state["developerOptionsEverEnabled"])
+        self.assertTrue(state["computerUseEverEnabled"])
+        self.assertNotIn("confirmedAt", state)
+        self.assertNotIn("history", state)
+
+    def test_computer_use_tool_is_visible_only_for_explicit_app_turn(self) -> None:
+        captured: list[str] = []
+        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
+        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
+
+        def plan_fn(prompt: str) -> dict:
+            captured.append(prompt)
+            return {"text": json.dumps({"action": "reply", "reply": "done"})}
+
+        try:
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
+            with TestClient(dashboard_server.app) as client:
+                ordinary = client.post(
+                    "/api/app/agent/message",
+                    json={"message": "ordinary turn", "sessionId": "sess-ordinary-computer-use"},
+                )
+                explicit = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "inspect the active window",
+                        "sessionId": "sess-explicit-computer-use",
+                        "computerUseRequested": True,
+                    },
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
+            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
+
+        self.assertEqual(ordinary.status_code, 200)
+        self.assertEqual(explicit.status_code, 200)
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("vrcforge_agent_desktop_action", captured[0])
+        self.assertIn("vrcforge_agent_desktop_action", captured[1])
+        self.assertFalse(dashboard_server.AGENT_GATEWAY.computer_use_turn_active())
+
+    def test_computer_use_direct_app_action_is_blocked_while_setting_is_off(self) -> None:
+        try:
+            dashboard_server.AGENT_GATEWAY.update_advanced_settings(
+                developer_options_enabled=False,
+                computer_use_enabled=False,
+            )
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/desktop-actions",
+                    json={"action": "computer_use", "params": {"operation": "screenshot"}},
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.update_advanced_settings(
+                developer_options_enabled=True,
+                computer_use_enabled=True,
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Computer Use is disabled", response.json()["detail"])
+
     def test_agent_desktop_action_is_explicit_and_audited(self) -> None:
         with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
             with TestClient(dashboard_server.app) as client:
@@ -850,7 +948,9 @@ class DashboardServerTests(unittest.TestCase):
                 json={"name": "mock-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
             )
             self.assertEqual(registered.status_code, 200)
-            bridge_id = registered.json()["bridge"]["bridgeId"]
+            registration = registered.json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
 
             status = client.get("/api/app/agent/desktop-bridge")
             self.assertEqual(status.status_code, 200)
@@ -876,11 +976,17 @@ class DashboardServerTests(unittest.TestCase):
             action_id = requested_payload["actionId"]
             self.assertTrue(action_id)
 
-            heartbeat = client.post("/api/app/agent/desktop-bridge/heartbeat", json={"bridgeId": bridge_id})
+            heartbeat = client.post(
+                "/api/app/agent/desktop-bridge/heartbeat",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
             self.assertEqual(heartbeat.status_code, 200)
             self.assertEqual(heartbeat.json()["pendingActionCount"], 1)
 
-            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            claimed = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
             self.assertEqual(claimed.status_code, 200)
             claimed_action = claimed.json()["action"]
             self.assertEqual(claimed_action["actionId"], action_id)
@@ -891,6 +997,7 @@ class DashboardServerTests(unittest.TestCase):
                 "/api/app/agent/desktop-actions/complete",
                 json={
                     "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
                     "actionId": action_id,
                     "status": "completed",
                     "result": {"summary": "settings window opened", "windowTitle": "Settings"},
@@ -908,13 +1015,84 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(merged[0]["action"], "computer_use")
         self.assertEqual(merged[0]["bridgeId"], bridge_id)
 
+    def test_active_desktop_action_is_global_and_result_stays_transient(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={
+                    "name": "embedded-proof",
+                    "provider": "embedded-ctypes-win32",
+                    "capabilities": ["computer_use"],
+                    "operations": ["list_windows", "screenshot", "sequence"],
+                },
+            ).json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "sessionId": "owner-session",
+                    "projectRoot": "OwnerProject",
+                    "params": {"operation": "sequence", "steps": [{"operation": "list_windows"}]},
+                },
+            ).json()
+            action_id = requested["actionId"]
+            client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
+            other_snapshot = client.get(
+                "/api/app/runtime/snapshot",
+                params={"sessionId": "different-session", "projectRoot": "DifferentProject"},
+            ).json()
+            completed = client.post(
+                "/api/app/agent/desktop-actions/complete",
+                json={
+                    "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
+                    "actionId": action_id,
+                    "status": "completed",
+                    "result": {
+                        "operation": "sequence",
+                        "stepCount": 1,
+                        "steps": [
+                            {
+                                "index": 1,
+                                "operation": "list_windows",
+                                "result": {"operation": "list_windows", "count": 3, "windows": [{"title": "private"}]},
+                            }
+                        ],
+                    },
+                },
+            )
+            result = client.get(f"/api/app/agent/desktop-actions/{action_id}/result")
+            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "owner-session"}).json()
+            after_snapshot = client.get(
+                "/api/app/runtime/snapshot",
+                params={"sessionId": "different-session", "projectRoot": "DifferentProject"},
+            ).json()
+
+        active = other_snapshot["activeDesktopActions"]["actions"]
+        self.assertEqual(active[0]["actionId"], action_id)
+        self.assertEqual(active[0]["status"], "claimed")
+        self.assertEqual(completed.status_code, 200)
+        self.assertTrue(result.json()["resultAvailable"])
+        self.assertEqual(result.json()["result"]["steps"][0]["result"]["count"], 3)
+        owner_row = next(item for item in listing["actions"] if item.get("actionId") == action_id)
+        self.assertEqual(owner_row["resultSummary"]["steps"][0]["result"]["count"], 3)
+        self.assertNotIn("windows", owner_row["resultSummary"]["steps"][0]["result"])
+        self.assertEqual(after_snapshot["activeDesktopActions"]["actions"], [])
+
     def test_desktop_bridge_stale_heartbeat_blocks_claim_and_requests(self) -> None:
         with TestClient(dashboard_server.app) as client:
             registered = client.post(
                 "/api/app/agent/desktop-bridge/register",
                 json={"name": "stale-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
             )
-            bridge_id = registered.json()["bridge"]["bridgeId"]
+            registration = registered.json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
             stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
             dashboard_server.AGENT_GATEWAY._desktop_bridges[bridge_id]["lastHeartbeatAt"] = stale_at
 
@@ -927,7 +1105,10 @@ class DashboardServerTests(unittest.TestCase):
             )
             self.assertEqual(requested.json()["status"], "unavailable")
 
-            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            claimed = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
             self.assertEqual(claimed.status_code, 409)
 
     def test_desktop_bridge_capability_and_type_filtering(self) -> None:
@@ -936,7 +1117,9 @@ class DashboardServerTests(unittest.TestCase):
                 "/api/app/agent/desktop-bridge/register",
                 json={"name": "rescue-bridge", "provider": "mock-provider", "capabilities": ["desktop_rescue"]},
             )
-            bridge_id = registered.json()["bridge"]["bridgeId"]
+            registration = registered.json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
 
             computer_use = client.post(
                 "/api/app/agent/desktop-actions",
@@ -951,21 +1134,29 @@ class DashboardServerTests(unittest.TestCase):
             rescue_payload = rescue.json()
             self.assertEqual(rescue_payload["status"], "requested")
 
-            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            claimed = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
             claimed_action = claimed.json()["action"]
             self.assertEqual(claimed_action["actionId"], rescue_payload["actionId"])
             self.assertEqual(claimed_action["action"], "desktop_rescue")
 
     def test_desktop_bridge_unknown_and_failed_paths(self) -> None:
         with TestClient(dashboard_server.app) as client:
-            missing = client.post("/api/app/agent/desktop-bridge/heartbeat", json={"bridgeId": "bridge_missing"})
+            missing = client.post(
+                "/api/app/agent/desktop-bridge/heartbeat",
+                json={"bridgeId": "bridge_missing", "bridgeCredential": "missing-credential"},
+            )
             self.assertEqual(missing.status_code, 404)
 
             registered = client.post(
                 "/api/app/agent/desktop-bridge/register",
                 json={"name": "fail-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
             )
-            bridge_id = registered.json()["bridge"]["bridgeId"]
+            registration = registered.json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
             requested = client.post(
                 "/api/app/agent/desktop-actions",
                 json={"action": "computer_use", "prompt": "will fail", "sessionId": "sess-fail"},
@@ -976,6 +1167,26 @@ class DashboardServerTests(unittest.TestCase):
                 "/api/app/agent/desktop-actions/complete",
                 json={
                     "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
+                    "actionId": action_id,
+                    "status": "failed",
+                    "error": "window not found",
+                },
+            )
+            self.assertEqual(failed.status_code, 409)
+
+            claimed = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
+            self.assertEqual(claimed.status_code, 200)
+            self.assertEqual(claimed.json()["action"]["actionId"], action_id)
+
+            failed = client.post(
+                "/api/app/agent/desktop-actions/complete",
+                json={
+                    "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
                     "actionId": action_id,
                     "status": "failed",
                     "error": "window not found",
@@ -984,7 +1195,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(failed.status_code, 200)
             self.assertFalse(failed.json()["ok"])
 
-            reclaim = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            reclaim = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
             self.assertEqual(reclaim.status_code, 200)
             self.assertIsNone(reclaim.json()["action"])
 
@@ -995,6 +1209,271 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(len(failed_rows), 1)
         self.assertEqual(failed_rows[0]["status"], "failed")
         self.assertIn("window not found", failed_rows[0]["error"])
+
+    def test_desktop_bridge_requires_explicit_capability_and_credential(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            missing_capability = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "empty-bridge", "provider": "mock-provider", "capabilities": []},
+            )
+            unsupported_capability = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "bad-bridge", "provider": "mock-provider", "capabilities": ["shell"]},
+            )
+            registered = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "auth-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            bridge_id = registered.json()["bridge"]["bridgeId"]
+            wrong_credential = client.post(
+                "/api/app/agent/desktop-bridge/heartbeat",
+                json={"bridgeId": bridge_id, "bridgeCredential": "wrong"},
+            )
+
+        self.assertEqual(missing_capability.status_code, 400)
+        self.assertEqual(unsupported_capability.status_code, 400)
+        self.assertEqual(wrong_credential.status_code, 401)
+
+    def test_desktop_interaction_requires_auto_or_full_permission(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "permission-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            click = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "params": {"operation": "click", "x": 10, "y": 10}},
+            )
+            screenshot = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "params": {"operation": "screenshot"}},
+            )
+
+        self.assertEqual(click.status_code, 403)
+        self.assertEqual(screenshot.status_code, 200)
+        self.assertEqual(screenshot.json()["status"], "requested")
+
+    def test_desktop_bridge_preserves_params_and_fails_closed_after_interactive_claim_loss(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.execution_mode = "auto"
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        with TestClient(dashboard_server.app) as client:
+            first_registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "first-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            first_id = first_registration["bridge"]["bridgeId"]
+            first_credential = first_registration["bridgeCredential"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "prompt": "focus and inspect",
+                    "sessionId": "sess-requeue",
+                    "params": {
+                        "operation": "sequence",
+                        "steps": [
+                            {"operation": "focus_window", "titleContains": "Settings"},
+                            {"operation": "screenshot"},
+                        ],
+                    },
+                },
+            ).json()
+            action_id = requested["actionId"]
+            claimed = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": first_id, "bridgeCredential": first_credential},
+            ).json()["action"]
+            self.assertEqual(claimed["params"]["operation"], "sequence")
+            self.assertEqual(claimed["params"]["steps"][0]["titleContains"], "Settings")
+
+            stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
+            dashboard_server.AGENT_GATEWAY._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at
+            replacement_registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "replacement-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            replacement_id = replacement_registration["bridge"]["bridgeId"]
+            replacement_credential = replacement_registration["bridgeCredential"]
+            replacement_claim = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": replacement_id, "bridgeCredential": replacement_credential},
+            )
+            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-requeue"})
+
+        self.assertEqual(replacement_claim.status_code, 200)
+        self.assertIsNone(replacement_claim.json()["action"])
+        failed_action = next(item for item in listing.json()["actions"] if item.get("actionId") == action_id)
+        self.assertEqual(failed_action["status"], "failed")
+        self.assertIn("not replayed", failed_action["error"])
+
+    def test_desktop_bridge_requeues_read_only_action_after_stale_claim(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            first_registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "read-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            first_id = first_registration["bridge"]["bridgeId"]
+            first_credential = first_registration["bridgeCredential"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "prompt": "capture after reconnect",
+                    "params": {"operation": "screenshot", "region": {"left": 0, "top": 0, "width": 32, "height": 32}},
+                },
+            ).json()
+            client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": first_id, "bridgeCredential": first_credential},
+            )
+            stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
+            dashboard_server.AGENT_GATEWAY._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at
+            replacement_registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "read-replacement", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            replacement_claim = client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={
+                    "bridgeId": replacement_registration["bridge"]["bridgeId"],
+                    "bridgeCredential": replacement_registration["bridgeCredential"],
+                },
+            )
+
+        self.assertEqual(replacement_claim.status_code, 200)
+        self.assertEqual(replacement_claim.json()["action"]["actionId"], requested["actionId"])
+        self.assertEqual(replacement_claim.json()["action"]["params"]["operation"], "screenshot")
+
+    def test_desktop_bridge_claim_and_complete_are_idempotent(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "retry-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "prompt": "retry proof", "sessionId": "sess-retry"},
+            ).json()
+            claim_body = {
+                "bridgeId": bridge_id,
+                "bridgeCredential": bridge_credential,
+                "claimRequestId": "claim-retry-1",
+            }
+            first_claim = client.post("/api/app/agent/desktop-actions/claim", json=claim_body).json()
+            retry_claim = client.post("/api/app/agent/desktop-actions/claim", json=claim_body).json()
+            completion_body = {
+                "bridgeId": bridge_id,
+                "bridgeCredential": bridge_credential,
+                "actionId": requested["actionId"],
+                "status": "completed",
+                "result": {"summary": "done"},
+            }
+            first_complete = client.post("/api/app/agent/desktop-actions/complete", json=completion_body).json()
+            retry_complete = client.post("/api/app/agent/desktop-actions/complete", json=completion_body).json()
+
+        self.assertEqual(first_claim["action"]["actionId"], requested["actionId"])
+        self.assertEqual(retry_claim["action"]["actionId"], requested["actionId"])
+        self.assertTrue(retry_claim["idempotent"])
+        self.assertFalse(first_complete["idempotent"])
+        self.assertTrue(retry_complete["idempotent"])
+
+    def test_desktop_action_cancel_lifecycle(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registration = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "cancel-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            ).json()
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "prompt": "wait for cancellation", "sessionId": "sess-cancel"},
+            ).json()
+            action_id = requested["actionId"]
+            client.post(
+                "/api/app/agent/desktop-actions/claim",
+                json={"bridgeId": bridge_id, "bridgeCredential": bridge_credential},
+            )
+            cancel = client.post(
+                f"/api/app/agent/desktop-actions/{action_id}/cancel",
+                json={"reason": "User clicked Stop"},
+            )
+            completed = client.post(
+                "/api/app/agent/desktop-actions/complete",
+                json={
+                    "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
+                    "actionId": action_id,
+                    "status": "cancelled",
+                },
+            )
+            retry_cancel = client.post(
+                f"/api/app/agent/desktop-actions/{action_id}/cancel",
+                json={"reason": "retry"},
+            )
+
+        self.assertEqual(cancel.status_code, 200)
+        self.assertEqual(cancel.json()["status"], "cancel_requested")
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.json()["status"], "cancelled")
+        self.assertEqual(retry_cancel.status_code, 200)
+        self.assertTrue(retry_cancel.json()["idempotent"])
+
+    def test_runtime_stop_cascades_to_owned_desktop_actions(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "runtime-cancel-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "prompt": "owned runtime action",
+                    "sessionId": "sess-runtime-stop",
+                    "clientTurnId": "client-runtime-stop",
+                    "params": {"operation": "wait", "durationMs": 10000},
+                },
+            ).json()
+            stopped = client.post(
+                "/api/app/agent/runs/cancel",
+                json={"clientTurnId": "client-runtime-stop", "reason": "user_stop"},
+            )
+            listing = client.get("/api/app/agent/desktop-actions", params={"limit": 20}).json()
+
+        action = next(item for item in listing["actions"] if item.get("actionId") == requested["actionId"])
+        self.assertEqual(stopped.status_code, 200)
+        self.assertIn(requested["actionId"], stopped.json()["cancelledDesktopActionIds"])
+        self.assertEqual(action["status"], "cancelled")
+
+    def test_desktop_action_projection_orders_by_latest_lifecycle_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            registration = gateway.register_desktop_bridge(
+                {"name": "projection-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]}
+            )
+            bridge_id = registration["bridge"]["bridgeId"]
+            bridge_credential = registration["bridgeCredential"]
+            action_id = gateway.request_desktop_action({"action": "computer_use", "prompt": "old request"})["actionId"]
+            gateway.claim_desktop_action({"bridgeId": bridge_id, "bridgeCredential": bridge_credential})
+            for index in range(230):
+                gateway.request_desktop_action({"action": "annotation", "prompt": f"newer legacy row {index}"})
+            gateway.complete_desktop_action(
+                {
+                    "bridgeId": bridge_id,
+                    "bridgeCredential": bridge_credential,
+                    "actionId": action_id,
+                    "status": "completed",
+                }
+            )
+            listing = gateway.list_desktop_actions(limit=5)
+
+        self.assertEqual(listing["actions"][0]["actionId"], action_id)
+        self.assertEqual(listing["actions"][0]["status"], "completed")
 
     def test_agent_goals_are_durable_and_statused(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1104,7 +1583,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         self.assertEqual([option["id"] for option in created.json()["question"]["options"]], ["a", "b", "c", "d"])
 
-    def test_agent_progress_and_question_tools_are_callable(self) -> None:
+    def test_agent_progress_and_question_tools_are_callable_but_computer_use_needs_app_turn(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -1157,8 +1636,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(progress.status_code, 200)
         self.assertEqual(question.status_code, 200)
         self.assertEqual(desktop_action.status_code, 200)
-        self.assertEqual(desktop_action.json()["result"]["action"], "computer_use")
-        self.assertEqual(desktop_action.json()["result"]["status"], "unavailable")
+        self.assertFalse(desktop_action.json()["ok"])
+        self.assertIn("user-started", desktop_action.json()["error"])
         self.assertEqual(snapshot.json()["progress"]["items"][0]["progressId"], "tool-step")
         self.assertEqual(snapshot.json()["questions"]["questions"][0]["question"], "Pick a proof path")
 
@@ -3017,7 +3496,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(applied.json()["execution"]["status"], "applied")
             mock_apply.assert_called_once()
 
-    def test_agent_gateway_manifest_describes_codex_debug_loop_tools(self) -> None:
+    def test_agent_gateway_manifest_hides_user_activated_computer_use_tool(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -3029,7 +3508,7 @@ class DashboardServerTests(unittest.TestCase):
         tool_names = {tool["name"] for tool in payload["tools"]}
         self.assertIn("vrcforge_agent_observe", tool_names)
         self.assertIn("vrcforge_agent_message", tool_names)
-        self.assertIn("vrcforge_agent_desktop_action", tool_names)
+        self.assertNotIn("vrcforge_agent_desktop_action", tool_names)
         self.assertIn("vrcforge_progress_replace", tool_names)
         self.assertIn("vrcforge_progress_update", tool_names)
         self.assertIn("vrcforge_progress_delete", tool_names)

@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, MonitorUp } from "lucide-react";
 import { useMemo, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
@@ -19,6 +19,7 @@ export type QueuedChatTurn = {
   id: string;
   text: string;
   attachments: ChatAttachment[];
+  computerUseRequested?: boolean;
 };
 
 export function ChatWorkspace({
@@ -202,6 +203,12 @@ export function ChatWorkspace({
                     <Loader2 className="h-3 w-3 animate-spin" />
                     {t("chat.queued")} {index + 1}
                   </div>
+                  {turn.computerUseRequested ? (
+                    <div className="flex items-center gap-1 text-[10px] font-medium text-primary">
+                      <MonitorUp className="h-3 w-3" />
+                      {t("composerAction.desktop")}
+                    </div>
+                  ) : null}
                   {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
                   <p className="rounded-2xl bg-muted px-4 py-2.5 whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
                   {otherAttachments.length ? (

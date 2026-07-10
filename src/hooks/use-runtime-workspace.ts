@@ -12,6 +12,7 @@ import {
   DesktopBridgeStatus,
   DesktopRuntimeSnapshot,
   WorkspaceDiffSummary,
+  cancelAgentDesktopAction,
   fetchDesktopRuntimeSnapshot,
   fetchWorkspaceDiff,
   refreshUnityReadiness,
@@ -56,7 +57,9 @@ export function useRuntimeWorkspace({
   const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
+  const [activeDesktopActions, setActiveDesktopActions] = useState<AgentDesktopAction[]>([]);
   const [desktopBridge, setDesktopBridge] = useState<DesktopBridgeStatus | null>(null);
+  const [cancellingDesktopActionIds, setCancellingDesktopActionIds] = useState<string[]>([]);
   const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
   const [agentProgress, setAgentProgress] = useState<AgentProgress[]>([]);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
@@ -167,6 +170,7 @@ export function useRuntimeWorkspace({
       setRuntimeRuns([]);
       setRuntimeRunsError("");
       setDesktopActions([]);
+      setActiveDesktopActions([]);
       setDesktopBridge(null);
       setAgentGoals([]);
       setAgentProgress([]);
@@ -196,6 +200,7 @@ export function useRuntimeWorkspace({
       setAgentApprovals(snapshot.approvals?.approvals ?? []);
       setRuntimeRuns(snapshot.runs?.runs ?? []);
       setDesktopActions(snapshot.desktopActions?.actions ?? []);
+      setActiveDesktopActions(snapshot.activeDesktopActions?.actions ?? []);
       setDesktopBridge(snapshot.desktopBridge ?? null);
       setAgentGoals(snapshot.goals?.goals ?? []);
       setAgentProgress(snapshot.progress?.items ?? []);
@@ -227,7 +232,36 @@ export function useRuntimeWorkspace({
   }
 
   function prependDesktopAction(action: AgentDesktopAction) {
-    setDesktopActions((items) => [action, ...items].slice(0, 8));
+    const actionId = action.actionId || action.id || "";
+    setDesktopActions((items) => [action, ...items.filter((item) => !actionId || (item.actionId || item.id || "") !== actionId)].slice(0, 8));
+    setActiveDesktopActions((items) => {
+      const remaining = items.filter((item) => !actionId || (item.actionId || item.id || "") !== actionId);
+      return ["requested", "claimed", "cancel_requested"].includes(action.status || "")
+        ? [action, ...remaining].slice(0, 8)
+        : remaining;
+    });
+  }
+
+  async function cancelDesktopAction(actionId: string) {
+    const normalized = actionId.trim();
+    if (!normalized || cancellingDesktopActionIds.includes(normalized)) {
+      return;
+    }
+    setCancellingDesktopActionIds((items) => [...items, normalized]);
+    try {
+      const payload = await cancelAgentDesktopAction(endpoint, normalized);
+      if (payload.action) {
+        prependDesktopAction(payload.action);
+      }
+      await refreshRuntimeRuns(false);
+      setRuntimeNotice("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setRuntimeNotice(message);
+      setError(message);
+    } finally {
+      setCancellingDesktopActionIds((items) => items.filter((item) => item !== normalized));
+    }
   }
 
   function upsertAgentGoal(goal: AgentGoal) {
@@ -256,7 +290,9 @@ export function useRuntimeWorkspace({
     runtimeRuns,
     runtimeRunsError,
     desktopActions,
+    activeDesktopActions,
     desktopBridge,
+    cancellingDesktopActionIds,
     agentGoals,
     agentProgress,
     agentQuestions,
@@ -269,6 +305,7 @@ export function useRuntimeWorkspace({
     refreshRuntimeRuns,
     toggleWorkspaceDiffReview,
     prependDesktopAction,
+    cancelDesktopAction,
     upsertAgentGoal,
     upsertAgentProgress,
     upsertAgentQuestion,

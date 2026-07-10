@@ -7,6 +7,7 @@ import type { RuntimeScheduleItem } from "./runtime-ui-types";
 type RuntimeCurrentTurn = {
   providerLabel: string;
   model: string;
+  computerUseRequested?: boolean;
 } | null;
 
 type RuntimeQueuedTurn = {
@@ -14,6 +15,7 @@ type RuntimeQueuedTurn = {
   text: string;
   providerLabel: string;
   model: string;
+  computerUseRequested?: boolean;
 };
 
 export function buildRuntimeSchedule({
@@ -32,7 +34,9 @@ export function buildRuntimeSchedule({
     items.push({
       id: "current-turn",
       status: stopRequested ? "cancelling" : "running",
-      title: thinkingStatusForModelLabel(currentTurn.providerLabel, currentTurn.model),
+      title: currentTurn.computerUseRequested
+        ? `${i18n.t("composerAction.desktop")} · ${thinkingStatusForModelLabel(currentTurn.providerLabel, currentTurn.model)}`
+        : thinkingStatusForModelLabel(currentTurn.providerLabel, currentTurn.model),
       meta: `${currentTurn.providerLabel} / ${currentTurn.model}`,
     });
   }
@@ -40,7 +44,9 @@ export function buildRuntimeSchedule({
     items.push({
       id: `queued-${turn.id}`,
       status: "queued",
-      title: turn.text || i18n.t("attachments.fallbackTitle"),
+      title: turn.computerUseRequested
+        ? `${i18n.t("composerAction.desktop")} · ${turn.text || i18n.t("attachments.fallbackTitle")}`
+        : turn.text || i18n.t("attachments.fallbackTitle"),
       meta: i18n.t("workspace.queueMeta", { index: index + 1, provider: turn.providerLabel, model: turn.model }),
     });
   });

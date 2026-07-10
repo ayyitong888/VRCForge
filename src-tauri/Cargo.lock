@@ -4243,6 +4243,7 @@ dependencies = [
  "tauri-build",
  "tungstenite",
  "ureq",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -35,6 +35,7 @@ import { WorkspaceHeader } from "./components/workspace/workspace-header";
 import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace } from "./components/protection/protection-workspace";
+import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
@@ -120,6 +121,7 @@ import {
   SubAgentTaskList,
   ApiError,
   AppBootstrap,
+  AdvancedSettingsState,
   DoctorReport,
   compactAgentHistory,
   answerAgentQuestion,
@@ -146,6 +148,7 @@ import {
   setAppSessionToken,
   retrySubAgent,
   updatePermission,
+  updateAdvancedSettings,
 } from "./lib/api";
 import { cn, formatCount } from "./lib/utils";
 
@@ -201,6 +204,10 @@ export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
+  const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
+  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
+  const [computerUseEverEnabled, setComputerUseEverEnabled] = useState(false);
+  const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(LEFT_SIDEBAR_COLLAPSED_KEY) === "true";
@@ -515,8 +522,10 @@ export default function App() {
       { name: "goal", title: t("chat.slashGoal") },
       { name: "memory", title: t("chat.slashMemory") },
       { name: "delegate", title: t("chat.slashDelegate") },
-      { name: "desktop", title: t("composerAction.desktop") },
     ];
+    if (developerOptionsEnabled && computerUseEnabled) {
+      list.push({ name: "desktop", title: t("composerAction.desktop") });
+    }
     for (const skill of skills) {
       if (!skill.name || skill.enabled === false || skill.available === false || skill.userInvocable === false) {
         continue;
@@ -524,7 +533,7 @@ export default function App() {
       list.push({ name: skill.name, title: skill.title || skill.description || "" });
     }
     return list;
-  }, [skills, t]);
+  }, [computerUseEnabled, developerOptionsEnabled, skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
@@ -547,14 +556,16 @@ export default function App() {
           description: t("composerAction.screenshotDesc"),
         });
       }
-      actions.push({
-        id: "desktop",
-        label: t("composerAction.desktop"),
-        description: t("composerAction.desktopDesc"),
-      });
+      if (developerOptionsEnabled && computerUseEnabled) {
+        actions.push({
+          id: "desktop",
+          label: t("composerAction.desktop"),
+          description: t("composerAction.desktopDesc"),
+        });
+      }
       return actions;
     },
-    [t, vrcForgeToolsReady],
+    [computerUseEnabled, developerOptionsEnabled, t, vrcForgeToolsReady],
   );
   const {
     showProjectModal,
@@ -709,7 +720,9 @@ export default function App() {
     runtimeRuns,
     runtimeRunsError,
     desktopActions,
+    activeDesktopActions,
     desktopBridge,
+    cancellingDesktopActionIds,
     agentGoals,
     agentProgress,
     agentQuestions,
@@ -722,6 +735,7 @@ export default function App() {
     refreshRuntimeRuns,
     toggleWorkspaceDiffReview,
     prependDesktopAction,
+    cancelDesktopAction,
     upsertAgentGoal,
     upsertAgentMemory,
   } = useRuntimeWorkspace({
@@ -1119,9 +1133,20 @@ export default function App() {
     try {
       window.localStorage.setItem(DEVELOPER_OPTIONS_ENABLED_KEY, String(developerOptionsEnabled));
     } catch {
-      // Developer options are best-effort local UI state.
+      // The backend is authoritative; this only avoids a startup flash before bootstrap.
     }
   }, [developerOptionsEnabled]);
+
+  useEffect(() => {
+    const settings = bootstrap?.advancedSettings;
+    if (!settings) {
+      return;
+    }
+    setDeveloperOptionsEnabled(settings.developerOptionsEnabled);
+    setDeveloperOptionsEverEnabled(settings.developerOptionsEverEnabled);
+    setComputerUseEnabled(settings.computerUseEnabled);
+    setComputerUseEverEnabled(settings.computerUseEverEnabled);
+  }, [bootstrap?.advancedSettings]);
 
   useEffect(() => {
     if (!showOnboarding || !onboardingMinimized) {
@@ -1204,7 +1229,7 @@ export default function App() {
       "agentRuntimeRuns",
       "agentRuntimeTurn",
     ]);
-    const bootstrapEvents = new Set(["agentPermission", "hello", "projects", "unity_status"]);
+    const bootstrapEvents = new Set(["advancedSettings", "agentPermission", "hello", "projects", "unity_status"]);
     const scheduleBootstrapRefresh = () => {
       if (desktopEventBootstrapTimerRef.current !== null) {
         window.clearTimeout(desktopEventBootstrapTimerRef.current);
@@ -1612,6 +1637,39 @@ export default function App() {
     }
   }
 
+  async function saveAdvancedSettings(
+    next: Partial<Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">>,
+  ) {
+    const nextDeveloperOptionsEnabled = next.developerOptionsEnabled ?? developerOptionsEnabled;
+    const nextComputerUseEnabled = nextDeveloperOptionsEnabled && (next.computerUseEnabled ?? computerUseEnabled);
+    setSavingAdvancedSettings(true);
+    setError("");
+    try {
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          return;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const payload = await updateAdvancedSettings(targetEndpoint, {
+        developerOptionsEnabled: nextDeveloperOptionsEnabled,
+        computerUseEnabled: nextComputerUseEnabled,
+      });
+      const settings = payload.settings;
+      setDeveloperOptionsEnabled(settings.developerOptionsEnabled);
+      setDeveloperOptionsEverEnabled(settings.developerOptionsEverEnabled);
+      setComputerUseEnabled(settings.computerUseEnabled);
+      setComputerUseEverEnabled(settings.computerUseEverEnabled);
+      setBootstrap((current) => (current ? { ...current, advancedSettings: settings } : current));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingAdvancedSettings(false);
+    }
+  }
+
   function copyConversationItem(item: ConversationItem) {
     const text = conversationItemText(item, t);
     if (!text.trim()) {
@@ -1775,7 +1833,6 @@ export default function App() {
 
   async function runExplicitWorkspaceAction(actionId: ComposerActionId) {
     const action = composerActions.find((item) => item.id === actionId);
-    setRightSidebarCollapsed(false);
     setRuntimeNotice("");
     if (!action) {
       return;
@@ -1786,12 +1843,23 @@ export default function App() {
       setError(reason);
       return;
     }
+    if (actionId === "desktop") {
+      if (!developerOptionsEnabled || !computerUseEnabled) {
+        setError(t("computerUse.disabled"));
+        return;
+      }
+      setError("");
+      setInput((current) => {
+        if (/^\/desktop(?:\s|$)/i.test(current.trimStart())) {
+          return current;
+        }
+        return current.trim() ? `/desktop ${current.trimStart()}` : "/desktop ";
+      });
+      return;
+    }
+    setRightSidebarCollapsed(false);
     const desktopAction =
-      actionId === "desktop"
-        ? "computer_use"
-        : actionId === "screenshot" || actionId === "annotation" || actionId === "browser"
-          ? actionId
-          : "";
+      actionId === "screenshot" || actionId === "annotation" || actionId === "browser" ? actionId : "";
     if (desktopAction) {
       try {
         const payload = await requestAgentDesktopAction(endpoint, {
@@ -1940,8 +2008,10 @@ export default function App() {
 
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
-    const message = input.trim();
-    if (!message && attachments.length === 0) {
+    const composerMessage = input.trim();
+    let message = composerMessage;
+    let computerUseRequested = false;
+    if (!composerMessage && attachments.length === 0) {
       return;
     }
     setError("");
@@ -1973,9 +2043,17 @@ export default function App() {
       return;
     }
     if (message === "/desktop" || message.startsWith("/desktop ")) {
-      await runExplicitWorkspaceAction("desktop");
-      setInput("");
-      return;
+      if (!developerOptionsEnabled || !computerUseEnabled) {
+        setError(t("computerUse.disabled"));
+        return;
+      }
+      const task = message.replace(/^\/desktop\s*/i, "").trim();
+      if (!task) {
+        setError(t("computerUse.taskRequired"));
+        return;
+      }
+      message = task;
+      computerUseRequested = true;
     }
     const turn: QueuedTurn = {
       id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1984,13 +2062,28 @@ export default function App() {
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
       model: providerSnapshot.model,
+      computerUseRequested,
+      computerUseVisualTheme: computerUseRequested ? theme : undefined,
     };
     setInput("");
     setAttachments([]);
     const result = await submitTurn(turn);
     if (result === "queue_full") {
-      setInput(message);
+      setInput(computerUseRequested ? `/desktop ${message}` : message);
       setAttachments(turn.attachments);
+    }
+  }
+
+  function stopInteractiveActivity() {
+    stopCurrentRun();
+    for (const action of activeDesktopActions) {
+      if (!["computer_use", "desktop_rescue"].includes(action.action || "")) {
+        continue;
+      }
+      const actionId = action.actionId || action.id || "";
+      if (actionId) {
+        void cancelDesktopAction(actionId);
+      }
     }
   }
 
@@ -2533,6 +2626,10 @@ export default function App() {
             <SettingsWorkspace
               activeSection={activeSettingsSection}
               developerOptionsEnabled={developerOptionsEnabled}
+              developerOptionsEverEnabled={developerOptionsEverEnabled}
+              computerUseEnabled={computerUseEnabled}
+              computerUseEverEnabled={computerUseEverEnabled}
+              savingAdvancedSettings={savingAdvancedSettings}
               permission={permission ?? null}
               loading={loading}
               runtimeConnected={runtimeConnected}
@@ -2572,7 +2669,13 @@ export default function App() {
               savingNotes={savingNotes}
               compactDebugEntries={compactDebugEntries}
               onSectionChange={setActiveSettingsSection}
-              onDeveloperOptionsChange={setDeveloperOptionsEnabled}
+              onDeveloperOptionsChange={(enabled) =>
+                void saveAdvancedSettings({
+                  developerOptionsEnabled: enabled,
+                  computerUseEnabled: enabled ? computerUseEnabled : false,
+                })
+              }
+              onComputerUseChange={(enabled) => void saveAdvancedSettings({ computerUseEnabled: enabled })}
               onSwitchMode={(mode) => void switchMode(mode)}
               onRestartOnboarding={restartOnboarding}
               onLocaleChange={(code) => void setLocale(code)}
@@ -2613,7 +2716,7 @@ export default function App() {
               sending={sending}
               permission={permission}
               onSubmit={submitMessage}
-              onStop={stopCurrentRun}
+              onStop={stopInteractiveActivity}
               onSwitchMode={switchMode}
               commands={slashCommands}
               actions={composerActions}
@@ -2733,6 +2836,13 @@ export default function App() {
           />
         )}
       </div>
+
+      <ComputerUseActivitySurface
+        actions={activeDesktopActions}
+        cancellingActionIds={cancellingDesktopActionIds}
+        theme={theme}
+        onCancel={stopInteractiveActivity}
+      />
 
       <OnboardingOverlay
         open={showOnboarding}

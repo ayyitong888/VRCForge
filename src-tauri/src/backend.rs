@@ -7,6 +7,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
@@ -24,6 +26,15 @@ use tauri::{
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+};
 
 pub(crate) const BACKEND_HOST: &str = "127.0.0.1";
 pub(crate) const BACKEND_PORT: u16 = 8757;
@@ -39,6 +50,8 @@ static BACKEND_SESSION_VERIFIED_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLo
 
 pub(crate) struct BackendState {
     pub(crate) child: Mutex<Option<Child>>,
+    #[cfg(windows)]
+    pub(crate) job: Mutex<Option<BackendJob>>,
     pub(crate) event_bridge_started: Mutex<bool>,
     pub(crate) start_in_progress: Mutex<bool>,
 }
@@ -47,8 +60,64 @@ impl BackendState {
     pub(crate) fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            #[cfg(windows)]
+            job: Mutex::new(None),
             event_bridge_started: Mutex::new(false),
             start_in_progress: Mutex::new(false),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) struct BackendJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for BackendJob {}
+
+#[cfg(windows)]
+impl BackendJob {
+    fn assign(child: &Child) -> Result<Self, String> {
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return Err(format!(
+                    "unable to create backend job object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                let error = std::io::Error::last_os_error();
+                CloseHandle(handle);
+                return Err(format!("unable to configure backend job object: {error}"));
+            }
+            if AssignProcessToJobObject(handle, child.as_raw_handle() as HANDLE) == 0 {
+                let error = std::io::Error::last_os_error();
+                CloseHandle(handle);
+                return Err(format!("unable to assign backend to job object: {error}"));
+            }
+            Ok(Self { handle })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BackendJob {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.handle.is_null() {
+                CloseHandle(self.handle);
+                self.handle = std::ptr::null_mut();
+            }
         }
     }
 }
@@ -258,9 +327,19 @@ pub(crate) fn start_backend_in_background(
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动本地 runtime: {error}"))?;
+
+    #[cfg(windows)]
+    let backend_job = match BackendJob::assign(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
 
     {
         let state = app_handle.state::<BackendState>();
@@ -269,6 +348,15 @@ pub(crate) fn start_backend_in_background(
             .lock()
             .map_err(|_| "backend state lock poisoned".to_string())?;
         *guard = Some(child);
+    }
+    #[cfg(windows)]
+    {
+        let state = app_handle.state::<BackendState>();
+        let mut guard = state
+            .job
+            .lock()
+            .map_err(|_| "backend job state lock poisoned".to_string())?;
+        *guard = Some(backend_job);
     }
 
     let state = app_handle.state::<BackendState>();
@@ -651,11 +739,24 @@ pub(crate) fn stop_managed_backend_child(state: &BackendState) {
     let Ok(mut guard) = state.child.lock() else {
         return;
     };
-    let Some(mut child) = guard.take() else {
+    let child = guard.take();
+    drop(guard);
+    #[cfg(windows)]
+    if let Ok(mut job_guard) = state.job.lock() {
+        drop(job_guard.take());
+    }
+    let Some(mut child) = child else {
         return;
     };
     let _ = child.kill();
-    let _ = child.wait();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => return,
+        }
+    }
 }
 
 pub(crate) fn shutdown_managed_backend(app: &tauri::AppHandle) {

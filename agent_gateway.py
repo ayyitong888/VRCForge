@@ -102,6 +102,10 @@ class AgentGatewayConfig:
     approval_timeout_seconds: int = 600
     execution_mode: str = "approval"
     roslyn_risk_acknowledged: bool = False
+    developer_options_enabled: bool = False
+    developer_options_ever_enabled: bool = False
+    computer_use_enabled: bool = False
+    computer_use_ever_enabled: bool = False
     checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     checkpoint_archive_dir: str = ""
 
@@ -114,6 +118,7 @@ class AgentTool:
     handler: ToolHandler
     write: bool = False
     advanced: bool = False
+    requires_user_activation: bool = False
 
 
 @dataclass
@@ -262,6 +267,19 @@ AGENT_GOAL_MAX_ITEMS = 60
 AGENT_DESKTOP_ACTION_MAX_ITEMS = 120
 DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS = 45
 DESKTOP_BRIDGE_ACTION_TYPES = {"desktop_rescue", "computer_use"}
+DESKTOP_ACTION_PARAMS_MAX_BYTES = 64 * 1024
+DESKTOP_ACTION_RESULT_MAX_BYTES = 128 * 1024
+DESKTOP_ACTION_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+DESKTOP_ACTION_CLEARABLE_FIELDS = {
+    "bridgeId",
+    "bridgeName",
+    "provider",
+    "claimRequestId",
+    "claimedAt",
+    "error",
+    "result",
+    "resultSummary",
+}
 
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
@@ -1455,10 +1473,14 @@ class AgentGateway:
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._cancelled_runtime_turns: set[str] = set()
         self._desktop_bridges: dict[str, dict[str, Any]] = {}
+        self._desktop_action_payloads: dict[str, dict[str, Any]] = {}
+        self._desktop_action_results: dict[str, dict[str, Any]] = {}
+        self._runtime_computer_use_context = threading.local()
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
         self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
         self._lock = threading.RLock()
+        self._desktop_action_condition = threading.Condition(self._lock)
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1489,6 +1511,9 @@ class AgentGateway:
             self._approvals.clear()
             self._runtime_sessions.clear()
             self._cancelled_runtime_turns.clear()
+            self._desktop_bridges.clear()
+            self._desktop_action_payloads.clear()
+            self._desktop_action_results.clear()
 
     @property
     def agent_memory_log_path(self) -> Path:
@@ -1522,6 +1547,7 @@ class AgentGateway:
         handler: ToolHandler,
         write: bool = False,
         advanced: bool = False,
+        requires_user_activation: bool = False,
     ) -> None:
         self._tools[name] = AgentTool(
             name=name,
@@ -1530,6 +1556,7 @@ class AgentGateway:
             handler=handler,
             write=write,
             advanced=advanced,
+            requires_user_activation=requires_user_activation,
         )
 
     def register_write_handler(
@@ -1568,6 +1595,10 @@ class AgentGateway:
                 "approval_timeout_seconds": 600,
                 "execution_mode": "approval",
                 "roslyn_risk_acknowledged": False,
+                "developer_options_enabled": False,
+                "developer_options_ever_enabled": False,
+                "computer_use_enabled": False,
+                "computer_use_ever_enabled": False,
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
             }
@@ -1586,6 +1617,10 @@ class AgentGateway:
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
                 execution_mode=normalize_execution_mode(raw.get("execution_mode")),
                 roslyn_risk_acknowledged=bool(raw.get("roslyn_risk_acknowledged", False)),
+                developer_options_enabled=bool(raw.get("developer_options_enabled", False)),
+                developer_options_ever_enabled=bool(raw.get("developer_options_ever_enabled", False)),
+                computer_use_enabled=bool(raw.get("computer_use_enabled", False)),
+                computer_use_ever_enabled=bool(raw.get("computer_use_ever_enabled", False)),
                 checkpoint_archive_max_size_mb=normalize_checkpoint_archive_max_size_mb(
                     raw.get("checkpoint_archive_max_size_mb")
                 ),
@@ -1610,6 +1645,10 @@ class AgentGateway:
             "approval_timeout_seconds": int(config.approval_timeout_seconds),
             "execution_mode": normalize_execution_mode(config.execution_mode),
             "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
+            "developer_options_enabled": bool(config.developer_options_enabled),
+            "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
+            "computer_use_enabled": bool(config.computer_use_enabled),
+            "computer_use_ever_enabled": bool(config.computer_use_ever_enabled),
             "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
                 config.checkpoint_archive_max_size_mb
             ),
@@ -1677,6 +1716,7 @@ class AgentGateway:
             self._serialize_tool(tool, config)
             for tool in self._tools.values()
             if self._tool_visible(tool, config)
+            and (not tool.requires_user_activation or self.computer_use_model_invocable(config))
         ]
         return {
             "ok": True,
@@ -1693,6 +1733,7 @@ class AgentGateway:
             "fullPermission": permission_context["fullPermission"],
             "permissionLabel": permission_context["permissionLabel"],
             "roslynRiskAcknowledged": config.roslyn_risk_acknowledged,
+            "advancedSettings": self.advanced_settings_state(config),
             "approvalTimeoutSeconds": config.approval_timeout_seconds,
             "tools": tools,
             "toolCount": len(tools),
@@ -1900,6 +1941,7 @@ class AgentGateway:
             "fullPermission": permission_context["fullPermission"],
             "permissionLabel": permission_context["permissionLabel"],
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
+            "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
             "allowRoslynAdvanced": self.roslyn_available(config),
             "legacyRoslynEnvEnabled": False,
@@ -1947,6 +1989,7 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable agent tool: {name}", status_code=404)
 
         params = params or {}
+        params_summary = self._tool_params_audit(name, params)
         user_constraints = self.read_user_constraints()
         tool_params = self._inject_user_constraints(params, tool, user_constraints)
         try:
@@ -1956,7 +1999,7 @@ class AgentGateway:
                     "event": "tool_call",
                     "tool": name,
                     "agent": agent_name,
-                    "paramsSummary": summarize_params(params),
+                    "paramsSummary": params_summary,
                     "status": "ok",
                 }
             )
@@ -1972,7 +2015,7 @@ class AgentGateway:
                     "event": "tool_call",
                     "tool": name,
                     "agent": agent_name,
-                    "paramsSummary": summarize_params(params),
+                    "paramsSummary": params_summary,
                     "status": "error",
                     "error": str(exc),
                 }
@@ -2063,6 +2106,32 @@ class AgentGateway:
         agent_name: str = "desktop-agent",
     ) -> dict[str, Any]:
         params = params or {}
+        previous = bool(getattr(self._runtime_computer_use_context, "enabled", False))
+        previous_visual_theme = str(getattr(self._runtime_computer_use_context, "visual_theme", "light"))
+        previous_session_id = str(getattr(self._runtime_computer_use_context, "session_id", ""))
+        previous_turn_id = str(getattr(self._runtime_computer_use_context, "turn_id", ""))
+        previous_client_turn_id = str(getattr(self._runtime_computer_use_context, "client_turn_id", ""))
+        self._runtime_computer_use_context.enabled = bool(params.get("_computerUseRequested"))
+        visual_theme = str(params.get("_computerUseVisualTheme") or "light").strip().lower()
+        self._runtime_computer_use_context.visual_theme = visual_theme if visual_theme in {"light", "dark"} else "light"
+        self._runtime_computer_use_context.session_id = str(params.get("session_id") or params.get("sessionId") or "")
+        self._runtime_computer_use_context.turn_id = ""
+        self._runtime_computer_use_context.client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
+        try:
+            return self._runtime_message_impl(params, agent_name=agent_name)
+        finally:
+            self._runtime_computer_use_context.enabled = previous
+            self._runtime_computer_use_context.visual_theme = previous_visual_theme
+            self._runtime_computer_use_context.session_id = previous_session_id
+            self._runtime_computer_use_context.turn_id = previous_turn_id
+            self._runtime_computer_use_context.client_turn_id = previous_client_turn_id
+
+    def _runtime_message_impl(
+        self,
+        params: dict[str, Any] | None = None,
+        agent_name: str = "desktop-agent",
+    ) -> dict[str, Any]:
+        params = params or {}
         message = str(params.get("message") or "").strip()
         if not message:
             raise AgentGatewayError("message is required.")
@@ -2073,6 +2142,9 @@ class AgentGateway:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+        self._runtime_computer_use_context.session_id = session_id
+        self._runtime_computer_use_context.turn_id = turn_id
+        self._runtime_computer_use_context.client_turn_id = client_turn_id
         history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
         attachments = normalize_runtime_attachments(params.get("attachments"))
         params["_runtimeAttachments"] = attachments
@@ -2111,6 +2183,8 @@ class AgentGateway:
                 "providerLabel": params.get("providerLabel") or params.get("provider_label") or "",
                 "model": params.get("model") or "",
                 "projectRoot": project_root,
+                "computerUseRequested": bool(params.get("_computerUseRequested")),
+                "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
             }
         )
 
@@ -2253,8 +2327,14 @@ class AgentGateway:
                 )
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
+                step_params = ensure_dict(plan.get("skillParams"))
+                if step_tool == "vrcforge_agent_desktop_action":
+                    step_params.setdefault("sessionId", session_id)
+                    step_params.setdefault("clientTurnId", client_turn_id)
+                    if project_root:
+                        step_params.setdefault("projectRoot", project_root)
                 step_payload = self._execute_runtime_skill(
-                    step_tool, ensure_dict(plan.get("skillParams")), agent_name
+                    step_tool, step_params, agent_name
                 )
                 skill_payload = step_payload
                 loop_state.append(
@@ -2458,6 +2538,7 @@ class AgentGateway:
         """
         if not tool_name:
             return {"ok": False, "status": "blocked", "tool": "", "error": "No write tool was resolved."}
+        params_summary = self._tool_params_audit(tool_name, params)
         try:
             if tool_name in self._write_handlers:
                 outcome = self.create_apply_request(
@@ -2473,7 +2554,7 @@ class AgentGateway:
                         ),
                         "preview": {
                             "summary": f"Agent proposed {tool_name}.",
-                            "paramsSummary": summarize_params(params),
+                            "paramsSummary": params_summary,
                         },
                     }
                 )
@@ -2484,7 +2565,7 @@ class AgentGateway:
                 "ok": False,
                 "status": "unavailable",
                 "tool": tool_name,
-                "paramsSummary": summarize_params(params),
+                "paramsSummary": params_summary,
                 "error": str(exc),
             }
         outcome = ensure_dict(outcome)
@@ -2504,7 +2585,7 @@ class AgentGateway:
             "ok": bool(outcome.get("ok")),
             "status": status,
             "tool": tool_name,
-            "paramsSummary": summarize_params(params),
+            "paramsSummary": params_summary,
             "result": outcome.get("result") if "result" in outcome else outcome,
         }
         if approval:
@@ -2719,6 +2800,8 @@ class AgentGateway:
             "providerLabel": params.get("providerLabel") or params.get("provider_label") or "",
             "model": params.get("model") or "",
             "projectRoot": params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "",
+            "computerUseRequested": bool(params.get("_computerUseRequested")),
+            "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
             "planSummary": summarize_text(str(top_plan.get("summary") or top_plan.get("reply") or "")),
             "planner": top_plan.get("planner") or "",
             "nextStep": top_plan.get("nextStep") or "",
@@ -2759,8 +2842,45 @@ class AgentGateway:
             "clientTurnId": client_turn_id,
             "reason": reason,
         }
+        cancelled_desktop_action_ids: list[str] = []
+        resolved_client_turn_id = client_turn_id
+        if turn_id and not resolved_client_turn_id:
+            matching_run = next(
+                (
+                    run
+                    for run in self.list_runtime_runs(limit=200).get("runs", [])
+                    if str(run.get("turnId") or "") == turn_id
+                ),
+                None,
+            )
+            resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
+        for action in self.list_active_desktop_actions(limit=32).get("actions", []):
+            action_id = str(action.get("actionId") or "")
+            same_turn = bool(
+                resolved_client_turn_id
+                and str(action.get("clientTurnId") or "") == resolved_client_turn_id
+            )
+            same_session = bool(
+                session_id
+                and not (turn_id or client_turn_id)
+                and str(action.get("sessionId") or "") == session_id
+            )
+            if not action_id or not (same_turn or same_session):
+                continue
+            try:
+                self.request_desktop_action_cancel(action_id, {"reason": reason})
+                cancelled_desktop_action_ids.append(action_id)
+            except AgentGatewayError:
+                continue
+        if cancelled_desktop_action_ids:
+            event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids
         self._append_runtime_run(event)
-        return {"ok": True, "status": "cancel_requested", "event": event}
+        return {
+            "ok": True,
+            "status": "cancel_requested",
+            "event": event,
+            "cancelledDesktopActionIds": cancelled_desktop_action_ids,
+        }
 
     def _runtime_cancel_requested(
         self,
@@ -2880,6 +3000,202 @@ class AgentGateway:
             "count": len(runs),
         }
 
+    @staticmethod
+    def _desktop_action_operations(params: dict[str, Any]) -> list[str]:
+        operation = re.sub(r"[^a-z0-9_.-]+", "_", str(params.get("operation") or "").strip().lower()).strip("_")
+        operations = [operation] if operation else []
+        if operation == "sequence":
+            operations.extend(
+                re.sub(r"[^a-z0-9_.-]+", "_", str(step.get("operation") or "").strip().lower()).strip("_")
+                for step in ensure_list(params.get("steps"))
+                if isinstance(step, dict)
+            )
+        return [item for item in operations if item]
+
+    @classmethod
+    def _desktop_action_is_replay_safe(cls, params: dict[str, Any]) -> bool:
+        operations = cls._desktop_action_operations(params)
+        return bool(operations) and all(item in {"list_windows", "inspect_window", "cursor_position", "screenshot", "wait"} for item in operations)
+
+    @classmethod
+    def _desktop_action_is_interactive(cls, params: dict[str, Any]) -> bool:
+        return any(
+            item in {"focus_window", "move_pointer", "click", "scroll", "type_text", "key_press"}
+            for item in cls._desktop_action_operations(params)
+        )
+
+    @classmethod
+    def _desktop_action_params_audit(cls, params: dict[str, Any]) -> dict[str, Any]:
+        operations = cls._desktop_action_operations(params)
+        text_length = 0
+        if isinstance(params.get("text"), str):
+            text_length += len(str(params.get("text") or ""))
+        for step in ensure_list(params.get("steps")):
+            if isinstance(step, dict) and isinstance(step.get("text"), str):
+                text_length += len(str(step.get("text") or ""))
+        return {
+            "operation": operations[0] if operations else "",
+            "operations": operations[:32],
+            "stepCount": len(ensure_list(params.get("steps"))) if operations[:1] == ["sequence"] else 0,
+            "textLength": text_length,
+            "parameterKeys": sorted(str(key) for key in params if str(key) not in {"text", "steps"})[:32],
+        }
+
+    def _tool_params_audit(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        if tool_name != "vrcforge_agent_desktop_action":
+            return summarize_params(params)
+        desktop_params = ensure_dict(params.get("params"))
+        try:
+            wait_timeout_ms = int(params.get("waitTimeoutMs") or 60_000)
+        except (TypeError, ValueError):
+            wait_timeout_ms = 60_000
+        return {
+            "action": str(params.get("action") or ""),
+            "waitForCompletion": params.get("waitForCompletion") is not False,
+            "waitTimeoutMs": wait_timeout_ms,
+            "desktop": self._desktop_action_params_audit(desktop_params),
+        }
+
+    @classmethod
+    def _desktop_action_result_audit(cls, result: dict[str, Any]) -> dict[str, Any]:
+        scalar_keys = {
+            "operation",
+            "count",
+            "stepCount",
+            "characterCount",
+            "width",
+            "height",
+            "format",
+            "durationMs",
+            "clicks",
+            "button",
+            "repeat",
+            "sampleColorCount",
+            "frameWarning",
+            "artifactRelativePath",
+        }
+        summary = {
+            key: value
+            for key, value in result.items()
+            if key in scalar_keys and isinstance(value, (str, int, float, bool))
+        }
+        steps = ensure_list(result.get("steps"))
+        if steps:
+            summary["steps"] = [
+                {
+                    "index": int(step.get("index") or index + 1),
+                    "operation": str(step.get("operation") or ""),
+                    "result": cls._desktop_action_result_audit(ensure_dict(step.get("result"))),
+                }
+                for index, step in enumerate(steps[:32])
+                if isinstance(step, dict)
+            ]
+        summary["resultKeys"] = sorted(str(key) for key in result)[:32]
+        return summary
+
+    def _append_desktop_action_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        with self._desktop_action_condition:
+            row = self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
+            self._desktop_action_condition.notify_all()
+            return row
+
+    def _desktop_action_with_payload(self, row: dict[str, Any]) -> dict[str, Any]:
+        action_id = str(row.get("actionId") or "")
+        payload = self._desktop_action_payloads.get(action_id)
+        return {**row, **({"params": payload} if payload is not None else {})}
+
+    def advanced_settings_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        return {
+            "developerOptionsEnabled": bool(config.developer_options_enabled),
+            "developerOptionsEverEnabled": bool(config.developer_options_ever_enabled),
+            "computerUseEnabled": bool(config.computer_use_enabled and config.developer_options_enabled),
+            "computerUseEverEnabled": bool(config.computer_use_ever_enabled),
+            "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
+        }
+
+    def update_advanced_settings(
+        self,
+        *,
+        developer_options_enabled: bool,
+        computer_use_enabled: bool,
+    ) -> dict[str, Any]:
+        with self._lock:
+            config = self.ensure_config()
+            previous = self.advanced_settings_state(config)
+            config.developer_options_enabled = bool(developer_options_enabled)
+            if config.developer_options_enabled:
+                config.developer_options_ever_enabled = True
+            config.computer_use_enabled = bool(computer_use_enabled and config.developer_options_enabled)
+            if config.computer_use_enabled:
+                config.computer_use_ever_enabled = True
+            self.save_config(config)
+            updated = self.advanced_settings_state(config)
+        self.append_audit(
+            {
+                "event": "advanced_settings_updated",
+                "previous": previous,
+                "updated": updated,
+            }
+        )
+        return {"ok": True, "schema": "vrcforge.advanced_settings.v1", "settings": updated}
+
+    def computer_use_turn_active(self) -> bool:
+        return bool(getattr(self._runtime_computer_use_context, "enabled", False))
+
+    def computer_use_model_invocable(self, config: AgentGatewayConfig | None = None) -> bool:
+        config = config or self.ensure_config()
+        return bool(
+            config.developer_options_enabled
+            and config.computer_use_enabled
+            and self.computer_use_turn_active()
+        )
+
+    def require_computer_use_enabled(self) -> AgentGatewayConfig:
+        config = self.ensure_config()
+        if not config.developer_options_enabled or not config.computer_use_enabled:
+            raise AgentGatewayError(
+                "Computer Use is disabled. Enable it under Settings > Developer Options first.",
+                status_code=403,
+            )
+        return config
+
+    def request_turn_authorized_desktop_action_and_wait(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.require_computer_use_enabled()
+        if not self.computer_use_turn_active():
+            raise AgentGatewayError(
+                "Computer Use can only run inside a user-started + > Desktop Rescue or /desktop task.",
+                status_code=403,
+            )
+        request_params = dict(params or {})
+        session_id = str(getattr(self._runtime_computer_use_context, "session_id", ""))
+        turn_id = str(getattr(self._runtime_computer_use_context, "turn_id", ""))
+        client_turn_id = str(getattr(self._runtime_computer_use_context, "client_turn_id", ""))
+        if self._runtime_cancel_requested(
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+        ):
+            raise AgentGatewayError("Computer Use turn was cancelled before the desktop action started.", status_code=409)
+        if session_id:
+            request_params.setdefault("sessionId", session_id)
+        if client_turn_id:
+            request_params.setdefault("clientTurnId", client_turn_id)
+        action_params = dict(ensure_dict(request_params.get("params")))
+        action_params["_visualTheme"] = str(
+            getattr(self._runtime_computer_use_context, "visual_theme", "light")
+        )
+        request_params["params"] = action_params
+        payload = self.request_desktop_action(request_params)
+        action_id = str(payload.get("actionId") or "")
+        if action_id and self._runtime_cancel_requested(
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+        ):
+            self.request_desktop_action_cancel(action_id, {"reason": "User stopped the Computer Use turn."})
+        return self._wait_for_desktop_action_payload(payload, request_params)
+
     def request_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         action = re.sub(r"[^a-z0-9_.-]+", "_", str(params.get("action") or "").strip().lower()).strip("_")
@@ -2894,9 +3210,20 @@ class AgentGateway:
         error = ""
         action_id = ""
         bridge_candidates: list[dict[str, Any]] = []
+        action_params = redact_sensitive(ensure_dict(params.get("params")))
+        params_size = len(json.dumps(action_params, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        if params_size > DESKTOP_ACTION_PARAMS_MAX_BYTES:
+            raise AgentGatewayError("Desktop action params exceed the 64 KiB limit.", status_code=413)
+        if action in DESKTOP_BRIDGE_ACTION_TYPES and self._desktop_action_is_interactive(action_params):
+            config = self.ensure_config()
+            if normalize_execution_mode(config.execution_mode) not in {"auto", "roslyn_full_auto"}:
+                raise AgentGatewayError(
+                    "Interactive Computer Use requires Auto Approval or Full Permission. Read-only list_windows, cursor_position, screenshot, and wait remain available.",
+                    status_code=403,
+                )
         if action == "screenshot" and "vrcforge_capture_screenshot" in self._tools:
             try:
-                result = self.call_tool("vrcforge_capture_screenshot", ensure_dict(params.get("params")), agent_name="desktop-agent")
+                result = self.call_tool("vrcforge_capture_screenshot", action_params, agent_name="desktop-agent")
                 status = "executed" if result.get("ok") else "failed"
                 error = str(result.get("error") or "")
             except Exception as exc:  # noqa: BLE001 - explicit desktop actions should return actionable errors.
@@ -2932,18 +3259,63 @@ class AgentGateway:
             "clientTurnId": client_turn_id,
             "projectRoot": project_root,
             "promptSummary": prompt,
+            "paramsSummary": self._desktop_action_params_audit(action_params),
+            "replaySafe": self._desktop_action_is_replay_safe(action_params),
+            "controlRisk": "interactive" if self._desktop_action_is_interactive(action_params) else "read_only",
             "resultSummary": summarize_params(result) if result else {},
             "error": error,
         }
         if action_id:
             event["actionId"] = action_id
+            with self._lock:
+                self._desktop_action_payloads[action_id] = action_params
         if bridge_candidates:
             event["bridgeCandidates"] = bridge_candidates
-        self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
+        self._append_desktop_action_event(event)
         return {"ok": status not in {"failed"}, "schema": "vrcforge.desktop_action.v1", "status": status, "action": action, "actionId": action_id, "event": redact_sensitive(event), "result": redact_sensitive(result), "error": error}
 
+    def request_desktop_action_and_wait(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        payload = self.request_desktop_action(params)
+        return self._wait_for_desktop_action_payload(payload, params)
+
+    def _wait_for_desktop_action_payload(
+        self,
+        payload: dict[str, Any],
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        action_id = str(payload.get("actionId") or "")
+        if payload.get("status") != "requested" or not action_id or params.get("waitForCompletion") is False:
+            return payload
+        timeout_ms = max(100, min(int(params.get("waitTimeoutMs") or 60_000), 120_000))
+        deadline = time.monotonic() + timeout_ms / 1000
+        with self._desktop_action_condition:
+            while time.monotonic() < deadline:
+                row = self._desktop_action_rows_by_id().get(action_id)
+                status = str((row or {}).get("status") or "")
+                if status in DESKTOP_ACTION_TERMINAL_STATUSES:
+                    return {
+                        "ok": status in {"completed", "cancelled"},
+                        "schema": "vrcforge.desktop_action.v1",
+                        "status": status,
+                        "action": str((row or {}).get("action") or payload.get("action") or ""),
+                        "actionId": action_id,
+                        "event": redact_sensitive(row or {}),
+                        "result": redact_sensitive(self._desktop_action_results.get(action_id, {})),
+                        "error": str((row or {}).get("error") or ""),
+                    }
+                self._desktop_action_condition.wait(timeout=max(0.0, deadline - time.monotonic()))
+        row = self._desktop_action_rows_by_id().get(action_id) or {}
+        return {
+            **payload,
+            "status": str(row.get("status") or payload.get("status") or "requested"),
+            "event": redact_sensitive(row or ensure_dict(payload.get("event"))),
+            "timedOut": True,
+            "error": "Desktop action is still running after the wait timeout.",
+        }
+
     def list_desktop_actions(self, *, limit: int = 50, session_id: str = "", project_root: str = "") -> dict[str, Any]:
-        rows = self._project_desktop_action_rows(limit_events=max(limit * 4, 200))
+        rows = self._project_desktop_action_rows(limit_events=0)
         normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         filtered = []
         for row in rows:
@@ -2953,9 +3325,57 @@ class AgentGateway:
             if normalized_project_root and row_project and normalize_filesystem_path(row_project) != normalized_project_root:
                 continue
             filtered.append(redact_sensitive(row))
-        filtered = filtered[-max(1, min(limit, AGENT_DESKTOP_ACTION_MAX_ITEMS)) :]
-        filtered.reverse()
-        return {"ok": True, "schema": "vrcforge.desktop_actions.v1", "actions": filtered, "count": len(filtered)}
+        filtered.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        filtered = filtered[: max(1, min(limit, AGENT_DESKTOP_ACTION_MAX_ITEMS))]
+        active = self.list_active_desktop_actions(limit=8)
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_actions.v1",
+            "actions": filtered,
+            "count": len(filtered),
+            "activeActions": active["actions"],
+            "activeCount": active["count"],
+        }
+
+    def list_active_desktop_actions(self, *, limit: int = 8) -> dict[str, Any]:
+        rows = [
+            redact_sensitive(row)
+            for row in self._project_desktop_action_rows(limit_events=0)
+            if str(row.get("action") or "") in DESKTOP_BRIDGE_ACTION_TYPES
+            and str(row.get("status") or "") in {"requested", "claimed", "cancel_requested"}
+        ]
+        running = [row for row in rows if str(row.get("status") or "") in {"claimed", "cancel_requested"}]
+        waiting = [row for row in rows if str(row.get("status") or "") == "requested"]
+        running.sort(
+            key=lambda item: (
+                0 if str(item.get("status") or "") == "cancel_requested" else 1,
+                str(item.get("updatedAt") or item.get("createdAt") or ""),
+            )
+        )
+        waiting.sort(key=lambda item: str(item.get("createdAt") or item.get("updatedAt") or ""))
+        active = (running + waiting)[: max(1, min(limit, 32))]
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_active_actions.v1",
+            "actions": active,
+            "count": len(active),
+        }
+
+    def get_desktop_action_result(self, action_id: str) -> dict[str, Any]:
+        action_id = str(action_id or "").strip()
+        if not action_id:
+            raise AgentGatewayError("Desktop action id is required.", status_code=400)
+        row = self._desktop_action_rows_by_id().get(action_id)
+        if row is None:
+            raise AgentGatewayError("Unknown desktop action id.", status_code=404)
+        result = self._desktop_action_results.get(action_id)
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_action_result.v1",
+            "action": redact_sensitive(row),
+            "resultAvailable": result is not None,
+            "result": redact_sensitive(result or {}),
+        }
 
     def _project_desktop_action_rows(self, *, limit_events: int = 1000) -> list[dict[str, Any]]:
         """Merge lifecycle events sharing an actionId into one row; legacy rows pass through."""
@@ -2976,6 +3396,9 @@ class AgentGateway:
                 continue
             created_at = row.get("createdAt") or event.get("createdAt")
             for key, value in event.items():
+                if key in DESKTOP_ACTION_CLEARABLE_FIELDS:
+                    row[key] = value
+                    continue
                 if value is None or value == "":
                     continue
                 if isinstance(value, (dict, list)) and not value:
@@ -2987,11 +3410,13 @@ class AgentGateway:
         return rows
 
     def _pending_desktop_actions(self) -> list[dict[str, Any]]:
-        return [
+        pending = [
             row
-            for row in self._project_desktop_action_rows()
+            for row in self._project_desktop_action_rows(limit_events=0)
             if str(row.get("actionId") or "").strip() and str(row.get("status") or "") == "requested"
         ]
+        pending.sort(key=lambda item: str(item.get("createdAt") or item.get("updatedAt") or ""))
+        return pending
 
     def _live_desktop_bridges(self) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -3001,10 +3426,49 @@ class AgentGateway:
                 heartbeat = _parse_utc_timestamp(str(record.get("lastHeartbeatAt") or ""))
                 if heartbeat is not None and (now - heartbeat).total_seconds() <= DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS:
                     record["status"] = "connected"
-                    live.append(dict(record))
+                    live.append(self._public_desktop_bridge(record))
                 else:
                     record["status"] = "stale"
         return live
+
+    @staticmethod
+    def _public_desktop_bridge(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in record.items()
+            if key not in {"credentialDigest"}
+        }
+
+    @staticmethod
+    def _desktop_bridge_credential_digest(credential: str) -> str:
+        return hashlib.sha256(credential.encode("utf-8")).hexdigest()
+
+    def _require_desktop_bridge(
+        self,
+        bridge_id: str,
+        credential: str,
+        *,
+        require_live: bool = True,
+    ) -> dict[str, Any]:
+        bridge_id = str(bridge_id or "").strip()
+        credential = str(credential or "").strip()
+        with self._lock:
+            record = self._desktop_bridges.get(bridge_id)
+            if record is None:
+                raise AgentGatewayError("Unknown desktop bridge. Register the bridge before continuing.", status_code=404)
+            expected = str(record.get("credentialDigest") or "")
+            supplied = self._desktop_bridge_credential_digest(credential) if credential else ""
+            if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+                raise AgentGatewayError("Desktop bridge credential is missing or invalid.", status_code=401)
+            heartbeat = _parse_utc_timestamp(str(record.get("lastHeartbeatAt") or ""))
+            is_live = bool(
+                heartbeat is not None
+                and (datetime.now(timezone.utc) - heartbeat).total_seconds() <= DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS
+            )
+            record["status"] = "connected" if is_live else "stale"
+            if require_live and not is_live:
+                raise AgentGatewayError("Desktop bridge heartbeat is stale. Register or heartbeat before continuing.", status_code=409)
+            return self._public_desktop_bridge(dict(record))
 
     def register_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -3013,11 +3477,18 @@ class AgentGateway:
         capabilities: list[str] = []
         for item in ensure_list(params.get("capabilities")):
             capability = re.sub(r"[^a-z0-9_.-]+", "_", str(item).strip().lower()).strip("_")
-            if capability and capability not in capabilities:
+            if capability in DESKTOP_BRIDGE_ACTION_TYPES and capability not in capabilities:
                 capabilities.append(capability)
         if not capabilities:
-            capabilities = sorted(DESKTOP_BRIDGE_ACTION_TYPES)
+            raise AgentGatewayError("Desktop bridge must declare at least one supported capability.", status_code=400)
+        operations: list[str] = []
+        for item in ensure_list(params.get("operations")):
+            operation = re.sub(r"[^a-z0-9_.-]+", "_", str(item).strip().lower()).strip("_")
+            if operation and operation not in operations:
+                operations.append(operation)
+        operations = operations[:64]
         bridge_id = f"bridge_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        bridge_credential = secrets.token_urlsafe(32)
         now = utc_now_iso()
         record = {
             "id": bridge_id,
@@ -3025,30 +3496,34 @@ class AgentGateway:
             "name": name,
             "provider": provider,
             "capabilities": capabilities,
+            "operations": operations,
             "status": "connected",
             "registeredAt": now,
             "lastHeartbeatAt": now,
+            "credentialDigest": self._desktop_bridge_credential_digest(bridge_credential),
         }
         with self._lock:
             self._desktop_bridges[bridge_id] = record
-        self._append_jsonl(self.desktop_bridge_log_path, "vrcforge.desktop_bridge.v1", {"event": "desktop_bridge_registered", **record})
+        public_record = self._public_desktop_bridge(record)
+        self._append_jsonl(self.desktop_bridge_log_path, "vrcforge.desktop_bridge.v1", {"event": "desktop_bridge_registered", **public_record})
         return {
             "ok": True,
             "schema": "vrcforge.desktop_bridge.v1",
-            "bridge": redact_sensitive(dict(record)),
+            "bridge": redact_sensitive(public_record),
+            "bridgeCredential": bridge_credential,
             "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
         }
 
     def heartbeat_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        credential = str(params.get("bridgeCredential") or params.get("bridge_credential") or "").strip()
+        self._require_desktop_bridge(bridge_id, credential, require_live=False)
         with self._lock:
-            record = self._desktop_bridges.get(bridge_id)
-            if record is None:
-                raise AgentGatewayError("Unknown desktop bridge. Register the bridge before sending heartbeats.", status_code=404)
+            record = self._desktop_bridges[bridge_id]
             record["lastHeartbeatAt"] = utc_now_iso()
             record["status"] = "connected"
-            snapshot = dict(record)
+            snapshot = self._public_desktop_bridge(dict(record))
         return {
             "ok": True,
             "schema": "vrcforge.desktop_bridge.v1",
@@ -3057,8 +3532,31 @@ class AgentGateway:
             "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
         }
 
+    def unregister_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        credential = str(params.get("bridgeCredential") or params.get("bridge_credential") or "").strip()
+        bridge = self._require_desktop_bridge(bridge_id, credential, require_live=False)
+        with self._lock:
+            self._desktop_bridges.pop(bridge_id, None)
+            self._recover_stale_desktop_action_claims()
+        self._append_jsonl(
+            self.desktop_bridge_log_path,
+            "vrcforge.desktop_bridge.v1",
+            {"event": "desktop_bridge_unregistered", **bridge, "status": "disconnected"},
+        )
+        return {"ok": True, "schema": "vrcforge.desktop_bridge.v1", "bridgeId": bridge_id, "status": "disconnected"}
+
     def desktop_bridge_status(self) -> dict[str, Any]:
         live = self._live_desktop_bridges()
+        supported_operations = sorted(
+            {
+                str(operation)
+                for bridge in live
+                for operation in ensure_list(bridge.get("operations"))
+                if str(operation).strip()
+            }
+        )
         return {
             "ok": True,
             "schema": "vrcforge.desktop_bridge_status.v1",
@@ -3068,34 +3566,131 @@ class AgentGateway:
             "pendingActionCount": len(self._pending_desktop_actions()),
             "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
             "supportedActions": sorted(DESKTOP_BRIDGE_ACTION_TYPES),
+            "supportedOperations": supported_operations,
         }
+
+    def _desktop_action_rows_by_id(self) -> dict[str, dict[str, Any]]:
+        return {
+            str(row.get("actionId") or ""): row
+            for row in self._project_desktop_action_rows(limit_events=0)
+            if str(row.get("actionId") or "").strip()
+        }
+
+    def _recover_stale_desktop_action_claims(self) -> int:
+        live_bridge_ids = {str(bridge.get("bridgeId") or "") for bridge in self._live_desktop_bridges()}
+        recovered = 0
+        for row in self._desktop_action_rows_by_id().values():
+            status = str(row.get("status") or "")
+            bridge_id = str(row.get("bridgeId") or "")
+            if status not in {"claimed", "cancel_requested"} or not bridge_id or bridge_id in live_bridge_ids:
+                continue
+            terminal_cancel = status == "cancel_requested"
+            replay_safe = bool(row.get("replaySafe"))
+            failed_closed = not terminal_cancel and not replay_safe
+            event = {
+                "event": "desktop_action_cancelled" if terminal_cancel else ("desktop_action_failed_closed" if failed_closed else "desktop_action_requeued"),
+                "actionId": str(row.get("actionId") or ""),
+                "status": "cancelled" if terminal_cancel else ("failed" if failed_closed else "requested"),
+                "action": row.get("action"),
+                "bridgeId": "",
+                "bridgeName": "",
+                "provider": "",
+                "claimRequestId": "",
+                "claimedAt": "",
+                "sessionId": row.get("sessionId"),
+                "projectRoot": row.get("projectRoot"),
+                "error": (
+                    "Cancelled after the desktop bridge disconnected."
+                    if terminal_cancel
+                    else (
+                        "Desktop bridge disconnected after a non-idempotent action started; the action was not replayed."
+                        if failed_closed
+                        else ""
+                    )
+                ),
+                "releasedBridgeId": bridge_id,
+            }
+            self._append_desktop_action_event(event)
+            if terminal_cancel or failed_closed:
+                self._desktop_action_payloads.pop(str(row.get("actionId") or ""), None)
+            recovered += 1
+        return recovered
 
     def claim_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        credential = str(params.get("bridgeCredential") or params.get("bridge_credential") or "").strip()
+        claim_request_id = summarize_text(
+            str(params.get("claimRequestId") or params.get("claim_request_id") or "").strip(),
+            160,
+        )
+        bridge = self._require_desktop_bridge(bridge_id, credential, require_live=True)
         requested_types: list[str] = []
         for item in ensure_list(params.get("actions")):
             action_type = re.sub(r"[^a-z0-9_.-]+", "_", str(item).strip().lower()).strip("_")
-            if action_type and action_type not in requested_types:
+            if action_type in DESKTOP_BRIDGE_ACTION_TYPES and action_type not in requested_types:
                 requested_types.append(action_type)
-        live = {str(bridge.get("bridgeId") or ""): bridge for bridge in self._live_desktop_bridges()}
-        bridge = live.get(bridge_id)
-        if bridge is None:
-            raise AgentGatewayError("Unknown or stale desktop bridge. Register and heartbeat before claiming actions.", status_code=409)
         capabilities = set(bridge.get("capabilities") or [])
         with self._lock:
+            self._recover_stale_desktop_action_claims()
+            rows = self._desktop_action_rows_by_id()
+            owned = [
+                row
+                for row in rows.values()
+                if str(row.get("status") or "") in {"claimed", "cancel_requested"}
+                and str(row.get("bridgeId") or "") == bridge_id
+            ]
+            if claim_request_id:
+                matching = [row for row in owned if str(row.get("claimRequestId") or "") == claim_request_id]
+                if matching:
+                    target = max(matching, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""))
+                    return {
+                        "ok": True,
+                        "schema": "vrcforge.desktop_action.v1",
+                        "action": redact_sensitive(self._desktop_action_with_payload(target)),
+                        "pendingCount": len(self._pending_desktop_actions()),
+                        "idempotent": True,
+                    }
+            if owned:
+                target = max(owned, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""))
+                return {
+                    "ok": True,
+                    "schema": "vrcforge.desktop_action.v1",
+                    "action": redact_sensitive(self._desktop_action_with_payload(target)),
+                    "pendingCount": len(self._pending_desktop_actions()),
+                    "idempotent": True,
+                }
             pending = self._pending_desktop_actions()
             target = None
             for row in pending:
                 action_type = str(row.get("action") or "")
                 if requested_types and action_type not in requested_types:
                     continue
-                if capabilities and action_type not in capabilities:
+                if action_type not in capabilities:
+                    continue
+                action_id = str(row.get("actionId") or "")
+                if action_id not in self._desktop_action_payloads:
+                    self._append_desktop_action_event(
+                        {
+                            "event": "desktop_action_failed_closed",
+                            "actionId": action_id,
+                            "status": "failed",
+                            "action": action_type,
+                            "sessionId": row.get("sessionId"),
+                            "projectRoot": row.get("projectRoot"),
+                            "error": "Desktop action payload is unavailable after backend restart; the action was not replayed.",
+                        }
+                    )
                     continue
                 target = row
                 break
             if target is None:
-                return {"ok": True, "schema": "vrcforge.desktop_action.v1", "action": None, "pendingCount": len(pending)}
+                return {
+                    "ok": True,
+                    "schema": "vrcforge.desktop_action.v1",
+                    "action": None,
+                    "pendingCount": len(self._pending_desktop_actions()),
+                }
             event = {
                 "event": "desktop_action_claimed",
                 "actionId": str(target.get("actionId") or ""),
@@ -3104,46 +3699,112 @@ class AgentGateway:
                 "bridgeId": bridge_id,
                 "bridgeName": bridge.get("name"),
                 "provider": bridge.get("provider"),
+                "claimRequestId": claim_request_id or f"claim_{secrets.token_hex(8)}",
+                "claimedAt": utc_now_iso(),
                 "sessionId": target.get("sessionId"),
                 "projectRoot": target.get("projectRoot"),
             }
-            self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
-        merged = {**target, **{key: value for key, value in event.items() if value not in (None, "")}, "id": str(target.get("actionId") or "")}
+            self._append_desktop_action_event(event)
+        merged = {
+            **self._desktop_action_with_payload(target),
+            **{key: value for key, value in event.items() if value not in (None, "")},
+            "id": str(target.get("actionId") or ""),
+        }
         return {
             "ok": True,
             "schema": "vrcforge.desktop_action.v1",
             "action": redact_sensitive(merged),
             "pendingCount": max(0, len(pending) - 1),
+            "idempotent": False,
         }
+
+    def request_desktop_action_cancel(self, action_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        action_id = str(action_id or params.get("actionId") or params.get("action_id") or "").strip()
+        reason = summarize_text(str(params.get("reason") or "User requested cancellation."), 500)
+        if not action_id:
+            raise AgentGatewayError("Desktop action id is required.", status_code=400)
+        with self._lock:
+            row = self._desktop_action_rows_by_id().get(action_id)
+            if row is None:
+                raise AgentGatewayError("Unknown desktop action id.", status_code=404)
+            current = str(row.get("status") or "")
+            if current in DESKTOP_ACTION_TERMINAL_STATUSES or current == "cancel_requested":
+                return {
+                    "ok": True,
+                    "schema": "vrcforge.desktop_action.v1",
+                    "status": current,
+                    "action": redact_sensitive(row),
+                    "idempotent": True,
+                }
+            if current not in {"requested", "claimed"}:
+                raise AgentGatewayError(f"Desktop action cannot be cancelled from {current or 'unknown'}.", status_code=409)
+            next_status = "cancel_requested" if current == "claimed" else "cancelled"
+            event = {
+                "event": "desktop_action_cancel_requested" if next_status == "cancel_requested" else "desktop_action_cancelled",
+                "actionId": action_id,
+                "status": next_status,
+                "action": row.get("action"),
+                "bridgeId": row.get("bridgeId"),
+                "sessionId": row.get("sessionId"),
+                "projectRoot": row.get("projectRoot"),
+                "cancelReason": reason,
+            }
+            self._append_desktop_action_event(event)
+            merged = {**row, **event, "id": action_id}
+            if next_status == "cancelled":
+                self._desktop_action_payloads.pop(action_id, None)
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_action.v1",
+            "status": next_status,
+            "action": redact_sensitive(merged),
+            "idempotent": False,
+        }
+
+    def desktop_action_cancel_requested(self, action_id: str) -> bool:
+        row = self._desktop_action_rows_by_id().get(str(action_id or "").strip())
+        return str((row or {}).get("status") or "") in {"cancel_requested", "cancelled"}
 
     def complete_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        credential = str(params.get("bridgeCredential") or params.get("bridge_credential") or "").strip()
         action_id = str(params.get("actionId") or params.get("action_id") or "").strip()
         status = str(params.get("status") or "completed").strip().lower()
-        if status not in {"completed", "failed"}:
-            raise AgentGatewayError("Desktop action completion status must be completed or failed.", status_code=400)
+        if status not in DESKTOP_ACTION_TERMINAL_STATUSES:
+            raise AgentGatewayError("Desktop action completion status must be completed, failed, or cancelled.", status_code=400)
+        self._require_desktop_bridge(bridge_id, credential, require_live=False)
         with self._lock:
-            if bridge_id not in self._desktop_bridges:
-                raise AgentGatewayError("Unknown desktop bridge. Register the bridge before completing actions.", status_code=404)
-            rows = {
-                str(row.get("actionId") or ""): row
-                for row in self._project_desktop_action_rows()
-                if str(row.get("actionId") or "").strip()
-            }
-            row = rows.get(action_id)
+            row = self._desktop_action_rows_by_id().get(action_id)
             if row is None:
                 raise AgentGatewayError("Unknown desktop action id.", status_code=404)
             row_status = str(row.get("status") or "")
-            if row_status not in {"requested", "claimed"}:
-                raise AgentGatewayError(f"Desktop action is already {row_status or 'closed'}.", status_code=409)
             claimed_bridge = str(row.get("bridgeId") or "")
-            if claimed_bridge and claimed_bridge != bridge_id:
+            if row_status in DESKTOP_ACTION_TERMINAL_STATUSES:
+                if claimed_bridge == bridge_id and row_status == status:
+                    return {
+                        "ok": status in {"completed", "cancelled"},
+                        "schema": "vrcforge.desktop_action.v1",
+                        "status": status,
+                        "action": redact_sensitive(row),
+                        "error": str(row.get("error") or ""),
+                        "idempotent": True,
+                    }
+                raise AgentGatewayError(f"Desktop action is already {row_status or 'closed'}.", status_code=409)
+            self._require_desktop_bridge(bridge_id, credential, require_live=True)
+            if row_status not in {"claimed", "cancel_requested"}:
+                raise AgentGatewayError("Desktop action must be claimed before completion.", status_code=409)
+            if claimed_bridge != bridge_id:
                 raise AgentGatewayError("Desktop action is claimed by another bridge.", status_code=409)
             error = summarize_text(str(params.get("error") or ""), 500)
-            result_summary = summarize_params(ensure_dict(params.get("result"))) if params.get("result") else {}
+            result_payload = redact_sensitive(ensure_dict(params.get("result"))) if params.get("result") else {}
+            result_size = len(json.dumps(result_payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            if result_size > DESKTOP_ACTION_RESULT_MAX_BYTES:
+                raise AgentGatewayError("Desktop action result exceeds the 128 KiB limit.", status_code=413)
+            result_summary = self._desktop_action_result_audit(result_payload) if result_payload else {}
             event = {
-                "event": "desktop_action_completed",
+                "event": "desktop_action_cancelled" if status == "cancelled" else "desktop_action_completed",
                 "actionId": action_id,
                 "status": status,
                 "action": row.get("action"),
@@ -3153,14 +3814,19 @@ class AgentGateway:
                 "sessionId": row.get("sessionId"),
                 "projectRoot": row.get("projectRoot"),
             }
-            self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
-        merged = {**row, **{key: value for key, value in event.items() if value not in (None, "")}, "status": status, "id": action_id}
+            self._desktop_action_results[action_id] = result_payload
+            self._desktop_action_payloads.pop(action_id, None)
+            while len(self._desktop_action_results) > AGENT_DESKTOP_ACTION_MAX_ITEMS:
+                self._desktop_action_results.pop(next(iter(self._desktop_action_results)))
+            self._append_desktop_action_event(event)
+        merged = {**row, **event, "status": status, "id": action_id}
         return {
-            "ok": status == "completed",
+            "ok": status in {"completed", "cancelled"},
             "schema": "vrcforge.desktop_action.v1",
             "status": status,
             "action": redact_sensitive(merged),
             "error": error,
+            "idempotent": False,
         }
 
     def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -6342,8 +7008,9 @@ class AgentGateway:
             "allowedTools": [tool.name],
             "disallowedTools": [],
             "entrypointTool": tool.name,
-            "userInvocable": True,
-            "disableModelInvocation": False,
+            "userInvocable": normalize_bool(override.get("userInvocable"), True),
+            "disableModelInvocation": normalize_bool(override.get("disableModelInvocation"), False)
+            or (tool.requires_user_activation and not self.computer_use_model_invocable(config)),
             "argumentHint": "",
             "requiresEnv": [],
             "requiresBinaries": [],
@@ -8037,6 +8704,8 @@ class AgentGateway:
         observe = observe or {}
         tool_lines: list[str] = []
         for tool in self._tools.values():
+            if tool.requires_user_activation and not self.computer_use_model_invocable():
+                continue
             flags = []
             if tool.write:
                 flags.append("write")
@@ -8289,7 +8958,12 @@ class AgentGateway:
                 "tool": tool_name,
                 "error": f"Unknown skill: {tool_name}",
             }
-        if tool.name in RUNTIME_BLOCKED_SKILLS or tool.write or tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES:
+        user_activated_tool = bool(tool.requires_user_activation and self.computer_use_model_invocable(config))
+        if (
+            tool.name in RUNTIME_BLOCKED_SKILLS
+            or (tool.write and not user_activated_tool)
+            or (tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES and not user_activated_tool)
+        ):
             return {
                 "ok": False,
                 "status": "blocked",
@@ -8310,6 +8984,7 @@ class AgentGateway:
                 "error": "This skill is unavailable in the current permission mode.",
             }
 
+        params_summary = self._tool_params_audit(tool.name, params)
         user_constraints = self.read_user_constraints()
         tool_params = self._inject_user_constraints(params, tool, user_constraints)
         try:
@@ -8322,7 +8997,7 @@ class AgentGateway:
                 "write": tool.write,
                 "advanced": tool.advanced,
                 "summary": tool.description,
-                "paramsSummary": summarize_params(params),
+                "paramsSummary": params_summary,
                 "result": redact_sensitive(result),
             }
             self.append_audit(
@@ -8330,7 +9005,7 @@ class AgentGateway:
                     "event": "runtime_skill_executed",
                     "tool": tool.name,
                     "agent": agent_name,
-                    "paramsSummary": summarize_params(params),
+                    "paramsSummary": params_summary,
                     "status": "ok",
                 }
             )
@@ -8341,7 +9016,7 @@ class AgentGateway:
                     "event": "runtime_skill_executed",
                     "tool": tool.name,
                     "agent": agent_name,
-                    "paramsSummary": summarize_params(params),
+                    "paramsSummary": params_summary,
                     "status": "error",
                     "error": str(exc),
                 }
@@ -8354,7 +9029,7 @@ class AgentGateway:
                 "write": tool.write,
                 "advanced": tool.advanced,
                 "summary": tool.description,
-                "paramsSummary": summarize_params(params),
+                "paramsSummary": params_summary,
                 "error": str(exc),
             }
 
@@ -8472,6 +9147,7 @@ class AgentGateway:
         return str(query_params.get("token") or "")
 
     def _serialize_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
+        model_invocable = not tool.requires_user_activation or self.computer_use_model_invocable(config)
         return {
             "name": tool.name,
             "description": tool.description,
@@ -8479,10 +9155,13 @@ class AgentGateway:
             "write": tool.write,
             "advanced": tool.advanced,
             "available": self._tool_visible(tool, config),
+            "requiresUserActivation": tool.requires_user_activation,
+            "modelInvocable": model_invocable,
         }
 
     def _serialize_tool_registry_entry(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
         available = self._tool_visible(tool, config)
+        model_invocable = not tool.requires_user_activation or self.computer_use_model_invocable(config)
         risk = self._registry_risk_for_tool(tool)
         requires_approval = tool.write or risk in {"write_request", "advanced_write"}
         return {
@@ -8503,6 +9182,8 @@ class AgentGateway:
             "source": "gateway-tool",
             "advanced": bool(tool.advanced),
             "directTool": True,
+            "requiresUserActivation": tool.requires_user_activation,
+            "modelInvocable": model_invocable,
         }
 
     def _serialize_write_registry_entry(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:

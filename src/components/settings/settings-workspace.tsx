@@ -23,6 +23,10 @@ import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
   developerOptionsEnabled: boolean;
+  developerOptionsEverEnabled: boolean;
+  computerUseEnabled: boolean;
+  computerUseEverEnabled: boolean;
+  savingAdvancedSettings: boolean;
   permission: PermissionState | null;
   loading: boolean;
   runtimeConnected: boolean;
@@ -63,6 +67,7 @@ type SettingsWorkspaceProps = {
   compactDebugEntries: Array<{ id: string; text: string; entryCount?: number; createdAt?: string }>;
   onSectionChange: (section: SettingsSection) => void;
   onDeveloperOptionsChange: (enabled: boolean) => void;
+  onComputerUseChange: (enabled: boolean) => void;
   onSwitchMode: (mode: ExecutionMode) => void;
   onRestartOnboarding: () => void;
   onLocaleChange: (code: string) => void;
@@ -99,6 +104,10 @@ type SettingsWorkspaceProps = {
 export function SettingsWorkspace({
   activeSection,
   developerOptionsEnabled,
+  developerOptionsEverEnabled,
+  computerUseEnabled,
+  computerUseEverEnabled,
+  savingAdvancedSettings,
   permission,
   loading,
   runtimeConnected,
@@ -139,6 +148,7 @@ export function SettingsWorkspace({
   compactDebugEntries,
   onSectionChange,
   onDeveloperOptionsChange,
+  onComputerUseChange,
   onSwitchMode,
   onRestartOnboarding,
   onLocaleChange,
@@ -233,11 +243,18 @@ export function SettingsWorkspace({
                   <Badge tone={developerOptionsEnabled ? "warn" : "muted"} className="shrink-0">
                     {developerOptionsEnabled ? t("settings.enabled") : t("connector.off")}
                   </Badge>
+                  {!developerOptionsEnabled && developerOptionsEverEnabled ? (
+                    <Badge tone="muted" className="shrink-0">
+                      {t("settings.everEnabled")}
+                    </Badge>
+                  ) : null}
                   <Button
                     type="button"
                     variant={developerOptionsEnabled ? "outline" : "primary"}
+                    disabled={savingAdvancedSettings}
                     onClick={() => updateDeveloperOptions(!developerOptionsEnabled)}
                   >
+                    {savingAdvancedSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                     {developerOptionsEnabled ? t("settings.turnOffDeveloperOptions") : t("settings.turnOnDeveloperOptions")}
                   </Button>
                 </div>
@@ -275,6 +292,11 @@ export function SettingsWorkspace({
                     {mode.value === "roslyn_full_auto" ? (
                       <Badge tone={modeVisual.badgeTone} className="shrink-0">
                         {t("settings.highRisk")}
+                      </Badge>
+                    ) : null}
+                    {mode.value === "roslyn_full_auto" && !selected && (permission?.roslynFullAutoEverEnabled || permission?.roslynRiskAcknowledged) ? (
+                      <Badge tone="muted" className="shrink-0">
+                        {t("settings.everEnabled")}
                       </Badge>
                     ) : null}
                     {selected ? <Check className={cn("ml-auto h-4 w-4 shrink-0", modeVisual.textClass)} /> : null}
@@ -352,6 +374,36 @@ export function SettingsWorkspace({
         {visibleSection === "developer" && developerOptionsEnabled ? (
         <section className="pb-6">
           <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-base font-semibold">{t("settings.computerUse")}</h2>
+            <Badge tone={computerUseEnabled ? "warn" : "muted"} className="shrink-0">
+              {computerUseEnabled ? t("settings.enabled") : t("connector.off")}
+            </Badge>
+            {!computerUseEnabled && computerUseEverEnabled ? (
+              <Badge tone="muted" className="shrink-0">
+                {t("settings.everEnabled")}
+              </Badge>
+            ) : null}
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">{t("settings.computerUseDesc")}</p>
+          <div className="mt-4 rounded-lg border border-border bg-card p-4">
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{t("settings.computerUseExplicitOnly")}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{t("settings.computerUseRisk")}</div>
+              </div>
+              <Button
+                type="button"
+                variant={computerUseEnabled ? "outline" : "primary"}
+                disabled={savingAdvancedSettings || !runtimeConnected}
+                onClick={() => onComputerUseChange(!computerUseEnabled)}
+              >
+                {savingAdvancedSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {computerUseEnabled ? t("settings.turnOff") : t("settings.turnOn")}
+              </Button>
+            </div>
+          </div>
+
+          <div className="mt-8 flex min-w-0 items-center gap-2">
             <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
             {diagnosticsMessage ? (
               <Badge tone="ok" className="shrink-0">

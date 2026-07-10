@@ -44,11 +44,13 @@ except Exception:  # pragma: no cover - source installs may not include psutil.
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
+    DESKTOP_BRIDGE_ACTION_TYPES,
     create_agent_mcp_app,
     ensure_dict,
     normalize_checkpoint_archive_max_size_mb,
     redact_sensitive,
 )
+from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
     connector_client_statuses,
@@ -766,6 +768,8 @@ class AgentRuntimeMessageRequest(BaseModel):
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
+    computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
+    computer_use_visual_theme: str | None = Field(default=None, alias="computerUseVisualTheme")
 
     model_config = {"populate_by_name": True}
 
@@ -809,31 +813,40 @@ class DesktopBridgeRegisterRequest(BaseModel):
     name: str = ""
     provider: str = ""
     capabilities: list[str] = Field(default_factory=list)
+    operations: list[str] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
 
 
 class DesktopBridgeHeartbeatRequest(BaseModel):
     bridge_id: str = Field(alias="bridgeId")
+    bridge_credential: str = Field(alias="bridgeCredential")
 
     model_config = {"populate_by_name": True}
 
 
 class DesktopActionClaimRequest(BaseModel):
     bridge_id: str = Field(alias="bridgeId")
+    bridge_credential: str = Field(alias="bridgeCredential")
     actions: list[str] = Field(default_factory=list)
+    claim_request_id: str = Field(default="", alias="claimRequestId")
 
     model_config = {"populate_by_name": True}
 
 
 class DesktopActionCompleteRequest(BaseModel):
     bridge_id: str = Field(alias="bridgeId")
+    bridge_credential: str = Field(alias="bridgeCredential")
     action_id: str = Field(alias="actionId")
-    status: Literal["completed", "failed"] = "completed"
+    status: Literal["completed", "failed", "cancelled"] = "completed"
     result: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
 
     model_config = {"populate_by_name": True}
+
+
+class DesktopActionCancelRequest(BaseModel):
+    reason: str = ""
 
 
 class AgentGoalCreateRequest(BaseModel):
@@ -953,6 +966,13 @@ class AgentApprovalScopeRequest(BaseModel):
 class AgentPermissionRequest(BaseModel):
     execution_mode: str = Field(default="approval")
     acknowledge_roslyn_risk: bool = Field(default=False)
+
+
+class AdvancedSettingsRequest(BaseModel):
+    developer_options_enabled: bool = Field(default=False, alias="developerOptionsEnabled")
+    computer_use_enabled: bool = Field(default=False, alias="computerUseEnabled")
+
+    model_config = {"populate_by_name": True}
 
 
 class AgentNotesRequest(BaseModel):
@@ -1358,6 +1378,11 @@ AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
 )
+DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
+    AGENT_GATEWAY,
+    ARTIFACTS_DIR / "desktop-captures",
+    on_actions_changed=lambda: EVENT_BUS.broadcast_from_sync("agentDesktopActions", {"changed": True}),
+)
 SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
     artifact_dir=SUB_AGENT_TASK_DIR,
     roles=[
@@ -1536,6 +1561,11 @@ async def on_startup() -> None:
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    if desktop_executor_enabled():
+        try:
+            await asyncio.to_thread(DESKTOP_EXECUTOR.start)
+        except Exception as exc:  # noqa: BLE001 - desktop control must not block core startup.
+            emit_log("warn", "desktop", "Embedded desktop executor failed to start.", {"error": str(exc)})
     if AGENT_MCP_INIT_TASK is None or AGENT_MCP_INIT_TASK.done():
         AGENT_MCP_INIT_TASK = asyncio.create_task(initialize_agent_mcp_mount())
     if not CONFIG_PATH.exists():
@@ -1563,6 +1593,11 @@ async def on_shutdown() -> None:
     global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
+
+    try:
+        await asyncio.to_thread(DESKTOP_EXECUTOR.stop)
+    except Exception as exc:  # noqa: BLE001 - backend shutdown must remain best-effort.
+        emit_log("warn", "desktop", "Embedded desktop executor shutdown had a warning.", {"error": str(exc)})
 
     if AGENT_MCP_INIT_TASK is not None and not AGENT_MCP_INIT_TASK.done():
         AGENT_MCP_INIT_TASK.cancel()
@@ -1709,6 +1744,7 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
+        "advancedSettings": AGENT_GATEWAY.advanced_settings_state(),
         "approvals": safe_approval_list(project_root=selected_project),
     }
 
@@ -1905,6 +1941,7 @@ def read_app_runtime_snapshot(
         "approvals": AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=effective_global_only),
         "runs": runs,
         "desktopActions": desktop_actions,
+        "activeDesktopActions": AGENT_GATEWAY.list_active_desktop_actions(limit=8),
         "desktopBridge": AGENT_GATEWAY.desktop_bridge_status(),
         "goals": goals,
         "progress": progress,
@@ -1951,8 +1988,29 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
     return payload
 
 
+@app.get("/api/app/advanced-settings")
+def read_agentic_app_advanced_settings() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schema": "vrcforge.advanced_settings.v1",
+        "settings": AGENT_GATEWAY.advanced_settings_state(),
+    }
+
+
+@app.post("/api/app/advanced-settings")
+async def update_agentic_app_advanced_settings(request: AdvancedSettingsRequest) -> dict[str, Any]:
+    payload = AGENT_GATEWAY.update_advanced_settings(
+        developer_options_enabled=request.developer_options_enabled,
+        computer_use_enabled=request.computer_use_enabled,
+    )
+    await EVENT_BUS.broadcast("advancedSettings", payload["settings"])
+    return payload
+
+
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
+    if runtime_request.computer_use_requested:
+        AGENT_GATEWAY.require_computer_use_enabled()
     payload = await asyncio.to_thread(
         AGENT_GATEWAY.runtime_message,
         {
@@ -1971,6 +2029,8 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "providerLabel": runtime_request.provider_label,
             "model": runtime_request.model,
             "history": runtime_request.history,
+            "_computerUseRequested": runtime_request.computer_use_requested,
+            "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
         },
         agent_name=runtime_request.agent_name,
     )
@@ -2110,9 +2170,19 @@ def app_agent_desktop_actions(limit: int = 50, sessionId: str = "", projectRoot:
     return AGENT_GATEWAY.list_desktop_actions(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 
+@app.get("/api/app/agent/desktop-actions/{action_id}/result")
+def app_agent_desktop_action_result(action_id: str) -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.get_desktop_action_result(action_id)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post("/api/app/agent/desktop-actions")
 async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[str, Any]:
     try:
+        if request.action in DESKTOP_BRIDGE_ACTION_TYPES:
+            AGENT_GATEWAY.require_computer_use_enabled()
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.request_desktop_action,
             {
@@ -2141,7 +2211,12 @@ async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterReques
     try:
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.register_desktop_bridge,
-            {"name": request.name, "provider": request.provider, "capabilities": request.capabilities},
+            {
+                "name": request.name,
+                "provider": request.provider,
+                "capabilities": request.capabilities,
+                "operations": request.operations,
+            },
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -2151,7 +2226,10 @@ async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterReques
 @app.post("/api/app/agent/desktop-bridge/heartbeat")
 async def app_agent_desktop_bridge_heartbeat(request: DesktopBridgeHeartbeatRequest) -> dict[str, Any]:
     try:
-        payload = await asyncio.to_thread(AGENT_GATEWAY.heartbeat_desktop_bridge, {"bridgeId": request.bridge_id})
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.heartbeat_desktop_bridge,
+            {"bridgeId": request.bridge_id, "bridgeCredential": request.bridge_credential},
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return payload
@@ -2162,7 +2240,12 @@ async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> 
     try:
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.claim_desktop_action,
-            {"bridgeId": request.bridge_id, "actions": request.actions},
+            {
+                "bridgeId": request.bridge_id,
+                "bridgeCredential": request.bridge_credential,
+                "actions": request.actions,
+                "claimRequestId": request.claim_request_id,
+            },
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -2178,11 +2261,26 @@ async def app_agent_desktop_action_complete(request: DesktopActionCompleteReques
             AGENT_GATEWAY.complete_desktop_action,
             {
                 "bridgeId": request.bridge_id,
+                "bridgeCredential": request.bridge_credential,
                 "actionId": request.action_id,
                 "status": request.status,
                 "result": request.result,
                 "error": request.error,
             },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
+    return payload
+
+
+@app.post("/api/app/agent/desktop-actions/{action_id}/cancel")
+async def app_agent_desktop_action_cancel(action_id: str, request: DesktopActionCancelRequest) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.request_desktop_action_cancel,
+            action_id,
+            {"reason": request.reason},
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -5236,7 +5334,15 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
 async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
     try:
-        payload = AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
+        if tool_name == "vrcforge_agent_desktop_action":
+            payload = await asyncio.to_thread(
+                AGENT_GATEWAY.call_tool,
+                tool_name,
+                tool_request.params,
+                tool_request.agent_name,
+            )
+        else:
+            payload = AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     params = ensure_dict(tool_request.params or {})
@@ -18998,7 +19104,14 @@ def register_agent_gateway_tools() -> None:
         ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
-    AGENT_GATEWAY.register_tool("vrcforge_agent_desktop_action", "Request a desktop-side action such as screenshot, annotation, browser handoff, Desktop Rescue, or Computer Use.", "plan/preview", AGENT_GATEWAY.request_desktop_action)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_agent_desktop_action",
+        "Run an explicit desktop action. For Computer Use pass params.operation as list_windows, inspect_window, screenshot, focus_window, move_pointer, click, scroll, type_text, key_press, wait, or sequence; execution stays visible and cancellable in the app. The zero-dependency Win32 adapter exposes native HWND controls, not a UI Automation accessibility tree.",
+        "supervised-write",
+        AGENT_GATEWAY.request_turn_authorized_desktop_action_and_wait,
+        write=True,
+        requires_user_activation=True,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_progress_list", "List the current agent progress items for a session or project.", "read/debug", lambda params: AGENT_GATEWAY.list_agent_progress(limit=int(ensure_dict(params or {}).get("limit") or 50), session_id=str(ensure_dict(params or {}).get("sessionId") or ensure_dict(params or {}).get("session_id") or ""), project_root=str(ensure_dict(params or {}).get("projectRoot") or ensure_dict(params or {}).get("project_root") or ensure_dict(params or {}).get("projectPath") or "")))
     AGENT_GATEWAY.register_tool("vrcforge_progress_replace", "Replace the visible agent progress list, similar to a TodoWrite plan update.", "plan/preview", lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_create", "Create one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_progress(params or {}))

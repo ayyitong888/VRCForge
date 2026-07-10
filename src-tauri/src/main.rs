@@ -84,6 +84,7 @@ fn main() {
             cancel_sub_agent,
             check_skills,
             clear_agent_memory,
+            cancel_agent_desktop_action,
             compact_agent_history,
             create_adjustment_checkpoint,
             create_agent_goal,
@@ -109,6 +110,7 @@ fn main() {
             fetch_agent_questions,
             fetch_agent_runs,
             fetch_adjustment_checkpoints,
+            fetch_advanced_settings,
             fetch_app_bootstrap,
             fetch_app_health,
             fetch_avatars,
@@ -167,6 +169,7 @@ fn main() {
             uninstall_skill_package,
             uninstall_external_agent_connector,
             update_adjustment_checkpoint,
+            update_advanced_settings,
             update_agent_goal,
             update_agent_progress,
             update_api_config,
@@ -185,8 +188,7 @@ fn main() {
             select_folder
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle().clone();
                 shutdown_managed_backend(&app);
                 app.exit(0);

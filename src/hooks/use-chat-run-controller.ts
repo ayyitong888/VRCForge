@@ -27,6 +27,8 @@ export type QueuedTurn = {
   chatId?: string;
   sessionId?: string;
   projectPath?: string;
+  computerUseRequested?: boolean;
+  computerUseVisualTheme?: "light" | "dark";
 };
 
 export type CurrentTurn = {
@@ -35,6 +37,7 @@ export type CurrentTurn = {
   startedAt: number;
   providerLabel: string;
   model: string;
+  computerUseRequested?: boolean;
 };
 
 export type RunSingleTurnOptions = {
@@ -215,7 +218,14 @@ export function useChatRunController({
     const abortController = new AbortController();
     let userItemId = "";
     activeTurnAbortRef.current = abortController;
-    setCurrentTurn({ clientTurnId: turn.id, text: turn.text, startedAt, providerLabel: turn.providerLabel, model: turn.model });
+    setCurrentTurn({
+      clientTurnId: turn.id,
+      text: turn.text,
+      startedAt,
+      providerLabel: turn.providerLabel,
+      model: turn.model,
+      computerUseRequested: turn.computerUseRequested,
+    });
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -259,6 +269,8 @@ export function useChatRunController({
         providerLabel: turn.providerLabel,
         model: turn.model,
         clientTurnId: turn.id,
+        computerUseRequested: Boolean(turn.computerUseRequested),
+        computerUseVisualTheme: turn.computerUseVisualTheme,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({

@@ -134,6 +134,16 @@
     "statusMissing": "缺失",
     "statusError": "错误"
   },
+  "computerUse": {
+    "starting": "Computer Use 正在启动",
+    "running": "VRCForge 正在使用你的电脑",
+    "stopping": "正在停止 Computer Use",
+    "defaultDetail": "VRCForge 正在执行一个可见、可取消的桌面操作。",
+    "cancel": "停止",
+    "cancelling": "停止中",
+    "disabled": "Computer Use 已关闭。请先在设置 > 开发者选项中开启。",
+    "taskRequired": "请在 /desktop 后说明需要 VRCForge 完成的任务。"
+  },
   "composerAction": {
     "addContext": "添加上下文",
     "attach": "添加文件",
@@ -223,6 +233,11 @@
     "turnOnDeveloperOptions": "开启开发者选项",
     "turnOffDeveloperOptions": "关闭开发者选项",
     "enabled": "已开启",
+    "everEnabled": "曾开启",
+    "computerUse": "Computer Use",
+    "computerUseDesc": "允许显式的智能体任务查看并控制 Windows；关闭时不会显示入口。",
+    "computerUseExplicitOnly": "只有点击 + > Desktop Rescue 或输入 /desktop 才会启动电脑控制任务。",
+    "computerUseRisk": "在该任务中，VRCForge 可以截图、点击、输入和按键；Stop 会结束本轮访问。",
     "compactDebugTitle": "上下文压缩日志",
     "compactDebugDesc": "压缩摘要默认不显示在对话里，只在这里供调试查看。",
     "compactDebugEntry": "{{count}} 条消息 · {{time}}",

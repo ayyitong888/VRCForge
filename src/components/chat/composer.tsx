@@ -87,15 +87,26 @@ export function Composer({
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
   const commandActions: ComposerSlashCommand[] = actions.map((action) => ({
-    name: action.id === "desktop" ? "desktop-rescue" : action.id,
+    name: action.id,
     title: action.disabled ? action.disabledReason || action.description : action.description,
     action,
   }));
   const slashQuery = !editing && input.startsWith("/") && !input.includes(" ") && !input.includes("\n") ? input.slice(1).toLowerCase() : null;
-  const slashMatches: ComposerSlashCommand[] =
-    slashQuery !== null
-      ? [...commands.map((command) => ({ ...command })), ...commandActions].filter((command) => command.name.toLowerCase().includes(slashQuery)).slice(0, 8)
-      : [];
+  const slashMatches: ComposerSlashCommand[] = [];
+  if (slashQuery !== null) {
+    const seen = new Set<string>();
+    for (const command of [...commands.map((item) => ({ ...item })), ...commandActions]) {
+      const name = command.name.toLowerCase();
+      if (!name.includes(slashQuery) || seen.has(name)) {
+        continue;
+      }
+      slashMatches.push(command);
+      seen.add(name);
+      if (slashMatches.length >= 8) {
+        break;
+      }
+    }
+  }
   const visibleActions: ComposerAction[] = actions.length
     ? actions
     : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
@@ -176,6 +187,7 @@ export function Composer({
             <button
               key={command.name}
               type="button"
+              data-composer-slash-command={command.name}
               className={cn(
                 "flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-muted",
                 command.action?.disabled ? "opacity-60" : "",
@@ -235,6 +247,7 @@ export function Composer({
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
               onClick={() => setActionMenuOpen((open) => !open)}
               title={t("composerAction.addContext")}
+              data-composer-action-menu
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -262,6 +275,7 @@ export function Composer({
                       onAction?.(action.id);
                     }}
                     title={action.disabled ? action.disabledReason : action.description}
+                    data-composer-action={action.id}
                   >
                     <span className="mt-0.5 shrink-0 text-muted-foreground">{composerActionIcon(action.id)}</span>
                     <span className="min-w-0">
@@ -338,7 +352,7 @@ export function Composer({
                 </Button>
               </>
             ) : sending ? (
-              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")}>
+              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")} data-composer-stop>
                 <Square className="h-4 w-4" />
               </Button>
             ) : (
@@ -348,6 +362,7 @@ export function Composer({
                 type="submit"
                 title={t("chat.send")}
                 aria-label={t("chat.send")}
+                data-composer-send
               >
                 <Send className="h-4 w-4" />
               </Button>

@@ -134,6 +134,16 @@
     "statusMissing": "欠落",
     "statusError": "エラー"
   },
+  "computerUse": {
+    "starting": "Computer Use を開始しています",
+    "running": "VRCForge がコンピューターを操作しています",
+    "stopping": "Computer Use を停止しています",
+    "defaultDetail": "VRCForge が表示中のキャンセル可能なデスクトップ操作を実行しています。",
+    "cancel": "停止",
+    "cancelling": "停止中",
+    "disabled": "Computer Use はオフです。設定 > 開発者オプションで先に有効にしてください。",
+    "taskRequired": "/desktop の後に VRCForge に実行させる内容を入力してください。"
+  },
   "composerAction": {
     "addContext": "コンテキストを追加",
     "attach": "ファイルを追加",
@@ -223,6 +233,11 @@
     "turnOnDeveloperOptions": "開発者オプションをオン",
     "turnOffDeveloperOptions": "開発者オプションをオフ",
     "enabled": "有効",
+    "everEnabled": "有効化済み",
+    "computerUse": "Computer Use",
+    "computerUseDesc": "明示的に開始したエージェントターンで Windows の確認と操作を許可します。無効時は入口を表示しません。",
+    "computerUseExplicitOnly": "+ > Desktop Rescue または /desktop からのみコンピューター操作ターンを開始します。",
+    "computerUseRisk": "そのターン中は画面取得、クリック、入力、キー操作が可能です。Stop でそのターンのアクセスを終了します。",
     "compactDebugTitle": "コンテキスト圧縮ログ",
     "compactDebugDesc": "圧縮サマリーはチャットに表示せず、デバッグ用にここで確認します。",
     "compactDebugEntry": "{{count}} 件 · {{time}}",

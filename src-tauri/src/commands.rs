@@ -85,6 +85,15 @@ pub(crate) struct DesktopPermissionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAdvancedSettingsRequest {
+    developer_options_enabled: bool,
+    computer_use_enabled: bool,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentMessageRequest {
     message: String,
     session_id: Option<String>,
@@ -96,6 +105,9 @@ pub(crate) struct DesktopAgentMessageRequest {
     provider_label: Option<String>,
     model: Option<String>,
     client_turn_id: Option<String>,
+    #[serde(default)]
+    computer_use_requested: bool,
+    computer_use_visual_theme: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -500,6 +512,41 @@ pub fn update_permission_mode(
 }
 
 #[tauri::command]
+pub async fn fetch_advanced_settings(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/advanced-settings".to_string(),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn update_advanced_settings(
+    request: DesktopAdvancedSettingsRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/advanced-settings".to_string(),
+            Some(serde_json::json!({
+                "developerOptionsEnabled": request.developer_options_enabled,
+                "computerUseEnabled": request.computer_use_enabled,
+            })),
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn send_agent_message(
     request: DesktopAgentMessageRequest,
 ) -> Result<serde_json::Value, String> {
@@ -518,6 +565,8 @@ pub async fn send_agent_message(
                 "provider": request.provider,
                 "providerLabel": request.provider_label,
                 "model": request.model,
+                "computerUseRequested": request.computer_use_requested,
+                "computerUseVisualTheme": request.computer_use_visual_theme,
             })),
             request
                 .timeout_ms
@@ -1491,10 +1540,32 @@ pub async fn fetch_agent_desktop_actions(
 }
 
 #[tauri::command]
-pub fn request_agent_desktop_action(
+pub async fn request_agent_desktop_action(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/desktop-actions", request, 60_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/desktop-actions", request, 60_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_agent_desktop_action(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/desktop-actions/{}/cancel",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1549,7 +1620,9 @@ pub async fn fetch_agent_progress(
 }
 
 #[tauri::command]
-pub fn replace_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn replace_agent_progress(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/agent/progress/replace", request, 60_000)
 }
 
@@ -1559,7 +1632,9 @@ pub fn create_agent_progress(request: DesktopJsonBodyRequest) -> Result<serde_js
 }
 
 #[tauri::command]
-pub fn update_agent_progress(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn update_agent_progress(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "POST",
         format!(
@@ -1573,7 +1648,9 @@ pub fn update_agent_progress(request: DesktopIdJsonBodyRequest) -> Result<serde_
 }
 
 #[tauri::command]
-pub fn delete_agent_progress(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn delete_agent_progress(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "DELETE",
         format!(
@@ -1608,7 +1685,9 @@ pub fn create_agent_question(request: DesktopJsonBodyRequest) -> Result<serde_js
 }
 
 #[tauri::command]
-pub fn answer_agent_question(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub fn answer_agent_question(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     backend_json_request(
         "POST",
         format!(

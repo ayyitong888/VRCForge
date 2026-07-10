@@ -13,7 +13,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark" } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -26,6 +26,8 @@ export async function sendAgentMessage(
     provider: options.provider || undefined,
     providerLabel: options.providerLabel || undefined,
     model: options.model || undefined,
+    computerUseRequested: Boolean(options.computerUseRequested),
+    computerUseVisualTheme: options.computerUseVisualTheme,
   };
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal);
@@ -45,6 +47,8 @@ export async function sendAgentMessage(
       provider: request.provider,
       providerLabel: request.providerLabel,
       model: request.model,
+      computerUseRequested: request.computerUseRequested,
+      computerUseVisualTheme: request.computerUseVisualTheme,
     }),
   });
 }
@@ -118,7 +122,7 @@ export async function recordAgentRunQueued(
 export async function fetchAgentDesktopActions(
   endpoint: string,
   params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
-): Promise<{ ok: boolean; schema?: string; actions: AgentDesktopAction[]; count: number }> {
+): Promise<{ ok: boolean; schema?: string; actions: AgentDesktopAction[]; count: number; activeActions?: AgentDesktopAction[]; activeCount?: number }> {
   const query = new URLSearchParams();
   if (params.limit) {
     query.set("limit", String(params.limit));
@@ -152,6 +156,24 @@ export async function requestAgentDesktopAction(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     timeoutMs: 60000,
+  });
+}
+
+export async function cancelAgentDesktopAction(
+  endpoint: string,
+  actionId: string,
+  reason = "User requested cancellation.",
+): Promise<{ ok: boolean; schema?: string; status?: string; action?: AgentDesktopAction; idempotent?: boolean }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("cancel_agent_desktop_action", {
+      request: { id: actionId, body: { reason }, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/desktop-actions/${encodeURIComponent(actionId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+    timeoutMs: 30000,
   });
 }
 

@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DiagnosticsStatus, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DiagnosticsStatus, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
@@ -138,6 +138,33 @@ export async function updatePermission(
       execution_mode: executionMode,
       acknowledge_roslyn_risk: acknowledgeRoslynRisk,
     }),
+  });
+}
+
+export async function fetchAdvancedSettings(
+  endpoint: string,
+): Promise<{ ok: boolean; schema: string; settings: AdvancedSettingsState }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_advanced_settings", {
+      request: { timeoutMs: 15000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/advanced-settings`, { timeoutMs: 15000 });
+}
+
+export async function updateAdvancedSettings(
+  endpoint: string,
+  settings: Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">,
+): Promise<{ ok: boolean; schema: string; settings: AdvancedSettingsState }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("update_advanced_settings", {
+      request: { ...settings, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/advanced-settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
   });
 }
 

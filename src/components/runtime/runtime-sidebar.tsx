@@ -383,16 +383,19 @@ export function RightRuntimeSidebar({
                   </span>
                 </div>
               ) : null}
-              {desktopActions.slice(0, 5).map((action) => (
-                <div key={action.id || `${action.action}-${action.createdAt}`} className="rounded-md px-1 py-1.5 text-xs">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <MousePointer2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1 truncate font-medium">{action.action}</span>
-                    <span className="shrink-0 text-muted-foreground">{action.status}</span>
+              {desktopActions.slice(0, 5).map((action) => {
+                const operation = typeof action.paramsSummary?.operation === "string" ? action.paramsSummary.operation : "";
+                return (
+                  <div key={action.id || `${action.action}-${action.createdAt}`} className="rounded-md px-1 py-1.5 text-xs">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <MousePointer2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate font-medium">{action.action}{operation ? ` · ${operation}` : ""}</span>
+                      <span className="shrink-0 text-muted-foreground">{action.status}</span>
+                    </div>
+                    {action.error || action.promptSummary ? <div className="mt-0.5 line-clamp-2 pl-5 text-muted-foreground">{action.error || action.promptSummary}</div> : null}
                   </div>
-                  {action.error || action.promptSummary ? <div className="mt-0.5 line-clamp-2 pl-5 text-muted-foreground">{action.error || action.promptSummary}</div> : null}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </RuntimeSection>
         ) : null}
