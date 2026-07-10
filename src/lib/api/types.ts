@@ -536,6 +536,7 @@ export type DesktopRuntimeSnapshot = {
   approvals?: { approvals?: AgentApproval[]; count?: number };
   runs?: AgentRuntimeRunLedger;
   desktopActions?: { actions?: AgentDesktopAction[]; count?: number };
+  desktopBridge?: DesktopBridgeStatus;
   goals?: { goals?: AgentGoal[]; count?: number };
   progress?: { items?: AgentProgress[]; count?: number };
   questions?: { questions?: AgentQuestion[]; count?: number };
@@ -545,6 +546,7 @@ export type DesktopRuntimeSnapshot = {
 export type AgentDesktopAction = {
   schema?: string;
   id?: string;
+  actionId?: string;
   action?: string;
   status?: string;
   sessionId?: string;
@@ -553,8 +555,33 @@ export type AgentDesktopAction = {
   promptSummary?: string;
   resultSummary?: Record<string, unknown>;
   error?: string;
+  bridgeId?: string;
+  bridgeName?: string;
+  provider?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type DesktopBridgeInfo = {
+  id?: string;
+  bridgeId?: string;
+  name?: string;
+  provider?: string;
+  capabilities?: string[];
+  status?: string;
+  registeredAt?: string;
+  lastHeartbeatAt?: string;
+};
+
+export type DesktopBridgeStatus = {
+  ok?: boolean;
+  schema?: string;
+  connected?: boolean;
+  bridges?: DesktopBridgeInfo[];
+  count?: number;
+  pendingActionCount?: number;
+  heartbeatTtlSeconds?: number;
+  supportedActions?: string[];
 };
 
 export type AgentGoal = {

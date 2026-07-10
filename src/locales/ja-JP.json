@@ -121,6 +121,7 @@
     "goals": "ゴール",
     "memory": "メモリ",
     "desktopActions": "デスクトップ操作",
+    "desktopBridgeConnected": "デスクトップ制御ブリッジ接続中：{{names}}",
     "refreshChanges": "変更を更新",
     "statusUntracked": "未追跡",
     "statusModified": "変更済み",

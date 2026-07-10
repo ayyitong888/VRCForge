@@ -121,6 +121,7 @@
     "goals": "目標",
     "memory": "記憶",
     "desktopActions": "桌面操作",
+    "desktopBridgeConnected": "桌面控制橋已連接：{{names}}",
     "refreshChanges": "刷新變更",
     "statusUntracked": "未追蹤",
     "statusModified": "已修改",

@@ -121,6 +121,7 @@
     "goals": "Goals",
     "memory": "Memory",
     "desktopActions": "Desktop actions",
+    "desktopBridgeConnected": "Desktop control bridge connected: {{names}}",
     "refreshChanges": "Refresh changes",
     "statusUntracked": "Untracked",
     "statusModified": "Modified",

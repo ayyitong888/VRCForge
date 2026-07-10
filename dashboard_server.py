@@ -805,6 +805,37 @@ class AgentDesktopActionRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class DesktopBridgeRegisterRequest(BaseModel):
+    name: str = ""
+    provider: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class DesktopBridgeHeartbeatRequest(BaseModel):
+    bridge_id: str = Field(alias="bridgeId")
+
+    model_config = {"populate_by_name": True}
+
+
+class DesktopActionClaimRequest(BaseModel):
+    bridge_id: str = Field(alias="bridgeId")
+    actions: list[str] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class DesktopActionCompleteRequest(BaseModel):
+    bridge_id: str = Field(alias="bridgeId")
+    action_id: str = Field(alias="actionId")
+    status: Literal["completed", "failed"] = "completed"
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentGoalCreateRequest(BaseModel):
     title: str = ""
     goal: str = ""
@@ -1874,6 +1905,7 @@ def read_app_runtime_snapshot(
         "approvals": AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=effective_global_only),
         "runs": runs,
         "desktopActions": desktop_actions,
+        "desktopBridge": AGENT_GATEWAY.desktop_bridge_status(),
         "goals": goals,
         "progress": progress,
         "questions": questions,
@@ -2096,6 +2128,65 @@ async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[s
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/desktop-bridge")
+def app_agent_desktop_bridge_status() -> dict[str, Any]:
+    return AGENT_GATEWAY.desktop_bridge_status()
+
+
+@app.post("/api/app/agent/desktop-bridge/register")
+async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterRequest) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.register_desktop_bridge,
+            {"name": request.name, "provider": request.provider, "capabilities": request.capabilities},
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return payload
+
+
+@app.post("/api/app/agent/desktop-bridge/heartbeat")
+async def app_agent_desktop_bridge_heartbeat(request: DesktopBridgeHeartbeatRequest) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(AGENT_GATEWAY.heartbeat_desktop_bridge, {"bridgeId": request.bridge_id})
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return payload
+
+
+@app.post("/api/app/agent/desktop-actions/claim")
+async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.claim_desktop_action,
+            {"bridgeId": request.bridge_id, "actions": request.actions},
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if payload.get("action"):
+        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
+    return payload
+
+
+@app.post("/api/app/agent/desktop-actions/complete")
+async def app_agent_desktop_action_complete(request: DesktopActionCompleteRequest) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.complete_desktop_action,
+            {
+                "bridgeId": request.bridge_id,
+                "actionId": request.action_id,
+                "status": request.status,
+                "result": request.result,
+                "error": request.error,
+            },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
     return payload
 
 

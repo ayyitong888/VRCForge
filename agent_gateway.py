@@ -260,6 +260,8 @@ RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
 AGENT_MEMORY_MAX_ITEMS = 120
 AGENT_GOAL_MAX_ITEMS = 60
 AGENT_DESKTOP_ACTION_MAX_ITEMS = 120
+DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS = 45
+DESKTOP_BRIDGE_ACTION_TYPES = {"desktop_rescue", "computer_use"}
 
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
@@ -1452,6 +1454,7 @@ class AgentGateway:
         self._approvals: dict[str, dict[str, Any]] = {}
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._cancelled_runtime_turns: set[str] = set()
+        self._desktop_bridges: dict[str, dict[str, Any]] = {}
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
         self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
@@ -1506,6 +1509,10 @@ class AgentGateway:
     @property
     def desktop_action_log_path(self) -> Path:
         return self.audit_dir / "desktop-actions.jsonl"
+
+    @property
+    def desktop_bridge_log_path(self) -> Path:
+        return self.audit_dir / "desktop-bridges.jsonl"
 
     def register_tool(
         self,
@@ -2885,6 +2892,8 @@ class AgentGateway:
         status = "requested"
         result: dict[str, Any] = {}
         error = ""
+        action_id = ""
+        bridge_candidates: list[dict[str, Any]] = []
         if action == "screenshot" and "vrcforge_capture_screenshot" in self._tools:
             try:
                 result = self.call_tool("vrcforge_capture_screenshot", ensure_dict(params.get("params")), agent_name="desktop-agent")
@@ -2893,9 +2902,26 @@ class AgentGateway:
             except Exception as exc:  # noqa: BLE001 - explicit desktop actions should return actionable errors.
                 status = "failed"
                 error = str(exc)
-        elif action in {"desktop_rescue", "computer_use"}:
-            status = "unavailable"
-            error = "Desktop control bridge is not connected. Launch this action from a configured desktop skill/provider."
+        elif action in DESKTOP_BRIDGE_ACTION_TYPES:
+            capable = [
+                bridge
+                for bridge in self._live_desktop_bridges()
+                if action in set(bridge.get("capabilities") or [])
+            ]
+            if capable:
+                status = "requested"
+                action_id = f"dact_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+                bridge_candidates = [
+                    {
+                        "bridgeId": str(bridge.get("bridgeId") or ""),
+                        "name": str(bridge.get("name") or ""),
+                        "provider": str(bridge.get("provider") or ""),
+                    }
+                    for bridge in capable[:5]
+                ]
+            else:
+                status = "unavailable"
+                error = "Desktop control bridge is not connected. Launch this action from a configured desktop skill/provider."
         else:
             status = "recorded"
         event = {
@@ -2909,23 +2935,233 @@ class AgentGateway:
             "resultSummary": summarize_params(result) if result else {},
             "error": error,
         }
+        if action_id:
+            event["actionId"] = action_id
+        if bridge_candidates:
+            event["bridgeCandidates"] = bridge_candidates
         self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
-        return {"ok": status not in {"failed"}, "schema": "vrcforge.desktop_action.v1", "status": status, "action": action, "event": redact_sensitive(event), "result": redact_sensitive(result), "error": error}
+        return {"ok": status not in {"failed"}, "schema": "vrcforge.desktop_action.v1", "status": status, "action": action, "actionId": action_id, "event": redact_sensitive(event), "result": redact_sensitive(result), "error": error}
 
     def list_desktop_actions(self, *, limit: int = 50, session_id: str = "", project_root: str = "") -> dict[str, Any]:
-        events = self._read_jsonl(self.desktop_action_log_path, limit=max(limit, 50))
+        rows = self._project_desktop_action_rows(limit_events=max(limit * 4, 200))
         normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         filtered = []
-        for event in events:
-            if session_id and str(event.get("sessionId") or "") != session_id:
+        for row in rows:
+            if session_id and str(row.get("sessionId") or "") != session_id:
                 continue
-            event_project = str(event.get("projectRoot") or "").strip()
-            if normalized_project_root and event_project and normalize_filesystem_path(event_project) != normalized_project_root:
+            row_project = str(row.get("projectRoot") or "").strip()
+            if normalized_project_root and row_project and normalize_filesystem_path(row_project) != normalized_project_root:
                 continue
-            filtered.append(redact_sensitive(event))
+            filtered.append(redact_sensitive(row))
         filtered = filtered[-max(1, min(limit, AGENT_DESKTOP_ACTION_MAX_ITEMS)) :]
         filtered.reverse()
         return {"ok": True, "schema": "vrcforge.desktop_actions.v1", "actions": filtered, "count": len(filtered)}
+
+    def _project_desktop_action_rows(self, *, limit_events: int = 1000) -> list[dict[str, Any]]:
+        """Merge lifecycle events sharing an actionId into one row; legacy rows pass through."""
+        events = self._read_jsonl(self.desktop_action_log_path, limit=limit_events)
+        rows: list[dict[str, Any]] = []
+        by_action: dict[str, dict[str, Any]] = {}
+        for event in events:
+            action_id = str(event.get("actionId") or "").strip()
+            if not action_id:
+                rows.append(dict(event))
+                continue
+            row = by_action.get(action_id)
+            if row is None:
+                row = dict(event)
+                row["id"] = action_id
+                by_action[action_id] = row
+                rows.append(row)
+                continue
+            created_at = row.get("createdAt") or event.get("createdAt")
+            for key, value in event.items():
+                if value is None or value == "":
+                    continue
+                if isinstance(value, (dict, list)) and not value:
+                    continue
+                row[key] = value
+            row["id"] = action_id
+            row["createdAt"] = created_at
+            row["updatedAt"] = event.get("updatedAt") or event.get("createdAt") or row.get("updatedAt")
+        return rows
+
+    def _pending_desktop_actions(self) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self._project_desktop_action_rows()
+            if str(row.get("actionId") or "").strip() and str(row.get("status") or "") == "requested"
+        ]
+
+    def _live_desktop_bridges(self) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        live: list[dict[str, Any]] = []
+        with self._lock:
+            for record in self._desktop_bridges.values():
+                heartbeat = _parse_utc_timestamp(str(record.get("lastHeartbeatAt") or ""))
+                if heartbeat is not None and (now - heartbeat).total_seconds() <= DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS:
+                    record["status"] = "connected"
+                    live.append(dict(record))
+                else:
+                    record["status"] = "stale"
+        return live
+
+    def register_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        name = summarize_text(str(params.get("name") or "").strip(), 120) or "desktop-bridge"
+        provider = summarize_text(str(params.get("provider") or "").strip(), 120) or "unknown"
+        capabilities: list[str] = []
+        for item in ensure_list(params.get("capabilities")):
+            capability = re.sub(r"[^a-z0-9_.-]+", "_", str(item).strip().lower()).strip("_")
+            if capability and capability not in capabilities:
+                capabilities.append(capability)
+        if not capabilities:
+            capabilities = sorted(DESKTOP_BRIDGE_ACTION_TYPES)
+        bridge_id = f"bridge_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        now = utc_now_iso()
+        record = {
+            "id": bridge_id,
+            "bridgeId": bridge_id,
+            "name": name,
+            "provider": provider,
+            "capabilities": capabilities,
+            "status": "connected",
+            "registeredAt": now,
+            "lastHeartbeatAt": now,
+        }
+        with self._lock:
+            self._desktop_bridges[bridge_id] = record
+        self._append_jsonl(self.desktop_bridge_log_path, "vrcforge.desktop_bridge.v1", {"event": "desktop_bridge_registered", **record})
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_bridge.v1",
+            "bridge": redact_sensitive(dict(record)),
+            "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
+        }
+
+    def heartbeat_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        with self._lock:
+            record = self._desktop_bridges.get(bridge_id)
+            if record is None:
+                raise AgentGatewayError("Unknown desktop bridge. Register the bridge before sending heartbeats.", status_code=404)
+            record["lastHeartbeatAt"] = utc_now_iso()
+            record["status"] = "connected"
+            snapshot = dict(record)
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_bridge.v1",
+            "bridge": redact_sensitive(snapshot),
+            "pendingActionCount": len(self._pending_desktop_actions()),
+            "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
+        }
+
+    def desktop_bridge_status(self) -> dict[str, Any]:
+        live = self._live_desktop_bridges()
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_bridge_status.v1",
+            "connected": bool(live),
+            "bridges": [redact_sensitive(bridge) for bridge in live],
+            "count": len(live),
+            "pendingActionCount": len(self._pending_desktop_actions()),
+            "heartbeatTtlSeconds": DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS,
+            "supportedActions": sorted(DESKTOP_BRIDGE_ACTION_TYPES),
+        }
+
+    def claim_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        requested_types: list[str] = []
+        for item in ensure_list(params.get("actions")):
+            action_type = re.sub(r"[^a-z0-9_.-]+", "_", str(item).strip().lower()).strip("_")
+            if action_type and action_type not in requested_types:
+                requested_types.append(action_type)
+        live = {str(bridge.get("bridgeId") or ""): bridge for bridge in self._live_desktop_bridges()}
+        bridge = live.get(bridge_id)
+        if bridge is None:
+            raise AgentGatewayError("Unknown or stale desktop bridge. Register and heartbeat before claiming actions.", status_code=409)
+        capabilities = set(bridge.get("capabilities") or [])
+        with self._lock:
+            pending = self._pending_desktop_actions()
+            target = None
+            for row in pending:
+                action_type = str(row.get("action") or "")
+                if requested_types and action_type not in requested_types:
+                    continue
+                if capabilities and action_type not in capabilities:
+                    continue
+                target = row
+                break
+            if target is None:
+                return {"ok": True, "schema": "vrcforge.desktop_action.v1", "action": None, "pendingCount": len(pending)}
+            event = {
+                "event": "desktop_action_claimed",
+                "actionId": str(target.get("actionId") or ""),
+                "status": "claimed",
+                "action": target.get("action"),
+                "bridgeId": bridge_id,
+                "bridgeName": bridge.get("name"),
+                "provider": bridge.get("provider"),
+                "sessionId": target.get("sessionId"),
+                "projectRoot": target.get("projectRoot"),
+            }
+            self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
+        merged = {**target, **{key: value for key, value in event.items() if value not in (None, "")}, "id": str(target.get("actionId") or "")}
+        return {
+            "ok": True,
+            "schema": "vrcforge.desktop_action.v1",
+            "action": redact_sensitive(merged),
+            "pendingCount": max(0, len(pending) - 1),
+        }
+
+    def complete_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        bridge_id = str(params.get("bridgeId") or params.get("bridge_id") or "").strip()
+        action_id = str(params.get("actionId") or params.get("action_id") or "").strip()
+        status = str(params.get("status") or "completed").strip().lower()
+        if status not in {"completed", "failed"}:
+            raise AgentGatewayError("Desktop action completion status must be completed or failed.", status_code=400)
+        with self._lock:
+            if bridge_id not in self._desktop_bridges:
+                raise AgentGatewayError("Unknown desktop bridge. Register the bridge before completing actions.", status_code=404)
+            rows = {
+                str(row.get("actionId") or ""): row
+                for row in self._project_desktop_action_rows()
+                if str(row.get("actionId") or "").strip()
+            }
+            row = rows.get(action_id)
+            if row is None:
+                raise AgentGatewayError("Unknown desktop action id.", status_code=404)
+            row_status = str(row.get("status") or "")
+            if row_status not in {"requested", "claimed"}:
+                raise AgentGatewayError(f"Desktop action is already {row_status or 'closed'}.", status_code=409)
+            claimed_bridge = str(row.get("bridgeId") or "")
+            if claimed_bridge and claimed_bridge != bridge_id:
+                raise AgentGatewayError("Desktop action is claimed by another bridge.", status_code=409)
+            error = summarize_text(str(params.get("error") or ""), 500)
+            result_summary = summarize_params(ensure_dict(params.get("result"))) if params.get("result") else {}
+            event = {
+                "event": "desktop_action_completed",
+                "actionId": action_id,
+                "status": status,
+                "action": row.get("action"),
+                "bridgeId": bridge_id,
+                "resultSummary": result_summary,
+                "error": error,
+                "sessionId": row.get("sessionId"),
+                "projectRoot": row.get("projectRoot"),
+            }
+            self._append_jsonl(self.desktop_action_log_path, "vrcforge.desktop_action.v1", event)
+        merged = {**row, **{key: value for key, value in event.items() if value not in (None, "")}, "status": status, "id": action_id}
+        return {
+            "ok": status == "completed",
+            "schema": "vrcforge.desktop_action.v1",
+            "status": status,
+            "action": redact_sensitive(merged),
+            "error": error,
+        }
 
     def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -9556,3 +9792,16 @@ def parse_iso_datetime(value: str) -> datetime | None:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

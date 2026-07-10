@@ -1,7 +1,7 @@
 import { Bot, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightClose, RefreshCw, Sparkles, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
-import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
+import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, DesktopBridgeStatus, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
 import type { RuntimeFileReference, RuntimePlanItem, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -40,6 +40,7 @@ export function RightRuntimeSidebar({
   agentProgress,
   agentMemory,
   desktopActions,
+  desktopBridge,
   workspaceStateError,
   runtimeReviewEvidence,
   runtimeFileReferences,
@@ -96,6 +97,7 @@ export function RightRuntimeSidebar({
   agentProgress: AgentProgress[];
   agentMemory: AgentMemory[];
   desktopActions: AgentDesktopAction[];
+  desktopBridge?: DesktopBridgeStatus | null;
   workspaceStateError: string;
   runtimeReviewEvidence: RuntimeReviewEvidence[];
   runtimeFileReferences: RuntimeFileReference[];
@@ -360,7 +362,7 @@ export function RightRuntimeSidebar({
           </RuntimeSection>
         ) : null}
 
-        {desktopActions.length ? (
+        {desktopActions.length || desktopBridge?.connected ? (
           <RuntimeSection
             title={t("workspace.desktopActions")}
             collapsed={rightRuntimeSectionsCollapsed.desktopActions}
@@ -368,6 +370,19 @@ export function RightRuntimeSidebar({
             count={<Badge tone="muted">{formatCount(desktopActions.length)}</Badge>}
           >
             <div className="space-y-0.5">
+              {desktopBridge?.connected ? (
+                <div className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1.5 text-xs text-muted-foreground">
+                  <Monitor className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {t("workspace.desktopBridgeConnected", {
+                      names: (desktopBridge.bridges ?? [])
+                        .map((bridge) => bridge.name || bridge.provider || bridge.bridgeId || "")
+                        .filter(Boolean)
+                        .join(", "),
+                    })}
+                  </span>
+                </div>
+              ) : null}
               {desktopActions.slice(0, 5).map((action) => (
                 <div key={action.id || `${action.action}-${action.createdAt}`} className="rounded-md px-1 py-1.5 text-xs">
                   <div className="flex min-w-0 items-center gap-2">

@@ -96,6 +96,7 @@ class DashboardServerTests(unittest.TestCase):
             tuning_root / "agent_gateway.json",
             tuning_root / "agent_gateway",
         )
+        dashboard_server.AGENT_GATEWAY._desktop_bridges.clear()
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -841,6 +842,159 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(
             any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.request_desktop_action for call in to_thread.call_args_list)
         )
+
+    def test_desktop_bridge_lifecycle_claim_and_complete(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registered = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "mock-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            self.assertEqual(registered.status_code, 200)
+            bridge_id = registered.json()["bridge"]["bridgeId"]
+
+            status = client.get("/api/app/agent/desktop-bridge")
+            self.assertEqual(status.status_code, 200)
+            status_payload = status.json()
+            self.assertTrue(status_payload["connected"])
+            self.assertEqual(status_payload["bridges"][0]["provider"], "mock-provider")
+            self.assertIn("computer_use", status_payload["supportedActions"])
+            self.assertIn("desktop_rescue", status_payload["supportedActions"])
+
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={
+                    "action": "computer_use",
+                    "prompt": "open settings window",
+                    "sessionId": "sess-bridge",
+                    "clientTurnId": "turn-bridge",
+                    "projectRoot": "ProjectA",
+                },
+            )
+            self.assertEqual(requested.status_code, 200)
+            requested_payload = requested.json()
+            self.assertEqual(requested_payload["status"], "requested")
+            action_id = requested_payload["actionId"]
+            self.assertTrue(action_id)
+
+            heartbeat = client.post("/api/app/agent/desktop-bridge/heartbeat", json={"bridgeId": bridge_id})
+            self.assertEqual(heartbeat.status_code, 200)
+            self.assertEqual(heartbeat.json()["pendingActionCount"], 1)
+
+            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            self.assertEqual(claimed.status_code, 200)
+            claimed_action = claimed.json()["action"]
+            self.assertEqual(claimed_action["actionId"], action_id)
+            self.assertEqual(claimed_action["status"], "claimed")
+            self.assertEqual(claimed_action["bridgeId"], bridge_id)
+
+            completed = client.post(
+                "/api/app/agent/desktop-actions/complete",
+                json={
+                    "bridgeId": bridge_id,
+                    "actionId": action_id,
+                    "status": "completed",
+                    "result": {"summary": "settings window opened", "windowTitle": "Settings"},
+                },
+            )
+            self.assertEqual(completed.status_code, 200)
+            self.assertTrue(completed.json()["ok"])
+
+            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-bridge"})
+
+        actions = listing.json()["actions"]
+        merged = [row for row in actions if row.get("actionId") == action_id]
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["status"], "completed")
+        self.assertEqual(merged[0]["action"], "computer_use")
+        self.assertEqual(merged[0]["bridgeId"], bridge_id)
+
+    def test_desktop_bridge_stale_heartbeat_blocks_claim_and_requests(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registered = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "stale-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            bridge_id = registered.json()["bridge"]["bridgeId"]
+            stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
+            dashboard_server.AGENT_GATEWAY._desktop_bridges[bridge_id]["lastHeartbeatAt"] = stale_at
+
+            status = client.get("/api/app/agent/desktop-bridge")
+            self.assertFalse(status.json()["connected"])
+
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "prompt": "should be unavailable", "sessionId": "sess-stale"},
+            )
+            self.assertEqual(requested.json()["status"], "unavailable")
+
+            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            self.assertEqual(claimed.status_code, 409)
+
+    def test_desktop_bridge_capability_and_type_filtering(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            registered = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "rescue-bridge", "provider": "mock-provider", "capabilities": ["desktop_rescue"]},
+            )
+            bridge_id = registered.json()["bridge"]["bridgeId"]
+
+            computer_use = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "prompt": "no capable bridge", "sessionId": "sess-caps"},
+            )
+            self.assertEqual(computer_use.json()["status"], "unavailable")
+
+            rescue = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "desktop_rescue", "prompt": "rescue the desktop", "sessionId": "sess-caps"},
+            )
+            rescue_payload = rescue.json()
+            self.assertEqual(rescue_payload["status"], "requested")
+
+            claimed = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            claimed_action = claimed.json()["action"]
+            self.assertEqual(claimed_action["actionId"], rescue_payload["actionId"])
+            self.assertEqual(claimed_action["action"], "desktop_rescue")
+
+    def test_desktop_bridge_unknown_and_failed_paths(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            missing = client.post("/api/app/agent/desktop-bridge/heartbeat", json={"bridgeId": "bridge_missing"})
+            self.assertEqual(missing.status_code, 404)
+
+            registered = client.post(
+                "/api/app/agent/desktop-bridge/register",
+                json={"name": "fail-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
+            )
+            bridge_id = registered.json()["bridge"]["bridgeId"]
+            requested = client.post(
+                "/api/app/agent/desktop-actions",
+                json={"action": "computer_use", "prompt": "will fail", "sessionId": "sess-fail"},
+            )
+            action_id = requested.json()["actionId"]
+
+            failed = client.post(
+                "/api/app/agent/desktop-actions/complete",
+                json={
+                    "bridgeId": bridge_id,
+                    "actionId": action_id,
+                    "status": "failed",
+                    "error": "window not found",
+                },
+            )
+            self.assertEqual(failed.status_code, 200)
+            self.assertFalse(failed.json()["ok"])
+
+            reclaim = client.post("/api/app/agent/desktop-actions/claim", json={"bridgeId": bridge_id})
+            self.assertEqual(reclaim.status_code, 200)
+            self.assertIsNone(reclaim.json()["action"])
+
+            listing = client.get("/api/app/agent/desktop-actions", params={"sessionId": "sess-fail"})
+
+        actions = listing.json()["actions"]
+        failed_rows = [row for row in actions if row.get("actionId") == action_id]
+        self.assertEqual(len(failed_rows), 1)
+        self.assertEqual(failed_rows[0]["status"], "failed")
+        self.assertIn("window not found", failed_rows[0]["error"])
 
     def test_agent_goals_are_durable_and_statused(self) -> None:
         with TestClient(dashboard_server.app) as client:

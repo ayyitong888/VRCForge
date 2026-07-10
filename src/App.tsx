@@ -709,6 +709,7 @@ export default function App() {
     runtimeRuns,
     runtimeRunsError,
     desktopActions,
+    desktopBridge,
     agentGoals,
     agentProgress,
     agentQuestions,
@@ -2700,6 +2701,7 @@ export default function App() {
               agentProgress={agentProgress}
               agentMemory={agentMemory}
               desktopActions={desktopActions}
+              desktopBridge={desktopBridge}
               workspaceStateError={workspaceStateError}
               runtimeReviewEvidence={runtimeReviewEvidence}
               runtimeFileReferences={runtimeFileReferences}

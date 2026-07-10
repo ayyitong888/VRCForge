@@ -9,6 +9,7 @@ import {
   AgentQuestion,
   AgentRuntimeRun,
   AppBootstrap,
+  DesktopBridgeStatus,
   DesktopRuntimeSnapshot,
   WorkspaceDiffSummary,
   fetchDesktopRuntimeSnapshot,
@@ -55,6 +56,7 @@ export function useRuntimeWorkspace({
   const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
+  const [desktopBridge, setDesktopBridge] = useState<DesktopBridgeStatus | null>(null);
   const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
   const [agentProgress, setAgentProgress] = useState<AgentProgress[]>([]);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
@@ -165,6 +167,7 @@ export function useRuntimeWorkspace({
       setRuntimeRuns([]);
       setRuntimeRunsError("");
       setDesktopActions([]);
+      setDesktopBridge(null);
       setAgentGoals([]);
       setAgentProgress([]);
       setAgentQuestions([]);
@@ -193,6 +196,7 @@ export function useRuntimeWorkspace({
       setAgentApprovals(snapshot.approvals?.approvals ?? []);
       setRuntimeRuns(snapshot.runs?.runs ?? []);
       setDesktopActions(snapshot.desktopActions?.actions ?? []);
+      setDesktopBridge(snapshot.desktopBridge ?? null);
       setAgentGoals(snapshot.goals?.goals ?? []);
       setAgentProgress(snapshot.progress?.items ?? []);
       setAgentQuestions(snapshot.questions?.questions ?? []);
@@ -252,6 +256,7 @@ export function useRuntimeWorkspace({
     runtimeRuns,
     runtimeRunsError,
     desktopActions,
+    desktopBridge,
     agentGoals,
     agentProgress,
     agentQuestions,

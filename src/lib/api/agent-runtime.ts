@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 export type ChatHistoryEntry = {
   role: "user" | "agent";
@@ -153,6 +153,10 @@ export async function requestAgentDesktopAction(
     body: JSON.stringify(payload),
     timeoutMs: 60000,
   });
+}
+
+export async function fetchDesktopBridgeStatus(endpoint: string): Promise<DesktopBridgeStatus> {
+  return requestJson<DesktopBridgeStatus>(`${endpoint}/api/app/agent/desktop-bridge`, { preferTauriIpc: true, timeoutMs: 15000 });
 }
 
 export async function fetchAgentGoals(
