@@ -21,6 +21,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
+from desktop_operations import (
+    DESKTOP_INTERACTIVE_OPERATIONS,
+    DESKTOP_REPLAY_SAFE_OPERATIONS,
+    canonical_desktop_operation,
+)
 from optimization_service import (
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
@@ -2241,14 +2246,14 @@ class AgentGateway:
         if bool(params.get("_computerUseRequested")):
             bootstrap_params: dict[str, Any] = {
                 "action": "computer_use",
-                "prompt": "Capture the initial desktop state for this user-started Computer Use turn.",
+                "prompt": "Discover applications and windows for this user-started Computer Use turn.",
                 "sessionId": session_id,
                 "clientTurnId": client_turn_id,
                 "params": {
                     "operation": "sequence",
                     "steps": [
+                        {"operation": "list_apps", "limit": 80},
                         {"operation": "list_windows", "limit": 30},
-                        {"operation": "screenshot"},
                     ],
                 },
             }
@@ -2275,7 +2280,7 @@ class AgentGateway:
                     "index": len(steps),
                     "kind": "skill",
                     "tool": "vrcforge_agent_desktop_action",
-                    "summary": "Captured the initial desktop state.",
+                    "summary": "Discovered the initial desktop applications and windows.",
                     "status": bootstrap_payload.get("status") or "",
                 }
             )
@@ -3077,11 +3082,11 @@ class AgentGateway:
 
     @staticmethod
     def _desktop_action_operations(params: dict[str, Any]) -> list[str]:
-        operation = re.sub(r"[^a-z0-9_.-]+", "_", str(params.get("operation") or "").strip().lower()).strip("_")
+        operation = canonical_desktop_operation(params.get("operation"))
         operations = [operation] if operation else []
         if operation == "sequence":
             operations.extend(
-                re.sub(r"[^a-z0-9_.-]+", "_", str(step.get("operation") or "").strip().lower()).strip("_")
+                canonical_desktop_operation(step.get("operation"))
                 for step in ensure_list(params.get("steps"))
                 if isinstance(step, dict)
             )
@@ -3090,26 +3095,11 @@ class AgentGateway:
     @classmethod
     def _desktop_action_is_replay_safe(cls, params: dict[str, Any]) -> bool:
         operations = cls._desktop_action_operations(params)
-        return bool(operations) and all(item in {"list_windows", "inspect_window", "cursor_position", "screenshot", "wait"} for item in operations)
+        return bool(operations) and all(item in DESKTOP_REPLAY_SAFE_OPERATIONS for item in operations)
 
     @classmethod
     def _desktop_action_is_interactive(cls, params: dict[str, Any]) -> bool:
-        return any(
-            item in {
-                "focus_window",
-                "move_pointer",
-                "click",
-                "drag",
-                "scroll",
-                "type_text",
-                "key_press",
-                "focus_element",
-                "invoke_element",
-                "set_value",
-                "secondary_action",
-            }
-            for item in cls._desktop_action_operations(params)
-        )
+        return any(item in DESKTOP_INTERACTIVE_OPERATIONS for item in cls._desktop_action_operations(params))
 
     @classmethod
     def _desktop_action_params_audit(cls, params: dict[str, Any]) -> dict[str, Any]:
@@ -3201,6 +3191,8 @@ class AgentGateway:
         def collect(candidate: dict[str, Any]) -> None:
             if str(candidate.get("operation") or "") == "screenshot" and candidate.get("artifactPath"):
                 screenshot_paths.append(str(candidate["artifactPath"]))
+            if isinstance(candidate.get("screenshot"), dict):
+                collect(ensure_dict(candidate.get("screenshot")))
             for step in ensure_list(candidate.get("steps"))[:32]:
                 if isinstance(step, dict):
                     collect(ensure_dict(step.get("result")))
@@ -3237,6 +3229,32 @@ class AgentGateway:
             item = result.get(key)
             if item not in (None, ""):
                 parts.append(f"{key}={summarize_text(str(item), 240)}")
+        apps = [item for item in ensure_list(result.get("apps")) if isinstance(item, dict)][:30]
+        if apps:
+            parts.append(
+                "apps="
+                + json.dumps(
+                    [
+                        {
+                            "displayName": summarize_text(str(item.get("displayName") or item.get("name") or ""), 120),
+                            "id": summarize_text(str(item.get("id") or item.get("appId") or ""), 300),
+                            "isRunning": bool(item.get("isRunning")),
+                            "windows": [
+                                {
+                                    "windowHandle": window.get("windowHandle"),
+                                    "title": summarize_text(str(window.get("title") or ""), 140),
+                                    "processId": window.get("processId"),
+                                }
+                                for window in ensure_list(item.get("windows"))[:6]
+                                if isinstance(window, dict)
+                            ],
+                        }
+                        for item in apps
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
         windows = [item for item in ensure_list(result.get("windows")) if isinstance(item, dict)][:12]
         if windows:
             parts.append(
@@ -3285,6 +3303,13 @@ class AgentGateway:
                 nested = cls._desktop_action_observation(step.get("result"))
                 step_summaries.append(f"{int(step.get('index') or index)}:{step.get('operation') or ''}({nested})")
             parts.append("steps=" + " | ".join(step_summaries))
+        for nested_key in ("accessibility", "screenshot"):
+            nested = ensure_dict(result.get(nested_key))
+            if nested:
+                parts.append(f"{nested_key}=({cls._desktop_action_observation(nested)})")
+        for key in ("selectedText", "documentText"):
+            if result.get(key):
+                parts.append(f"{key}={summarize_text(str(result.get(key)), 1200)}")
         return summarize_text("; ".join(parts), 6000)
 
     def _append_desktop_action_event(self, event: dict[str, Any]) -> dict[str, Any]:

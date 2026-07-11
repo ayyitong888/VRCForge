@@ -8,6 +8,7 @@ import {
   filterPersistableChats,
   isStoredChat,
   normalizeChatContextUsage,
+  stripSupersededStreamingItems,
   stripTransientConversationItems,
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
@@ -200,7 +201,14 @@ export function useChatSessions({
 
   function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
     markChatsDirty();
-    setChats((list) => list.map((chat) => (chat.id === chatId ? cacheChatContextUsageFast(updater(chat)) : chat)));
+    setChats((list) => list.map((chat) => {
+      if (chat.id !== chatId) {
+        return chat;
+      }
+      const updated = updater(chat);
+      const items = stripSupersededStreamingItems(updated.items);
+      return cacheChatContextUsageFast(items === updated.items ? updated : { ...updated, items });
+    }));
   }
 
   function appendToChat(chatId: string, item: ConversationItem) {

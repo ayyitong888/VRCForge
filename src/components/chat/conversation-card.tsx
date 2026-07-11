@@ -124,7 +124,7 @@ export function ConversationCard({
 
   if (item.type === "streaming") {
     return (
-      <div className="group flex justify-start">
+      <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
           {item.text ? (
             <ChatMarkdown text={item.text} />

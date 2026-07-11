@@ -327,6 +327,12 @@ export function useChatRunController({
       }
       return false;
     } finally {
+      updateChat(chatId, (current) => {
+        const items = current.items.filter(
+          (item) => item.type !== "streaming" || item.clientTurnId !== turn.id,
+        );
+        return items.length === current.items.length ? current : { ...current, items };
+      });
       if (activeTurnAbortRef.current === abortController) {
         activeTurnAbortRef.current = null;
       }

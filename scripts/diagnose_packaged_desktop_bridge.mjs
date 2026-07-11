@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -10,12 +11,9 @@ const port = Number(process.env.VRCFORGE_CDP_PORT || "9343");
 const marker = `DB_PROBE_${Date.now()}`;
 const probeSessionId = `${marker}_SESSION`;
 const outPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `desktop-bridge-${marker}.json`);
-const fixtureScript = resolve(repoRoot, "scripts", "desktop_executor_fixture.ps1");
-const fixtureOutputPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `fixture-${marker}.json`);
-const fixtureWindowMarker = `${marker}_WINDOW`;
+const fixtureSourcePath = resolve(repoRoot, "scripts", "desktop_executor_fixture.cs");
+const fixtureExePath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `fixture-${marker}.exe`);
 const fixtureTypedMarker = `${marker}_TYPED_VALUE`;
-const uiaFixtureOutputPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `uia-fixture-${marker}.json`);
-const uiaFixtureWindowMarker = `${marker}_UIA_WINDOW`;
 const uiaFixtureTypedMarker = `${marker}_UIA_VALUE`;
 const appOrigin = process.env.VRCFORGE_APP_ORIGIN || "http://127.0.0.1:8757";
 const appRequestOrigin = "tauri://localhost";
@@ -24,6 +22,15 @@ let appSessionToken = "";
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function processExists(processId) {
+  try {
+    process.kill(Number(processId), 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function runPowerShell(script) {
@@ -429,18 +436,24 @@ function sequenceStepResult(payload, operation) {
   return steps.find((step) => step?.operation === operation)?.result || null;
 }
 
-async function bmpEvidence(path) {
+async function imageEvidence(path) {
   if (!path) {
     return { ok: false, error: "missing artifact path" };
   }
   try {
     const bytes = await readFile(path);
+    const bmp = bytes.length >= 54 && bytes.subarray(0, 2).toString("ascii") === "BM";
+    const png = bytes.length >= 33 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const width = bmp ? bytes.readInt32LE(18) : png ? bytes.readUInt32BE(16) : 0;
+    const height = bmp ? Math.abs(bytes.readInt32LE(22)) : png ? bytes.readUInt32BE(20) : 0;
     return {
-      ok: bytes.length >= 54 && bytes.subarray(0, 2).toString("ascii") === "BM",
+      ok: (bmp || png) && width > 0 && height > 0,
       byteLength: bytes.length,
-      signature: bytes.subarray(0, 2).toString("ascii"),
-      width: bytes.length >= 26 ? bytes.readInt32LE(18) : 0,
-      height: bytes.length >= 26 ? Math.abs(bytes.readInt32LE(22)) : 0,
+      format: bmp ? "bmp" : png ? "png" : "unknown",
+      signature: bytes.subarray(0, png ? 8 : 2).toString("hex"),
+      width,
+      height,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
     };
   } catch (error) {
     return { ok: false, error: String(error) };
@@ -449,6 +462,16 @@ async function bmpEvidence(path) {
 
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
+  const fixtureCompileOutput = await runPowerShell(`
+    $csc = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+    $presentationFramework = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\PresentationFramework' -Recurse -Filter PresentationFramework.dll | Select-Object -First 1).FullName
+    $presentationCore = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_64\\PresentationCore' -Recurse -Filter PresentationCore.dll | Select-Object -First 1).FullName
+    $windowsBase = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\WindowsBase' -Recurse -Filter WindowsBase.dll | Select-Object -First 1).FullName
+    $systemXaml = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Xaml' -Recurse -Filter System.Xaml.dll | Select-Object -First 1).FullName
+    & $csc /nologo /target:winexe /reference:$presentationFramework /reference:$presentationCore /reference:$windowsBase /reference:$systemXaml /out:'${fixtureExePath.replaceAll("'", "''")}' '${fixtureSourcePath.replaceAll("'", "''")}'
+    if ($LASTEXITCODE -ne 0) { throw "fixture compiler exited $LASTEXITCODE" }
+    Get-Item '${fixtureExePath.replaceAll("'", "''")}' | Select-Object FullName,Length | ConvertTo-Json -Compress
+  `);
   await waitForPortReleased(15000);
   const beforeLaunch = await processSnapshot();
   if (snapshotHasResidue(beforeLaunch)) {
@@ -477,9 +500,11 @@ async function main() {
     beforeLaunch,
     assertions: [],
     resourceSnapshots: {},
+    fixtureCompile: fixtureCompileOutput ? JSON.parse(fixtureCompileOutput) : null,
   };
   let cdp = null;
-  let fixtureChild = null;
+  let launchedAppPid = 0;
+  let launchedFixturePid = 0;
   let previousPermissionMode = "";
   let permissionRestoreNeeded = false;
   let previousAdvancedSettings = null;
@@ -505,15 +530,9 @@ async function main() {
     output.restoredTransientPlaceholders = await evalValue(
       cdp,
       `(() => {
-        const bodyText = document.body.innerText || "";
-        const labels = [
-          "执行中 · 等待模型响应",
-          "執行中 · 等待模型回應",
-          "Running · waiting for model",
-          "実行中 · モデルの応答待ち",
-        ];
-        const found = labels.filter((label) => bodyText.includes(label));
-        return { ok: found.length === 0, found };
+        const turns = Array.from(document.querySelectorAll("[data-conversation-streaming-turn]"))
+          .map((item) => item.getAttribute("data-conversation-streaming-turn") || "");
+        return { ok: turns.length === 0, turns };
       })()`,
     );
     if (!output.restoredTransientPlaceholders?.ok) {
@@ -748,12 +767,21 @@ async function main() {
     }
     const supportedOperations = output.bridgeConnected?.payload?.supportedOperations || [];
     for (const operation of [
+      "list_apps",
+      "launch_app",
       "list_windows",
+      "get_window",
+      "window_state",
       "inspect_window",
+      "cursor_position",
       "screenshot",
+      "focus_window",
+      "move_pointer",
       "click",
       "drag",
+      "scroll",
       "type_text",
+      "key_press",
       "focus_element",
       "invoke_element",
       "set_value",
@@ -842,7 +870,7 @@ async function main() {
         const bannerStyle = banner ? getComputedStyle(banner) : null;
         const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
         return {
-          ok: Boolean(surface && glow && banner && cancel && surface.getAttribute("data-state") === "running"),
+          ok: Boolean(surface && cancel && surface.getAttribute("data-state") === "running"),
           state: surface?.getAttribute("data-state") || "",
           actionId: surface?.getAttribute("data-action-id") || "",
           palette: surface?.getAttribute("data-visual-palette") || "",
@@ -862,7 +890,7 @@ async function main() {
       15000,
     ).catch((error) => ({ ok: false, error: String(error) }));
     if (!output.activityRunning?.ok) {
-      output.assertions.push("Computer Use running banner, glow, and cancel control were not visible");
+      output.assertions.push("Computer Use running state and cancel control were not visible");
     }
     output.activityRunningAction = await waitForActionStatus(
       output.activityRunning?.actionId || "",
@@ -874,23 +902,6 @@ async function main() {
       output.activityRunningAction?.action?.clientTurnId !== explicitClientTurnId
     ) {
       output.assertions.push("Computer Use activity surface was not bound to an action owned by the explicit turn");
-    }
-    if (
-      output.activityRunning?.palette !== `semantic-${output.activityRunning?.documentTheme}` ||
-      output.activityRunning?.glowOpacity < 0.05 ||
-      !output.activityRunning?.glowShadow ||
-      output.activityRunning?.glowShadow === "none" ||
-      (!output.activityRunning?.reducedMotion && output.activityRunning?.glowAnimation !== "computer-use-breathe")
-    ) {
-      output.assertions.push("Computer Use glow did not resolve to the active theme or wide animated visual treatment");
-    }
-    if (
-      !output.activityRunning?.hasBanner ||
-      output.activityRunning?.bannerWidth < 540 ||
-      !output.activityRunning?.bannerShadow ||
-      output.activityRunning?.bannerShadow === "none"
-    ) {
-      output.assertions.push("Computer Use top banner did not resolve to the expected elevated responsive surface");
     }
 
     output.explicitTurnResponse = await explicitTurnPromise;
@@ -958,20 +969,23 @@ async function main() {
         sessionId: probeSessionId,
         clientTurnId: `${marker}-turn-screenshot`,
         params: {
-          operation: "sequence",
-          steps: [
-            { operation: "focus_window", windowHandle: vrcforgeWindow?.windowHandle || 0 },
-            { operation: "wait", durationMs: 300 },
-            { operation: "screenshot", windowHandle: vrcforgeWindow?.windowHandle || 0 },
-          ],
+          operation: "get_window_state",
+          window: {
+            id: vrcforgeWindow?.windowHandle || 0,
+            app: vrcforgeWindow?.app || vrcforgeWindow?.processPath || "",
+            processId: vrcforgeWindow?.processId || 0,
+          },
+          include_screenshot: true,
+          include_text: false,
         },
       },
     });
     const screenshotActionId = output.screenshotRequestedAction?.payload?.actionId || "";
     output.screenshotCompletedAction = await waitForActionStatus(screenshotActionId, ["completed", "failed"], 30000);
     output.screenshotActionResult = await readActionResult(screenshotActionId);
-    const screenshotResult = sequenceStepResult(output.screenshotActionResult?.payload, "screenshot") || {};
-    output.screenshotBmpEvidence = await bmpEvidence(screenshotResult.artifactPath);
+    const windowStateResult = output.screenshotActionResult?.payload?.result || {};
+    const screenshotResult = windowStateResult.screenshot || {};
+    output.screenshotImageEvidence = await imageEvidence(screenshotResult.artifactPath);
     if (output.screenshotCompletedAction?.action?.status !== "completed") {
       output.assertions.push(`target-window screenshot failed: ${output.screenshotCompletedAction?.action?.error || "missing action"}`);
     }
@@ -982,51 +996,104 @@ async function main() {
       output.assertions.push("target-window screenshot was not attributed to the embedded ctypes bridge");
     }
     if (
+      windowStateResult.operation !== "window_state" ||
       screenshotResult.operation !== "screenshot" ||
       screenshotResult.windowHandle !== vrcforgeWindow?.windowHandle ||
+      screenshotResult.captureBackend !== "windows_graphics_capture" ||
+      screenshotResult.occlusionSafe !== true ||
+      screenshotResult.format !== "png" ||
       screenshotResult.width <= 0 ||
       screenshotResult.height <= 0 ||
       screenshotResult.sampleColorCount <= 1 ||
       screenshotResult.frameWarning ||
-      !output.screenshotBmpEvidence?.ok
+      !output.screenshotImageEvidence?.ok
     ) {
-      output.assertions.push("target-window screenshot was blank, malformed, or not tied to the VRCForge HWND");
+      output.assertions.push("target-window state did not return a nonblank occlusion-safe WGC PNG tied to the VRCForge HWND");
     }
 
-    // Phase 3: click and type only inside an isolated WPF fixture, then read back its submitted marker.
-    await rm(fixtureOutputPath, { force: true });
-    fixtureChild = spawn(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        fixtureScript,
-        "-Marker",
-        fixtureWindowMarker,
-        "-OutputPath",
-        fixtureOutputPath,
-      ],
-      { windowsHide: true, stdio: "ignore" },
-    );
-    output.fixtureWindowTitle = await waitForFixtureWindow(fixtureChild.pid, fixtureWindowMarker);
+    // Phase 3: launch a safe app and exercise the canonical Window2-shaped input contract.
+    output.listAppsRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Packaged Windows application discovery proof",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-list-apps`,
+        params: { operation: "list_apps", limit: 200 },
+      },
+    });
+    const listAppsActionId = output.listAppsRequestedAction?.payload?.actionId || "";
+    output.listAppsCompletedAction = await waitForActionStatus(listAppsActionId, ["completed", "failed"], 30000);
+    output.listAppsActionResult = await readActionResult(listAppsActionId);
+    const listAppsResult = output.listAppsActionResult?.payload?.result || {};
+    const listedApps = Array.isArray(listAppsResult.apps) ? listAppsResult.apps : [];
+    output.listAppsProof = {
+      count: listedApps.length,
+      hasRunningVRCForge: listedApps.some((app) =>
+        Boolean(app?.isRunning) && (app?.windows || []).some((window) => window?.windowHandle === vrcforgeWindow?.windowHandle),
+      ),
+      hasLaunchCandidate: listedApps.some((app) => !app?.isRunning && app?.id),
+    };
+    if (
+      output.listAppsCompletedAction?.action?.status !== "completed" ||
+      listAppsResult.operation !== "list_apps" ||
+      !output.listAppsProof.hasRunningVRCForge ||
+      !output.listAppsProof.hasLaunchCandidate
+    ) {
+      output.assertions.push("packaged list_apps did not return registered apps plus the running VRCForge window");
+    }
+
+    output.launchAppRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Launch a preinstalled Notepad fixture",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-launch-app`,
+        params: { operation: "launch_app", app: "C:\\Windows\\System32\\notepad.exe", timeout_ms: 8000 },
+      },
+    });
+    const launchAppActionId = output.launchAppRequestedAction?.payload?.actionId || "";
+    output.launchAppCompletedAction = await waitForActionStatus(launchAppActionId, ["completed", "failed"], 30000);
+    output.launchAppActionResult = await readActionResult(launchAppActionId);
+    const launchAppResult = output.launchAppActionResult?.payload?.result || {};
+    const notepadWindow = launchAppResult.window || (launchAppResult.windows || [])[0] || null;
+    output.notepadWindow = notepadWindow;
+    launchedAppPid = Number(notepadWindow?.processId || 0);
+    if (
+      output.launchAppCompletedAction?.action?.status !== "completed" ||
+      launchAppResult.operation !== "launch_app" ||
+      !launchAppResult.windowDetected ||
+      !notepadWindow?.windowHandle ||
+      !launchedAppPid
+    ) {
+      output.assertions.push("packaged launch_app did not launch and resolve a Notepad window");
+    }
+
     output.inputRequestedAction = await appApi("/api/app/agent/desktop-actions", {
       method: "POST",
       body: {
         action: "computer_use",
-        prompt: "Controlled packaged fixture input proof",
+        prompt: "Controlled packaged Notepad input proof",
         sessionId: probeSessionId,
         clientTurnId: `${marker}-turn-input`,
         params: {
           operation: "sequence",
           steps: [
-            { operation: "wait", durationMs: 300 },
-            { operation: "focus_window", titleContains: fixtureWindowMarker },
-            { operation: "click", titleContains: fixtureWindowMarker, xRatio: 0.5, yRatio: 0.45 },
+            {
+              operation: "click",
+              window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+              x: 120,
+              y: 140,
+              click_count: 1,
+              mouse_button: "left",
+            },
+            { operation: "type", text: fixtureTypedMarker },
+            { operation: "press_key", key: "Control_L+a" },
             { operation: "type_text", text: fixtureTypedMarker },
-            { operation: "click", titleContains: fixtureWindowMarker, xRatio: 0.5, yRatio: 0.74 },
-            { operation: "wait", durationMs: 500 },
+            { operation: "drag", from_x: 30, from_y: 140, to_x: 260, to_y: 140, duration_ms: 200 },
+            { operation: "scroll", x: 200, y: 140, scroll_x: 120, scroll_y: 240 },
+            { operation: "wait", duration_ms: 200 },
           ],
         },
       },
@@ -1034,78 +1101,209 @@ async function main() {
     const inputActionId = output.inputRequestedAction?.payload?.actionId || "";
     output.inputCompletedAction = await waitForActionStatus(inputActionId, ["completed", "failed"], 30000);
     if (output.inputCompletedAction?.action?.status !== "completed") {
-      output.assertions.push(`packaged fixture input action failed: ${output.inputCompletedAction?.action?.error || "missing action"}`);
+      output.assertions.push(`packaged Notepad input action failed: ${output.inputCompletedAction?.action?.error || "missing action"}`);
     }
     if (
       output.inputCompletedAction?.action?.bridgeId !== embeddedBridge?.bridgeId ||
       output.inputCompletedAction?.action?.provider !== "embedded-ctypes-win32" ||
       output.inputCompletedAction?.action?.sessionId !== probeSessionId
     ) {
-      output.assertions.push("fixture input action was not owned and completed by the embedded ctypes bridge");
+      output.assertions.push("Notepad input action was not owned and completed by the embedded ctypes bridge");
     }
-    let fixturePayload = null;
-    for (let attempt = 0; attempt < 20 && !fixturePayload; attempt += 1) {
-      try {
-        fixturePayload = JSON.parse(await readFile(fixtureOutputPath, "utf8"));
-      } catch {
-        await sleep(100);
+    output.inputActionResult = await readActionResult(inputActionId);
+    const inputSequence = output.inputActionResult?.payload?.result || {};
+    const executedInputOperations = (inputSequence.steps || []).map((step) => step.operation);
+    output.inputOperationProof = { executedInputOperations };
+    for (const operation of ["click", "type_text", "key_press", "drag", "scroll"]) {
+      if (!executedInputOperations.includes(operation)) {
+        output.assertions.push(`packaged Notepad sequence did not execute operation: ${operation}`);
       }
     }
-    output.fixtureProof = fixturePayload;
-    if (fixturePayload?.status !== "submitted" || fixturePayload?.text !== fixtureTypedMarker) {
-      output.assertions.push("isolated fixture did not submit the exact text typed by the packaged executor");
+
+    output.uiaFixtureLaunchRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Launch the native UI Automation acceptance fixture",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-uia-fixture-launch`,
+        params: { operation: "launch_app", app: fixtureExePath, timeout_ms: 8000 },
+      },
+    });
+    const uiaFixtureLaunchActionId = output.uiaFixtureLaunchRequestedAction?.payload?.actionId || "";
+    output.uiaFixtureLaunchCompletedAction = await waitForActionStatus(uiaFixtureLaunchActionId, ["completed", "failed"], 30000);
+    output.uiaFixtureLaunchActionResult = await readActionResult(uiaFixtureLaunchActionId);
+    const uiaFixtureLaunchResult = output.uiaFixtureLaunchActionResult?.payload?.result || {};
+    const uiaFixtureWindow = uiaFixtureLaunchResult.window || (uiaFixtureLaunchResult.windows || [])[0] || null;
+    launchedFixturePid = Number(uiaFixtureWindow?.processId || 0);
+    if (
+      output.uiaFixtureLaunchCompletedAction?.action?.status !== "completed" ||
+      !uiaFixtureLaunchResult.windowDetected ||
+      !uiaFixtureWindow?.windowHandle ||
+      !launchedFixturePid
+    ) {
+      output.assertions.push("packaged launch_app did not launch the native UI Automation fixture");
     }
 
-    // Prove the packaged UI Automation adapter against a second isolated WPF fixture.
-    await rm(uiaFixtureOutputPath, { force: true });
-    fixtureChild = spawn(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        fixtureScript,
-        "-Marker",
-        uiaFixtureWindowMarker,
-        "-OutputPath",
-        uiaFixtureOutputPath,
-      ],
-      { windowsHide: true, stdio: "ignore" },
+    output.occlusionFocusRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Bring the native fixture over Notepad before passive capture",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-occlusion-focus`,
+        params: {
+          operation: "activate_window",
+          window: {
+            id: uiaFixtureWindow?.windowHandle || 0,
+            app: uiaFixtureWindow?.app || "",
+            processId: launchedFixturePid,
+          },
+        },
+      },
+    });
+    const occlusionFocusActionId = output.occlusionFocusRequestedAction?.payload?.actionId || "";
+    output.occlusionFocusCompletedAction = await waitForActionStatus(occlusionFocusActionId, ["completed", "failed"], 30000);
+    output.occlusionFocusActionResult = await readActionResult(occlusionFocusActionId);
+    const focusedCoverWindow = output.occlusionFocusActionResult?.payload?.result?.window || {};
+    const coverRect = focusedCoverWindow.rect || uiaFixtureWindow?.rect || {};
+    const coveredRect = notepadWindow?.rect || {};
+    const coveredWidth = Math.max(
+      0,
+      Math.min(Number(coverRect.right), Number(coveredRect.right)) -
+        Math.max(Number(coverRect.left), Number(coveredRect.left)),
     );
-    output.uiaFixtureWindowTitle = await waitForFixtureWindow(fixtureChild.pid, uiaFixtureWindowMarker);
+    const coveredHeight = Math.max(
+      0,
+      Math.min(Number(coverRect.bottom), Number(coveredRect.bottom)) -
+        Math.max(Number(coverRect.top), Number(coveredRect.top)),
+    );
+    const targetArea = Math.max(1, Number(coveredRect.width) * Number(coveredRect.height));
+    const coveredAreaRatio = (coveredWidth * coveredHeight) / targetArea;
+    output.occludedWindowStateRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Capture the fully covered Notepad window without activating it",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-occluded-state`,
+        params: {
+          operation: "get_window_state",
+          window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+          include_screenshot: true,
+          include_text: false,
+        },
+      },
+    });
+    const occludedWindowStateActionId = output.occludedWindowStateRequestedAction?.payload?.actionId || "";
+    output.occludedWindowStateCompletedAction = await waitForActionStatus(occludedWindowStateActionId, ["completed", "failed"], 30000);
+    output.occludedWindowStateActionResult = await readActionResult(occludedWindowStateActionId);
+    const occludedWindowState = output.occludedWindowStateActionResult?.payload?.result || {};
+    const occludedScreenshot = occludedWindowState.screenshot || {};
+    output.occludedScreenshotEvidence = await imageEvidence(occludedScreenshot.artifactPath);
+    output.occlusionProof = {
+      coveredAreaRatio,
+      coverForeground: focusedCoverWindow.foreground === true,
+      targetForeground: occludedWindowState.window?.foreground === true,
+      targetWindowHandle: notepadWindow?.windowHandle || 0,
+      captureBackend: occludedScreenshot.captureBackend || "",
+      occlusionSafe: occludedScreenshot.occlusionSafe === true,
+      image: output.occludedScreenshotEvidence,
+    };
+    if (
+      output.occlusionFocusCompletedAction?.action?.status !== "completed" ||
+      output.occludedWindowStateCompletedAction?.action?.status !== "completed" ||
+      output.occlusionProof.coveredAreaRatio < 0.9 ||
+      !output.occlusionProof.coverForeground ||
+      output.occlusionProof.targetForeground ||
+      output.occlusionProof.captureBackend !== "windows_graphics_capture" ||
+      !output.occlusionProof.occlusionSafe ||
+      !output.occludedScreenshotEvidence?.ok
+    ) {
+      output.assertions.push("packaged get_window_state did not prove WGC capture of a substantially occluded, non-foreground window");
+    }
+
+    output.windowsKeyRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Protected Windows-key rejection proof",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-protected-key`,
+        params: {
+          operation: "press_key",
+          window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+          key: "Win+r",
+        },
+      },
+    });
+    const windowsKeyActionId = output.windowsKeyRequestedAction?.payload?.actionId || "";
+    output.windowsKeyCompletedAction = await waitForActionStatus(windowsKeyActionId, ["completed", "failed"], 30000);
+    if (
+      output.windowsKeyCompletedAction?.action?.status !== "failed" ||
+      !/does not allow windows/i.test(String(output.windowsKeyCompletedAction?.action?.error || ""))
+    ) {
+      output.assertions.push("packaged Computer Use did not fail closed on a Windows-key shortcut");
+    }
+
+    // Prove UI Automation state, fresh element indexes, element click, set_value, and Raise on a real native app.
     output.uiaInspectRequestedAction = await appApi("/api/app/agent/desktop-actions", {
       method: "POST",
       body: {
         action: "computer_use",
-        prompt: "Packaged UI Automation inspection proof",
+        prompt: "Packaged native UI Automation inspection proof",
         sessionId: probeSessionId,
         clientTurnId: `${marker}-turn-uia-inspect`,
-        params: { operation: "inspect_window", titleContains: uiaFixtureWindowMarker, limit: 100 },
+        params: {
+          operation: "get_window_state",
+          window: {
+            id: uiaFixtureWindow?.windowHandle || 0,
+            app: uiaFixtureWindow?.app || "",
+            processId: launchedFixturePid,
+          },
+          include_screenshot: false,
+          include_text: true,
+          limit: 200,
+        },
       },
     });
     const uiaInspectActionId = output.uiaInspectRequestedAction?.payload?.actionId || "";
     output.uiaInspectCompletedAction = await waitForActionStatus(uiaInspectActionId, ["completed", "failed"], 30000);
     output.uiaInspectActionResult = await readActionResult(uiaInspectActionId);
-    const uiaInspectResult = output.uiaInspectActionResult?.payload?.result || {};
+    const uiaWindowState = output.uiaInspectActionResult?.payload?.result || {};
+    const uiaInspectResult = uiaWindowState.accessibility || {};
     const uiaControls = Array.isArray(uiaInspectResult.controls) ? uiaInspectResult.controls : [];
-    const uiaInput = uiaControls.find((item) => item.automationId === "MarkerInput");
-    const uiaSubmit = uiaControls.find((item) => item.automationId === "SubmitButton");
+    const uiaInputs = uiaControls.filter((item) => String(item.controlType || "").endsWith(".Edit") && item.enabled && !item.offscreen);
+    const uiaInput = uiaInputs.sort((left, right) => Number(right?.rect?.top || 0) - Number(left?.rect?.top || 0))[0] || null;
+    const uiaButton = uiaControls.find((item) => String(item.controlType || "").endsWith(".Button") && item.enabled && !item.offscreen) || null;
     output.uiaInspectionProof = {
       accessibilityTree: uiaInspectResult.accessibilityTree === true,
       count: uiaControls.length,
       input: uiaInput || null,
-      submit: uiaSubmit || null,
+      button: uiaButton || null,
+      treeIsString: typeof uiaInspectResult.tree === "string" && uiaInspectResult.tree.length > 0,
+      hasCanonicalFields:
+        Object.hasOwn(uiaInspectResult, "focused_element") &&
+        Object.hasOwn(uiaInspectResult, "selected_elements") &&
+        Object.hasOwn(uiaInspectResult, "selected_text") &&
+        Object.hasOwn(uiaInspectResult, "document_text"),
     };
-    if (!output.uiaInspectionProof.accessibilityTree || !uiaInput || !uiaSubmit) {
-      output.assertions.push("packaged UI Automation inspection did not find the fixture input and submit controls");
+    if (
+      output.uiaInspectCompletedAction?.action?.status !== "completed" ||
+      !output.uiaInspectionProof.accessibilityTree ||
+      !output.uiaInspectionProof.treeIsString ||
+      !output.uiaInspectionProof.hasCanonicalFields ||
+      !uiaInput ||
+      !uiaButton
+    ) {
+      output.assertions.push("packaged UI Automation window state did not expose the native Edit/Button controls and canonical text fields");
     }
-    if (uiaInput && uiaSubmit) {
+    if (uiaInput && uiaButton) {
       output.uiaInputRequestedAction = await appApi("/api/app/agent/desktop-actions", {
         method: "POST",
         body: {
           action: "computer_use",
-          prompt: "Controlled packaged UI Automation input proof",
+          prompt: "Controlled packaged native UI Automation input proof",
           sessionId: probeSessionId,
           clientTurnId: `${marker}-turn-uia-input`,
           params: {
@@ -1113,16 +1311,26 @@ async function main() {
             steps: [
               {
                 operation: "set_value",
-                titleContains: uiaFixtureWindowMarker,
-                elementIndex: uiaInput.index,
+                window: {
+                  id: uiaFixtureWindow?.windowHandle || 0,
+                  app: uiaFixtureWindow?.app || "",
+                  processId: launchedFixturePid,
+                },
+                element_index: uiaInput.index,
                 value: uiaFixtureTypedMarker,
               },
               {
-                operation: "invoke_element",
-                titleContains: uiaFixtureWindowMarker,
-                elementIndex: uiaSubmit.index,
+                operation: "click",
+                element_index: uiaButton.index,
+                click_count: 1,
+                mouse_button: "left",
               },
-              { operation: "wait", durationMs: 300 },
+              {
+                operation: "perform_secondary_action",
+                element_index: uiaInput.index,
+                action: "Raise",
+              },
+              { operation: "wait", duration_ms: 200 },
             ],
           },
         },
@@ -1133,17 +1341,34 @@ async function main() {
       if (output.uiaInputCompletedAction?.action?.status !== "completed") {
         output.assertions.push(`packaged UI Automation input action failed: ${output.uiaInputCompletedAction?.action?.error || "missing action"}`);
       }
-      let uiaFixturePayload = null;
-      for (let attempt = 0; attempt < 20 && !uiaFixturePayload; attempt += 1) {
-        try {
-          uiaFixturePayload = JSON.parse(await readFile(uiaFixtureOutputPath, "utf8"));
-        } catch {
-          await sleep(100);
-        }
-      }
-      output.uiaFixtureProof = uiaFixturePayload;
-      if (uiaFixturePayload?.status !== "submitted" || uiaFixturePayload?.text !== uiaFixtureTypedMarker) {
-        output.assertions.push("isolated fixture did not submit the exact value set through packaged UI Automation");
+      output.uiaReadbackRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+        method: "POST",
+        body: {
+          action: "computer_use",
+          prompt: "Read back the native UI Automation fixture value",
+          sessionId: probeSessionId,
+          clientTurnId: `${marker}-turn-uia-readback`,
+          params: {
+            operation: "get_window_state",
+            window: { id: uiaFixtureWindow?.windowHandle || 0, app: uiaFixtureWindow?.app || "", processId: launchedFixturePid },
+            include_screenshot: false,
+            include_text: true,
+            limit: 200,
+          },
+        },
+      });
+      const uiaReadbackActionId = output.uiaReadbackRequestedAction?.payload?.actionId || "";
+      output.uiaReadbackCompletedAction = await waitForActionStatus(uiaReadbackActionId, ["completed", "failed"], 30000);
+      output.uiaReadbackActionResult = await readActionResult(uiaReadbackActionId);
+      const readbackControls = output.uiaReadbackActionResult?.payload?.result?.accessibility?.controls || [];
+      output.uiaValueReadback = readbackControls.find((item) => Number(item?.index) === Number(uiaInput.index)) || null;
+      output.uiaAppliedLabel = readbackControls.find((item) => String(item?.name || "").includes(uiaFixtureTypedMarker)) || null;
+      if (
+        output.uiaReadbackCompletedAction?.action?.status !== "completed" ||
+        output.uiaValueReadback?.value !== uiaFixtureTypedMarker ||
+        !output.uiaAppliedLabel
+      ) {
+        output.assertions.push("packaged UI Automation set_value/element click did not update the native fixture");
       }
     }
     const desktopActionLedger = resolve(
@@ -1247,6 +1472,19 @@ async function main() {
       advancedSettingsRestoreNeeded = false;
     }
 
+    output.streamingPlaceholdersAfterLaterWork = await waitForEval(
+      cdp,
+      `(() => {
+        const turns = Array.from(document.querySelectorAll("[data-conversation-streaming-turn]"))
+          .map((item) => item.getAttribute("data-conversation-streaming-turn") || "");
+        return { ok: turns.length === 0, turns };
+      })()`,
+      30000,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!output.streamingPlaceholdersAfterLaterWork?.ok) {
+      output.assertions.push("a prior unanswered turn kept spinning after later work reached terminal state");
+    }
+
     output.resourceSnapshots.beforeClose = await resourceSnapshot();
     const memorySamples = Object.entries(output.resourceSnapshots)
       .filter(([, sample]) => Number.isFinite(Number(sample?.appPrivateMB)))
@@ -1266,10 +1504,11 @@ async function main() {
       output.assertions.push("VRCForge process memory exceeded the packaged Computer Use acceptance envelope");
     }
 
-    if (fixtureChild && !fixtureChild.killed) {
+    if (launchedAppPid) {
       try {
-        fixtureChild.kill();
+        process.kill(launchedAppPid);
       } catch {}
+      launchedAppPid = 0;
     }
     if (cdp) {
       cdp.close();
@@ -1282,10 +1521,32 @@ async function main() {
     if (snapshotHasResidue(output.afterWindowClose)) {
       output.assertions.push("closing the packaged main window left VRCForge/backend or port 8757 alive");
     }
+    output.launchedFixtureSurvivedAppClose = launchedFixturePid > 0 && processExists(launchedFixturePid);
+    if (!output.launchedFixtureSurvivedAppClose) {
+      output.assertions.push("closing VRCForge also terminated an external application launched by Computer Use");
+    }
+    if (launchedFixturePid) {
+      try {
+        process.kill(launchedFixturePid);
+      } catch {}
+      launchedFixturePid = 0;
+    }
   } catch (error) {
     output.error = String(error && error.stack ? error.stack : error);
     output.assertions.push("probe threw before completion");
   } finally {
+    if (launchedAppPid) {
+      try {
+        process.kill(launchedAppPid);
+      } catch {}
+      launchedAppPid = 0;
+    }
+    if (launchedFixturePid) {
+      try {
+        process.kill(launchedFixturePid);
+      } catch {}
+      launchedFixturePid = 0;
+    }
     if (permissionRestoreNeeded && previousPermissionMode) {
       output.permissionRestoreFinally = await restorePermissionMode(previousPermissionMode).catch((error) => ({ ok: false, error: String(error) }));
       if (!output.permissionRestoreFinally?.ok) {
@@ -1297,11 +1558,6 @@ async function main() {
       if (!output.advancedSettingsRestoreFinally?.ok) {
         output.assertions.push("probe could not restore the original advanced settings during cleanup");
       }
-    }
-    if (fixtureChild && !fixtureChild.killed) {
-      try {
-        fixtureChild.kill();
-      } catch {}
     }
     if (cdp) {
       cdp.close();

@@ -24,6 +24,8 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
 
 mod backend;
+#[cfg(windows)]
+mod capture_helper;
 mod commands;
 mod event_bridge;
 mod sanitize;
@@ -33,7 +35,36 @@ use commands::*;
 use event_bridge::*;
 use sanitize::*;
 
+const WEBVIEW2_ACCESSIBILITY_ARG: &str = "--force-renderer-accessibility";
+
+fn webview2_args_with_accessibility(existing: Option<&str>) -> String {
+    let existing = existing.unwrap_or_default().trim();
+    if existing
+        .split_ascii_whitespace()
+        .any(|argument| argument == WEBVIEW2_ACCESSIBILITY_ARG)
+    {
+        existing.to_string()
+    } else if existing.is_empty() {
+        WEBVIEW2_ACCESSIBILITY_ARG.to_string()
+    } else {
+        format!("{existing} {WEBVIEW2_ACCESSIBILITY_ARG}")
+    }
+}
+
+#[cfg(windows)]
+fn configure_webview2_accessibility() {
+    const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    let existing = env::var(KEY).ok();
+    env::set_var(KEY, webview2_args_with_accessibility(existing.as_deref()));
+}
+
 fn main() {
+    #[cfg(windows)]
+    if let Some(exit_code) = capture_helper::try_run_from_args() {
+        std::process::exit(exit_code);
+    }
+    #[cfg(windows)]
+    configure_webview2_accessibility();
     tauri::Builder::default()
         .manage(BackendState::new())
         .setup(|app| {
@@ -215,6 +246,7 @@ mod tests {
         sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
         try_ensure_agent_notes_file, validate_local_folder_to_open,
         validate_project_folder_to_open, webview_error_message, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        webview2_args_with_accessibility,
     };
     use std::{
         env, fs,
@@ -398,6 +430,18 @@ mod tests {
     #[test]
     fn agent_message_timeout_keeps_long_turns_usable() {
         assert!(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS >= 600_000);
+    }
+
+    #[test]
+    fn webview_accessibility_flag_preserves_existing_arguments() {
+        assert_eq!(
+            webview2_args_with_accessibility(Some("--remote-debugging-port=9343")),
+            "--remote-debugging-port=9343 --force-renderer-accessibility"
+        );
+        assert_eq!(
+            webview2_args_with_accessibility(Some("--force-renderer-accessibility")),
+            "--force-renderer-accessibility"
+        );
     }
 
     #[test]

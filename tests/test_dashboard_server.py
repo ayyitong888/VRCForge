@@ -984,6 +984,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("Computer Use is disabled", response.json()["detail"])
 
+    def test_desktop_capture_root_is_the_gateway_trusted_vision_root(self) -> None:
+        self.assertEqual(
+            dashboard_server.DESKTOP_EXECUTOR.capture_dir.resolve(),
+            dashboard_server.DESKTOP_CAPTURE_DIR.resolve(),
+        )
+        self.assertEqual(
+            dashboard_server.DESKTOP_CAPTURE_DIR.resolve(),
+            (dashboard_server.AGENT_GATEWAY_AUDIT_DIR / "desktop-captures").resolve(),
+        )
+
     def test_agent_desktop_action_is_explicit_and_audited(self) -> None:
         with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
             with TestClient(dashboard_server.app) as client:

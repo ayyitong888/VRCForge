@@ -1387,9 +1387,10 @@ AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
 )
+DESKTOP_CAPTURE_DIR = AGENT_GATEWAY_AUDIT_DIR / "desktop-captures"
 DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
     AGENT_GATEWAY,
-    ARTIFACTS_DIR / "desktop-captures",
+    DESKTOP_CAPTURE_DIR,
     on_actions_changed=lambda: EVENT_BUS.broadcast_from_sync("agentDesktopActions", {"changed": True}),
 )
 SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
@@ -19156,7 +19157,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_desktop_action",
-        "Run an explicit desktop action. For Computer Use pass params.operation as list_windows, inspect_window, screenshot, focus_window, move_pointer, click, drag, scroll, type_text, key_press, focus_element, invoke_element, set_value, secondary_action, wait, or sequence. inspect_window returns a bounded UI Automation tree when Windows exposes one; element actions accept elementIndex or exact automation selectors. Execution stays visible and cancellable in the app.",
+        "Run an action only inside a user-started Computer Use turn. Supported params.operation values are list_apps, launch_app, list_windows, get_window, window_state/get_window_state, inspect_window, screenshot, focus_window/activate_window, move_pointer, click, drag, scroll, type_text, key_press/press_key, focus_element, invoke_element, set_value, secondary_action/perform_secondary_action, wait, and sequence. Start with list_apps, carry the returned window handle plus app/process identity, then use window_state for a bounded screenshot and/or UI Automation text. Input actions require and automatically activate a target window; click and value/secondary actions can use a fresh elementIndex. Never target terminals, authentication/security UI, password managers, ChatGPT/Codex, or Windows-key shortcuts. Before deleting, sending/submitting, uploading, installing, changing permissions/settings, or making financial/medical actions, call vrcforge_ask_user at action time unless the exact action was explicitly pre-approved and policy permits that. Execution stays visible, cancellable, and scoped to the explicit turn.",
         "supervised-write",
         AGENT_GATEWAY.request_turn_authorized_desktop_action_and_wait,
         write=True,

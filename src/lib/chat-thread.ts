@@ -78,6 +78,21 @@ export function stripTransientConversationItems(items: ConversationItem[]): Conv
   return items.filter((item) => item.type !== "streaming");
 }
 
+export function stripSupersededStreamingItems(items: ConversationItem[]): ConversationItem[] {
+  let lastDurableIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.type !== "streaming") {
+      lastDurableIndex = index;
+      break;
+    }
+  }
+  if (lastDurableIndex < 0) {
+    return items;
+  }
+  const reconciled = items.filter((item, index) => item.type !== "streaming" || index > lastDurableIndex);
+  return reconciled.length === items.length ? items : reconciled;
+}
+
 export function normalizeChatContextUsage(value: unknown): AgentContextUsage | undefined {
   if (!value || typeof value !== "object") {
     return undefined;

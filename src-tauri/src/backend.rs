@@ -32,7 +32,7 @@ use windows_sys::Win32::{
     System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     },
 };
 
@@ -88,7 +88,8 @@ impl BackendJob {
                 ));
             }
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            limits.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
             if SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
@@ -304,6 +305,8 @@ pub(crate) fn start_backend_in_background(
         .map_err(|error| format!("unable to open backend stderr log: {error}"))?;
 
     let mut command = backend_command(&root)?;
+    let capture_helper = env::current_exe()
+        .map_err(|error| format!("unable to resolve the VRCForge capture helper executable: {error}"))?;
     command
         .current_dir(&root)
         .env("VRCFORGE_APP_DIR", &root)
@@ -317,6 +320,7 @@ pub(crate) fn start_backend_in_background(
             user_data.join("config").join("settings.json"),
         )
         .env("VRCFORGE_APP_SESSION_TOKEN", &app_session_token)
+        .env("VRCFORGE_CAPTURE_HELPER", &capture_helper)
         .arg("--host")
         .arg(BACKEND_HOST)
         .arg("--port")

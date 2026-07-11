@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import struct
+import subprocess
 import tempfile
 import sys
 import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from agent_gateway import AgentGateway
+from desktop_apps import WindowsAppCatalog
 from desktop_executor import DesktopActionCancelled, DesktopExecutorError, WindowsDesktopController
+from desktop_operations import canonical_desktop_params
 from desktop_worker import EmbeddedDesktopWorker
 
 
@@ -35,6 +39,23 @@ class FakeDesktopController:
 
 
 class DesktopExecutorTests(unittest.TestCase):
+    def test_launch_app_breaks_away_from_backend_job(self) -> None:
+        catalog = WindowsAppCatalog()
+        catalog.resolve_app = lambda _selector: {
+            "name": "Fixture",
+            "appId": r"C:\Fixture.exe",
+            "launchKind": "executable",
+        }
+
+        with patch("desktop_apps.subprocess.Popen") as popen:
+            catalog.launch_app("Fixture")
+
+        flags = int(popen.call_args.kwargs["creationflags"])
+        breakaway_flag = int(getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+        if not breakaway_flag:
+            self.skipTest("Windows process breakaway flags are unavailable on this platform")
+        self.assertTrue(flags & breakaway_flag)
+
     @unittest.skipUnless(sys.platform == "win32", "Windows desktop controller requires Win32")
     def test_windows_controller_initializes_uia_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -44,7 +65,7 @@ class DesktopExecutorTests(unittest.TestCase):
 
     def test_uia_element_action_returns_bounded_metadata_without_value(self) -> None:
         class FakeUia:
-            def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+            def execute(self, request: dict[str, Any], _cancel_check=None) -> dict[str, Any]:
                 self.request = request
                 return {
                     "ok": True,
@@ -54,7 +75,25 @@ class DesktopExecutorTests(unittest.TestCase):
 
         controller = object.__new__(WindowsDesktopController)
         controller.uia = FakeUia()
-        controller._resolve_window = lambda _params: {"windowHandle": 42}
+        window = {"windowHandle": 42, "processId": 9, "processPath": "C:/Fixture.exe"}
+        controller._focus_window = lambda *_args: {"window": window}
+        controller._resolve_input_window = lambda _params: window
+        controller._uia_snapshots = {
+            42: {
+                "observedAt": time.monotonic(),
+                "processId": 9,
+                "processPath": "C:/Fixture.exe",
+                "elements": [
+                    {
+                        "index": 7,
+                        "name": "Composer",
+                        "automationId": "MarkerInput",
+                        "controlType": "ControlType.Edit",
+                        "className": "TextBox",
+                    }
+                ],
+            }
+        }
         result = controller._uia_action(
             {"operation": "set_value", "elementIndex": 7, "value": "private text"},
             {},
@@ -64,6 +103,107 @@ class DesktopExecutorTests(unittest.TestCase):
         self.assertEqual(result["performed"], "set_value")
         self.assertEqual(result["characterCount"], len("private text"))
         self.assertNotIn("value", result)
+
+    def test_gateway_canonicalizes_desktop_aliases_before_permission_classification(self) -> None:
+        for operation in ("press", "press_key", "type", "invoke", "set_element_value", "perform_secondary_action"):
+            self.assertTrue(AgentGateway._desktop_action_is_interactive({"operation": operation}))  # noqa: SLF001
+        self.assertTrue(AgentGateway._desktop_action_is_replay_safe({"operation": "get_window_state"}))  # noqa: SLF001
+        self.assertFalse(AgentGateway._desktop_action_is_replay_safe({"operation": "drag_pointer"}))  # noqa: SLF001
+
+    def test_window2_parameter_shape_is_normalized_once(self) -> None:
+        normalized = canonical_desktop_params(
+            {
+                "operation": "click",
+                "window": {"id": 42, "app": "C:/Fixture.exe", "processId": 9},
+                "element_index": 7,
+                "click_count": 2,
+                "mouse_button": "right",
+                "screenshot_id": "frame.png",
+            }
+        )
+
+        self.assertEqual(normalized["windowHandle"], 42)
+        self.assertEqual(normalized["elementIndex"], 7)
+        self.assertEqual(normalized["clicks"], 2)
+        self.assertEqual(normalized["button"], "right")
+        self.assertEqual(normalized["screenshotId"], "frame.png")
+
+    def test_protected_windows_key_is_rejected_before_input(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        with self.assertRaisesRegex(DesktopExecutorError, "does not allow Windows"):
+            controller._key_press(
+                {"operation": "key_press", "keys": "Win+r", "windowHandle": 42},
+                {},
+                lambda: False,
+            )
+
+    def test_official_key_chord_is_split_from_key_field(self) -> None:
+        assert WindowsDesktopController._key_names_from_params({"key": "Control_L + Shift_L + period"}) == [
+            "Control_L",
+            "Shift_L",
+            "period",
+        ]
+        assert WindowsDesktopController._key_names_from_params({"keys": ["Control_L+a", "Return"]}) == [
+            "Control_L",
+            "a",
+            "Return",
+        ]
+
+    def test_protected_process_is_rejected_as_an_automation_target(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._resolve_window = lambda _params: {
+            "windowHandle": 42,
+            "processPath": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "className": "HwndWrapper[fixture]",
+        }
+        with self.assertRaisesRegex(DesktopExecutorError, "protected application"):
+            controller._resolve_input_window({"windowHandle": 42})
+
+    def test_vrcforge_self_target_is_read_only(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._resolve_window = lambda _params: {
+            "windowHandle": 42,
+            "processPath": r"D:\VRCForge\VRCForge.exe",
+            "className": "Tauri Window",
+        }
+
+        self.assertEqual(controller._resolve_read_window({"windowHandle": 42})["windowHandle"], 42)
+        with self.assertRaisesRegex(DesktopExecutorError, "cannot control or inspect VRCForge"):
+            controller._resolve_input_window({"windowHandle": 42})
+
+    def test_text_fallback_click_uses_resolved_bounds_without_reusing_element_selector(self) -> None:
+        class FakeUia:
+            @staticmethod
+            def execute(_request, _cancel_check):
+                return {
+                    "performed": "keyboard_replace_required",
+                    "element": {"rect": {"left": 130, "top": 240, "width": 200, "height": 40}},
+                }
+
+        controller = object.__new__(WindowsDesktopController)
+        controller.uia = FakeUia()
+        controller._focus_window = lambda *_args: None
+        controller._resolve_input_window = lambda _params: {
+            "windowHandle": 42,
+            "rect": {"left": 100, "top": 200, "width": 500, "height": 400},
+        }
+        controller._observed_element_expectations = lambda _window, _params: {}
+        calls: list[tuple[str, dict[str, Any]]] = []
+        controller._click = lambda params, _action, _cancel: calls.append(("click", params)) or {}
+        controller._key_press = lambda params, _action, _cancel: calls.append(("key", params)) or {}
+        controller._type_text = lambda params, _action, _cancel: calls.append(("type", params)) or {}
+
+        result = controller._uia_action(
+            {"operation": "set_value", "windowHandle": 42, "elementIndex": 7, "value": "replacement"},
+            {},
+            lambda: False,
+        )
+
+        self.assertEqual(result["performed"], "keyboard_replace")
+        self.assertNotIn("elementIndex", calls[0][1])
+        self.assertEqual((calls[0][1]["x"], calls[0][1]["y"]), (130, 60))
+        self.assertEqual(calls[1][1]["key"], "Control_L+a")
+        self.assertEqual(calls[2][1]["text"], "replacement")
 
     def test_sequence_validates_every_step_before_side_effects(self) -> None:
         class SequenceProbe(WindowsDesktopController):
