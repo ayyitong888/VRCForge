@@ -117,66 +117,150 @@
     }
   }
 
-  @keyframes computer-use-status-pulse {
-    0%, 100% {
-      box-shadow: 0 0 0 0 hsl(var(--primary) / 0.28);
+  @keyframes computer-use-banner-enter {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -12px) scale(0.98);
     }
-    50% {
-      box-shadow: 0 0 0 5px hsl(var(--primary) / 0);
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0) scale(1);
     }
   }
 
+  @keyframes computer-use-sonar {
+    0% {
+      transform: scale(1);
+      opacity: 0.4;
+    }
+    70%, 100% {
+      transform: scale(1.55);
+      opacity: 0;
+    }
+  }
+
+  @keyframes computer-use-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  /* Directional aurora: a soft wash falling from the top edge with faint
+     embers in the bottom corners, instead of a uniform inset vignette. */
   .computer-use-glow {
     opacity: var(--computer-use-glow-opacity);
-    box-shadow: inset 0 0 64px 8px hsl(var(--primary) / 0.24);
+    background:
+      radial-gradient(120% 55% at 50% -20%, hsl(var(--primary) / 0.34), transparent 62%),
+      radial-gradient(44% 34% at 0% 102%, hsl(var(--primary) / 0.15), transparent 72%),
+      radial-gradient(44% 34% at 100% 102%, hsl(var(--primary) / 0.15), transparent 72%);
     animation: computer-use-breathe var(--computer-use-pulse-duration) ease-in-out infinite;
+    animation-play-state: var(--computer-use-motion-play, running);
     will-change: opacity;
   }
 
+  /* Frosted-glass banner with a gradient hairline ring and an accent-tinted
+     drop shadow. The two-layer background paints the translucent surface in
+     the padding box and the hairline gradient in the border box. */
   .computer-use-banner {
-    border: 0;
-    background: var(--computer-use-surface);
+    position: absolute;
+    border: 1px solid transparent;
+    background:
+      linear-gradient(var(--computer-use-surface), var(--computer-use-surface)) padding-box,
+      linear-gradient(
+        135deg,
+        hsl(var(--primary) / 0.5),
+        hsl(var(--border) / 0.6) 35%,
+        hsl(var(--border) / 0.6) 65%,
+        hsl(var(--primary) / 0.32)
+      ) border-box;
     box-shadow:
-      0 2px 5px hsl(223 26% 13% / 0.1),
-      0 8px 20px hsl(223 26% 13% / 0.12);
+      0 1px 2px hsl(223 26% 13% / 0.06),
+      0 6px 16px hsl(223 26% 13% / 0.1),
+      0 18px 44px -14px hsl(var(--primary) / 0.28);
+    animation: computer-use-banner-enter 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Activity shimmer: a thin light streak sweeping along the banner's lower
+     edge while actions are live; pauses and dims while stopping. */
+  .computer-use-banner::after {
+    content: "";
+    position: absolute;
+    inset: auto 16% -1px 16%;
+    height: 2px;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.85), transparent);
+    background-size: 200% 100%;
+    opacity: var(--computer-use-shimmer-opacity);
+    animation: computer-use-shimmer var(--computer-use-shimmer-duration) linear infinite;
+    animation-play-state: var(--computer-use-motion-play, running);
+    pointer-events: none;
   }
 
   .computer-use-icon {
     color: var(--computer-use-accent);
     background: var(--computer-use-surface-muted);
+    box-shadow: inset 0 0 0 1px hsl(var(--primary) / 0.2);
+  }
+
+  /* Sonar ripple radiating from the icon tile while the agent is active. */
+  .computer-use-icon::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1px solid hsl(var(--primary) / 0.45);
+    animation: computer-use-sonar var(--computer-use-pulse-duration) ease-out infinite;
+    animation-play-state: var(--computer-use-motion-play, running);
+    pointer-events: none;
   }
 
   .computer-use-status-dot {
     border-color: var(--computer-use-surface);
     background: var(--computer-use-accent);
-    animation: computer-use-status-pulse var(--computer-use-pulse-duration) ease-out infinite;
   }
 
   .computer-use-status-dot-stopping {
     color: hsl(var(--muted-foreground));
     background: currentColor;
-    animation: none;
   }
 
   .computer-use-stop {
-    color: var(--computer-use-accent);
-    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--destructive));
+    background: hsl(var(--destructive) / 0.08);
+    border: 1px solid hsl(var(--destructive) / 0.16);
     box-shadow: none;
   }
 
   .computer-use-stop:hover:not(:disabled) {
-    background: hsl(var(--primary) / 0.16);
-    box-shadow: none;
+    background: hsl(var(--destructive) / 0.14);
+    border-color: hsl(var(--destructive) / 0.3);
+    box-shadow: 0 2px 8px hsl(var(--destructive) / 0.16);
+  }
+
+  .computer-use-stop:active:not(:disabled) {
+    transform: translateY(0.5px);
   }
 
   @media (prefers-reduced-motion: reduce) {
     .computer-use-glow,
-    .computer-use-status-dot {
+    .computer-use-banner,
+    .computer-use-icon::before {
       animation: none;
     }
 
     .computer-use-glow {
       opacity: var(--computer-use-glow-opacity);
+    }
+
+    .computer-use-icon::before {
+      opacity: 0;
+    }
+
+    .computer-use-banner::after {
+      display: none;
     }
   }
 

@@ -12,11 +12,39 @@ type ComputerUseVisualTokens = {
 
 const PHASE_TOKENS: Record<
   ComputerUseVisualPhase,
-  { glowOpacity: string; edgeOpacity: string; pulseDuration: string }
+  {
+    glowOpacity: string;
+    edgeOpacity: string;
+    pulseDuration: string;
+    shimmerOpacity: string;
+    shimmerDuration: string;
+    motionPlay: string;
+  }
 > = {
-  starting: { glowOpacity: "0.18", edgeOpacity: "0", pulseDuration: "2.4s" },
-  running: { glowOpacity: "0.14", edgeOpacity: "0", pulseDuration: "2.1s" },
-  stopping: { glowOpacity: "0.08", edgeOpacity: "0", pulseDuration: "2.8s" },
+  starting: {
+    glowOpacity: "0.2",
+    edgeOpacity: "0",
+    pulseDuration: "2.2s",
+    shimmerOpacity: "0.85",
+    shimmerDuration: "1.8s",
+    motionPlay: "running",
+  },
+  running: {
+    glowOpacity: "0.15",
+    edgeOpacity: "0",
+    pulseDuration: "2.6s",
+    shimmerOpacity: "0.6",
+    shimmerDuration: "2.6s",
+    motionPlay: "running",
+  },
+  stopping: {
+    glowOpacity: "0.07",
+    edgeOpacity: "0",
+    pulseDuration: "3.2s",
+    shimmerOpacity: "0.18",
+    shimmerDuration: "2.6s",
+    motionPlay: "paused",
+  },
 };
 
 /**
@@ -34,13 +62,16 @@ export function resolveComputerUseVisualTokens(
     style: {
       "--computer-use-accent": "hsl(var(--primary))",
       "--computer-use-on-accent": "hsl(var(--primary-foreground))",
-      "--computer-use-surface": `hsl(var(--card) / ${theme === "dark" ? "0.94" : "0.97"})`,
+      "--computer-use-surface": `hsl(var(--card) / ${theme === "dark" ? "0.9" : "0.94"})`,
       "--computer-use-surface-muted": `hsl(var(--primary) / ${theme === "dark" ? "0.16" : "0.09"})`,
       "--computer-use-outline": "transparent",
       "--computer-use-glow-opacity": phaseTokens.glowOpacity,
       "--computer-use-glow-rest-opacity": restOpacity,
       "--computer-use-edge-opacity": phaseTokens.edgeOpacity,
       "--computer-use-pulse-duration": phaseTokens.pulseDuration,
+      "--computer-use-shimmer-opacity": phaseTokens.shimmerOpacity,
+      "--computer-use-shimmer-duration": phaseTokens.shimmerDuration,
+      "--computer-use-motion-play": phaseTokens.motionPlay,
     },
   };
 }

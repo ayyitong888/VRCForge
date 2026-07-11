@@ -71,15 +71,15 @@ export function ComputerUseActivitySurface({
       />
 
       <div
-        className="computer-use-banner absolute left-1/2 top-2 flex w-[min(600px,calc(100vw-32px))] -translate-x-1/2 items-center gap-2.5 rounded-lg px-3 py-2 backdrop-blur-xl"
+        className="computer-use-banner absolute left-1/2 top-3 flex w-[min(600px,calc(100vw-32px))] -translate-x-1/2 items-center gap-3 rounded-2xl py-2 pl-2 pr-2 backdrop-blur-xl backdrop-saturate-150"
         data-vrcforge-computer-use-banner
       >
-        <div className="computer-use-icon relative grid h-8 w-8 shrink-0 place-items-center rounded-full">
-          <MonitorUp className="h-4 w-4" strokeWidth={2} />
+        <div className="computer-use-icon relative grid h-9 w-9 shrink-0 place-items-center rounded-[10px]">
+          <MonitorUp className="h-[18px] w-[18px]" strokeWidth={2} />
           <span
             aria-hidden="true"
             className={cn(
-              "computer-use-status-dot absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2",
+              "computer-use-status-dot absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2",
               phase === "stopping" && "computer-use-status-dot-stopping",
             )}
           />
@@ -92,7 +92,7 @@ export function ComputerUseActivitySurface({
         </div>
         <button
           type="button"
-          className="computer-use-stop pointer-events-auto inline-flex h-9 shrink-0 items-center gap-2 rounded-full px-3.5 text-xs font-semibold transition-[background-color,box-shadow] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
+          className="computer-use-stop pointer-events-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-xs font-semibold transition-[background-color,border-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           onClick={() => void onCancel(actionId)}
           disabled={!actionId || cancelling}
           title={t("computerUse.cancel")}
