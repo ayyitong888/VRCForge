@@ -148,14 +148,16 @@
     }
   }
 
-  /* Directional aurora: a soft wash falling from the top edge with faint
-     embers in the bottom corners, instead of a uniform inset vignette. */
+  /* Directional aurora + breathing perimeter ring: a soft wash falling from
+     the top edge plus subtle accent glows on the left, right, and bottom
+     edges, mirroring the native Win32 overlay ring. */
   .computer-use-glow {
     opacity: var(--computer-use-glow-opacity);
     background:
       radial-gradient(120% 55% at 50% -20%, hsl(var(--primary) / 0.34), transparent 62%),
-      radial-gradient(44% 34% at 0% 102%, hsl(var(--primary) / 0.15), transparent 72%),
-      radial-gradient(44% 34% at 100% 102%, hsl(var(--primary) / 0.15), transparent 72%);
+      linear-gradient(to right, hsl(var(--primary) / 0.18), transparent 9%),
+      linear-gradient(to left, hsl(var(--primary) / 0.18), transparent 9%),
+      linear-gradient(to top, hsl(var(--primary) / 0.18), transparent 13%);
     animation: computer-use-breathe var(--computer-use-pulse-duration) ease-in-out infinite;
     animation-play-state: var(--computer-use-motion-play, running);
     will-change: opacity;

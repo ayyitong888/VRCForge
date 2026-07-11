@@ -12,6 +12,8 @@ from typing import Any, Callable
 from desktop_overlay_visuals import (
     DesktopOverlayGeometry,
     build_directional_glow_pixels,
+    build_edge_glow_pixels,
+    parse_overlay_accent,
     resolve_desktop_overlay_copy,
     resolve_desktop_overlay_geometry,
     resolve_desktop_overlay_palette,
@@ -208,6 +210,7 @@ class WindowsDesktopActivityOverlay:
         self._timer_id = 0
         self._motion_enabled = True
         self._hotkey_available = False
+        self._accent_custom = False
         self._class_name = f"VRCForgeDesktopOverlay_{os.getpid()}_{id(self)}"
         self._wnd_proc_callback = _WNDPROC(self._wnd_proc)
 
@@ -331,14 +334,22 @@ class WindowsDesktopActivityOverlay:
     def _signed_word(value: int) -> int:
         return ctypes.c_short(value & 0xFFFF).value
 
-    def show(self, cancel_callback: Callable[[], None], message: str = "", *, theme: str = "light") -> None:
+    def show(
+        self,
+        cancel_callback: Callable[[], None],
+        message: str = "",
+        *,
+        theme: str = "light",
+        accent: str = "",
+    ) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._cancel_callback = cancel_callback
             self._cancel_requested = False
             self._detail_override = str(message or "").strip()
-            self._palette = resolve_desktop_overlay_palette(theme)
+            self._accent_custom = parse_overlay_accent(accent) is not None
+            self._palette = resolve_desktop_overlay_palette(theme, accent=accent)
             self._error = ""
             self._ready.clear()
             self._thread = threading.Thread(target=self._run, name="vrcforge-desktop-overlay", daemon=True)
@@ -376,6 +387,8 @@ class WindowsDesktopActivityOverlay:
                 "renderer": "win32-layered-ambient-v2",
                 "visible": bool(thread and thread.is_alive() and self._banner_hwnd),
                 "theme": self._palette.theme,
+                "accent": "#{0:02x}{1:02x}{2:02x}".format(*self._palette.accent),
+                "accentSource": "custom" if self._accent_custom else "theme",
                 "dpi": geometry.dpi if geometry else 0,
                 "windowCount": len(self._windows),
                 "glowWindowCount": len(self._surfaces),
@@ -722,12 +735,13 @@ class WindowsDesktopActivityOverlay:
             top_pixels = build_directional_glow_pixels(top_rect[2], top_rect[3], color=self._palette.accent, peak_alpha=self._palette.glow_peak_alpha, focus_x=self._geometry.top_glow_focus_x)
             top_hwnd = self._create_window(instance, title="VRCForge Desktop Ambient", rect=top_rect, click_through=True)
             self._create_layered_surface(top_hwnd, rect=top_rect, pixels=top_pixels, kind="top-aurora")
-            corner_alpha = max(6, round(self._palette.glow_peak_alpha * 0.42))
-            for kind, rect, corner in (
-                ("bottom-left-ember", self._geometry.bottom_left_glow, "left"),
-                ("bottom-right-ember", self._geometry.bottom_right_glow, "right"),
+            edge_alpha = max(6, round(self._palette.glow_peak_alpha * 0.55))
+            for kind, rect, side in (
+                ("left-edge-glow", self._geometry.left_edge_glow, "left"),
+                ("right-edge-glow", self._geometry.right_edge_glow, "right"),
+                ("bottom-edge-glow", self._geometry.bottom_edge_glow, "bottom"),
             ):
-                pixels = build_directional_glow_pixels(rect[2], rect[3], color=self._palette.accent, peak_alpha=corner_alpha, corner=corner)
+                pixels = build_edge_glow_pixels(rect[2], rect[3], color=self._palette.accent, peak_alpha=edge_alpha, side=side)
                 hwnd = self._create_window(instance, title="VRCForge Desktop Ambient", rect=rect, click_through=True)
                 self._create_layered_surface(hwnd, rect=rect, pixels=pixels, kind=kind)
 

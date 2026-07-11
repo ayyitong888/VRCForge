@@ -881,14 +881,18 @@ async function main() {
     if (
       nativeOverlayInfo.renderer !== "win32-layered-ambient-v2" ||
       !nativeOverlayInfo.captureExcluded ||
-      nativeOverlayInfo.windowCount !== 4 ||
-      nativeOverlayInfo.glowWindowCount !== 3 ||
+      nativeOverlayInfo.windowCount !== 5 ||
+      nativeOverlayInfo.glowWindowCount !== 4 ||
       nativeOverlayInfo.fontFamily !== "Segoe UI" ||
       !Array.isArray(nativeOverlayInfo.stopHitTargetSize) ||
       nativeOverlayInfo.stopHitTargetSize.some((value) => Number(value) <= 0)
     ) {
       output.assertions.push("native Computer Use overlay did not expose the expected capture-safe visual contract");
     }
+    output.nativeOverlayAccent = {
+      accent: nativeOverlayInfo.accent || "",
+      accentSource: nativeOverlayInfo.accentSource || "",
+    };
     output.activityRunning = await waitForEval(
       cdp,
       `(() => {

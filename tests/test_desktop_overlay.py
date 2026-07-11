@@ -9,6 +9,8 @@ from ctypes import wintypes
 
 from desktop_overlay_visuals import (
     build_directional_glow_pixels,
+    build_edge_glow_pixels,
+    parse_overlay_accent,
     resolve_desktop_overlay_copy,
     resolve_desktop_overlay_geometry,
     resolve_desktop_overlay_palette,
@@ -32,6 +34,31 @@ class DesktopOverlayVisualTests(unittest.TestCase):
         self.assertIn("電腦", resolve_desktop_overlay_copy("zh-TW").title)
         self.assertIn("コンピューター", resolve_desktop_overlay_copy("ja-JP").title)
 
+    def test_custom_accent_overrides_palette_and_derives_companions(self) -> None:
+        self.assertEqual(parse_overlay_accent("#8b5cf6"), (139, 92, 246))
+        self.assertEqual(parse_overlay_accent("8B5CF6"), (139, 92, 246))
+        self.assertEqual(parse_overlay_accent("#f0a"), (255, 0, 170))
+        self.assertIsNone(parse_overlay_accent(""))
+        self.assertIsNone(parse_overlay_accent("#12345"))
+        self.assertIsNone(parse_overlay_accent("not-a-color"))
+
+        default_light = resolve_desktop_overlay_palette("light")
+        untouched = resolve_desktop_overlay_palette("light", accent="nonsense")
+        self.assertEqual(untouched, default_light)
+
+        custom = resolve_desktop_overlay_palette("light", accent="#8b5cf6")
+        self.assertEqual(custom.accent, (139, 92, 246))
+        self.assertNotEqual(custom.border, default_light.border)
+        self.assertNotEqual(custom.icon_surface, default_light.icon_surface)
+        # Companion tints must stay theme-consistent and stop must stay red.
+        self.assertEqual(custom.surface, default_light.surface)
+        self.assertEqual(custom.stop, default_light.stop)
+        self.assertEqual(custom.banner_alpha, default_light.banner_alpha)
+
+        dark_custom = resolve_desktop_overlay_palette("dark", accent="8b5cf6")
+        self.assertEqual(dark_custom.accent, (139, 92, 246))
+        self.assertEqual(dark_custom.stop, resolve_desktop_overlay_palette("dark").stop)
+
     def test_geometry_scales_and_keeps_stop_inside_banner(self) -> None:
         at_96 = resolve_desktop_overlay_geometry(
             virtual_rect=(-1920, 0, 4480, 1440),
@@ -53,6 +80,22 @@ class DesktopOverlayVisualTests(unittest.TestCase):
         self.assertLessEqual(stop_top + stop_height, at_144.banner[3])
         self.assertEqual(at_144.top_glow[0], -1920)
 
+        # Perimeter ring strips hug the virtual-screen edges on every DPI.
+        for geometry in (at_96, at_144):
+            left_rect = geometry.left_edge_glow
+            right_rect = geometry.right_edge_glow
+            bottom_rect = geometry.bottom_edge_glow
+            self.assertEqual(left_rect[0], -1920)
+            self.assertEqual(left_rect[3], 1440)
+            self.assertEqual(right_rect[0] + right_rect[2], -1920 + 4480)
+            self.assertEqual(right_rect[3], 1440)
+            self.assertEqual(bottom_rect[0], -1920)
+            self.assertEqual(bottom_rect[2], 4480)
+            self.assertEqual(bottom_rect[1] + bottom_rect[3], 1440)
+            self.assertEqual(left_rect[2], right_rect[2])
+        self.assertGreater(at_144.left_edge_glow[2], at_96.left_edge_glow[2])
+        self.assertGreater(at_144.bottom_edge_glow[3], at_96.bottom_edge_glow[3])
+
     def test_top_aurora_is_soft_directional_and_premultiplied(self) -> None:
         width, height = 17, 9
         pixels = build_directional_glow_pixels(
@@ -71,25 +114,39 @@ class DesktopOverlayVisualTests(unittest.TestCase):
             blue, green, red, alpha = pixels[index : index + 4]
             self.assertLessEqual(max(red, green, blue), alpha)
 
-    def test_corner_embers_fade_toward_the_center(self) -> None:
+    def test_edge_glows_peak_at_their_screen_edge_and_fade_inward(self) -> None:
         width, height = 15, 7
-        left = build_directional_glow_pixels(
-            width,
-            height,
-            color=(37, 99, 235),
-            peak_alpha=14,
-            corner="left",
-        )
-        right = build_directional_glow_pixels(
-            width,
-            height,
-            color=(37, 99, 235),
-            peak_alpha=14,
-            corner="right",
-        )
+        color = (37, 99, 235)
+        left = build_edge_glow_pixels(width, height, color=color, peak_alpha=18, side="left")
+        right = build_edge_glow_pixels(width, height, color=color, peak_alpha=18, side="right")
+        bottom = build_edge_glow_pixels(width, height, color=color, peak_alpha=18, side="bottom")
 
-        self.assertGreater(_alpha_at(left, width, 0, height - 1), _alpha_at(left, width, width - 1, height - 1))
-        self.assertGreater(_alpha_at(right, width, width - 1, height - 1), _alpha_at(right, width, 0, height - 1))
+        for pixels in (left, right, bottom):
+            self.assertEqual(len(pixels), width * height * 4)
+
+        # Left strip: brightest at x=0, fully faded at the inner edge; uniform per column.
+        self.assertEqual(_alpha_at(left, width, 0, 0), 18)
+        self.assertGreater(_alpha_at(left, width, 0, 3), _alpha_at(left, width, width // 2, 3))
+        self.assertEqual(_alpha_at(left, width, width - 1, 3), 0)
+        self.assertEqual(_alpha_at(left, width, 2, 0), _alpha_at(left, width, 2, height - 1))
+
+        # Right strip mirrors the left one.
+        self.assertEqual(_alpha_at(right, width, width - 1, 3), 18)
+        self.assertEqual(_alpha_at(right, width, 0, 3), 0)
+
+        # Bottom strip: brightest on the last row, faded at the top; uniform per row.
+        self.assertEqual(_alpha_at(bottom, width, 4, height - 1), 18)
+        self.assertEqual(_alpha_at(bottom, width, 4, 0), 0)
+        self.assertEqual(_alpha_at(bottom, width, 0, 4), _alpha_at(bottom, width, width - 1, 4))
+
+        # Premultiplied BGRA invariant holds for the ring strips too.
+        for pixels in (left, right, bottom):
+            for index in range(0, len(pixels), 4):
+                blue, green, red, alpha = pixels[index : index + 4]
+                self.assertLessEqual(max(red, green, blue), alpha)
+
+        with self.assertRaises(ValueError):
+            build_edge_glow_pixels(width, height, color=color, peak_alpha=18, side="top")
 
 
 @unittest.skipUnless(sys.platform == "win32", "Native overlay requires Win32")
@@ -112,9 +169,11 @@ class WindowsDesktopOverlayTests(unittest.TestCase):
             self.assertEqual(diagnostics["renderer"], "win32-layered-ambient-v2")
             self.assertTrue(diagnostics["visible"])
             self.assertTrue(diagnostics["captureExcluded"])
-            self.assertEqual(diagnostics["windowCount"], 4)
-            self.assertEqual(diagnostics["glowWindowCount"], 3)
+            self.assertEqual(diagnostics["windowCount"], 5)
+            self.assertEqual(diagnostics["glowWindowCount"], 4)
             self.assertEqual(diagnostics["fontFamily"], "Segoe UI")
+            self.assertEqual(diagnostics["accentSource"], "theme")
+            self.assertEqual(diagnostics["accent"], "#2563eb")
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]

@@ -31,6 +31,7 @@ export type QueuedTurn = {
   projectPath?: string;
   computerUseRequested?: boolean;
   computerUseVisualTheme?: "light" | "dark";
+  computerUseVisualAccent?: string;
 };
 
 export type CurrentTurn = {
@@ -281,6 +282,7 @@ export function useChatRunController({
         computerUseRequested: Boolean(turn.computerUseRequested),
         computerUseGrantId: computerUseGrant?.grantId,
         computerUseVisualTheme: turn.computerUseVisualTheme,
+        computerUseVisualAccent: turn.computerUseVisualAccent,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       updateChat(chatId, (current) => ({

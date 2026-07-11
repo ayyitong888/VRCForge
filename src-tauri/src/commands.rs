@@ -109,6 +109,7 @@ pub(crate) struct DesktopAgentMessageRequest {
     computer_use_requested: bool,
     computer_use_grant_id: Option<String>,
     computer_use_visual_theme: Option<String>,
+    computer_use_visual_accent: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -579,6 +580,7 @@ pub async fn send_agent_message(
                 "computerUseRequested": request.computer_use_requested,
                 "computerUseGrantId": request.computer_use_grant_id,
                 "computerUseVisualTheme": request.computer_use_visual_theme,
+                "computerUseVisualAccent": request.computer_use_visual_accent,
             })),
             request
                 .timeout_ms

@@ -101,6 +101,7 @@ import {
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
+import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildRuntimeSchedule } from "./lib/runtime-schedule";
@@ -2057,6 +2058,7 @@ export default function App() {
       model: providerSnapshot.model,
       computerUseRequested,
       computerUseVisualTheme: computerUseRequested ? theme : undefined,
+      computerUseVisualAccent: computerUseRequested ? resolveComputerUseAccentHex() || undefined : undefined,
     };
     setInput("");
     setAttachments([]);

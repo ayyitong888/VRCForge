@@ -2111,6 +2111,20 @@ class AgentGateway:
             ),
         }
 
+    @staticmethod
+    def _normalize_computer_use_accent(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if not text.startswith("#"):
+            text = "#" + text
+        digits = text[1:]
+        if len(digits) == 3 and all(char in "0123456789abcdef" for char in digits):
+            digits = "".join(char * 2 for char in digits)
+        if len(digits) == 6 and all(char in "0123456789abcdef" for char in digits):
+            return "#" + digits
+        return ""
+
     def runtime_message(
         self,
         params: dict[str, Any] | None = None,
@@ -2119,6 +2133,7 @@ class AgentGateway:
         params = params or {}
         previous = bool(getattr(self._runtime_computer_use_context, "enabled", False))
         previous_visual_theme = str(getattr(self._runtime_computer_use_context, "visual_theme", "light"))
+        previous_visual_accent = str(getattr(self._runtime_computer_use_context, "visual_accent", ""))
         previous_session_id = str(getattr(self._runtime_computer_use_context, "session_id", ""))
         previous_turn_id = str(getattr(self._runtime_computer_use_context, "turn_id", ""))
         previous_client_turn_id = str(getattr(self._runtime_computer_use_context, "client_turn_id", ""))
@@ -2133,6 +2148,9 @@ class AgentGateway:
         self._runtime_computer_use_context.enabled = computer_use_requested
         visual_theme = str(params.get("_computerUseVisualTheme") or "light").strip().lower()
         self._runtime_computer_use_context.visual_theme = visual_theme if visual_theme in {"light", "dark"} else "light"
+        self._runtime_computer_use_context.visual_accent = self._normalize_computer_use_accent(
+            params.get("_computerUseVisualAccent")
+        )
         self._runtime_computer_use_context.session_id = str(params.get("session_id") or params.get("sessionId") or "")
         self._runtime_computer_use_context.turn_id = ""
         self._runtime_computer_use_context.client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
@@ -2141,6 +2159,7 @@ class AgentGateway:
         finally:
             self._runtime_computer_use_context.enabled = previous
             self._runtime_computer_use_context.visual_theme = previous_visual_theme
+            self._runtime_computer_use_context.visual_accent = previous_visual_accent
             self._runtime_computer_use_context.session_id = previous_session_id
             self._runtime_computer_use_context.turn_id = previous_turn_id
             self._runtime_computer_use_context.client_turn_id = previous_client_turn_id
@@ -2204,6 +2223,7 @@ class AgentGateway:
                 "projectRoot": project_root,
                 "computerUseRequested": bool(params.get("_computerUseRequested")),
                 "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
+                "computerUseVisualAccent": self._normalize_computer_use_accent(params.get("_computerUseVisualAccent")),
             }
         )
 
@@ -2882,6 +2902,7 @@ class AgentGateway:
             "projectRoot": params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "",
             "computerUseRequested": bool(params.get("_computerUseRequested")),
             "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
+            "computerUseVisualAccent": self._normalize_computer_use_accent(params.get("_computerUseVisualAccent")),
             "planSummary": summarize_text(str(top_plan.get("summary") or top_plan.get("reply") or "")),
             "planner": top_plan.get("planner") or "",
             "nextStep": top_plan.get("nextStep") or "",
@@ -3448,6 +3469,9 @@ class AgentGateway:
         action_params = dict(ensure_dict(request_params.get("params")))
         action_params["_visualTheme"] = str(
             getattr(self._runtime_computer_use_context, "visual_theme", "light")
+        )
+        action_params["_visualAccent"] = str(
+            getattr(self._runtime_computer_use_context, "visual_accent", "")
         )
         request_params["params"] = action_params
         payload = self.request_desktop_action(request_params)

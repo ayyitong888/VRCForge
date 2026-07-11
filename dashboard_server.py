@@ -771,6 +771,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
     computer_use_grant_id: str | None = Field(default=None, alias="computerUseGrantId")
     computer_use_visual_theme: str | None = Field(default=None, alias="computerUseVisualTheme")
+    computer_use_visual_accent: str | None = Field(default=None, alias="computerUseVisualAccent")
 
     model_config = {"populate_by_name": True}
 
@@ -2043,6 +2044,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "_computerUseRequested": runtime_request.computer_use_requested,
             "_computerUseGrantId": runtime_request.computer_use_grant_id,
             "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
+            "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
             },
             agent_name=runtime_request.agent_name,
         )

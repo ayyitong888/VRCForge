@@ -189,10 +189,13 @@ class EmbeddedDesktopWorker:
             if self._controller is None:
                 raise DesktopExecutorError("Desktop controller is not initialized.")
             if self._activity_overlay is not None:
-                visual_theme = str((action.get("params") or {}).get("_visualTheme") or "light")
+                action_params = action.get("params") or {}
+                visual_theme = str(action_params.get("_visualTheme") or "light")
+                visual_accent = str(action_params.get("_visualAccent") or "")
                 self._activity_overlay.show(
                     lambda: self._cancel_from_overlay(action_id),
                     theme=visual_theme,
+                    accent=visual_accent,
                 )
             result = self._controller.execute(
                 action,

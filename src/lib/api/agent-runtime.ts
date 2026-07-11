@@ -13,7 +13,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark" } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -29,6 +29,7 @@ export async function sendAgentMessage(
     computerUseRequested: Boolean(options.computerUseRequested),
     computerUseGrantId: options.computerUseGrantId,
     computerUseVisualTheme: options.computerUseVisualTheme,
+    computerUseVisualAccent: options.computerUseVisualAccent,
   };
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal);
@@ -51,6 +52,7 @@ export async function sendAgentMessage(
       computerUseRequested: request.computerUseRequested,
       computerUseGrantId: request.computerUseGrantId,
       computerUseVisualTheme: request.computerUseVisualTheme,
+      computerUseVisualAccent: request.computerUseVisualAccent,
     }),
   });
 }
