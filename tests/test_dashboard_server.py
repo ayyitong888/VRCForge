@@ -1039,6 +1039,8 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(status_payload["bridges"][0]["provider"], "mock-provider")
             self.assertIn("computer_use", status_payload["supportedActions"])
             self.assertIn("desktop_rescue", status_payload["supportedActions"])
+            self.assertIn("embeddedExecutor", status_payload)
+            self.assertIn("nativeOverlayInfo", status_payload["embeddedExecutor"])
 
             requested = client.post(
                 "/api/app/agent/desktop-actions",

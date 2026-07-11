@@ -572,6 +572,7 @@ export type AgentDesktopAction = {
   bridgeId?: string;
   bridgeName?: string;
   provider?: string;
+  bridgeCandidates?: DesktopBridgeInfo[];
   claimRequestId?: string;
   claimedAt?: string;
   createdAt?: string;

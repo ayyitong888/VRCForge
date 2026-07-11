@@ -2231,7 +2231,10 @@ async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[s
 
 @app.get("/api/app/agent/desktop-bridge")
 def app_agent_desktop_bridge_status() -> dict[str, Any]:
-    return AGENT_GATEWAY.desktop_bridge_status()
+    return {
+        **AGENT_GATEWAY.desktop_bridge_status(),
+        "embeddedExecutor": DESKTOP_EXECUTOR.status(),
+    }
 
 
 @app.post("/api/app/agent/desktop-bridge/register")

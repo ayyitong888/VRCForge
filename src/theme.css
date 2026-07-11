@@ -253,6 +253,7 @@
 
     .computer-use-glow {
       opacity: var(--computer-use-glow-opacity);
+      will-change: auto;
     }
 
     .computer-use-icon::before {
@@ -261,6 +262,14 @@
 
     .computer-use-banner::after {
       display: none;
+    }
+
+    .computer-use-stop {
+      transition: none;
+    }
+
+    .computer-use-stop:active:not(:disabled) {
+      transform: none;
     }
   }
 

@@ -14,9 +14,9 @@ from desktop_executor import (
     DesktopActionCancelled,
     DesktopController,
     DesktopExecutorError,
-    WindowsDesktopActivityOverlay,
     WindowsDesktopController,
 )
+from desktop_overlay import WindowsDesktopActivityOverlay
 
 
 class EmbeddedDesktopWorker:
@@ -104,12 +104,14 @@ class EmbeddedDesktopWorker:
 
     def status(self) -> dict[str, Any]:
         with self._state_lock:
+            overlay_info = self._activity_overlay.diagnostics() if self._activity_overlay is not None else {}
             return {
                 "available": self.available,
                 "running": bool(self._worker_thread and self._worker_thread.is_alive()),
                 "bridgeId": self._bridge_id,
                 "currentActionId": self._current_action_id,
                 "nativeOverlay": bool(self._activity_overlay),
+                "nativeOverlayInfo": overlay_info,
                 "lastError": self._last_error,
                 "operations": sorted(WINDOWS_DESKTOP_OPERATIONS),
             }
@@ -190,7 +192,6 @@ class EmbeddedDesktopWorker:
                 visual_theme = str((action.get("params") or {}).get("_visualTheme") or "light")
                 self._activity_overlay.show(
                     lambda: self._cancel_from_overlay(action_id),
-                    "VRCForge Computer Use  |  Click here or press Ctrl+Shift+F12 to stop",
                     theme=visual_theme,
                 )
             result = self._controller.execute(

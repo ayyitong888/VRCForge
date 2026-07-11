@@ -92,7 +92,7 @@ async function resourceSnapshot() {
     $packagedRoot = '${packagedRootPowerShell}'
     $processes = Get-Process -ErrorAction SilentlyContinue |
       Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
-      Select-Object Id,ProcessName,@{N='WorkingSetMB';E={[math]::Round($_.WorkingSet64/1MB,1)}},@{N='PrivateMB';E={[math]::Round($_.PrivateMemorySize64/1MB,1)}}
+      Select-Object Id,ProcessName,HandleCount,@{N='ThreadCount';E={$_.Threads.Count}},@{N='WorkingSetMB';E={[math]::Round($_.WorkingSet64/1MB,1)}},@{N='PrivateMB';E={[math]::Round($_.PrivateMemorySize64/1MB,1)}}
     $os = Get-CimInstance Win32_OperatingSystem
     [pscustomobject]@{
       processes = @($processes)
@@ -319,6 +319,23 @@ async function waitForBridgeConnected(timeoutMs = 30000) {
     await sleep(200);
   }
   return latest;
+}
+
+async function waitForNativeOverlay(visible, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await appApi("/api/app/agent/desktop-bridge");
+    const info = latest?.payload?.embeddedExecutor?.nativeOverlayInfo || {};
+    if (Boolean(info.visible) === Boolean(visible)) {
+      return { response: latest, info };
+    }
+    await sleep(100);
+  }
+  return {
+    response: latest,
+    info: latest?.payload?.embeddedExecutor?.nativeOverlayInfo || {},
+  };
 }
 
 async function waitForActionStatus(actionId, statuses, timeoutMs = 30000) {
@@ -859,41 +876,36 @@ async function main() {
       output.assertions.push("explicit Computer Use turn did not create a desktop action");
     }
 
+    output.nativeActivityRunning = await waitForNativeOverlay(true, 15000);
+    const nativeOverlayInfo = output.nativeActivityRunning?.info || {};
+    if (
+      nativeOverlayInfo.renderer !== "win32-layered-ambient-v2" ||
+      !nativeOverlayInfo.captureExcluded ||
+      nativeOverlayInfo.windowCount !== 4 ||
+      nativeOverlayInfo.glowWindowCount !== 3 ||
+      nativeOverlayInfo.fontFamily !== "Segoe UI" ||
+      !Array.isArray(nativeOverlayInfo.stopHitTargetSize) ||
+      nativeOverlayInfo.stopHitTargetSize.some((value) => Number(value) <= 0)
+    ) {
+      output.assertions.push("native Computer Use overlay did not expose the expected capture-safe visual contract");
+    }
     output.activityRunning = await waitForEval(
       cdp,
       `(() => {
-        const surface = document.querySelector("[data-vrcforge-computer-use]");
-        const glow = document.querySelector("[data-vrcforge-computer-use-glow]");
-        const banner = document.querySelector("[data-vrcforge-computer-use-banner]");
-        const cancel = document.querySelector("[data-vrcforge-computer-use-cancel]");
-        const glowStyle = glow ? getComputedStyle(glow) : null;
-        const bannerStyle = banner ? getComputedStyle(banner) : null;
-        const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const surfaces = document.querySelectorAll("[data-vrcforge-computer-use]");
         return {
-          ok: Boolean(surface && cancel && surface.getAttribute("data-state") === "running"),
-          state: surface?.getAttribute("data-state") || "",
-          actionId: surface?.getAttribute("data-action-id") || "",
-          palette: surface?.getAttribute("data-visual-palette") || "",
+          ok: surfaces.length === 0,
+          surfaceCount: surfaces.length,
           documentTheme: document.documentElement.dataset.theme || "",
-          hasGlow: Boolean(glow),
-          glowOpacity: Number(glowStyle?.opacity || 0),
-          glowAnimation: glowStyle?.animationName || "",
-          glowShadow: glowStyle?.boxShadow || "",
-          reducedMotion,
-          hasBanner: Boolean(banner),
-          bannerWidth: banner?.getBoundingClientRect().width || 0,
-          bannerShadow: bannerStyle?.boxShadow || "",
-          hasCancel: Boolean(cancel),
-          text: surface?.textContent || "",
         };
       })()`,
       15000,
     ).catch((error) => ({ ok: false, error: String(error) }));
     if (!output.activityRunning?.ok) {
-      output.assertions.push("Computer Use running state and cancel control were not visible");
+      output.assertions.push("embedded Computer Use action rendered a duplicate React activity surface");
     }
     output.activityRunningAction = await waitForActionStatus(
-      output.activityRunning?.actionId || "",
+      actionId,
       ["requested", "claimed", "cancel_requested", "completed", "failed", "cancelled"],
       5000,
     );
@@ -901,7 +913,7 @@ async function main() {
       output.activityRunningAction?.action?.sessionId !== probeSessionId ||
       output.activityRunningAction?.action?.clientTurnId !== explicitClientTurnId
     ) {
-      output.assertions.push("Computer Use activity surface was not bound to an action owned by the explicit turn");
+      output.assertions.push("native Computer Use activity was not bound to an action owned by the explicit turn");
     }
 
     output.explicitTurnResponse = await explicitTurnPromise;
@@ -923,6 +935,10 @@ async function main() {
       output.completedAction?.action?.clientTurnId !== explicitClientTurnId
     ) {
       output.assertions.push("explicit turn action did not preserve its session/clientTurn ownership");
+    }
+    output.nativeActivityAfterComplete = await waitForNativeOverlay(false, 10000);
+    if (output.nativeActivityAfterComplete?.info?.visible) {
+      output.assertions.push("native Computer Use overlay remained visible after completion");
     }
     output.completedActionResult = await readActionResult(actionId);
     const listWindowsResult = sequenceStepResult(output.completedActionResult?.payload, "list_windows");
@@ -1401,7 +1417,7 @@ async function main() {
     }
     output.resourceSnapshots.afterFixtureInput = await resourceSnapshot();
 
-    // Phase 4: a real action is cancelled from the packaged React surface.
+    // Phase 4: cancel a real embedded action through the same backend path used by native Stop.
     output.cancelRequestedAction = await appApi("/api/app/agent/desktop-actions", {
       method: "POST",
       body: {
@@ -1413,36 +1429,30 @@ async function main() {
       },
     });
     const cancelActionId = output.cancelRequestedAction?.payload?.actionId || "";
+    output.nativeCancelSurface = await waitForNativeOverlay(true, 15000);
+    if (!output.nativeCancelSurface?.info?.visible) {
+      output.assertions.push("cancel proof did not reach the native Computer Use overlay");
+    }
     output.cancelSurface = await waitForEval(
       cdp,
       `(() => {
-        const surface = document.querySelector("[data-vrcforge-computer-use]");
-        const button = document.querySelector("[data-vrcforge-computer-use-cancel]");
+        const surfaces = document.querySelectorAll("[data-vrcforge-computer-use]");
         return {
-          ok: Boolean(surface && button && surface.getAttribute("data-state") === "running"),
-          state: surface?.getAttribute("data-state") || "",
-          actionId: surface?.getAttribute("data-action-id") || "",
+          ok: surfaces.length === 0,
+          surfaceCount: surfaces.length,
         };
       })()`,
       15000,
     ).catch((error) => ({ ok: false, error: String(error) }));
     if (!output.cancelSurface?.ok) {
-      output.assertions.push("cancel proof did not reach the running Computer Use surface");
+      output.assertions.push("cancel proof rendered a duplicate React Computer Use surface");
     }
-    if (output.cancelSurface?.actionId !== cancelActionId) {
-      output.assertions.push("cancel surface was not bound to the action being cancelled");
-    }
-    output.cancelClick = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        const button = document.querySelector("[data-vrcforge-computer-use-cancel]");
-        if (!(button instanceof HTMLButtonElement)) return { clicked: false };
-        button.click();
-        return { clicked: true };
-      })()`,
-      returnByValue: true,
-    }).then((response) => response?.result?.value || {});
-    if (!output.cancelClick?.clicked) {
-      output.assertions.push("packaged Computer Use cancel button could not be clicked");
+    output.cancelRequest = await appApi(`/api/app/agent/desktop-actions/${cancelActionId}/cancel`, {
+      method: "POST",
+      body: { reason: "Packaged native Stop path proof" },
+    });
+    if (!output.cancelRequest?.ok || output.cancelRequest?.payload?.status !== "cancel_requested") {
+      output.assertions.push("packaged Computer Use cancel request was not accepted");
     }
     output.cancelledAction = await waitForActionStatus(cancelActionId, ["cancelled", "failed"], 15000);
     if (output.cancelledAction?.action?.status !== "cancelled") {
@@ -1461,7 +1471,11 @@ async function main() {
       10000,
     ).catch((error) => ({ ok: false, error: String(error) }));
     if (!output.activityAfterCancel?.ok) {
-      output.assertions.push("Computer Use activity surface did not disappear after cancellation");
+      output.assertions.push("React Computer Use fallback appeared after native cancellation");
+    }
+    output.nativeActivityAfterCancel = await waitForNativeOverlay(false, 10000);
+    if (output.nativeActivityAfterCancel?.info?.visible) {
+      output.assertions.push("native Computer Use overlay did not disappear after cancellation");
     }
     output.resourceSnapshots.afterCancel = await resourceSnapshot();
 

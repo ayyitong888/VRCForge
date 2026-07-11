@@ -62,7 +62,7 @@ export function resolveComputerUseVisualTokens(
     style: {
       "--computer-use-accent": "hsl(var(--primary))",
       "--computer-use-on-accent": "hsl(var(--primary-foreground))",
-      "--computer-use-surface": `hsl(var(--card) / ${theme === "dark" ? "0.9" : "0.94"})`,
+      "--computer-use-surface": `hsl(var(--card) / ${theme === "dark" ? "0.82" : "0.86"})`,
       "--computer-use-surface-muted": `hsl(var(--primary) / ${theme === "dark" ? "0.16" : "0.09"})`,
       "--computer-use-outline": "transparent",
       "--computer-use-glow-opacity": phaseTokens.glowOpacity,

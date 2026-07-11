@@ -16,10 +16,25 @@ type ComputerUseActivitySurfaceProps = {
   onCancel: (actionId: string) => void | Promise<void>;
 };
 
+const EMBEDDED_NATIVE_PROVIDER = "embedded-ctypes-win32";
+
+export function usesNativeComputerUseOverlay(action: AgentDesktopAction): boolean {
+  if (action.provider === EMBEDDED_NATIVE_PROVIDER) {
+    return true;
+  }
+  const candidates = action.bridgeCandidates ?? [];
+  return (
+    action.status === "requested" &&
+    candidates.length > 0 &&
+    candidates.every((candidate) => candidate.provider === EMBEDDED_NATIVE_PROVIDER)
+  );
+}
+
 function activeDesktopAction(actions: AgentDesktopAction[]): AgentDesktopAction | null {
   const eligible = actions.filter((action) =>
     ["computer_use", "desktop_rescue"].includes(action.action || "") &&
-    ["requested", "claimed", "cancel_requested"].includes(action.status || ""),
+    ["requested", "claimed", "cancel_requested"].includes(action.status || "") &&
+    !usesNativeComputerUseOverlay(action),
   );
   return (
     eligible.find((action) => action.status === "cancel_requested") ??
