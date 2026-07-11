@@ -2,7 +2,7 @@ import { Bot, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightCl
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, DesktopBridgeStatus, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
-import type { RuntimeFileReference, RuntimePlanItem, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
+import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { DataLine } from "../ui/data-line";
@@ -49,8 +49,6 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiff,
   workspaceDiffReviewOpen,
   loadingWorkspaceDiffPatch,
-  runtimePlanItems,
-  onChoosePlanOption,
   runtimeSchedule,
   visibleSubAgentTasks,
   selectedSubAgent,
@@ -106,8 +104,6 @@ export function RightRuntimeSidebar({
   loadingWorkspaceDiff: boolean;
   workspaceDiffReviewOpen: boolean;
   loadingWorkspaceDiffPatch: boolean;
-  runtimePlanItems: RuntimePlanItem[];
-  onChoosePlanOption: (value: string) => void;
   runtimeSchedule: RuntimeScheduleItem[];
   visibleSubAgentTasks: SubAgentTask[];
   selectedSubAgent: SubAgentTask | null;
@@ -128,14 +124,12 @@ export function RightRuntimeSidebar({
   formatPayload: (value: unknown) => string;
 }) {
   const { t } = useTranslation();
-  const progressItems: RuntimePlanItem[] = agentProgress.length
-    ? agentProgress.map((item) => ({
-        id: item.progressId,
-        title: item.title || item.progressId,
-        meta: item.summary || item.owner || "",
-        status: item.status || "pending",
-      }))
-    : runtimePlanItems;
+  const progressItems = agentProgress.map((item) => ({
+    id: item.progressId,
+    title: item.title || item.progressId,
+    meta: item.summary || item.owner || "",
+    status: item.status || "pending",
+  }));
   const showProgressSection = !showStatusSummary || progressItems.length > 0;
   return (
     <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-l border-border/80 bg-sidebar">
@@ -173,7 +167,7 @@ export function RightRuntimeSidebar({
                   const status = item.status || "pending";
                   const completed = isProgressDone(status);
                   return (
-                  <div key={item.id} tabIndex={item.choices?.length ? 0 : undefined} className="group rounded-md px-1 py-1.5 text-xs outline-none transition-colors hover:bg-muted/60 focus-visible:bg-muted/60">
+                  <div key={item.id} className="rounded-md px-1 py-1.5 text-xs transition-colors hover:bg-muted/60">
                     <div className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-2">
                       <span className={cn("flex h-6 w-6 items-center justify-center rounded-full border text-xs font-semibold", progressStatusClass(status))}>
                         {formatCount(index + 1)}
@@ -186,21 +180,6 @@ export function RightRuntimeSidebar({
                       </span>
                       <span className="shrink-0 text-muted-foreground">{progressStatusLabel(status, t)}</span>
                     </div>
-                    {item.choices?.length ? (
-                      <div className="mt-2 hidden gap-1 pl-8 group-hover:grid group-focus-within:grid">
-                        {item.choices.slice(0, 3).map((choice) => (
-                          <button
-                            key={choice.id}
-                            type="button"
-                            className="rounded-md border border-border bg-background px-2 py-1 text-left text-xs transition-colors hover:bg-muted"
-                            onClick={() => onChoosePlanOption(choice.value || choice.label)}
-                          >
-                            <span className="block truncate font-medium">{choice.label}</span>
-                            {choice.description ? <span className="block truncate text-muted-foreground">{choice.description}</span> : null}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
                   </div>
                   );
                 })}

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import struct
 import tempfile
+import sys
 import time
 import unittest
 from pathlib import Path
 from typing import Any
 
 from agent_gateway import AgentGateway
-from desktop_executor import DesktopActionCancelled
+from desktop_executor import DesktopActionCancelled, DesktopExecutorError, WindowsDesktopController
 from desktop_worker import EmbeddedDesktopWorker
 
 
@@ -33,6 +35,107 @@ class FakeDesktopController:
 
 
 class DesktopExecutorTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows desktop controller requires Win32")
+    def test_windows_controller_initializes_uia_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller = WindowsDesktopController(Path(temp_dir))
+
+        self.assertTrue(hasattr(controller, "uia"))
+
+    def test_uia_element_action_returns_bounded_metadata_without_value(self) -> None:
+        class FakeUia:
+            def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+                self.request = request
+                return {
+                    "ok": True,
+                    "performed": "set_value",
+                    "element": {"index": 7, "name": "Composer", "controlType": "ControlType.Edit"},
+                }
+
+        controller = object.__new__(WindowsDesktopController)
+        controller.uia = FakeUia()
+        controller._resolve_window = lambda _params: {"windowHandle": 42}
+        result = controller._uia_action(
+            {"operation": "set_value", "elementIndex": 7, "value": "private text"},
+            {},
+            lambda: False,
+        )
+
+        self.assertEqual(result["performed"], "set_value")
+        self.assertEqual(result["characterCount"], len("private text"))
+        self.assertNotIn("value", result)
+
+    def test_sequence_validates_every_step_before_side_effects(self) -> None:
+        class SequenceProbe(WindowsDesktopController):
+            def __init__(self) -> None:
+                self.effects: list[str] = []
+
+            def _validate_operation_params(self, operation: str, params: dict[str, Any]) -> None:
+                if params.get("invalid"):
+                    raise DesktopExecutorError("invalid later step")
+
+            def _execute_operation(self, operation, params, action, cancel_check):
+                if operation == "sequence":
+                    return super()._execute_operation(operation, params, action, cancel_check)
+                self.effects.append(operation)
+                return {"operation": operation}
+
+        controller = SequenceProbe()
+        with self.assertRaisesRegex(DesktopExecutorError, "invalid later step"):
+            controller.execute(
+                {
+                    "action": "computer_use",
+                    "params": {
+                        "operation": "sequence",
+                        "steps": [
+                            {"operation": "click", "x": 1, "y": 1},
+                            {"operation": "type_text", "text": "x", "invalid": True},
+                        ],
+                    },
+                },
+                lambda: False,
+            )
+        self.assertEqual(controller.effects, [])
+
+    def test_ambiguous_window_title_requires_a_precise_target(self) -> None:
+        controller = object.__new__(WindowsDesktopController)
+        controller._enumerate_windows = lambda **_kwargs: [
+            {"windowHandle": 1, "title": "Editor - A", "processId": 10},
+            {"windowHandle": 2, "title": "Editor - B", "processId": 20},
+        ]
+        with self.assertRaisesRegex(DesktopExecutorError, "ambiguous"):
+            controller._resolve_window({"titleContains": "Editor"})
+        selected = controller._resolve_window({"titleContains": "Editor", "processId": 20})
+        self.assertEqual(selected["windowHandle"], 2)
+
+    def test_desktop_screenshot_is_analyzed_and_observed_by_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_dir = root / "audit" / "desktop-captures"
+            capture_dir.mkdir(parents=True)
+            pixels = bytes((0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0))
+            dib = struct.pack("<IiiHHIIiiII", 40, 2, -2, 1, 32, 0, len(pixels), 0, 0, 0, 0)
+            bmp = struct.pack("<2sIHHI", b"BM", 14 + len(dib) + len(pixels), 0, 0, 14 + len(dib)) + dib + pixels
+            path = capture_dir / "screen.bmp"
+            path.write_bytes(bmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            seen: list[dict[str, Any]] = []
+
+            def analyze(_message: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+                seen.extend(images)
+                return {"status": "analyzed", "text": "A settings window is visible."}
+
+            gateway.vision_analyze_fn = analyze
+            result = {"status": "completed", "result": {"operation": "screenshot", "artifactPath": str(path), "width": 2, "height": 2}}
+            vision = gateway._desktop_action_vision_analysis("inspect settings", result)  # noqa: SLF001
+            observation = gateway._llm_loop_step_observation(  # noqa: SLF001
+                {"tool": "vrcforge_agent_desktop_action", "result": result, "desktopVision": vision}
+            )
+
+        self.assertTrue(seen[0]["dataUrl"].startswith("data:image/png;base64,"))
+        self.assertIn("operation=screenshot", observation)
+        self.assertIn("A settings window is visible", observation)
+
     def test_embedded_worker_executes_and_returns_full_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

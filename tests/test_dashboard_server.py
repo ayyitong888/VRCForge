@@ -285,6 +285,26 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual({chat["id"] for chat in read_response.json()["chats"]}, {"temp-chat", "project-chat"})
                 self.assertEqual(read_response.json()["count"], 2)
 
+    def test_chat_transcripts_never_persist_or_restore_streaming_placeholders(self) -> None:
+        chats = [
+            {
+                "id": "chat-with-orphan",
+                "sessionId": "session-orphan",
+                "items": [
+                    {"id": "user-1", "type": "user", "text": "hello"},
+                    {"id": "stream-old", "type": "streaming", "clientTurnId": "old-turn", "text": ""},
+                    {"id": "agent-1", "type": "agent", "response": {"reply": "done"}},
+                ],
+            }
+        ]
+        with TestClient(dashboard_server.app) as client:
+            written = client.post("/api/app/chats", json={"chats": chats})
+            restored = client.get("/api/app/chats")
+
+        self.assertEqual(written.status_code, 200)
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual([item["type"] for item in restored.json()["chats"][0]["items"]], ["user", "agent"])
+
     def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
 
@@ -873,14 +893,20 @@ class DashboardServerTests(unittest.TestCase):
             with TestClient(dashboard_server.app) as client:
                 ordinary = client.post(
                     "/api/app/agent/message",
-                    json={"message": "ordinary turn", "sessionId": "sess-ordinary-computer-use"},
+                    json={"message": "ordinary turn", "session_id": "sess-ordinary-computer-use"},
+                )
+                grant = client.post(
+                    "/api/app/agent/computer-use/grants",
+                    json={"sessionId": "sess-explicit-computer-use", "clientTurnId": "turn-explicit"},
                 )
                 explicit = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "inspect the active window",
-                        "sessionId": "sess-explicit-computer-use",
+                        "session_id": "sess-explicit-computer-use",
+                        "clientTurnId": "turn-explicit",
                         "computerUseRequested": True,
+                        "computerUseGrantId": grant.json()["grantId"],
                     },
                 )
         finally:
@@ -888,11 +914,55 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
 
         self.assertEqual(ordinary.status_code, 200)
+        self.assertEqual(grant.status_code, 200)
         self.assertEqual(explicit.status_code, 200)
         self.assertEqual(len(captured), 2)
         self.assertNotIn("vrcforge_agent_desktop_action", captured[0])
         self.assertIn("vrcforge_agent_desktop_action", captured[1])
         self.assertFalse(dashboard_server.AGENT_GATEWAY.computer_use_turn_active())
+
+    def test_computer_use_turn_grant_is_required_bound_and_single_use(self) -> None:
+        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
+        dashboard_server.AGENT_GATEWAY.llm_plan_fn = lambda _prompt: {"text": json.dumps({"action": "reply", "reply": "done"})}
+        try:
+            with TestClient(dashboard_server.app) as client:
+                forged = client.post(
+                    "/api/app/agent/message",
+                    json={"message": "forged", "clientTurnId": "forged-turn", "computerUseRequested": True},
+                )
+                grant = client.post(
+                    "/api/app/agent/computer-use/grants",
+                    json={"sessionId": "grant-session", "clientTurnId": "granted-turn", "projectRoot": "ProjectA"},
+                )
+                granted = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "granted",
+                        "session_id": "grant-session",
+                        "clientTurnId": "granted-turn",
+                        "projectRoot": "ProjectA",
+                        "computerUseRequested": True,
+                        "computerUseGrantId": grant.json()["grantId"],
+                    },
+                )
+                replayed = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "replay",
+                        "session_id": "grant-session",
+                        "clientTurnId": "granted-turn",
+                        "projectRoot": "ProjectA",
+                        "computerUseRequested": True,
+                        "computerUseGrantId": grant.json()["grantId"],
+                    },
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
+
+        self.assertEqual(forged.status_code, 403)
+        self.assertEqual(grant.status_code, 200)
+        self.assertEqual(granted.status_code, 200)
+        self.assertEqual(replayed.status_code, 403)
 
     def test_computer_use_direct_app_action_is_blocked_while_setting_is_off(self) -> None:
         try:
@@ -1407,7 +1477,8 @@ class DashboardServerTests(unittest.TestCase):
                     "bridgeId": bridge_id,
                     "bridgeCredential": bridge_credential,
                     "actionId": action_id,
-                    "status": "cancelled",
+                    "status": "completed",
+                    "result": {"summary": "late success must not win"},
                 },
             )
             retry_cancel = client.post(
@@ -1520,6 +1591,28 @@ class DashboardServerTests(unittest.TestCase):
         items = listing.json()["items"]
         self.assertEqual([item["progressId"] for item in items], ["step-b"])
         self.assertEqual(items[0]["status"], "completed")
+
+    def test_agent_progress_and_questions_are_strictly_scoped(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            client.post(
+                "/api/app/agent/progress/replace",
+                json={"sessionId": "scope-a", "projectRoot": "ProjectA", "items": [{"id": "step-1", "title": "A"}]},
+            )
+            client.post(
+                "/api/app/agent/progress/replace",
+                json={"sessionId": "scope-b", "projectRoot": "ProjectB", "items": [{"id": "step-1", "title": "B"}]},
+            )
+            dashboard_server.AGENT_GATEWAY.create_agent_progress({"title": "legacy unscoped"})
+            dashboard_server.AGENT_GATEWAY.create_agent_question(
+                {"question": "Unscoped?", "options": ["A", "B"]}
+            )
+            progress_a = client.get("/api/app/agent/progress", params={"sessionId": "scope-a", "projectRoot": "ProjectA"})
+            progress_b = client.get("/api/app/agent/progress", params={"sessionId": "scope-b", "projectRoot": "ProjectB"})
+            questions_a = client.get("/api/app/agent/questions", params={"sessionId": "scope-a", "projectRoot": "ProjectA"})
+
+        self.assertEqual([item["title"] for item in progress_a.json()["items"]], ["A"])
+        self.assertEqual([item["title"] for item in progress_b.json()["items"]], ["B"])
+        self.assertEqual(questions_a.json()["questions"], [])
 
     def test_agent_questions_can_be_answered_and_snapshot(self) -> None:
         with TestClient(dashboard_server.app) as client:

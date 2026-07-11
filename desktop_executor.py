@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from desktop_uia import DesktopUiaError, WindowsUiaAdapter
+
 WINDOWS_DESKTOP_OPERATIONS = {
     "list_windows",
     "inspect_window",
@@ -20,9 +22,14 @@ WINDOWS_DESKTOP_OPERATIONS = {
     "focus_window",
     "move_pointer",
     "click",
+    "drag",
     "scroll",
     "type_text",
     "key_press",
+    "focus_element",
+    "invoke_element",
+    "set_value",
+    "secondary_action",
     "wait",
     "sequence",
 }
@@ -542,6 +549,7 @@ class WindowsDesktopController:
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.uia = WindowsUiaAdapter()
         self._configure_signatures()
         try:
             if hasattr(self.user32, "SetProcessDpiAwarenessContext"):
@@ -647,8 +655,11 @@ class WindowsDesktopController:
             "list_apps": "list_windows",
             "capture": "screenshot",
             "move": "move_pointer",
+            "drag_pointer": "drag",
             "type": "type_text",
             "press": "key_press",
+            "invoke": "invoke_element",
+            "set_element_value": "set_value",
             "sleep": "wait",
         }
         return aliases.get(operation, operation)
@@ -667,16 +678,23 @@ class WindowsDesktopController:
                 raise DesktopExecutorError("sequence requires a non-empty params.steps list.")
             if len(raw_steps) > 32:
                 raise DesktopExecutorError("sequence supports at most 32 steps.")
-            results: list[dict[str, Any]] = []
+            normalized_steps: list[tuple[str, dict[str, Any]]] = []
             for index, raw_step in enumerate(raw_steps):
                 if not isinstance(raw_step, dict):
                     raise DesktopExecutorError(f"sequence step {index + 1} must be an object.")
                 step_operation = self._normalize_operation(raw_step.get("operation"))
                 if step_operation not in WINDOWS_DESKTOP_OPERATIONS or step_operation == "sequence":
                     raise DesktopExecutorError(f"Unsupported sequence operation at step {index + 1}: {step_operation or 'missing'}")
-                result = self._execute_operation(step_operation, raw_step, action, cancel_check)
+                step_params = dict(raw_step)
+                step_params["operation"] = step_operation
+                self._validate_operation_params(step_operation, step_params)
+                normalized_steps.append((step_operation, step_params))
+            results: list[dict[str, Any]] = []
+            for index, (step_operation, step_params) in enumerate(normalized_steps):
+                result = self._execute_operation(step_operation, step_params, action, cancel_check)
                 results.append({"index": index + 1, "operation": step_operation, "result": result})
             return {"operation": operation, "stepCount": len(results), "steps": results, "summary": "Desktop sequence completed."}
+        self._validate_operation_params(operation, params)
         handlers: dict[str, Callable[[dict[str, Any], dict[str, Any], CancelCheck], dict[str, Any]]] = {
             "list_windows": self._list_windows,
             "inspect_window": self._inspect_window,
@@ -685,12 +703,80 @@ class WindowsDesktopController:
             "focus_window": self._focus_window,
             "move_pointer": self._move_pointer,
             "click": self._click,
+            "drag": self._drag,
             "scroll": self._scroll,
             "type_text": self._type_text,
             "key_press": self._key_press,
+            "focus_element": self._uia_action,
+            "invoke_element": self._uia_action,
+            "set_value": self._uia_action,
+            "secondary_action": self._uia_action,
             "wait": self._wait,
         }
         return handlers[operation](params, action, cancel_check)
+
+    def _validate_operation_params(self, operation: str, params: dict[str, Any]) -> None:
+        if operation in {"inspect_window", "focus_window"}:
+            self._resolve_window(params)
+        elif operation == "screenshot":
+            if params.get("windowHandle") not in (None, "") or str(params.get("titleContains") or "").strip():
+                self._resolve_window(params)
+            elif isinstance(params.get("region"), dict):
+                region = params["region"]
+                if int(region.get("width") or 0) <= 0 or int(region.get("height") or 0) <= 0:
+                    raise DesktopExecutorError("Screenshot region width and height must be positive.")
+        elif operation in {"move_pointer", "click"}:
+            self._point_from_params(params)
+            if operation == "click":
+                if str(params.get("button") or "left").strip().lower() not in {"left", "right", "middle"}:
+                    raise DesktopExecutorError("click button must be left, right, or middle.")
+                int(params.get("clicks") or 1)
+                int(params.get("intervalMs") or 80)
+        elif operation == "drag":
+            self._drag_points(params)
+            int(params.get("durationMs") or 500)
+            int(params.get("steps") or 20)
+        elif operation == "scroll":
+            if "x" in params or "y" in params:
+                if "x" not in params or "y" not in params:
+                    raise DesktopExecutorError("scroll coordinates require both x and y.")
+                self._point_from_params(params)
+            int(params.get("delta") or (int(params.get("notches") or -3) * self.WHEEL_DELTA))
+        elif operation == "type_text":
+            text = str(params.get("text") or "")
+            if not text or len(text) > 8000:
+                raise DesktopExecutorError("type_text requires between 1 and 8000 characters.")
+            if params.get("windowHandle") not in (None, "") or str(params.get("titleContains") or "").strip():
+                self._resolve_window(params)
+            int(params.get("delayMs") or 0)
+        elif operation == "key_press":
+            raw_keys = params.get("keys")
+            if isinstance(raw_keys, str):
+                keys = [item.strip() for item in raw_keys.split("+") if item.strip()]
+            elif isinstance(raw_keys, list):
+                keys = [str(item).strip() for item in raw_keys if str(item).strip()]
+            else:
+                key = str(params.get("key") or "").strip()
+                keys = [key] if key else []
+            if not keys or len(keys) > 8:
+                raise DesktopExecutorError("key_press requires one to eight keys.")
+            for key in keys:
+                self._virtual_key(key)
+            int(params.get("repeat") or 1)
+            int(params.get("intervalMs") or 50)
+        elif operation == "wait":
+            int(params.get("durationMs") or params.get("ms") or 500)
+        elif operation in {"focus_element", "invoke_element", "set_value", "secondary_action"}:
+            self._resolve_window(params)
+            if not any(params.get(key) not in (None, "") for key in ("elementIndex", "automationId", "name")):
+                raise DesktopExecutorError("UI Automation actions require elementIndex, automationId, or name.")
+            if operation == "set_value":
+                if "value" not in params and "text" not in params:
+                    raise DesktopExecutorError("set_value requires value.")
+                if len(str(params.get("value") if "value" in params else params.get("text") or "")) > 8000:
+                    raise DesktopExecutorError("set_value supports at most 8000 characters.")
+            if operation == "secondary_action" and str(params.get("action") or "").strip().lower() not in {"invoke", "select", "expand", "collapse"}:
+                raise DesktopExecutorError("secondary_action must be invoke, select, expand, or collapse.")
 
     @staticmethod
     def _raise_if_cancelled(cancel_check: CancelCheck) -> None:
@@ -772,8 +858,26 @@ class WindowsDesktopController:
         if not title_contains:
             raise DesktopExecutorError("A windowHandle or titleContains value is required.")
         matches = [item for item in self._enumerate_windows() if title_contains in str(item.get("title") or "").casefold()]
+        process_id = params.get("processId") or params.get("pid")
+        if process_id not in (None, ""):
+            try:
+                expected_process_id = int(process_id)
+            except (TypeError, ValueError) as exc:
+                raise DesktopExecutorError("processId must be an integer.") from exc
+            matches = [item for item in matches if int(item.get("processId") or 0) == expected_process_id]
         if not matches:
             raise DesktopExecutorError(f"No visible window title contains: {title_contains}")
+        exact_matches = [item for item in matches if str(item.get("title") or "").casefold() == title_contains]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(matches) > 1:
+            candidates = ", ".join(
+                f"{item.get('title') or '<untitled>'} (pid {item.get('processId')}, hwnd {item.get('windowHandle')})"
+                for item in matches[:5]
+            )
+            raise DesktopExecutorError(
+                "Window title is ambiguous; use an exact title, processId, or windowHandle. Matches: " + candidates
+            )
         return matches[0]
 
     def _list_windows(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
@@ -805,14 +909,63 @@ class WindowsDesktopController:
             return True
 
         self.user32.EnumChildWindows(int(window["windowHandle"]), collect, 0)
-        return {
+        result = {
             "operation": "inspect_window",
             "window": window,
             "count": len(controls),
-            "controls": controls,
+            "nativeControls": controls,
             "truncated": len(controls) >= limit,
             "accessibilityTree": False,
             "summary": f"Inspected {len(controls)} native child controls.",
+        }
+        try:
+            accessibility = self.uia.inspect(int(window["windowHandle"]), limit=limit)
+            elements = accessibility.get("elements") if isinstance(accessibility.get("elements"), list) else []
+            result.update(
+                {
+                    "count": len(elements),
+                    "controls": elements,
+                    "accessibilityTree": True,
+                    "truncated": bool(accessibility.get("truncated")),
+                    "summary": f"Inspected {len(elements)} UI Automation elements.",
+                }
+            )
+        except DesktopUiaError as exc:
+            result["controls"] = controls
+            result["accessibilityError"] = str(exc)[-500:]
+        return result
+
+    def _uia_action(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
+        self._raise_if_cancelled(cancel_check)
+        window = self._resolve_window(params)
+        operation = self._normalize_operation(params.get("operation"))
+        operation_map = {
+            "focus_element": "focus",
+            "invoke_element": "invoke",
+            "set_value": "set_value",
+            "secondary_action": "secondary_action",
+        }
+        request = {
+            "operation": operation_map[operation],
+            "windowHandle": int(window["windowHandle"]),
+            "limit": max(1, min(int(params.get("limit") or 500), 500)),
+        }
+        for key in ("elementIndex", "automationId", "name", "controlType", "action"):
+            if params.get(key) not in (None, ""):
+                request[key] = params[key]
+        if operation == "set_value":
+            request["value"] = str(params.get("value") or params.get("text") or "")
+        try:
+            result = self.uia.execute(request)
+        except DesktopUiaError as exc:
+            raise DesktopExecutorError(str(exc)) from exc
+        self._raise_if_cancelled(cancel_check)
+        return {
+            "operation": operation,
+            "performed": result.get("performed"),
+            "element": result.get("element"),
+            "characterCount": len(str(request.get("value") or "")) if operation == "set_value" else 0,
+            "summary": f"UI Automation {result.get('performed') or operation} completed.",
         }
 
     def _cursor_position(self, _params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
@@ -892,6 +1045,56 @@ class WindowsDesktopController:
             if index + 1 < clicks and interval:
                 time.sleep(interval)
         return {"operation": "click", "x": x, "y": y, "button": button, "clicks": clicks, "summary": f"Clicked {button} at ({x}, {y})."}
+
+    def _drag_points(self, params: dict[str, Any]) -> tuple[tuple[int, int], tuple[int, int]]:
+        common = {
+            key: params[key]
+            for key in ("windowHandle", "hwnd", "titleContains", "windowTitle", "processId", "pid", "relativeToWindow")
+            if key in params
+        }
+
+        def point(prefix: str) -> tuple[int, int]:
+            candidate = dict(common)
+            ratio_x = params.get(f"{prefix}XRatio")
+            ratio_y = params.get(f"{prefix}YRatio")
+            if ratio_x is not None or ratio_y is not None:
+                candidate["xRatio"] = ratio_x
+                candidate["yRatio"] = ratio_y
+            else:
+                candidate["x"] = params.get(f"{prefix}X")
+                candidate["y"] = params.get(f"{prefix}Y")
+            return self._point_from_params(candidate)
+
+        return point("from"), point("to")
+
+    def _drag(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
+        (from_x, from_y), (to_x, to_y) = self._drag_points(params)
+        duration_ms = max(50, min(int(params.get("durationMs") or 500), 5000))
+        steps = max(2, min(int(params.get("steps") or max(4, duration_ms // 25)), 120))
+        self._raise_if_cancelled(cancel_check)
+        if not self.user32.SetCursorPos(from_x, from_y):
+            raise DesktopExecutorError("SetCursorPos failed before drag.")
+        self._send_mouse(self.MOUSEEVENTF_LEFTDOWN)
+        try:
+            for index in range(1, steps + 1):
+                self._raise_if_cancelled(cancel_check)
+                ratio = index / steps
+                x = round(from_x + (to_x - from_x) * ratio)
+                y = round(from_y + (to_y - from_y) * ratio)
+                if not self.user32.SetCursorPos(x, y):
+                    raise DesktopExecutorError("SetCursorPos failed during drag.")
+                time.sleep(duration_ms / steps / 1000)
+        finally:
+            self._send_mouse(self.MOUSEEVENTF_LEFTUP)
+        return {
+            "operation": "drag",
+            "fromX": from_x,
+            "fromY": from_y,
+            "toX": to_x,
+            "toY": to_y,
+            "durationMs": duration_ms,
+            "summary": f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y}).",
+        }
 
     def _scroll(self, params: dict[str, Any], _action: dict[str, Any], cancel_check: CancelCheck) -> dict[str, Any]:
         self._raise_if_cancelled(cancel_check)

@@ -107,7 +107,18 @@ pub(crate) struct DesktopAgentMessageRequest {
     client_turn_id: Option<String>,
     #[serde(default)]
     computer_use_requested: bool,
+    computer_use_grant_id: Option<String>,
     computer_use_visual_theme: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopComputerUseTurnGrantRequest {
+    session_id: Option<String>,
+    client_turn_id: String,
+    project_root: Option<String>,
+    #[serde(default)]
     timeout_ms: Option<u64>,
 }
 
@@ -566,11 +577,31 @@ pub async fn send_agent_message(
                 "providerLabel": request.provider_label,
                 "model": request.model,
                 "computerUseRequested": request.computer_use_requested,
+                "computerUseGrantId": request.computer_use_grant_id,
                 "computerUseVisualTheme": request.computer_use_visual_theme,
             })),
             request
                 .timeout_ms
                 .or(Some(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS)),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn issue_computer_use_turn_grant(
+    request: DesktopComputerUseTurnGrantRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/agent/computer-use/grants".to_string(),
+            Some(serde_json::json!({
+                "sessionId": request.session_id,
+                "clientTurnId": request.client_turn_id,
+                "projectRoot": request.project_root,
+            })),
+            request.timeout_ms.or(Some(30_000)),
         )
     })
     .await

@@ -13,7 +13,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark" } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark" } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -27,6 +27,7 @@ export async function sendAgentMessage(
     providerLabel: options.providerLabel || undefined,
     model: options.model || undefined,
     computerUseRequested: Boolean(options.computerUseRequested),
+    computerUseGrantId: options.computerUseGrantId,
     computerUseVisualTheme: options.computerUseVisualTheme,
   };
   if (hasTauriInternals()) {
@@ -48,8 +49,26 @@ export async function sendAgentMessage(
       providerLabel: request.providerLabel,
       model: request.model,
       computerUseRequested: request.computerUseRequested,
+      computerUseGrantId: request.computerUseGrantId,
       computerUseVisualTheme: request.computerUseVisualTheme,
     }),
+  });
+}
+
+export async function issueComputerUseTurnGrant(
+  endpoint: string,
+  payload: { sessionId?: string; clientTurnId: string; projectRoot?: string },
+): Promise<{ ok: boolean; schema?: string; grantId: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("issue_computer_use_turn_grant", {
+      request: { ...payload, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/computer-use/grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 30000,
   });
 }
 

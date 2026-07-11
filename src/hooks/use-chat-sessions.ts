@@ -8,6 +8,7 @@ import {
   filterPersistableChats,
   isStoredChat,
   normalizeChatContextUsage,
+  stripTransientConversationItems,
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
@@ -110,7 +111,7 @@ export function useChatSessions({
             pinned: chat.pinned === true,
             archived: chat.archived === true,
             contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
-            items: chat.items,
+            items: stripTransientConversationItems(chat.items),
           };
           const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
           shouldCacheRestoredTimestamps =

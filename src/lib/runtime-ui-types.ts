@@ -5,21 +5,6 @@ export type RuntimeScheduleItem = {
   meta: string;
 };
 
-export type RuntimePlanChoice = {
-  id: string;
-  label: string;
-  description?: string;
-  value?: string;
-};
-
-export type RuntimePlanItem = {
-  id: string;
-  title: string;
-  meta?: string;
-  status?: "completed" | "running" | "queued" | "question" | "blocked" | string;
-  choices?: RuntimePlanChoice[];
-};
-
 export type RuntimeFileReference = {
   path: string;
   source: string;

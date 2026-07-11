@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import type { ChatAttachment, ChatThread, ConversationItem } from "../lib/chat-types";
+import { stripTransientConversationItems } from "../lib/chat-thread";
 import {
   appendAttachmentSummary,
   buildChatHistory,
@@ -9,6 +10,7 @@ import {
 } from "../lib/conversation-utils";
 import { isRuntimeSessionVerificationError } from "../lib/app-runtime";
 import {
+  issueComputerUseTurnGrant,
   recordAgentRunQueued,
   requestAgentRunCancel,
   sendAgentMessage,
@@ -210,7 +212,7 @@ export function useChatRunController({
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions): Promise<boolean> {
     const chat = getChatById(chatId);
     const baseItems = options?.baseItems ?? chat?.items ?? [];
-    const chatSessionId = options?.sessionId ?? chat?.sessionId ?? "";
+    const chatSessionId = (options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
     const chatAgentName = chat?.agentName || "desktop-agent";
     const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
     const startedAt = Date.now();
@@ -257,10 +259,17 @@ export function useChatRunController({
       streamingTurnChatRef.current.set(turn.id, chatId);
       updateChat(chatId, (current) => ({
         ...touchChat(current),
-        sessionId: options?.sessionId ?? current.sessionId,
+        sessionId: chatSessionId,
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-        items: [...(options?.baseItems ?? current.items), userItem, streamingItem],
+        items: [...stripTransientConversationItems(options?.baseItems ?? current.items), userItem, streamingItem],
       }));
+      const computerUseGrant = turn.computerUseRequested
+        ? await issueComputerUseTurnGrant(targetEndpoint, {
+            sessionId: chatSessionId || undefined,
+            clientTurnId: turn.id,
+            projectRoot: chat?.projectPath || activeRuntimeProjectPath || undefined,
+          })
+        : null;
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         attachments: serializeChatAttachments(turn.attachments),
@@ -270,6 +279,7 @@ export function useChatRunController({
         model: turn.model,
         clientTurnId: turn.id,
         computerUseRequested: Boolean(turn.computerUseRequested),
+        computerUseGrantId: computerUseGrant?.grantId,
         computerUseVisualTheme: turn.computerUseVisualTheme,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
@@ -277,7 +287,7 @@ export function useChatRunController({
         ...touchChat(current),
         sessionId: response.sessionId || response.session_id || current.sessionId,
         items: [
-          ...current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
+          ...stripTransientConversationItems(current.items),
           { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
         ],
       }));
@@ -293,7 +303,7 @@ export function useChatRunController({
           sessionId: snapshot.sessionId,
           title: snapshot.title || current.title,
           updatedAt: snapshot.updatedAt || current.updatedAt,
-          items: snapshot.items,
+          items: stripTransientConversationItems(snapshot.items),
         }));
         options.onFailure?.(text);
       } else {
@@ -307,7 +317,7 @@ export function useChatRunController({
       appendToChat(chatId, { id: `error-${Date.now()}`, type: "error", text });
       updateChat(chatId, (current) => ({
         ...touchChat(current),
-        items: current.items.filter((item) => !(item.type === "streaming" && item.clientTurnId === turn.id)),
+        items: stripTransientConversationItems(current.items),
       }));
       }
       if (isRuntimeSessionVerificationError(text)) {

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import hmac
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -259,6 +261,8 @@ SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(
 RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
 RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
+DESKTOP_VISION_MAX_WIDTH = 1280
+DESKTOP_VISION_MAX_HEIGHT = 720
 # 视觉委托分析结果的展示/回灌上限：这是"给规划器看的图片描述"，不是原始载荷，
 # 必须保持有界，避免一次识图把上下文塞爆。
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
@@ -1481,6 +1485,7 @@ class AgentGateway:
         self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
         self._lock = threading.RLock()
         self._desktop_action_condition = threading.Condition(self._lock)
+        self._computer_use_turn_grants: dict[str, dict[str, str]] = {}
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1514,6 +1519,7 @@ class AgentGateway:
             self._desktop_bridges.clear()
             self._desktop_action_payloads.clear()
             self._desktop_action_results.clear()
+            self._computer_use_turn_grants.clear()
 
     @property
     def agent_memory_log_path(self) -> Path:
@@ -2111,7 +2117,15 @@ class AgentGateway:
         previous_session_id = str(getattr(self._runtime_computer_use_context, "session_id", ""))
         previous_turn_id = str(getattr(self._runtime_computer_use_context, "turn_id", ""))
         previous_client_turn_id = str(getattr(self._runtime_computer_use_context, "client_turn_id", ""))
-        self._runtime_computer_use_context.enabled = bool(params.get("_computerUseRequested"))
+        computer_use_requested = bool(params.get("_computerUseRequested"))
+        if computer_use_requested:
+            self.consume_computer_use_turn_grant(
+                str(params.get("_computerUseGrantId") or ""),
+                session_id=str(params.get("session_id") or params.get("sessionId") or ""),
+                client_turn_id=str(params.get("client_turn_id") or params.get("clientTurnId") or ""),
+                project_root=str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or ""),
+            )
+        self._runtime_computer_use_context.enabled = computer_use_requested
         visual_theme = str(params.get("_computerUseVisualTheme") or "light").strip().lower()
         self._runtime_computer_use_context.visual_theme = visual_theme if visual_theme in {"light", "dark"} else "light"
         self._runtime_computer_use_context.session_id = str(params.get("session_id") or params.get("sessionId") or "")
@@ -2224,6 +2238,48 @@ class AgentGateway:
         iterations = 0
         cap_reached = False
 
+        if bool(params.get("_computerUseRequested")):
+            bootstrap_params: dict[str, Any] = {
+                "action": "computer_use",
+                "prompt": "Capture the initial desktop state for this user-started Computer Use turn.",
+                "sessionId": session_id,
+                "clientTurnId": client_turn_id,
+                "params": {
+                    "operation": "sequence",
+                    "steps": [
+                        {"operation": "list_windows", "limit": 30},
+                        {"operation": "screenshot"},
+                    ],
+                },
+            }
+            if project_root:
+                bootstrap_params["projectRoot"] = project_root
+            bootstrap_payload = self._execute_runtime_skill(
+                "vrcforge_agent_desktop_action",
+                bootstrap_params,
+                agent_name,
+            )
+            skill_payload = bootstrap_payload
+            bootstrap_step: dict[str, Any] = {
+                "tool": "vrcforge_agent_desktop_action",
+                "kind": "skill",
+                "status": bootstrap_payload.get("status"),
+                "result": bootstrap_payload.get("result"),
+            }
+            bootstrap_vision = self._desktop_action_vision_analysis(message, bootstrap_payload.get("result"))
+            if bootstrap_vision is not None:
+                bootstrap_step["desktopVision"] = bootstrap_vision
+            loop_state.append(bootstrap_step)
+            steps.append(
+                {
+                    "index": len(steps),
+                    "kind": "skill",
+                    "tool": "vrcforge_agent_desktop_action",
+                    "summary": "Captured the initial desktop state.",
+                    "status": bootstrap_payload.get("status") or "",
+                }
+            )
+
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
             if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
                 last_plan = {
@@ -2328,23 +2384,42 @@ class AgentGateway:
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
                 step_params = ensure_dict(plan.get("skillParams"))
-                if step_tool == "vrcforge_agent_desktop_action":
+                if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
                     step_params.setdefault("sessionId", session_id)
-                    step_params.setdefault("clientTurnId", client_turn_id)
                     if project_root:
                         step_params.setdefault("projectRoot", project_root)
+                if step_tool == "vrcforge_agent_desktop_action":
+                    step_params.setdefault("clientTurnId", client_turn_id)
                 step_payload = self._execute_runtime_skill(
                     step_tool, step_params, agent_name
                 )
                 skill_payload = step_payload
-                loop_state.append(
-                    {
-                        "tool": step_tool,
-                        "kind": "skill",
-                        "status": step_payload.get("status"),
-                        "result": step_payload.get("result"),
-                    }
-                )
+                loop_step = {
+                    "tool": step_tool,
+                    "kind": "skill",
+                    "status": step_payload.get("status"),
+                    "result": step_payload.get("result"),
+                }
+                if step_tool == "vrcforge_agent_desktop_action":
+                    desktop_vision = self._desktop_action_vision_analysis(message, step_payload.get("result"))
+                    if desktop_vision is not None:
+                        loop_step["desktopVision"] = desktop_vision
+                        steps.append(
+                            {
+                                "index": len(steps),
+                                "kind": "vision",
+                                "tool": "desktop_vision_analysis",
+                                "summary": summarize_text(str(desktop_vision.get("text") or desktop_vision.get("notice") or desktop_vision.get("error") or ""), 240),
+                                "status": desktop_vision.get("status") or "",
+                                "provider": desktop_vision.get("provider") or "",
+                                "providerLabel": desktop_vision.get("providerLabel") or "",
+                                "model": desktop_vision.get("model") or "",
+                                "source": desktop_vision.get("source") or "",
+                                "usage": ensure_dict(desktop_vision.get("usage")),
+                                "imageCount": desktop_vision.get("imageCount") or 0,
+                            }
+                        )
+                loop_state.append(loop_step)
 
             steps.append(
                 {
@@ -3020,7 +3095,19 @@ class AgentGateway:
     @classmethod
     def _desktop_action_is_interactive(cls, params: dict[str, Any]) -> bool:
         return any(
-            item in {"focus_window", "move_pointer", "click", "scroll", "type_text", "key_press"}
+            item in {
+                "focus_window",
+                "move_pointer",
+                "click",
+                "drag",
+                "scroll",
+                "type_text",
+                "key_press",
+                "focus_element",
+                "invoke_element",
+                "set_value",
+                "secondary_action",
+            }
             for item in cls._desktop_action_operations(params)
         )
 
@@ -3030,9 +3117,13 @@ class AgentGateway:
         text_length = 0
         if isinstance(params.get("text"), str):
             text_length += len(str(params.get("text") or ""))
+        if isinstance(params.get("value"), str):
+            text_length += len(str(params.get("value") or ""))
         for step in ensure_list(params.get("steps")):
             if isinstance(step, dict) and isinstance(step.get("text"), str):
                 text_length += len(str(step.get("text") or ""))
+            if isinstance(step, dict) and isinstance(step.get("value"), str):
+                text_length += len(str(step.get("value") or ""))
         return {
             "operation": operations[0] if operations else "",
             "operations": operations[:32],
@@ -3092,6 +3183,109 @@ class AgentGateway:
             ]
         summary["resultKeys"] = sorted(str(key) for key in result)[:32]
         return summary
+
+    @staticmethod
+    def _desktop_action_result_payload(value: Any) -> dict[str, Any]:
+        current = ensure_dict(value)
+        for _ in range(3):
+            nested = ensure_dict(current.get("result"))
+            if not nested:
+                break
+            current = nested
+        return current
+
+    def _desktop_action_vision_analysis(self, message: str, value: Any) -> dict[str, Any] | None:
+        result = self._desktop_action_result_payload(value)
+        screenshot_paths: list[str] = []
+
+        def collect(candidate: dict[str, Any]) -> None:
+            if str(candidate.get("operation") or "") == "screenshot" and candidate.get("artifactPath"):
+                screenshot_paths.append(str(candidate["artifactPath"]))
+            for step in ensure_list(candidate.get("steps"))[:32]:
+                if isinstance(step, dict):
+                    collect(ensure_dict(step.get("result")))
+
+        collect(result)
+        if not screenshot_paths:
+            return None
+        try:
+            attachment = desktop_screenshot_attachment(
+                Path(screenshot_paths[-1]),
+                allowed_root=self.audit_dir / "desktop-captures",
+            )
+        except (OSError, ValueError) as exc:
+            return {
+                "schema": "vrcforge.vision_analysis.v1",
+                "status": "error",
+                "reason": "desktop_screenshot_unreadable",
+                "error": summarize_text(str(exc), 300),
+                "imageCount": 1,
+            }
+        return self._run_vision_analysis(
+            "Analyze this current desktop screenshot for the next action in the user's explicit Computer Use task. "
+            + summarize_text(message, 1200),
+            [attachment],
+        )
+
+    @classmethod
+    def _desktop_action_observation(cls, value: Any) -> str:
+        result = cls._desktop_action_result_payload(value)
+        if not result:
+            return ""
+        parts: list[str] = []
+        for key in ("operation", "summary", "count", "stepCount", "width", "height", "windowHandle", "x", "y", "durationMs"):
+            item = result.get(key)
+            if item not in (None, ""):
+                parts.append(f"{key}={summarize_text(str(item), 240)}")
+        windows = [item for item in ensure_list(result.get("windows")) if isinstance(item, dict)][:12]
+        if windows:
+            parts.append(
+                "windows="
+                + json.dumps(
+                    [
+                        {
+                            "windowHandle": item.get("windowHandle"),
+                            "title": summarize_text(str(item.get("title") or ""), 160),
+                            "className": summarize_text(str(item.get("className") or ""), 80),
+                            "processId": item.get("processId"),
+                            "rect": item.get("rect"),
+                        }
+                        for item in windows
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        controls = [item for item in ensure_list(result.get("controls")) if isinstance(item, dict)][:80]
+        if controls:
+            parts.append(
+                "elements="
+                + json.dumps(
+                    [
+                        {
+                            "index": item.get("index"),
+                            "name": summarize_text(str(item.get("name") or item.get("title") or ""), 120),
+                            "automationId": summarize_text(str(item.get("automationId") or ""), 100),
+                            "controlType": summarize_text(str(item.get("controlType") or item.get("className") or ""), 80),
+                            "enabled": item.get("enabled"),
+                            "offscreen": item.get("offscreen"),
+                            "focused": item.get("focused"),
+                            "rect": item.get("rect"),
+                        }
+                        for item in controls
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        steps = [item for item in ensure_list(result.get("steps")) if isinstance(item, dict)][:32]
+        if steps:
+            step_summaries = []
+            for index, step in enumerate(steps, start=1):
+                nested = cls._desktop_action_observation(step.get("result"))
+                step_summaries.append(f"{int(step.get('index') or index)}:{step.get('operation') or ''}({nested})")
+            parts.append("steps=" + " | ".join(step_summaries))
+        return summarize_text("; ".join(parts), 6000)
 
     def _append_desktop_action_event(self, event: dict[str, Any]) -> dict[str, Any]:
         with self._desktop_action_condition:
@@ -3159,6 +3353,51 @@ class AgentGateway:
                 status_code=403,
             )
         return config
+
+    def issue_computer_use_turn_grant(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.require_computer_use_enabled()
+        params = params or {}
+        client_turn_id = str(params.get("clientTurnId") or params.get("client_turn_id") or "").strip()
+        if not client_turn_id:
+            raise AgentGatewayError("clientTurnId is required for a Computer Use turn grant.", status_code=400)
+        grant_id = f"cug_{secrets.token_urlsafe(24)}"
+        grant = {
+            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+            "clientTurnId": client_turn_id,
+            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
+        }
+        with self._lock:
+            while len(self._computer_use_turn_grants) >= 64:
+                self._computer_use_turn_grants.pop(next(iter(self._computer_use_turn_grants)))
+            self._computer_use_turn_grants[grant_id] = grant
+        return {"ok": True, "schema": "vrcforge.computer_use_turn_grant.v1", "grantId": grant_id}
+
+    def consume_computer_use_turn_grant(
+        self,
+        grant_id: str,
+        *,
+        session_id: str = "",
+        client_turn_id: str = "",
+        project_root: str = "",
+    ) -> None:
+        grant_id = str(grant_id or "").strip()
+        if not grant_id:
+            raise AgentGatewayError(
+                "Computer Use requires a user-issued turn grant from + > Desktop Rescue or /desktop.",
+                status_code=403,
+            )
+        with self._lock:
+            grant = self._computer_use_turn_grants.pop(grant_id, None)
+        if grant is None:
+            raise AgentGatewayError("Computer Use turn grant is missing, invalid, or already consumed.", status_code=403)
+        if str(grant.get("clientTurnId") or "") != str(client_turn_id or "").strip():
+            raise AgentGatewayError("Computer Use turn grant does not match this client turn.", status_code=403)
+        granted_session = str(grant.get("sessionId") or "").strip()
+        if granted_session and granted_session != str(session_id or "").strip():
+            raise AgentGatewayError("Computer Use turn grant does not match this session.", status_code=403)
+        granted_project = str(grant.get("projectRoot") or "").strip()
+        if granted_project and normalize_filesystem_path(granted_project) != normalize_filesystem_path(project_root):
+            raise AgentGatewayError("Computer Use turn grant does not match this project.", status_code=403)
 
     def request_turn_authorized_desktop_action_and_wait(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.require_computer_use_enabled()
@@ -3306,12 +3545,20 @@ class AgentGateway:
                     }
                 self._desktop_action_condition.wait(timeout=max(0.0, deadline - time.monotonic()))
         row = self._desktop_action_rows_by_id().get(action_id) or {}
+        try:
+            cancelled = self.request_desktop_action_cancel(
+                action_id,
+                {"reason": "Computer Use action exceeded its turn wait timeout."},
+            )
+            row = ensure_dict(cancelled.get("action")) or row
+        except AgentGatewayError:
+            pass
         return {
             **payload,
             "status": str(row.get("status") or payload.get("status") or "requested"),
             "event": redact_sensitive(row or ensure_dict(payload.get("event"))),
             "timedOut": True,
-            "error": "Desktop action is still running after the wait timeout.",
+            "error": "Desktop action exceeded the turn wait timeout and cancellation was requested.",
         }
 
     def list_desktop_actions(self, *, limit: int = 50, session_id: str = "", project_root: str = "") -> dict[str, Any]:
@@ -3797,6 +4044,8 @@ class AgentGateway:
                 raise AgentGatewayError("Desktop action must be claimed before completion.", status_code=409)
             if claimed_bridge != bridge_id:
                 raise AgentGatewayError("Desktop action is claimed by another bridge.", status_code=409)
+            if row_status == "cancel_requested":
+                status = "cancelled"
             error = summarize_text(str(params.get("error") or ""), 500)
             result_payload = redact_sensitive(ensure_dict(params.get("result"))) if params.get("result") else {}
             result_size = len(json.dumps(result_payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
@@ -3939,17 +4188,26 @@ class AgentGateway:
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else 0,
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        return {"ok": True, "progress": self._project_agent_progress(include_deleted=True)[progress_id]}
+        return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
+
+    @staticmethod
+    def _require_agent_item_scope(existing: dict[str, Any], params: dict[str, Any], *, label: str) -> None:
+        requested_session = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        existing_session = str(existing.get("sessionId") or "").strip()
+        if requested_session and requested_session != existing_session:
+            raise AgentGatewayError(f"{label} does not belong to this session.", status_code=404)
+        requested_project = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        existing_project = str(existing.get("projectRoot") or "").strip()
+        if requested_project and normalize_filesystem_path(requested_project) != normalize_filesystem_path(existing_project):
+            raise AgentGatewayError(f"{label} does not belong to this project.", status_code=404)
 
     def update_agent_progress(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         progress_id = str(progress_id or "").strip()
         if not progress_id:
             raise AgentGatewayError("progressId is required.", status_code=400)
-        current = self._project_agent_progress(include_deleted=True)
-        if progress_id not in current:
-            raise AgentGatewayError(f"Progress item was not found: {progress_id}", status_code=404)
-        existing = current[progress_id]
+        existing = self._find_agent_progress(progress_id, params)
+        self._require_agent_item_scope(existing, params, label="Progress item")
         status = str(params.get("status") or existing.get("status") or "pending").strip().lower()
         if status not in {"pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"}:
             raise AgentGatewayError("Progress status must be pending, in_progress, running, completed, cancelled, blocked, or deleted.", status_code=400)
@@ -3965,7 +4223,26 @@ class AgentGateway:
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else int(existing.get("order") or 0),
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
-        return {"ok": True, "progress": self._project_agent_progress(include_deleted=True)[progress_id]}
+        return {"ok": True, "progress": self._find_agent_progress(progress_id, event)}
+
+    def _find_agent_progress(self, progress_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        matches = [
+            item
+            for item in self._project_agent_progress(include_deleted=True).values()
+            if str(item.get("progressId") or "") == progress_id
+        ]
+        requested_session = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        requested_project = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        if requested_session:
+            matches = [item for item in matches if str(item.get("sessionId") or "") == requested_session]
+        if requested_project:
+            normalized_project = normalize_filesystem_path(requested_project)
+            matches = [item for item in matches if normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project]
+        if not matches:
+            raise AgentGatewayError(f"Progress item was not found: {progress_id}", status_code=404)
+        if len(matches) > 1:
+            raise AgentGatewayError("Progress item id is ambiguous; include sessionId and projectRoot.", status_code=409)
+        return matches[0]
 
     def delete_agent_progress(self, progress_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -3978,11 +4255,10 @@ class AgentGateway:
             progress = [
                 item
                 for item in progress
-                if not str(item.get("projectRoot") or "").strip()
-                or normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
+                if normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
             ]
         if session_id:
-            progress = [item for item in progress if str(item.get("sessionId") or "") in {"", session_id}]
+            progress = [item for item in progress if str(item.get("sessionId") or "") == session_id]
         progress.sort(key=lambda item: (int(item.get("order") or 0), str(item.get("createdAt") or "")))
         progress = progress[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in progress], "count": len(progress)}
@@ -4035,6 +4311,7 @@ class AgentGateway:
         if question_id not in current:
             raise AgentGatewayError(f"Question was not found: {question_id}", status_code=404)
         existing = current[question_id]
+        self._require_agent_item_scope(existing, params, label="Question")
         event = {
             "event": "question_answered",
             "status": "answered",
@@ -4054,11 +4331,10 @@ class AgentGateway:
             questions = [
                 item
                 for item in questions
-                if not str(item.get("projectRoot") or "").strip()
-                or normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
+                if normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
             ]
         if session_id:
-            questions = [item for item in questions if str(item.get("sessionId") or "") in {"", session_id}]
+            questions = [item for item in questions if str(item.get("sessionId") or "") == session_id]
         questions.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         questions = questions[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [redact_sensitive(item) for item in questions], "count": len(questions)}
@@ -7501,13 +7777,17 @@ class AgentGateway:
     def _project_agent_progress(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         progress: dict[str, dict[str, Any]] = {}
         deleted: set[str] = set()
+
+        def projection_key(progress_id: str, session_id: str, project_root: str) -> str:
+            return f"{session_id}\0{normalize_filesystem_path(project_root) if project_root else ''}\0{progress_id}"
+
         for event in self._read_jsonl(self.agent_progress_log_path, limit=0):
             event_name = str(event.get("event") or "")
             if event_name == "progress_replaced":
                 session_id = str(event.get("sessionId") or "")
                 project_root = str(event.get("projectRoot") or "")
                 normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
-                for existing_id, existing in list(progress.items()):
+                for existing_key, existing in list(progress.items()):
                     existing_project = str(existing.get("projectRoot") or "")
                     same_session = str(existing.get("sessionId") or "") == session_id
                     same_project = (
@@ -7516,16 +7796,17 @@ class AgentGateway:
                         else existing_project == project_root
                     )
                     if same_session and same_project:
-                        deleted.add(existing_id)
+                        deleted.add(existing_key)
                 for item in ensure_list(event.get("items")):
                     if not isinstance(item, dict):
                         continue
                     progress_id = str(item.get("progressId") or item.get("id") or "").strip()
                     if not progress_id:
                         continue
-                    deleted.discard(progress_id)
-                    previous = progress.get(progress_id, {})
-                    progress[progress_id] = {
+                    item_key = projection_key(progress_id, session_id, project_root)
+                    deleted.discard(item_key)
+                    previous = progress.get(item_key, {})
+                    progress[item_key] = {
                         **previous,
                         **item,
                         "id": progress_id,
@@ -7539,10 +7820,13 @@ class AgentGateway:
             progress_id = str(event.get("progressId") or "").strip()
             if not progress_id:
                 continue
+            event_session = str(event.get("sessionId") or "")
+            event_project = str(event.get("projectRoot") or "")
+            item_key = projection_key(progress_id, event_session, event_project)
             if str(event.get("status") or "") == "deleted" or event_name == "progress_deleted":
-                deleted.add(progress_id)
-            previous = progress.get(progress_id, {})
-            progress[progress_id] = {
+                deleted.add(item_key)
+            previous = progress.get(item_key, {})
+            progress[item_key] = {
                 **previous,
                 **event,
                 "id": progress_id,
@@ -7552,7 +7836,7 @@ class AgentGateway:
             }
         if include_deleted:
             return progress
-        return {progress_id: item for progress_id, item in progress.items() if progress_id not in deleted and str(item.get("status") or "") != "deleted"}
+        return {item_key: item for item_key, item in progress.items() if item_key not in deleted and str(item.get("status") or "") != "deleted"}
 
     def _project_agent_questions(self, *, include_answered: bool = False) -> dict[str, dict[str, Any]]:
         questions: dict[str, dict[str, Any]] = {}
@@ -8669,6 +8953,21 @@ class AgentGateway:
     def _llm_loop_step_observation(self, step: dict[str, Any]) -> str:
         result = step.get("result")
         fields: list[str] = []
+        if str(step.get("tool") or "") == "vrcforge_agent_desktop_action":
+            desktop_observation = self._desktop_action_observation(result)
+            if desktop_observation:
+                fields.append(desktop_observation)
+            vision = ensure_dict(step.get("desktopVision"))
+            if vision:
+                vision_status = str(vision.get("status") or "unknown")
+                fields.append(f"desktopVisionStatus={vision_status}")
+                if vision_status == "analyzed":
+                    fields.append("desktopVision=" + summarize_text(str(vision.get("text") or ""), 4000))
+                else:
+                    fields.append(
+                        "desktopVisionUnavailable="
+                        + summarize_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), 300)
+                    )
         if isinstance(result, dict):
             for key in (
                 "ok",
@@ -9806,6 +10105,60 @@ def summarize_text(text: str, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1] + "…"
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+
+def desktop_screenshot_attachment(path: Path, *, allowed_root: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    root = allowed_root.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Desktop screenshot is outside the managed capture directory.") from exc
+    bitmap = resolved.read_bytes()
+    if len(bitmap) < 54 or bitmap[:2] != b"BM":
+        raise ValueError("Desktop screenshot is not a supported BMP file.")
+    pixel_offset = struct.unpack_from("<I", bitmap, 10)[0]
+    width, signed_height, planes, bit_count, compression = struct.unpack_from("<iiHHI", bitmap, 18)
+    if width <= 0 or signed_height == 0 or planes != 1 or bit_count != 32 or compression != 0:
+        raise ValueError("Desktop screenshot must be an uncompressed 32-bit BMP.")
+    height = abs(signed_height)
+    source_stride = width * 4
+    if pixel_offset + source_stride * height > len(bitmap):
+        raise ValueError("Desktop screenshot pixel data is incomplete.")
+    scale = min(1.0, DESKTOP_VISION_MAX_WIDTH / width, DESKTOP_VISION_MAX_HEIGHT / height)
+    target_width = max(1, int(width * scale))
+    target_height = max(1, int(height * scale))
+    top_down = signed_height < 0
+    scanlines = bytearray()
+    for target_y in range(target_height):
+        source_y = min(height - 1, int(target_y * height / target_height))
+        if not top_down:
+            source_y = height - 1 - source_y
+        row_offset = pixel_offset + source_y * source_stride
+        scanlines.append(0)
+        for target_x in range(target_width):
+            source_x = min(width - 1, int(target_x * width / target_width))
+            offset = row_offset + source_x * 4
+            blue, green, red = bitmap[offset : offset + 3]
+            scanlines.extend((red, green, blue))
+    header = struct.pack(">IIBBBBB", target_width, target_height, 8, 2, 0, 0, 0)
+    png = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", zlib.compress(bytes(scanlines), 6)) + _png_chunk(b"IEND", b"")
+    data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    if len(data_url) > RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS:
+        raise ValueError("Desktop screenshot is too large for bounded vision analysis.")
+    return {
+        "id": f"desktop-{stable_hash(str(resolved))[:16]}",
+        "name": "current-desktop.png",
+        "type": "image/png",
+        "size": len(png),
+        "payloadKind": "data_url",
+        "dataUrl": data_url,
+        "replayable": False,
+    }
 
 
 def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:

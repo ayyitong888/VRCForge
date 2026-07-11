@@ -769,6 +769,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     model: str | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
     computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
+    computer_use_grant_id: str | None = Field(default=None, alias="computerUseGrantId")
     computer_use_visual_theme: str | None = Field(default=None, alias="computerUseVisualTheme")
 
     model_config = {"populate_by_name": True}
@@ -779,6 +780,14 @@ class AgentRuntimeCancelRequest(BaseModel):
     turn_id: str | None = Field(default=None, alias="turnId")
     client_turn_id: str | None = Field(default=None, alias="clientTurnId")
     reason: str = "user_stop"
+
+    model_config = {"populate_by_name": True}
+
+
+class ComputerUseTurnGrantRequest(BaseModel):
+    session_id: str | None = Field(default=None, alias="sessionId")
+    client_turn_id: str = Field(alias="clientTurnId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
 
     model_config = {"populate_by_name": True}
 
@@ -2009,11 +2018,12 @@ async def update_agentic_app_advanced_settings(request: AdvancedSettingsRequest)
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    if runtime_request.computer_use_requested:
-        AGENT_GATEWAY.require_computer_use_enabled()
-    payload = await asyncio.to_thread(
-        AGENT_GATEWAY.runtime_message,
-        {
+    try:
+        if runtime_request.computer_use_requested:
+            AGENT_GATEWAY.require_computer_use_enabled()
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.runtime_message,
+            {
             "session_id": runtime_request.session_id,
             "clientTurnId": runtime_request.client_turn_id,
             "message": runtime_request.message,
@@ -2030,14 +2040,31 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             "model": runtime_request.model,
             "history": runtime_request.history,
             "_computerUseRequested": runtime_request.computer_use_requested,
+            "_computerUseGrantId": runtime_request.computer_use_grant_id,
             "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
-        },
-        agent_name=runtime_request.agent_name,
-    )
+            },
+            agent_name=runtime_request.agent_name,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
     await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=payload.get("sessionId") or payload.get("session_id") or ""))
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
+
+
+@app.post("/api/app/agent/computer-use/grants")
+def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.issue_computer_use_turn_grant(
+            {
+                "sessionId": request.session_id,
+                "clientTurnId": request.client_turn_id,
+                "projectRoot": request.project_root,
+            }
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 AGENT_COMPACT_TRANSCRIPT_MAX_CHARS = 60000
@@ -2937,7 +2964,13 @@ def load_chat_transcript_file(path: Path) -> list[dict[str, Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and isinstance(payload.get("chats"), list):
-                chats = [item for item in payload["chats"] if isinstance(item, dict) and not is_empty_chat_transcript(item)]
+                chats = [
+                    sanitized
+                    for item in payload["chats"]
+                    if isinstance(item, dict)
+                    for sanitized in [sanitize_chat_transcript(item)]
+                    if not is_empty_chat_transcript(sanitized)
+                ]
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=f"无法读取会话记录: {exc}") from exc
     return chats
@@ -2970,7 +3003,12 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    chats = [chat for chat in request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS] if not is_empty_chat_transcript(chat)]
+    chats = [
+        sanitized
+        for chat in request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS]
+        for sanitized in [sanitize_chat_transcript(chat)]
+        if not is_empty_chat_transcript(sanitized)
+    ]
     app_chats: list[dict[str, Any]] = []
     project_groups: dict[str, dict[str, Any]] = {}
     for chat in chats:
@@ -3024,6 +3062,18 @@ def is_empty_chat_transcript(chat: dict[str, Any]) -> bool:
     title = str(chat.get("title") or "").strip()
     session_id = str(chat.get("sessionId") or chat.get("session_id") or "").strip()
     return isinstance(items, list) and not items and not title and not session_id
+
+
+def sanitize_chat_transcript(chat: dict[str, Any]) -> dict[str, Any]:
+    items = chat.get("items")
+    if not isinstance(items, list):
+        return chat
+    durable_items = [
+        item
+        for item in items
+        if not isinstance(item, dict) or str(item.get("type") or "") != "streaming"
+    ]
+    return chat if len(durable_items) == len(items) else {**chat, "items": durable_items}
 
 
 PROJECT_PREFS_MAX_PATHS = 64
@@ -19106,7 +19156,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_desktop_action",
-        "Run an explicit desktop action. For Computer Use pass params.operation as list_windows, inspect_window, screenshot, focus_window, move_pointer, click, scroll, type_text, key_press, wait, or sequence; execution stays visible and cancellable in the app. The zero-dependency Win32 adapter exposes native HWND controls, not a UI Automation accessibility tree.",
+        "Run an explicit desktop action. For Computer Use pass params.operation as list_windows, inspect_window, screenshot, focus_window, move_pointer, click, drag, scroll, type_text, key_press, focus_element, invoke_element, set_value, secondary_action, wait, or sequence. inspect_window returns a bounded UI Automation tree when Windows exposes one; element actions accept elementIndex or exact automation selectors. Execution stays visible and cancellable in the app.",
         "supervised-write",
         AGENT_GATEWAY.request_turn_authorized_desktop_action_and_wait,
         write=True,

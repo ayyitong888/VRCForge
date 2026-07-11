@@ -960,7 +960,6 @@ export default function App() {
         workspaceDiff,
         pendingApprovalItems,
         runtimeRuns,
-        runtimeSchedule,
         workspaceProjectLabel: activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat"),
         runtimeConnected,
         unityBridgeComponent,
@@ -986,7 +985,6 @@ export default function App() {
       providerSnapshot.providerLabel,
       runtimeConnected,
       runtimeRuns,
-      runtimeSchedule,
       t,
       toggleWorkspaceDiffReview,
       unityBridgeComponent,
@@ -1000,7 +998,6 @@ export default function App() {
   const {
     workspaceDiffFiles,
     workspaceDiffChanged,
-    runtimePlanItems,
     runtimeFileReferences,
     runtimeReviewEvidence,
     localizeHealthMessage,
@@ -1014,10 +1011,6 @@ export default function App() {
   const hasRightSidebarProjectContext = Boolean(activeRuntimeProjectPath);
   const showRightSidebarStatusSummary = !hasRightSidebarProjectContext && !activeChat;
   const showRightSidebarWorkspaceArtifacts = hasRightSidebarProjectContext;
-  const chooseRuntimePlanOption = (value: string) => {
-    setInput(value);
-    setActiveView("chat");
-  };
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
     try {
@@ -2074,16 +2067,13 @@ export default function App() {
     }
   }
 
-  function stopInteractiveActivity() {
-    stopCurrentRun();
-    for (const action of activeDesktopActions) {
-      if (!["computer_use", "desktop_rescue"].includes(action.action || "")) {
-        continue;
-      }
-      const actionId = action.actionId || action.id || "";
-      if (actionId) {
-        void cancelDesktopAction(actionId);
-      }
+  function stopInteractiveActivity(actionId?: string) {
+    if (currentTurn?.clientTurnId || isChatRunActive()) {
+      stopCurrentRun();
+      return;
+    }
+    if (actionId) {
+      void cancelDesktopAction(actionId);
     }
   }
 
@@ -2737,7 +2727,7 @@ export default function App() {
               onBindProject={bindProject}
               conversation={conversation}
               queued={visibleQueued}
-              agentQuestions={agentQuestions}
+              agentQuestions={sessionId ? agentQuestions : []}
               onAnswerQuestion={answerRuntimeQuestion}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
@@ -2801,7 +2791,7 @@ export default function App() {
               runtimeRunsError={runtimeRunsError}
               rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
               agentGoals={agentGoals}
-              agentProgress={agentProgress}
+              agentProgress={sessionId ? agentProgress : []}
               agentMemory={agentMemory}
               desktopActions={desktopActions}
               desktopBridge={desktopBridge}
@@ -2813,8 +2803,6 @@ export default function App() {
               loadingWorkspaceDiff={loadingWorkspaceDiff}
               workspaceDiffReviewOpen={workspaceDiffReviewOpen}
               loadingWorkspaceDiffPatch={loadingWorkspaceDiffPatch}
-              runtimePlanItems={runtimePlanItems}
-              onChoosePlanOption={chooseRuntimePlanOption}
               runtimeSchedule={runtimeSchedule}
               visibleSubAgentTasks={visibleSubAgentTasks}
               selectedSubAgent={selectedSubAgent}

@@ -14,6 +14,9 @@ const fixtureScript = resolve(repoRoot, "scripts", "desktop_executor_fixture.ps1
 const fixtureOutputPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `fixture-${marker}.json`);
 const fixtureWindowMarker = `${marker}_WINDOW`;
 const fixtureTypedMarker = `${marker}_TYPED_VALUE`;
+const uiaFixtureOutputPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `uia-fixture-${marker}.json`);
+const uiaFixtureWindowMarker = `${marker}_UIA_WINDOW`;
+const uiaFixtureTypedMarker = `${marker}_UIA_VALUE`;
 const appOrigin = process.env.VRCFORGE_APP_ORIGIN || "http://127.0.0.1:8757";
 const appRequestOrigin = "tauri://localhost";
 let appSessionToken = "";
@@ -499,6 +502,23 @@ async function main() {
       })()`,
       30000,
     );
+    output.restoredTransientPlaceholders = await evalValue(
+      cdp,
+      `(() => {
+        const bodyText = document.body.innerText || "";
+        const labels = [
+          "执行中 · 等待模型响应",
+          "執行中 · 等待模型回應",
+          "Running · waiting for model",
+          "実行中 · モデルの応答待ち",
+        ];
+        const found = labels.filter((label) => bodyText.includes(label));
+        return { ok: found.length === 0, found };
+      })()`,
+    );
+    if (!output.restoredTransientPlaceholders?.ok) {
+      output.assertions.push("persisted chat restore left an orphan streaming placeholder visible");
+    }
     output.bootstrap = await appApi("/api/app/bootstrap");
     output.permissionBefore = await appApi("/api/app/permission");
     previousPermissionMode = String(output.permissionBefore?.payload?.permission?.executionMode || "approval");
@@ -727,7 +747,19 @@ async function main() {
       output.assertions.push("packaged backend did not auto-register the embedded ctypes Win32 bridge");
     }
     const supportedOperations = output.bridgeConnected?.payload?.supportedOperations || [];
-    for (const operation of ["list_windows", "inspect_window", "screenshot", "click", "type_text", "sequence"]) {
+    for (const operation of [
+      "list_windows",
+      "inspect_window",
+      "screenshot",
+      "click",
+      "drag",
+      "type_text",
+      "focus_element",
+      "invoke_element",
+      "set_value",
+      "secondary_action",
+      "sequence",
+    ]) {
       if (!supportedOperations.includes(operation)) {
         output.assertions.push(`embedded bridge did not advertise operation: ${operation}`);
       }
@@ -739,6 +771,31 @@ async function main() {
       ((await appApi("/api/app/agent/desktop-actions?limit=50"))?.payload?.actions || []).map((item) => item.actionId),
     );
     const explicitClientTurnId = `${marker}-turn-1`;
+    output.ungrantedTurnResponse = await appApi("/api/app/agent/message", {
+      method: "POST",
+      timeoutMs: 10000,
+      body: {
+        agent_name: "desktop-agent",
+        session_id: probeSessionId,
+        clientTurnId: `${marker}-turn-ungranted`,
+        message: `${marker} ungranted Computer Use gate proof`,
+        computerUseRequested: true,
+      },
+    });
+    if (output.ungrantedTurnResponse?.status !== 403) {
+      output.assertions.push("Computer Use turn without a server-issued grant was not rejected");
+    }
+    output.explicitTurnGrant = await appApi("/api/app/agent/computer-use/grants", {
+      method: "POST",
+      body: {
+        sessionId: probeSessionId,
+        clientTurnId: explicitClientTurnId,
+      },
+    });
+    const explicitTurnGrantId = output.explicitTurnGrant?.payload?.grantId || "";
+    if (!output.explicitTurnGrant?.ok || !explicitTurnGrantId) {
+      output.assertions.push("packaged backend did not issue a Computer Use turn grant");
+    }
     const explicitTurnPromise = appApi("/api/app/agent/message", {
       method: "POST",
       timeoutMs: 45000,
@@ -748,6 +805,7 @@ async function main() {
         clientTurnId: explicitClientTurnId,
         message: `${marker} safe explicit Computer Use turn`,
         computerUseRequested: true,
+        computerUseGrantId: explicitTurnGrantId,
         skill_tool: "vrcforge_agent_desktop_action",
         skill_params: {
           action: "computer_use",
@@ -806,8 +864,16 @@ async function main() {
     if (!output.activityRunning?.ok) {
       output.assertions.push("Computer Use running banner, glow, and cancel control were not visible");
     }
-    if (output.activityRunning?.actionId !== actionId) {
-      output.assertions.push("Computer Use activity surface was not bound to the explicit turn actionId");
+    output.activityRunningAction = await waitForActionStatus(
+      output.activityRunning?.actionId || "",
+      ["requested", "claimed", "cancel_requested", "completed", "failed", "cancelled"],
+      5000,
+    );
+    if (
+      output.activityRunningAction?.action?.sessionId !== probeSessionId ||
+      output.activityRunningAction?.action?.clientTurnId !== explicitClientTurnId
+    ) {
+      output.assertions.push("Computer Use activity surface was not bound to an action owned by the explicit turn");
     }
     if (
       output.activityRunning?.palette !== `semantic-${output.activityRunning?.documentTheme}` ||
@@ -989,6 +1055,97 @@ async function main() {
     if (fixturePayload?.status !== "submitted" || fixturePayload?.text !== fixtureTypedMarker) {
       output.assertions.push("isolated fixture did not submit the exact text typed by the packaged executor");
     }
+
+    // Prove the packaged UI Automation adapter against a second isolated WPF fixture.
+    await rm(uiaFixtureOutputPath, { force: true });
+    fixtureChild = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        fixtureScript,
+        "-Marker",
+        uiaFixtureWindowMarker,
+        "-OutputPath",
+        uiaFixtureOutputPath,
+      ],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    output.uiaFixtureWindowTitle = await waitForFixtureWindow(fixtureChild.pid, uiaFixtureWindowMarker);
+    output.uiaInspectRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+      method: "POST",
+      body: {
+        action: "computer_use",
+        prompt: "Packaged UI Automation inspection proof",
+        sessionId: probeSessionId,
+        clientTurnId: `${marker}-turn-uia-inspect`,
+        params: { operation: "inspect_window", titleContains: uiaFixtureWindowMarker, limit: 100 },
+      },
+    });
+    const uiaInspectActionId = output.uiaInspectRequestedAction?.payload?.actionId || "";
+    output.uiaInspectCompletedAction = await waitForActionStatus(uiaInspectActionId, ["completed", "failed"], 30000);
+    output.uiaInspectActionResult = await readActionResult(uiaInspectActionId);
+    const uiaInspectResult = output.uiaInspectActionResult?.payload?.result || {};
+    const uiaControls = Array.isArray(uiaInspectResult.controls) ? uiaInspectResult.controls : [];
+    const uiaInput = uiaControls.find((item) => item.automationId === "MarkerInput");
+    const uiaSubmit = uiaControls.find((item) => item.automationId === "SubmitButton");
+    output.uiaInspectionProof = {
+      accessibilityTree: uiaInspectResult.accessibilityTree === true,
+      count: uiaControls.length,
+      input: uiaInput || null,
+      submit: uiaSubmit || null,
+    };
+    if (!output.uiaInspectionProof.accessibilityTree || !uiaInput || !uiaSubmit) {
+      output.assertions.push("packaged UI Automation inspection did not find the fixture input and submit controls");
+    }
+    if (uiaInput && uiaSubmit) {
+      output.uiaInputRequestedAction = await appApi("/api/app/agent/desktop-actions", {
+        method: "POST",
+        body: {
+          action: "computer_use",
+          prompt: "Controlled packaged UI Automation input proof",
+          sessionId: probeSessionId,
+          clientTurnId: `${marker}-turn-uia-input`,
+          params: {
+            operation: "sequence",
+            steps: [
+              {
+                operation: "set_value",
+                titleContains: uiaFixtureWindowMarker,
+                elementIndex: uiaInput.index,
+                value: uiaFixtureTypedMarker,
+              },
+              {
+                operation: "invoke_element",
+                titleContains: uiaFixtureWindowMarker,
+                elementIndex: uiaSubmit.index,
+              },
+              { operation: "wait", durationMs: 300 },
+            ],
+          },
+        },
+      });
+      const uiaInputActionId = output.uiaInputRequestedAction?.payload?.actionId || "";
+      output.uiaInputCompletedAction = await waitForActionStatus(uiaInputActionId, ["completed", "failed"], 30000);
+      output.uiaInputActionResult = await readActionResult(uiaInputActionId);
+      if (output.uiaInputCompletedAction?.action?.status !== "completed") {
+        output.assertions.push(`packaged UI Automation input action failed: ${output.uiaInputCompletedAction?.action?.error || "missing action"}`);
+      }
+      let uiaFixturePayload = null;
+      for (let attempt = 0; attempt < 20 && !uiaFixturePayload; attempt += 1) {
+        try {
+          uiaFixturePayload = JSON.parse(await readFile(uiaFixtureOutputPath, "utf8"));
+        } catch {
+          await sleep(100);
+        }
+      }
+      output.uiaFixtureProof = uiaFixturePayload;
+      if (uiaFixturePayload?.status !== "submitted" || uiaFixturePayload?.text !== uiaFixtureTypedMarker) {
+        output.assertions.push("isolated fixture did not submit the exact value set through packaged UI Automation");
+      }
+    }
     const desktopActionLedger = resolve(
       process.env.LOCALAPPDATA || "",
       "VRCForge",
@@ -999,7 +1156,10 @@ async function main() {
       "desktop-actions.jsonl",
     );
     const ledgerText = await readFile(desktopActionLedger, "utf8").catch(() => "");
-    output.inputPrivacy = { ledgerPathFound: Boolean(ledgerText), typedTextPersisted: ledgerText.includes(fixtureTypedMarker) };
+    output.inputPrivacy = {
+      ledgerPathFound: Boolean(ledgerText),
+      typedTextPersisted: ledgerText.includes(fixtureTypedMarker) || ledgerText.includes(uiaFixtureTypedMarker),
+    };
     if (!output.inputPrivacy.ledgerPathFound) {
       output.assertions.push("desktop action JSONL ledger was not found for the packaged privacy check");
     }

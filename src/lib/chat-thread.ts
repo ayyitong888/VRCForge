@@ -66,7 +66,16 @@ export function cacheChatContextUsageFast(chat: ChatThread): ChatThread {
 }
 
 export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
-  return list.filter((chat) => !isUnstartedChat(chat));
+  return list
+    .map((chat) => {
+      const items = stripTransientConversationItems(chat.items);
+      return items.length === chat.items.length ? chat : { ...chat, items };
+    })
+    .filter((chat) => !isUnstartedChat(chat));
+}
+
+export function stripTransientConversationItems(items: ConversationItem[]): ConversationItem[] {
+  return items.filter((item) => item.type !== "streaming");
 }
 
 export function normalizeChatContextUsage(value: unknown): AgentContextUsage | undefined {
