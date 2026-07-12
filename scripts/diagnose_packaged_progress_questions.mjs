@@ -3,7 +3,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const exe = resolve(repoRoot, "dist", "VRCForge_Windows_x64", "VRCForge.exe");
+const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
+const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
+const exe = resolve(packagedRoot, "VRCForge.exe");
 const port = Number(process.env.VRCFORGE_CDP_PORT || "9342");
 const marker = `PQ_PROBE_${Date.now()}`;
 const outPath = resolve(repoRoot, "artifacts", "actual-app-progress", `progress-question-${marker}.json`);
@@ -39,8 +41,9 @@ function runPowerShell(script) {
 
 async function closeExistingVrcforgeProcesses() {
   await runPowerShell(`
+    $packagedRoot = '${packagedRootPowerShell}'
     Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.ProcessName -eq 'VRCForge' -or $_.ProcessName -eq 'vrcforge_backend' -or $_.ProcessName -eq 'vrcforge-agentic-app' } |
+      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
       Stop-Process -Force -ErrorAction SilentlyContinue
   `);
   await waitForPortReleased(15000);
@@ -66,8 +69,9 @@ async function waitForPortReleased(timeoutMs) {
 
 async function processSnapshot() {
   const value = await runPowerShell(`
+    $packagedRoot = '${packagedRootPowerShell}'
     $processes = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.ProcessName -eq 'VRCForge' -or $_.ProcessName -eq 'vrcforge_backend' -or $_.ProcessName -eq 'vrcforge-agentic-app' } |
+      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
       Select-Object Id,ProcessName,Path
     $ports = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
       Select-Object LocalAddress,LocalPort,State,OwningProcess
@@ -225,6 +229,58 @@ async function appApi(path, options = {}) {
   }
 }
 
+async function resolveActiveChatScope(cdp, bootstrap) {
+  const header = await evalValue(
+    cdp,
+    `(() => {
+      const labels = Array.from(document.querySelectorAll("header > div:first-child > span"))
+        .map((node) => (node.textContent || "").trim())
+        .filter(Boolean);
+      return { projectLabel: labels[0] || "", title: labels.at(-1) || "" };
+    })()`,
+  );
+  const projectRows = bootstrap?.payload?.health?.projects?.projects || [];
+  const projectPaths = Array.from(new Set(projectRows.map((item) => String(item?.path || "").trim()).filter(Boolean)));
+  const query = projectPaths.map((path) => `projectPath=${encodeURIComponent(path)}`).join("&");
+  const chatsResponse = await appApi(`/api/app/chats${query ? `?${query}` : ""}`);
+  const chats = Array.isArray(chatsResponse?.payload?.chats) ? chatsResponse.payload.chats : [];
+  const titleMatches = chats.filter(
+    (chat) =>
+      (String(chat?.sessionId || "").trim() || String(chat?.projectPath || "").trim()) &&
+      String(chat?.title || "").trim() === String(header?.title || "").trim(),
+  );
+  const projectMatches = titleMatches.filter((chat) => {
+    const projectRoot = String(chat?.projectPath || "").replace(/[\\/]+$/, "");
+    const projectName = projectRoot.split(/[\\/]/).at(-1) || "";
+    return projectName === String(header?.projectLabel || "").trim();
+  });
+  const candidates = projectMatches.length ? projectMatches : titleMatches;
+  candidates.sort((left, right) => String(right?.updatedAt || "").localeCompare(String(left?.updatedAt || "")));
+  const chat = candidates[0];
+  return {
+    ok: Boolean(chat?.sessionId || chat?.projectPath),
+    projectLabel: String(header?.projectLabel || ""),
+    title: String(header?.title || ""),
+    chatId: String(chat?.id || ""),
+    sessionId: String(chat?.sessionId || ""),
+    projectRoot: String(chat?.projectPath || ""),
+    candidateCount: candidates.length,
+  };
+}
+
+async function waitForActiveChatScope(cdp, bootstrap, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await resolveActiveChatScope(cdp, bootstrap);
+    if (latest.ok) {
+      return latest;
+    }
+    await sleep(500);
+  }
+  return latest || { ok: false, projectLabel: "", title: "", chatId: "", sessionId: "", projectRoot: "", candidateCount: 0 };
+}
+
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
   await closeExistingVrcforgeProcesses();
@@ -245,6 +301,8 @@ async function main() {
     assertions: [],
   };
   let cdp = null;
+  let activeScope = null;
+  let createdQuestionId = "";
   try {
     const page = await waitForCdpTarget();
     cdp = connectCdp(page.webSocketDebuggerUrl);
@@ -262,6 +320,11 @@ async function main() {
       30000,
     );
     output.bootstrap = await appApi("/api/app/bootstrap");
+    activeScope = await waitForActiveChatScope(cdp, output.bootstrap);
+    output.activeScope = activeScope;
+    if (!activeScope.ok) {
+      throw new Error(`Could not resolve the active chat session: ${JSON.stringify(activeScope)}`);
+    }
 
     const progressTitle = `${marker} progress active`;
     const questionText = `${marker} choose acceptance path`;
@@ -272,6 +335,8 @@ async function main() {
     output.progressCreate = await appApi("/api/app/agent/progress/replace", {
       method: "POST",
       body: {
+        sessionId: activeScope.sessionId,
+        projectRoot: activeScope.projectRoot,
         items: [
           { id: `${marker}-progress-1`, title: `${marker} read old todos`, status: "completed", order: 1, owner: "agent" },
           { id: `${marker}-progress-2`, title: progressTitle, status: "in_progress", order: 2, owner: "agent" },
@@ -282,6 +347,8 @@ async function main() {
     output.questionCreate = await appApi("/api/app/agent/questions", {
       method: "POST",
       body: {
+        sessionId: activeScope.sessionId,
+        projectRoot: activeScope.projectRoot,
         header: "Acceptance",
         question: questionText,
         options: Array.from({ length: 8 }, (_, index) => ({
@@ -292,6 +359,7 @@ async function main() {
         })),
       },
     });
+    createdQuestionId = output.questionCreate?.payload?.question?.questionId || "";
 
     output.visible = await waitForEval(
       cdp,
@@ -358,14 +426,15 @@ async function main() {
       })()`,
       15000,
     );
-    const questionId = output.questionCreate?.payload?.question?.questionId || "";
-    output.answerApi = questionId
-      ? await appApi(`/api/app/agent/questions?includeAnswered=true&limit=20`)
+    const scopeQuery = new URLSearchParams({
+      includeAnswered: "true",
+      limit: "20",
+      sessionId: activeScope.sessionId,
+      projectRoot: activeScope.projectRoot,
+    });
+    output.answerApi = createdQuestionId
+      ? await appApi(`/api/app/agent/questions?${scopeQuery}`)
       : { ok: false, status: 0, payload: { error: "questionId missing" } };
-    output.progressCleanup = [];
-    for (const progressId of [`${marker}-progress-1`, `${marker}-progress-2`, `${marker}-progress-3`]) {
-      output.progressCleanup.push(await appApi(`/api/app/agent/progress/${encodeURIComponent(progressId)}`, { method: "DELETE" }));
-    }
 
     if (!output.visible?.ok) {
       output.assertions.push("question card/progress rail layout did not match expected visible state");
@@ -380,6 +449,29 @@ async function main() {
     output.error = String(error && error.stack ? error.stack : error);
     output.assertions.push("probe threw before completion");
   } finally {
+    if (activeScope?.ok) {
+      const cleanupQuery = new URLSearchParams({ sessionId: activeScope.sessionId, projectRoot: activeScope.projectRoot });
+      output.progressCleanup = [];
+      for (const progressId of [`${marker}-progress-1`, `${marker}-progress-2`, `${marker}-progress-3`]) {
+        output.progressCleanup.push(
+          await appApi(`/api/app/agent/progress/${encodeURIComponent(progressId)}?${cleanupQuery}`, { method: "DELETE" }).catch((error) => ({
+            ok: false,
+            error: String(error),
+          })),
+        );
+      }
+      if (createdQuestionId && !output.answered?.ok) {
+        output.questionCleanup = await appApi(`/api/app/agent/questions/${encodeURIComponent(createdQuestionId)}/answer`, {
+          method: "POST",
+          body: {
+            answer: "Release probe cleanup",
+            value: "Release probe cleanup",
+            sessionId: activeScope.sessionId,
+            projectRoot: activeScope.projectRoot,
+          },
+        }).catch((error) => ({ ok: false, error: String(error) }));
+      }
+    }
     if (cdp) {
       cdp.close();
     }

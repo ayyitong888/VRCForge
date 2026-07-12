@@ -676,6 +676,7 @@ export default function App() {
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
+  const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
   const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
   const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
@@ -2729,7 +2730,7 @@ export default function App() {
               onBindProject={bindProject}
               conversation={conversation}
               queued={visibleQueued}
-              agentQuestions={sessionId ? agentQuestions : []}
+              agentQuestions={hasAgentRuntimeScope ? agentQuestions : []}
               onAnswerQuestion={answerRuntimeQuestion}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
@@ -2793,7 +2794,7 @@ export default function App() {
               runtimeRunsError={runtimeRunsError}
               rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
               agentGoals={agentGoals}
-              agentProgress={sessionId ? agentProgress : []}
+              agentProgress={hasAgentRuntimeScope ? agentProgress : []}
               agentMemory={agentMemory}
               desktopActions={desktopActions}
               desktopBridge={desktopBridge}

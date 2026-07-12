@@ -3,7 +3,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const exe = resolve(repoRoot, "dist", "VRCForge_Windows_x64", "VRCForge.exe");
+const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
+const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
+const exe = resolve(packagedRoot, "VRCForge.exe");
 const port = Number(process.env.VRCFORGE_CDP_PORT || "9341");
 const marker = `WORKFLOW_PROBE_${Date.now()}`;
 const outPath = resolve(repoRoot, "artifacts", "latency", `packaged-workflows-${marker}.json`);
@@ -58,8 +60,9 @@ async function waitForPortReleased(timeoutMs) {
 
 async function closeExistingVrcforgeProcesses() {
   await runPowerShell(`
+    $packagedRoot = '${packagedRootPowerShell}'
     Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.ProcessName -eq 'VRCForge' -or $_.ProcessName -eq 'vrcforge_backend' -or $_.ProcessName -eq 'vrcforge-agentic-app' } |
+      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
       Stop-Process -Force -ErrorAction SilentlyContinue
   `);
   await waitForPortReleased(15000);
@@ -67,8 +70,9 @@ async function closeExistingVrcforgeProcesses() {
 
 async function processSnapshot() {
   return runPowerShell(`
+    $packagedRoot = '${packagedRootPowerShell}'
     $processes = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.ProcessName -eq 'VRCForge' -or $_.ProcessName -eq 'vrcforge_backend' -or $_.ProcessName -eq 'vrcforge-agentic-app' } |
+      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
       Select-Object Id,ProcessName,Path
     $ports = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
       Select-Object LocalAddress,LocalPort,State,OwningProcess
