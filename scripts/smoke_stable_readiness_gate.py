@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,8 +59,6 @@ COMPATIBILITY_TERMS = (
     "Known safe profiles",
 )
 AVATAR_ENCRYPTION_BOUNDARY_TERMS = (
-    "Current source version: `1.0.1`",
-    "Latest published stable release: `1.0.0`",
     "Avatar Encryption / Anti-Rip addon",
     "private-addon connector",
     "private module required",
@@ -106,7 +106,7 @@ def main() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check VRCForge 1.0 public-stable readiness documentation gates.")
+    parser = argparse.ArgumentParser(description="Check VRCForge public-stable readiness and release evidence gates.")
     parser.add_argument("--version", default=read_text_file(Path("VERSION")).strip() if Path("VERSION").is_file() else "")
     parser.add_argument("--compatibility-matrix", default="docs/COMPATIBILITY_MATRIX.md")
     parser.add_argument("--release-manifest", default="dist/release/release-manifest.json")
@@ -148,7 +148,9 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     steps.append(check_doc_contains(Path(args.compatibility_matrix), "compatibility_matrix.exists", COMPATIBILITY_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/OPTIMIZATION_STRATEGY.md"), "optimizer_state_machine.public", OPTIMIZER_STATE_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/RELEASE_CHECKLIST.md"), "release_checklist.stable_gate", ("smoke_stable_readiness_gate.py", "COMPATIBILITY_MATRIX", "support bundle"), required=True))
-    steps.append(check_release_manifest(Path(args.release_manifest), version))
+    release_manifest_path = Path(args.release_manifest)
+    steps.append(check_release_manifest(release_manifest_path, version))
+    manifest_hashes = release_manifest_hashes(release_manifest_path)
 
     # Resolve smoke/proof artifacts once so the same path feeds both the content
     # check and the optional freshness guard below.
@@ -161,12 +163,19 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     external_agent_path = resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")
     installer_path = resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")
 
-    steps.append(check_packaged_backend(packaged_backend_path, version))
-    steps.append(check_payload_zip(payload_zip_path, version))
+    payload_name = f"VRCForge_Windows_x64_{version}.zip"
+    steps.append(check_packaged_backend(packaged_backend_path, version, manifest_hashes.get(payload_name, "")))
+    steps.append(check_payload_zip(payload_zip_path, version, manifest_hashes.get(payload_name, "")))
     steps.append(check_golden_path_matrix(golden_path_matrix_path, require_live_writes=require_live_writes))
     steps.append(check_optimizer_request_guard(optimizer_guard_path))
     steps.append(check_external_agent_smoke(external_agent_path))
-    steps.append(check_installer_smoke(installer_path))
+    steps.append(
+        check_installer_smoke(
+            installer_path,
+            version,
+            manifest_hashes.get("VRCForge_Offline_Installer_x64.exe", ""),
+        )
+    )
 
     # Freshness guard (opt-in). Default 0 disables it so existing callers keep their
     # exact behavior; CI/release can pass a window so a stale-but-passing artifact
@@ -299,6 +308,7 @@ def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
     required_names = [*RELEASE_ARTIFACTS, f"VRCForge_Windows_x64_{version}.zip"]
     missing: list[str] = []
     checksum_mismatches: list[str] = []
+    invalid_checksums: list[str] = []
     base_dir = path.parent
     for name in required_names:
         item = artifacts_by_name.get(name)
@@ -312,10 +322,27 @@ def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
             missing.append(str(artifact_path))
             continue
         expected_sha = str(item.get("sha256") or item.get("sha256sum") or "").lower()
-        if expected_sha and sha256_file(artifact_path) != expected_sha:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            invalid_checksums.append(name)
+        elif sha256_file(artifact_path) != expected_sha:
             checksum_mismatches.append(name)
     manifest_version = str(payload.get("version") or "").strip()
-    ok = manifest_version == version and not missing and not checksum_mismatches
+    manifest_commit = str(payload.get("commit") or "").strip().lower()
+    head_commit = current_git_commit()
+    commit_ok = bool(
+        re.fullmatch(r"[0-9a-f]{40}", manifest_commit)
+        and (not head_commit or manifest_commit == head_commit)
+    )
+    uv_sha = str(payload.get("uvDownloadSha256") or "").strip().lower()
+    uv_sha_ok = bool(re.fullmatch(r"[0-9a-f]{64}", uv_sha))
+    ok = bool(
+        manifest_version == version
+        and commit_ok
+        and uv_sha_ok
+        and not missing
+        and not invalid_checksums
+        and not checksum_mismatches
+    )
     return evidence_step(
         "release_artifacts.manifest",
         ok,
@@ -323,14 +350,51 @@ def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
         path,
         category="release",
         schema="release-manifest",
-        fields_checked=["version", "commit", "artifacts[].name", "artifacts[].sha256"],
+        fields_checked=["version", "commit", "uvDownloadSha256", "artifacts[].name", "artifacts[].sha256"],
         missing=missing,
         reason="" if ok else "release manifest is missing required artifacts or checksum evidence",
-        details={"version": manifest_version, "expectedVersion": version, "checksumMismatches": checksum_mismatches},
+        details={
+            "version": manifest_version,
+            "expectedVersion": version,
+            "commit": manifest_commit,
+            "expectedCommit": head_commit,
+            "commitMatches": commit_ok,
+            "uvDownloadSha256Present": uv_sha_ok,
+            "invalidChecksums": invalid_checksums,
+            "checksumMismatches": checksum_mismatches,
+        },
     )
 
 
-def check_packaged_backend(path: Path, version: str) -> dict[str, Any]:
+def release_manifest_hashes(path: Path) -> dict[str, str]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return {}
+    return {
+        Path(str(item.get("path") or item.get("name") or "")).name: str(
+            item.get("sha256") or item.get("sha256sum") or ""
+        ).strip().lower()
+        for item in normalize_manifest_artifacts(payload)
+    }
+
+
+def current_git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def check_packaged_backend(path: Path, version: str, expected_payload_sha256: str) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("packaged_backend.support_bundle", False, True, path, reason=parse_error, category="packaged-runtime")
@@ -345,6 +409,8 @@ def check_packaged_backend(path: Path, version: str) -> dict[str, Any]:
         and payload.get("supportBundleOk") is True
         and str(payload.get("supportBundlePath") or "")
         and support_path.is_file()
+        and bool(expected_payload_sha256)
+        and payload.get("payloadZipSha256") == expected_payload_sha256
     )
     return evidence_step(
         "packaged_backend.support_bundle",
@@ -353,17 +419,20 @@ def check_packaged_backend(path: Path, version: str) -> dict[str, Any]:
         path,
         category="packaged-runtime",
         schema=str(payload.get("schema") or ""),
-        fields_checked=["ok", "version", "portableMode", "bootstrapOk", "proofIndexOk", "supportBundleOk", "supportBundlePath"],
+        fields_checked=["ok", "version", "portableMode", "bootstrapOk", "proofIndexOk", "supportBundleOk", "supportBundlePath", "payloadZipSha256"],
         reason="" if ok else "packaged backend/support bundle smoke did not pass",
+        details={"payloadZipSha256": payload.get("payloadZipSha256"), "expectedPayloadZipSha256": expected_payload_sha256},
     )
 
 
-def check_payload_zip(path: Path, version: str) -> dict[str, Any]:
+def check_payload_zip(path: Path, version: str, expected_payload_sha256: str) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("payload_zip.unpack", False, True, path, reason=parse_error, category="packaged-runtime")
     zip_path = Path(str(payload.get("zip") or ""))
     missing = payload.get("missing")
+    recorded_sha = str(payload.get("archiveSha256") or "").strip().lower()
+    current_sha = sha256_file(zip_path) if zip_path.is_file() else ""
     ok = bool(
         payload.get("schema") == "vrcforge.payload_zip_unpack.v1"
         and payload.get("ok") is True
@@ -371,6 +440,9 @@ def check_payload_zip(path: Path, version: str) -> dict[str, Any]:
         and isinstance(missing, list)
         and not missing
         and zip_path.is_file()
+        and bool(expected_payload_sha256)
+        and recorded_sha == expected_payload_sha256
+        and current_sha == expected_payload_sha256
     )
     return evidence_step(
         "payload_zip.unpack",
@@ -379,9 +451,10 @@ def check_payload_zip(path: Path, version: str) -> dict[str, Any]:
         path,
         category="packaged-runtime",
         schema=str(payload.get("schema") or ""),
-        fields_checked=["ok", "version", "missing", "zip"],
+        fields_checked=["ok", "version", "missing", "zip", "archiveSha256"],
         missing=[str(item) for item in missing] if isinstance(missing, list) else ["missing[]"],
         reason="" if ok else "portable zip unpack smoke did not pass",
+        details={"archiveSha256": recorded_sha, "currentSha256": current_sha, "expectedSha256": expected_payload_sha256},
     )
 
 
@@ -489,13 +562,15 @@ def check_external_agent_smoke(path: Path) -> dict[str, Any]:
     )
 
 
-def check_installer_smoke(path: Path) -> dict[str, Any]:
+def check_installer_smoke(path: Path, version: str, expected_installer_sha256: str) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("installer.install_uninstall", False, True, path, reason=parse_error, category="installer")
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     phases = summary.get("phases") if isinstance(summary.get("phases"), dict) else {}
     failed_steps = summary.get("failedSteps") if isinstance(summary.get("failedSteps"), list) else []
+    steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    by_name = {str(step.get("name") or ""): step for step in steps if isinstance(step, dict)}
     admin_blocked = bool(
         payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1"
         and summary.get("status") == "blocked"
@@ -504,7 +579,32 @@ def check_installer_smoke(path: Path) -> dict[str, Any]:
         and phases.get("uninstall") == "blocked"
         and "admin" in str(summary.get("blockedReason") or "").lower()
     )
-    ok = bool(payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1" and payload.get("ok") is True and summary.get("status") == "passed")
+    required_steps_ok = all(
+        by_name.get(name, {}).get("ok") is True
+        for name in (
+            "admin.check",
+            "install.payload_verify",
+            "installed_backend.health",
+            "installed_backend.cleanup",
+            "uninstall.command",
+            "uninstall.removed",
+            "preservation.after_uninstall",
+        )
+    )
+    ok = bool(
+        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1"
+        and payload.get("ok") is True
+        and summary.get("status") == "passed"
+        and failed_steps == []
+        and phases.get("install") == "passed"
+        and phases.get("uninstall") == "passed"
+        and phases.get("preservation") == "passed"
+        and required_steps_ok
+        and by_name.get("installed_backend.health", {}).get("version") == version
+        and by_name.get("installed_backend.health", {}).get("portableMode") is True
+        and bool(expected_installer_sha256)
+        and payload.get("installerSha256") == expected_installer_sha256
+    )
     return evidence_step(
         "installer.install_uninstall",
         ok,
@@ -513,9 +613,15 @@ def check_installer_smoke(path: Path) -> dict[str, Any]:
         category="installer",
         schema=str(payload.get("schema") or ""),
         status="passed" if ok else ("blocked" if admin_blocked else "failed"),
-        fields_checked=["ok", "summary.status", "failedSteps", "phases.install", "phases.uninstall", "blockedReason"],
+        fields_checked=["ok", "summary.status", "failedSteps", "phases.install", "phases.uninstall", "phases.preservation", "installed_backend.health", "installed_backend.cleanup", "preservation.after_uninstall", "installerSha256", "blockedReason"],
         reason="" if ok else ("installer requires Administrator elevation" if admin_blocked else "installer install/uninstall smoke did not pass"),
-        details={"adminBlocked": admin_blocked, "summary": summary},
+        details={
+            "adminBlocked": admin_blocked,
+            "summary": summary,
+            "requiredStepsOk": required_steps_ok,
+            "installerSha256": payload.get("installerSha256"),
+            "expectedInstallerSha256": expected_installer_sha256,
+        },
     )
 
 

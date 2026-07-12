@@ -85,6 +85,7 @@ class GoldenPathMatrixSmoke:
         self.artifact_root = Path.cwd() / "artifacts" / "golden-path-matrix"
         self.paths: list[dict[str, Any]] = []
         self.bootstrap_payload: dict[str, Any] = {}
+        self.unity_unavailable_reason = ""
         self.project_root = str(Path(args.project_root).expanduser().resolve()) if args.project_root else ""
         self.avatar_path = str(args.avatar_path or "")
         self.outfit_package = resolve_optional_path(args.outfit_package)
@@ -143,30 +144,59 @@ class GoldenPathMatrixSmoke:
             bootstrap = self.request_app_json("GET", "/api/app/bootstrap")
             self.bootstrap_payload = bootstrap
             self.set_project_from_bootstrap(bootstrap)
+            bootstrap_version = str(ensure_dict(bootstrap.get("app")).get("version") or bootstrap.get("version") or "").strip()
             steps.append(
                 {
                     "name": "runtime.bootstrap",
-                    "ok": bool(bootstrap.get("ok", True)),
-                    "version": ensure_dict(bootstrap.get("app")).get("version") or bootstrap.get("version"),
+                    "ok": bool(bootstrap.get("ok", True)) and bool(bootstrap_version),
+                    "version": bootstrap_version,
                     "selectedProject": self.project_root,
                 }
             )
-            doctor = self.request_app_json("GET", "/api/app/doctor")
             components = ensure_dict(ensure_dict(bootstrap.get("health")).get("components"))
             unity_components = {
                 key: value
                 for key, value in components.items()
                 if any(fragment in key.lower() for fragment in ("unity", "mcp", "vrcforge"))
             }
+            self.remember_unity_unavailable(confirmed_unity_unavailable_from_components(components))
+            doctor = self.request_app_json("GET", "/api/app/doctor")
+            self.remember_unity_unavailable(confirmed_unity_unavailable_from_doctor(doctor))
+            doctor_contract_error = doctor_hard_failure_reason(doctor, bootstrap_version)
+            doctor_report_ok = bool(doctor.get("ok", True))
+            doctor_accepted = not doctor_contract_error and (
+                doctor_report_ok or self.safe_default_unity_unavailable()
+            )
             steps.append(
                 {
                     "name": "doctor.report",
-                    "ok": bool(doctor.get("ok", True)),
+                    "ok": doctor_accepted,
+                    "reportOk": doctor_report_ok,
                     "schema": doctor.get("schema"),
+                    "version": doctor.get("version"),
                     "status": doctor.get("status") or ensure_dict(doctor.get("summary")).get("status"),
+                    "contractError": doctor_contract_error,
                     "unityComponents": unity_components,
                 }
             )
+            if self.safe_default_unity_unavailable() and all(step.get("ok") for step in steps):
+                self.add_path(
+                    "install_doctor_provider_connect",
+                    "Install -> Doctor -> provider fallback -> Unity connect",
+                    status="skipped",
+                    mode="safe",
+                    required=False,
+                    steps=[
+                        *steps,
+                        {
+                            "name": "unity.connect",
+                            "ok": True,
+                            "status": "skipped",
+                            "reason": self.unity_unavailable_reason,
+                        },
+                    ],
+                )
+                return
             self.add_path(
                 "install_doctor_provider_connect",
                 "Install -> Doctor -> provider fallback -> Unity connect",
@@ -213,6 +243,14 @@ class GoldenPathMatrixSmoke:
                 required=False,
             )
             return
+        if self.safe_default_unity_unavailable():
+            self.add_skipped(
+                "scan_avatar_validation",
+                "Scan avatar -> validation report",
+                self.unity_unavailable_reason,
+                required=False,
+            )
+            return
         steps: list[dict[str, Any]] = []
         try:
             avatars = self.request_app_json("POST", "/api/app/avatars", {"projectPath": self.project_root})
@@ -238,6 +276,15 @@ class GoldenPathMatrixSmoke:
                 steps=steps,
             )
         except Exception as exc:  # noqa: BLE001
+            if not self.args.include_live_writes and is_confirmed_unity_unavailable_http_error(exc, "/api/app/avatars"):
+                self.remember_unity_unavailable(str(exc))
+                self.add_skipped(
+                    "scan_avatar_validation",
+                    "Scan avatar -> validation report",
+                    self.unity_unavailable_reason,
+                    required=False,
+                )
+                return
             self.add_path(
                 "scan_avatar_validation",
                 "Scan avatar -> validation report",
@@ -394,6 +441,14 @@ class GoldenPathMatrixSmoke:
                 required=False,
             )
             return
+        if self.safe_default_unity_unavailable():
+            self.add_skipped(
+                "model_optimization_validation_rollback",
+                "Model optimization profile -> optimizer step -> validation -> rollback",
+                self.unity_unavailable_reason,
+                required=False,
+            )
+            return
         steps: list[dict[str, Any]] = []
         try:
             plan = self.request_app_json(
@@ -416,6 +471,15 @@ class GoldenPathMatrixSmoke:
                 }
             )
         except Exception as exc:  # noqa: BLE001
+            if not self.args.include_live_writes and is_confirmed_unity_unavailable_http_error(exc, "/api/app/optimization/plan"):
+                self.remember_unity_unavailable(str(exc))
+                self.add_skipped(
+                    "model_optimization_validation_rollback",
+                    "Model optimization profile -> optimizer step -> validation -> rollback",
+                    self.unity_unavailable_reason,
+                    required=False,
+                )
+                return
             self.add_path(
                 "model_optimization_validation_rollback",
                 "Model optimization profile -> optimizer step -> validation -> rollback",
@@ -788,6 +852,13 @@ class GoldenPathMatrixSmoke:
         if selected:
             self.project_root = selected
 
+    def remember_unity_unavailable(self, reason: str) -> None:
+        if reason and not self.unity_unavailable_reason:
+            self.unity_unavailable_reason = reason
+
+    def safe_default_unity_unavailable(self) -> bool:
+        return not bool(self.args.include_live_writes) and bool(self.unity_unavailable_reason)
+
     def add_skipped(
         self,
         path_id: str,
@@ -872,13 +943,108 @@ def path_effective_ok(status: str, *, required: bool, strict: bool) -> bool:
     return False
 
 
+def confirmed_unity_unavailable_from_components(components: dict[str, Any]) -> str:
+    bridge = ensure_dict(components.get("unityMcpBridgeReachable"))
+    bridge_status = str(bridge.get("status") or "").lower()
+    bridge_diagnostic = " ".join(str(bridge.get(key) or "") for key in ("message", "detail"))
+    if bridge_status in {"warning", "error"} and explicitly_unavailable_diagnostic(bridge_diagnostic):
+        return "Unity/MCP-dependent path skipped: bootstrap confirms the Unity MCP bridge is unavailable."
+
+    instance = ensure_dict(components.get("unityMcpInstance"))
+    instance_status = str(instance.get("status") or "").lower()
+    instance_detail = ensure_dict(instance.get("detail"))
+    if instance_status in {"warning", "error"} and (
+        instance_detail.get("activeInstanceCount") == 0
+        or "no unity instance" in str(instance.get("message") or "").lower()
+        or "not registered" in str(instance.get("message") or "").lower()
+    ):
+        return "Unity/MCP-dependent path skipped: bootstrap confirms no Unity editor instance is registered."
+    return ""
+
+
+def confirmed_unity_unavailable_from_doctor(doctor: dict[str, Any]) -> str:
+    for check in ensure_list(doctor.get("checks")):
+        if not isinstance(check, dict):
+            continue
+        check_id = str(check.get("id") or "")
+        status = str(check.get("status") or "").lower()
+        diagnostic = " ".join(str(check.get(key) or "") for key in ("message", "whatFailed", "howToFix", "detail"))
+        if check_id == "unity.mcp.bridge" and status in {"warning", "error"} and explicitly_unavailable_diagnostic(diagnostic):
+            return "Unity/MCP-dependent path skipped: Doctor confirms the Unity MCP bridge is unavailable."
+        if check_id == "unity.mcp.instance" and status in {"warning", "error"} and explicitly_unavailable_diagnostic(diagnostic):
+            return "Unity/MCP-dependent path skipped: Doctor confirms no usable Unity editor instance."
+    return ""
+
+
+def explicitly_unavailable_diagnostic(value: str) -> bool:
+    lowered = str(value or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "not reachable",
+            "not connected",
+            "no unity instance",
+            "no unity editor instance",
+            "no usable unity",
+            "not registered",
+            "connection refused",
+            "server is not ready",
+            "bridge unavailable",
+        )
+    )
+
+
+def doctor_hard_failure_reason(doctor: dict[str, Any], bootstrap_version: str) -> str:
+    if doctor.get("schema") != "vrcforge.doctor.v1":
+        return "Doctor returned an unexpected schema."
+    doctor_version = str(doctor.get("version") or "").strip()
+    if not bootstrap_version or not doctor_version:
+        return "Bootstrap/Doctor version evidence is missing."
+    if doctor_version != bootstrap_version:
+        return f"Bootstrap/Doctor version mismatch: {bootstrap_version} != {doctor_version}."
+
+    checks = [check for check in ensure_list(doctor.get("checks")) if isinstance(check, dict)]
+    if doctor.get("ok") is False and not checks:
+        return "Doctor returned ok=false without classified checks."
+    for check in checks:
+        check_id = str(check.get("id") or "")
+        status = str(check.get("status") or "").lower()
+        if status == "ok":
+            continue
+        diagnostic = " ".join(str(check.get(key) or "") for key in ("message", "whatFailed", "whyItMatters", "howToFix")).lower()
+        if any(marker in diagnostic for marker in ("version mismatch", "incompatible version", "unsupported version")):
+            return f"Doctor reported a version error in {check_id or 'an unknown check'}."
+        if check_id == "doctor.degraded":
+            return "Doctor diagnostics degraded before Unity availability could be assessed safely."
+        if status == "error" and not check_id.startswith(("unity.", "package.")):
+            return f"Doctor reported a non-Unity error in {check_id or 'an unknown check'}."
+    return ""
+
+
+def is_confirmed_unity_unavailable_http_error(exc: Exception, endpoint: str) -> bool:
+    text = str(exc)
+    if not text.lower().startswith(f"http 503 from {endpoint}:".lower()):
+        return False
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "unity mcp server is not ready",
+            "no unity instances connected",
+            "unity bridge unavailable",
+            "connection refused",
+        )
+    )
+
+
 def validation_summary(payload: dict[str, Any]) -> dict[str, Any]:
     summary = ensure_dict(payload.get("summary"))
     gate = ensure_dict(payload.get("gate"))
     gate_status = summary.get("gateStatus") or gate.get("status")
+    report_ok = payload.get("ok") is True
     return {
-        "ok": payload.get("schema") == "vrcforge.validation.v1" and gate_status != "blocked",
-        "reportOk": bool(payload.get("ok", True)),
+        "ok": payload.get("schema") == "vrcforge.validation.v1" and report_ok and gate_status == "pass",
+        "reportOk": report_ok,
         "schema": payload.get("schema"),
         "severityCounts": summary.get("severityCounts"),
         "findingCount": summary.get("findingCount"),

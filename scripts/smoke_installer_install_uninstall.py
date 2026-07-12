@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -57,6 +59,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     }
     blocked_reason = ""
     backend_process: subprocess.Popen[str] | None = None
+    install_attempt_owned = False
     sentinel_path = user_data_root / SENTINEL_NAME
     try:
         steps.append(
@@ -131,6 +134,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("Preservation sentinel was not created.")
 
         first_installer = upgrade_installer or installer
+        install_attempt_owned = True
         install_result = run_installer(first_installer, install_dir, args.timeout)
         steps.append(command_step("installer.install", install_result.args, install_result))
         phases["install"] = "passed" if install_result.returncode == 0 else "failed"
@@ -149,6 +153,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
         expected = [
             install_dir / "VRCForge.exe",
+            install_dir / "VERSION",
             install_dir / "backend" / "vrcforge_backend.exe",
             install_dir / "dashboard" / "index.html",
             install_dir / "Uninstall.exe",
@@ -158,50 +163,52 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         if missing:
             raise RuntimeError("Installed payload is incomplete.")
 
+        if port_is_open(args.backend_port):
+            raise RuntimeError(f"Backend smoke port {args.backend_port} is already in use.")
+        expected_version = (install_dir / "VERSION").read_text(encoding="utf-8").strip()
         backend_process = start_installed_backend(args, install_dir, user_data_root)
-        health = wait_for_health(args.backend_port, args.timeout)
+        health = wait_for_health(args.backend_port, args.timeout, backend_process)
+        process_alive = backend_process.poll() is None
+        health_ok = bool(
+            process_alive
+            and health.get("version") == expected_version
+            and health.get("portableMode") is True
+        )
         steps.append(
             {
                 "name": "installed_backend.health",
-                "ok": bool(health.get("version")),
+                "ok": health_ok,
                 "version": health.get("version"),
+                "expectedVersion": expected_version,
                 "portableMode": health.get("portableMode"),
+                "processAlive": process_alive,
+                "pid": backend_process.pid,
                 "userDataRoot": str(user_data_root),
             }
         )
-        if not health.get("version"):
-            raise RuntimeError("Installed backend health probe did not return a version.")
+        if not health_ok:
+            raise RuntimeError("Installed backend health did not match the installed payload.")
         stop_process(backend_process)
-        backend_process = None
-
-        uninstall = install_dir / "Uninstall.exe"
-        uninstall_cmd = [str(uninstall), "/S"]
-        uninstall_result = subprocess.run(uninstall_cmd, cwd=str(install_dir.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=args.timeout, check=False)
-        steps.append(command_step("installer.uninstall", uninstall_cmd, uninstall_result))
-        phases["uninstall"] = "passed" if uninstall_result.returncode == 0 else "failed"
-        if uninstall_result.returncode != 0:
-            raise RuntimeError("Uninstaller returned a non-zero exit code.")
-        removed = wait_for_path_removed(install_dir, timeout=30.0)
-        empty_remaining = bool(install_dir.exists() and is_empty_directory(install_dir))
-        cleanup_removed = False
-        if not removed and empty_remaining:
-            try:
-                install_dir.rmdir()
-                cleanup_removed = not install_dir.exists()
-            except OSError:
-                cleanup_removed = False
-        removed = removed or cleanup_removed
+        backend_cleanup_ok = wait_for_port_released(args.backend_port, timeout=10.0)
         steps.append(
             {
-                "name": "uninstall.removed",
-                "ok": removed,
-                "installDir": str(install_dir),
-                "emptyDirectoryRemaining": empty_remaining,
-                "smokeCleanupRemovedEmptyDir": cleanup_removed,
+                "name": "installed_backend.cleanup",
+                "ok": backend_cleanup_ok,
+                "pid": backend_process.pid,
+                "port": args.backend_port,
+                "portReleased": backend_cleanup_ok,
             }
         )
+        backend_process = None
+        if not backend_cleanup_ok:
+            raise RuntimeError("Installed backend port remained in use after process stop.")
+
+        uninstall_steps, removed = uninstall_installed_payload(install_dir, args.timeout)
+        steps.extend(uninstall_steps)
+        phases["uninstall"] = "passed" if removed else "failed"
         if not removed:
-            raise RuntimeError("Install directory still exists after uninstall.")
+            raise RuntimeError("Installed payload was not removed cleanly.")
+        install_attempt_owned = False
         preserved = sentinel_path.is_file() and read_json_file(sentinel_path).get("id") == sentinel["id"]
         phases["preservation"] = "passed" if preserved else "failed"
         steps.append(
@@ -230,6 +237,13 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         steps.append({"name": "installer_smoke.error", "ok": False, "error": str(exc)})
+        if backend_process is not None:
+            stop_process(backend_process)
+            backend_process = None
+        if install_attempt_owned and install_dir.exists():
+            cleanup_steps, removed = uninstall_installed_payload(install_dir, args.timeout, prefix="failure_cleanup")
+            steps.extend(cleanup_steps)
+            phases["uninstall"] = "passed" if removed else "failed"
         return build_report(
             args,
             installer,
@@ -254,6 +268,48 @@ def run_installer(installer: Path, install_dir: Path, timeout: float) -> subproc
     return subprocess.run(cmd, cwd=str(installer.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
 
 
+def uninstall_installed_payload(
+    install_dir: Path,
+    timeout: float,
+    *,
+    prefix: str = "uninstall",
+) -> tuple[list[dict[str, Any]], bool]:
+    uninstall = install_dir / "Uninstall.exe"
+    if not uninstall.is_file():
+        return ([{"name": f"{prefix}.executable", "ok": False, "path": str(uninstall)}], False)
+    uninstall_cmd = [str(uninstall), "/S"]
+    result = subprocess.run(
+        uninstall_cmd,
+        cwd=str(install_dir.parent),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    steps = [command_step(f"{prefix}.command", uninstall_cmd, result)]
+    removed = result.returncode == 0 and wait_for_path_removed(install_dir, timeout=30.0)
+    empty_remaining = bool(install_dir.exists() and is_empty_directory(install_dir))
+    cleanup_removed = False
+    if result.returncode == 0 and not removed and empty_remaining:
+        try:
+            install_dir.rmdir()
+            cleanup_removed = not install_dir.exists()
+        except OSError:
+            cleanup_removed = False
+    removed = removed or cleanup_removed
+    steps.append(
+        {
+            "name": f"{prefix}.removed",
+            "ok": removed,
+            "installDir": str(install_dir),
+            "emptyDirectoryRemaining": empty_remaining,
+            "smokeCleanupRemovedEmptyDir": cleanup_removed,
+        }
+    )
+    return steps, removed
+
+
 def nsis_install_command(installer: Path, install_dir: Path) -> str:
     # NSIS requires /D to be the final raw command-line segment and not quoted,
     # even when the target path contains spaces.
@@ -267,14 +323,17 @@ def start_installed_backend(args: argparse.Namespace, install_dir: Path, user_da
     artifacts_dir = user_data_root / "artifacts"
     for directory in (config_dir, logs_dir, artifacts_dir):
         directory.mkdir(parents=True, exist_ok=True)
+    settings_path = ensure_runtime_settings(config_dir)
     env = os.environ.copy()
     env.update(
         {
+            "VRCFORGE_APP_DIR": str(install_dir),
             "VRCFORGE_USER_DATA_DIR": str(user_data_root),
             "VRCFORGE_CONFIG_DIR": str(config_dir),
             "VRCFORGE_LOG_DIR": str(logs_dir),
             "VRCFORGE_ARTIFACTS_DIR": str(artifacts_dir),
             "VRCFORGE_DASHBOARD_DIR": str(install_dir / "dashboard"),
+            "VRCFORGE_SETTINGS_PATH": str(settings_path),
         }
     )
     return subprocess.Popen(
@@ -287,15 +346,56 @@ def start_installed_backend(args: argparse.Namespace, install_dir: Path, user_da
     )
 
 
-def wait_for_health(port: int, timeout: float) -> dict[str, Any]:
+def ensure_runtime_settings(config_dir: Path) -> Path:
+    settings_path = config_dir / "settings.json"
+    if settings_path.exists():
+        return settings_path
+    settings_path.write_text(
+        json.dumps(
+            {
+                "dashboard": {"project_roots": []},
+                "paths": {"blendshape_export": "Assets/VRCForge/blendshapes_export.json"},
+            },
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return settings_path
+
+
+def wait_for_health(
+    port: int,
+    timeout: float,
+    process: subprocess.Popen[str] | None = None,
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            return {}
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:  # noqa: S310 - loopback smoke.
                 return json.loads(response.read().decode("utf-8") or "{}")
         except Exception:  # noqa: BLE001
             time.sleep(2)
     return {}
+
+
+def port_is_open(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        client.settimeout(0.25)
+        return client.connect_ex(("127.0.0.1", int(port))) == 0
+
+
+def wait_for_port_released(port: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not port_is_open(port):
+            return True
+        time.sleep(0.1)
+    return not port_is_open(port)
 
 
 def wait_for_path_removed(path: Path, timeout: float) -> bool:
@@ -405,6 +505,16 @@ def read_json_file(path: Path) -> dict[str, Any]:
         return {}
 
 
+def sha256_file(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def build_report(
     args: argparse.Namespace,
     installer: Path,
@@ -426,6 +536,7 @@ def build_report(
         "startedAt": started_at,
         "finishedAt": utc_now(),
         "installer": str(installer),
+        "installerSha256": sha256_file(installer),
         "upgradeInstaller": str(upgrade_installer) if upgrade_installer else "",
         "installDir": str(install_dir),
         "userData": {

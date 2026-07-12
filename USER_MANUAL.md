@@ -5,9 +5,9 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source version: `1.0.1`. Latest published stable release:
-`1.0.0`. The 1.0.1 source line starts an Avatar Encryption /
-Anti-Rip addon connector preview for lilToon and Poiyomi with scan/plan/preview
+Current source / target release version: `1.1.2`. Latest published stable
+release: `1.1.1` until `v1.1.2` is published. The Avatar Encryption / Anti-Rip addon remains a connector preview
+for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
 The public GitHub release does not include the encryption implementation.
 Approved execution still requires explicit approval, checkpoint, validation,
@@ -38,7 +38,7 @@ Paranoid remains preview-only pending additional proof.
 | Saved face tuning presets | 捏脸预设保存与重放 | 已可用 / Available |
 | Locked Blendshapes for partial reroll | 锁定形态键后局部重抽 | 已可用 / Available |
 | Shader / Material tuning | Semantic material tuning for lilToon, Poiyomi, and conservative Generic fallback | 已可用 / Available |
-| Avatar Encryption / Anti-Rip addon | lilToon and Poiyomi scan/plan/preview plus private-addon connector request interfaces; other shader families compatibility-only | 1.0.1 connector preview, approval/checkpoint/rollback required; private module required for execution |
+| Avatar Encryption / Anti-Rip addon | lilToon and Poiyomi scan/plan/preview plus private-addon connector request interfaces; other shader families compatibility-only | Connector preview, approval/checkpoint/rollback required; private module required for execution |
 | Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
 | First-run resilient normal-agent fallback | Optional Unity/skill/project failures do not block ordinary agent chat | 已可用 / Available |
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |
@@ -68,7 +68,7 @@ Paranoid remains preview-only pending additional proof.
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
-| Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | 1.0.1 source line, approval/checkpoint required |
+| Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | Current source line, approval/checkpoint required |
 | External agent connector templates and smoke | HTTP + stdio MCP snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
 | `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |

@@ -105,6 +105,7 @@ def write_json(path: Path, payload: dict) -> None:
 def write_evidence_tree(tmp_path: Path) -> None:
     release_dir = tmp_path / "dist" / "release"
     artifacts = []
+    artifact_hashes = {}
     for name, content in {
         "VRCForge.unitypackage": b"unitypackage",
         "VRCForge_Offline_Installer_x64.exe": b"offline",
@@ -112,8 +113,17 @@ def write_evidence_tree(tmp_path: Path) -> None:
         "VRCForge_Windows_x64_1.0.1.zip": b"zip",
     }.items():
         sha256 = write_bytes(release_dir / name, content)
+        artifact_hashes[name] = sha256
         artifacts.append({"name": name, "path": name, "sha256": sha256})
-    write_json(release_dir / "release-manifest.json", {"version": "1.0.1", "commit": "abc", "artifacts": artifacts})
+    write_json(
+        release_dir / "release-manifest.json",
+        {
+            "version": "1.0.1",
+            "commit": "a" * 40,
+            "uvDownloadSha256": "b" * 64,
+            "artifacts": artifacts,
+        },
+    )
 
     support_bundle = tmp_path / "artifacts" / "packaged-backend-smoke-101" / "support.zip"
     write_bytes(support_bundle, b"support")
@@ -128,6 +138,7 @@ def write_evidence_tree(tmp_path: Path) -> None:
             "proofIndexOk": True,
             "supportBundleOk": True,
             "supportBundlePath": str(support_bundle),
+            "payloadZipSha256": artifact_hashes["VRCForge_Windows_x64_1.0.1.zip"],
         },
     )
     write_json(
@@ -138,6 +149,7 @@ def write_evidence_tree(tmp_path: Path) -> None:
             "version": "1.0.1",
             "missing": [],
             "zip": str(release_dir / "VRCForge_Windows_x64_1.0.1.zip"),
+            "archiveSha256": artifact_hashes["VRCForge_Windows_x64_1.0.1.zip"],
         },
     )
     write_json(
@@ -178,7 +190,21 @@ def write_evidence_tree(tmp_path: Path) -> None:
         {
             "schema": "vrcforge.installer_install_uninstall_smoke.v1",
             "ok": True,
-            "summary": {"status": "passed", "failedSteps": [], "phases": {"install": "passed", "uninstall": "passed"}},
+            "installerSha256": artifact_hashes["VRCForge_Offline_Installer_x64.exe"],
+            "summary": {
+                "status": "passed",
+                "failedSteps": [],
+                "phases": {"install": "passed", "uninstall": "passed", "preservation": "passed", "upgrade": "skipped"},
+            },
+            "steps": [
+                {"name": "admin.check", "ok": True},
+                {"name": "install.payload_verify", "ok": True},
+                {"name": "installed_backend.health", "ok": True, "version": "1.0.1", "portableMode": True},
+                {"name": "installed_backend.cleanup", "ok": True, "portReleased": True},
+                {"name": "uninstall.command", "ok": True},
+                {"name": "uninstall.removed", "ok": True},
+                {"name": "preservation.after_uninstall", "ok": True},
+            ],
         },
     )
 
@@ -321,3 +347,59 @@ def test_require_live_writes_passes_when_live_writes_proven(tmp_path, monkeypatc
     report = gate.build_stable_readiness_gate(make_args(tmp_path, require_live_writes=True))
 
     assert _step(report, "golden_path_matrix.safe_default")["ok"] is True
+
+
+def test_release_manifest_requires_commit_uv_hash_and_artifact_hashes(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    manifest_path = tmp_path / "dist" / "release" / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["commit"] = ""
+    manifest["uvDownloadSha256"] = ""
+    manifest["artifacts"][0]["sha256"] = ""
+    write_json(manifest_path, manifest)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+
+    step = _step(report, "release_artifacts.manifest")
+    assert step["ok"] is False
+    assert step["details"]["commitMatches"] is False
+    assert step["details"]["uvDownloadSha256Present"] is False
+    assert step["details"]["invalidChecksums"]
+
+
+def test_payload_and_backend_smokes_must_match_manifest_zip_hash(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    backend_path = tmp_path / "artifacts" / "packaged-backend-smoke-101" / "packaged-bootstrap-summary.json"
+    payload_path = tmp_path / "artifacts" / "payload-smoke" / "v101-zip-unpack" / "summary.json"
+    backend = json.loads(backend_path.read_text(encoding="utf-8"))
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    backend["payloadZipSha256"] = "0" * 64
+    payload["archiveSha256"] = "0" * 64
+    write_json(backend_path, backend)
+    write_json(payload_path, payload)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+
+    assert _step(report, "packaged_backend.support_bundle")["ok"] is False
+    assert _step(report, "payload_zip.unpack")["ok"] is False
+
+
+def test_installer_smoke_requires_full_phase_and_cleanup_evidence(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    installer_path = tmp_path / "artifacts" / "installer-smoke" / "installer-install-uninstall-test.json"
+    installer = json.loads(installer_path.read_text(encoding="utf-8"))
+    installer["steps"] = []
+    installer["summary"]["phases"]["preservation"] = "skipped"
+    write_json(installer_path, installer)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+
+    step = _step(report, "installer.install_uninstall")
+    assert step["ok"] is False
+    assert step["details"]["requiredStepsOk"] is False

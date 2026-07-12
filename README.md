@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/source-v1.0.1-blue)](https://github.com/ayyitong888/VRCForge)
+[![Version](https://img.shields.io/badge/source-v1.1.2-blue)](https://github.com/ayyitong888/VRCForge)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -12,12 +12,12 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source version: `1.0.1`. Latest published stable release: `1.0.0`.
+Current source / target release version: `1.1.2`. Latest published stable release: `1.1.1` until the `v1.1.2` release is published.
 
 ## Install / 安装
 
 Download the latest release / 下载最新 Release:
-https://github.com/ayyitong888/VRCForge/releases/tag/v1.0.0
+https://github.com/ayyitong888/VRCForge/releases/latest
 
 1. Download and run `VRCForge_Web_Installer_x64.exe` (or `VRCForge_Offline_Installer_x64.exe` for offline install).
 2. Start `VRCForge.exe` from the desktop or Start Menu.
@@ -26,7 +26,7 @@ https://github.com/ayyitong888/VRCForge/releases/tag/v1.0.0
 
 Program files: `%ProgramFiles%\VRCForge`. User data: `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-Portable zip (`VRCForge_Windows_x64_1.0.0.zip`) is also available for no-install/debug use.
+Portable zip (`VRCForge_Windows_x64_1.1.1.zip` for the current published stable release) is also available for no-install/debug use. The versioned `1.1.2` zip appears with the `v1.1.2` release.
 
 ## Features / 功能概览
 
@@ -44,7 +44,7 @@ Portable zip (`VRCForge_Windows_x64_1.0.0.zip`) is also available for no-install
 
 **Doctor / 诊断:** Startup health checks, debug logging, redacted support bundle export.
 
-**Avatar Encryption / Anti-Rip (1.0.1 preview):** lilToon and Poiyomi scan/plan/preview with private-addon connector request interfaces. Windows PC-only; requires separately installed private module for execution.
+**Avatar Encryption / Anti-Rip (preview):** lilToon and Poiyomi scan/plan/preview with private-addon connector request interfaces. Windows PC-only; requires separately installed private module for execution.
 
 ## CLI / 命令行
 

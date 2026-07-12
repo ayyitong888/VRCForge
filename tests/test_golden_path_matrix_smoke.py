@@ -75,7 +75,7 @@ def fake_read_only_request(
             },
         }
     if (method, path) == ("GET", "/api/app/doctor"):
-        return {"ok": True, "schema": "vrcforge.doctor.v1", "status": "ok"}
+        return {"ok": True, "schema": "vrcforge.doctor.v1", "version": "0.9.0-test", "status": "ok"}
     if (method, path) == ("POST", "/api/app/avatars"):
         assert payload == {"projectPath": "E:/unity/Hero"}
         return {"ok": True, "avatars": [{"avatarPath": "Scene/Hero"}], "avatarCount": 1}
@@ -106,6 +106,48 @@ def paths_by_id(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(item["id"]): item for item in report["paths"]}
 
 
+def fake_unity_unavailable_request(
+    base_url: str,
+    method: str,
+    path: str,
+    token: str,
+    payload: dict[str, Any] | None,
+    allow_http_error: bool,
+    timeout: float,
+) -> dict[str, Any]:
+    if (method, path) == ("GET", "/api/app/bootstrap"):
+        return {
+            "ok": True,
+            "app": {"version": "1.1.2"},
+            "health": {
+                "state": {"selected_project_path": "E:/unity/Hero"},
+                "components": {
+                    "backend": {"status": "ok"},
+                    "unityMcpBridgeReachable": {"status": "warning", "message": "Unity MCP bridge is not reachable."},
+                    "unityMcpInstance": {
+                        "status": "warning",
+                        "message": "No Unity instance is registered.",
+                        "detail": {"activeInstanceCount": 0},
+                    },
+                },
+            },
+        }
+    if (method, path) == ("GET", "/api/app/doctor"):
+        return {
+            "ok": False,
+            "schema": "vrcforge.doctor.v1",
+            "version": "1.1.2",
+            "summary": {"errorCount": 1, "warningCount": 2, "unknownCount": 0},
+            "checks": [
+                {"id": "backend.online", "status": "ok"},
+                {"id": "unity.mcp.bridge", "status": "warning", "message": "Unity MCP bridge is not reachable."},
+                {"id": "unity.mcp.instance", "status": "warning", "message": "No Unity instance is registered."},
+                {"id": "package.vrchat_sdk", "status": "error", "message": "VRChat SDK was not detected."},
+            ],
+        }
+    raise AssertionError(f"Unity-dependent request should have been skipped: {method} {path} {payload}")
+
+
 def test_default_matrix_runs_safe_paths_and_skips_live_writes(tmp_path: Path) -> None:
     smoke = load_smoke_module()
     run_calls: list[list[str]] = []
@@ -130,6 +172,212 @@ def test_default_matrix_runs_safe_paths_and_skips_live_writes(tmp_path: Path) ->
     assert matrix["external_agent_write_request_rollback"]["status"] == "skipped"
     assert matrix["vsk_import_dry_run_cleanup"]["status"] == "skipped"
     assert matrix["cli_doctor_readiness_checkpoint"]["status"] == "skipped"
+
+
+def test_safe_default_skips_confirmed_unity_dependencies(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    report = smoke.GoldenPathMatrixSmoke(make_args(tmp_path), request_func=fake_unity_unavailable_request).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is True
+    assert report["summary"]["failedCount"] == 0
+    assert matrix["install_doctor_provider_connect"]["status"] == "skipped"
+    assert matrix["scan_avatar_validation"]["status"] == "skipped"
+    assert matrix["model_optimization_validation_rollback"]["status"] == "skipped"
+    doctor_step = next(step for step in matrix["install_doctor_provider_connect"]["steps"] if step["name"] == "doctor.report")
+    assert doctor_step["reportOk"] is False
+    assert doctor_step["contractError"] == ""
+
+
+def test_strict_mode_still_fails_confirmed_unity_skips(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    report = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, strict=True),
+        request_func=fake_unity_unavailable_request,
+    ).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is False
+    assert matrix["install_doctor_provider_connect"]["status"] == "skipped"
+    assert matrix["install_doctor_provider_connect"]["ok"] is False
+    assert "scan_avatar_validation" in report["summary"]["failedPaths"]
+    assert "model_optimization_validation_rollback" in report["summary"]["failedPaths"]
+
+
+def test_live_write_mode_does_not_downgrade_unity_failures(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(*args: Any) -> dict[str, Any]:
+        method = str(args[1])
+        path = str(args[2])
+        calls.append((method, path))
+        if (method, path) in {("GET", "/api/app/bootstrap"), ("GET", "/api/app/doctor")}:
+            return fake_unity_unavailable_request(*args)
+        if (method, path) == ("POST", "/api/app/avatars"):
+            raise RuntimeError("HTTP 503 from /api/app/avatars: No Unity instances connected")
+        if (method, path) == ("POST", "/api/app/optimization/plan"):
+            raise TimeoutError("timed out")
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    report = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, include_live_writes=True),
+        request_func=fake_request,
+    ).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is False
+    assert matrix["install_doctor_provider_connect"]["status"] == "failed"
+    assert matrix["scan_avatar_validation"]["status"] == "failed"
+    assert matrix["model_optimization_validation_rollback"]["status"] == "failed"
+    assert ("POST", "/api/app/avatars") in calls
+    assert ("POST", "/api/app/optimization/plan") in calls
+
+
+def test_safe_default_does_not_swallow_generic_http_503(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    def fake_request(
+        base_url: str,
+        method: str,
+        path: str,
+        token: str,
+        payload: dict[str, Any] | None,
+        allow_http_error: bool,
+        timeout: float,
+    ) -> dict[str, Any]:
+        if (method, path) == ("GET", "/api/app/bootstrap"):
+            return {
+                "ok": True,
+                "app": {"version": "1.1.2"},
+                "health": {
+                    "state": {"selected_project_path": "E:/unity/Hero"},
+                    "components": {"unityMcpBridgeReachable": {"status": "unknown"}},
+                },
+            }
+        if (method, path) == ("GET", "/api/app/doctor"):
+            return {"ok": True, "schema": "vrcforge.doctor.v1", "version": "1.1.2", "checks": []}
+        if (method, path) == ("POST", "/api/app/avatars"):
+            raise RuntimeError("HTTP 503 from /api/app/avatars: backend database unavailable")
+        if (method, path) == ("POST", "/api/app/optimization/plan"):
+            return {
+                "ok": True,
+                "schema": "vrcforge.optimization.v1",
+                "targetProfile": {"id": "pc_conservative"},
+                "recommendedSteps": [],
+            }
+        raise AssertionError(f"unexpected request: {method} {path} {payload}")
+
+    report = smoke.GoldenPathMatrixSmoke(make_args(tmp_path), request_func=fake_request).run()
+
+    assert report["ok"] is False
+    assert paths_by_id(report)["scan_avatar_validation"]["status"] == "failed"
+
+
+def test_safe_default_accepts_exact_unity_http_503_as_unavailable(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    def fake_request(
+        base_url: str,
+        method: str,
+        path: str,
+        token: str,
+        payload: dict[str, Any] | None,
+        allow_http_error: bool,
+        timeout: float,
+    ) -> dict[str, Any]:
+        if (method, path) == ("GET", "/api/app/bootstrap"):
+            return {
+                "ok": True,
+                "app": {"version": "1.1.2"},
+                "health": {
+                    "state": {"selected_project_path": "E:/unity/Hero"},
+                    "components": {"unityMcpBridgeReachable": {"status": "unknown"}},
+                },
+            }
+        if (method, path) == ("GET", "/api/app/doctor"):
+            return {"ok": True, "schema": "vrcforge.doctor.v1", "version": "1.1.2", "checks": []}
+        if (method, path) == ("POST", "/api/app/avatars"):
+            raise RuntimeError("HTTP 503 from /api/app/avatars: Unity MCP server is not ready yet")
+        raise AssertionError(f"request after Unity 503 should have been skipped: {method} {path} {payload}")
+
+    report = smoke.GoldenPathMatrixSmoke(make_args(tmp_path), request_func=fake_request).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is True
+    assert matrix["scan_avatar_validation"]["status"] == "skipped"
+    assert matrix["model_optimization_validation_rollback"]["status"] == "skipped"
+
+
+def test_safe_default_does_not_swallow_doctor_version_mismatch(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    def fake_request(*args: Any) -> dict[str, Any]:
+        payload = fake_unity_unavailable_request(*args)
+        if (str(args[1]), str(args[2])) == ("GET", "/api/app/doctor"):
+            payload["version"] = "1.1.3"
+        return payload
+
+    report = smoke.GoldenPathMatrixSmoke(make_args(tmp_path), request_func=fake_request).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is False
+    assert matrix["install_doctor_provider_connect"]["status"] == "failed"
+    doctor_step = next(step for step in matrix["install_doctor_provider_connect"]["steps"] if step["name"] == "doctor.report")
+    assert "version mismatch" in doctor_step["contractError"]
+    assert matrix["scan_avatar_validation"]["status"] == "skipped"
+
+
+def test_safe_default_does_not_swallow_doctor_backend_error(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+
+    def fake_request(*args: Any) -> dict[str, Any]:
+        payload = fake_unity_unavailable_request(*args)
+        if (str(args[1]), str(args[2])) == ("GET", "/api/app/doctor"):
+            payload["checks"].append({"id": "backend.online", "status": "error", "message": "Backend state store failed."})
+        return payload
+
+    report = smoke.GoldenPathMatrixSmoke(make_args(tmp_path), request_func=fake_request).run()
+
+    matrix = paths_by_id(report)
+    assert report["ok"] is False
+    assert matrix["install_doctor_provider_connect"]["status"] == "failed"
+    doctor_step = next(step for step in matrix["install_doctor_provider_connect"]["steps"] if step["name"] == "doctor.report")
+    assert "non-Unity error" in doctor_step["contractError"]
+
+
+def test_unity_bridge_protocol_error_is_not_treated_as_normal_absence() -> None:
+    smoke = load_smoke_module()
+
+    reason = smoke.confirmed_unity_unavailable_from_components(
+        {
+            "unityMcpBridgeReachable": {
+                "status": "error",
+                "message": "Unity MCP authentication failed with an incompatible protocol response.",
+            }
+        }
+    )
+
+    assert reason == ""
+
+
+def test_validation_summary_requires_explicit_pass_and_ok_true() -> None:
+    smoke = load_smoke_module()
+
+    assert smoke.validation_summary(
+        {"ok": True, "schema": "vrcforge.validation.v1", "summary": {"gateStatus": "pass"}}
+    )["ok"] is True
+    assert smoke.validation_summary(
+        {"ok": False, "schema": "vrcforge.validation.v1", "summary": {"gateStatus": "pass"}}
+    )["ok"] is False
+    assert smoke.validation_summary(
+        {"ok": True, "schema": "vrcforge.validation.v1", "summary": {"gateStatus": "failed"}}
+    )["ok"] is False
+    assert smoke.validation_summary(
+        {"ok": True, "schema": "vrcforge.validation.v1", "summary": {}}
+    )["ok"] is False
 
 
 def test_strict_mode_treats_skipped_paths_as_failures(tmp_path: Path) -> None:

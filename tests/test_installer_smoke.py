@@ -165,6 +165,103 @@ def test_empty_directory_detection_only_accepts_empty_dirs(tmp_path):
     assert smoke.is_empty_directory(tmp_path / "missing") is False
 
 
+def test_runtime_settings_are_seeded_for_direct_installed_backend_probe(tmp_path):
+    smoke = load_installer_smoke()
+    config_dir = tmp_path / "user-data" / "config"
+    config_dir.mkdir(parents=True)
+
+    settings_path = smoke.ensure_runtime_settings(config_dir)
+
+    assert settings_path == config_dir / "settings.json"
+    payload = smoke.read_json_file(settings_path)
+    assert payload["dashboard"]["project_roots"] == []
+    assert payload["paths"]["blendshape_export"] == "Assets/VRCForge/blendshapes_export.json"
+
+
+def test_runtime_settings_preserve_existing_user_data(tmp_path):
+    smoke = load_installer_smoke()
+    config_dir = tmp_path / "user-data" / "config"
+    config_dir.mkdir(parents=True)
+    settings_path = config_dir / "settings.json"
+    settings_path.write_text('{"custom": true}\n', encoding="utf-8")
+
+    assert smoke.ensure_runtime_settings(config_dir) == settings_path
+    assert smoke.read_json_file(settings_path) == {"custom": True}
+
+
+def test_failure_before_install_does_not_remove_preexisting_directory(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
+    installer.write_bytes(b"fake-installer")
+    install_dir = tmp_path / "Program Files" / "VRCForge"
+    install_dir.mkdir(parents=True)
+    marker = install_dir / "owned-by-user.txt"
+    marker.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(smoke, "is_admin", lambda: True)
+
+    report = smoke.run_smoke(make_args(tmp_path, installer, install_dir=str(install_dir)))
+
+    assert report["ok"] is False
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not any(str(step["name"]).startswith("failure_cleanup") for step in report["steps"])
+
+
+def test_health_failure_uninstalls_only_payload_created_by_smoke(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
+    installer.write_bytes(b"fake-installer")
+    install_dir = tmp_path / "Program Files" / "VRCForge"
+    monkeypatch.setattr(smoke, "is_admin", lambda: True)
+    monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout, process=None: {})
+
+    class FakeProcess:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(smoke, "start_installed_backend", lambda args, install_root, user_data_root: FakeProcess())
+
+    def fake_run(cmd, **kwargs):
+        if isinstance(cmd, str) and f'"{installer.resolve()}"' in cmd:
+            (install_dir / "backend").mkdir(parents=True)
+            (install_dir / "dashboard").mkdir(parents=True)
+            (install_dir / "VRCForge.exe").write_text("desktop", encoding="utf-8")
+            (install_dir / "VERSION").write_text("1.0-test\n", encoding="utf-8")
+            (install_dir / "backend" / "vrcforge_backend.exe").write_text("backend", encoding="utf-8")
+            (install_dir / "dashboard" / "index.html").write_text("dashboard", encoding="utf-8")
+            (install_dir / "Uninstall.exe").write_text("uninstall", encoding="utf-8")
+            return CompletedProcess(cmd, 0, "", "")
+        if isinstance(cmd, list) and Path(cmd[0]) == install_dir / "Uninstall.exe":
+            for path in sorted(install_dir.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                else:
+                    path.rmdir()
+            install_dir.rmdir()
+            return CompletedProcess(cmd, 0, "", "")
+        return CompletedProcess(cmd, 1, "", "unexpected command")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    report = smoke.run_smoke(make_args(tmp_path, installer, install_dir=str(install_dir)))
+
+    assert report["ok"] is False
+    assert report["summary"]["phases"]["install"] == "passed"
+    assert report["summary"]["phases"]["uninstall"] == "passed"
+    assert any(step["name"] == "failure_cleanup.removed" and step["ok"] for step in report["steps"])
+    assert not install_dir.exists()
+
+
 def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkeypatch):
     smoke = load_installer_smoke()
     local_app_data = tmp_path / "LocalAppData"
@@ -177,9 +274,11 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     upgrade_installer.write_bytes(b"new")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.setattr(smoke, "is_admin", lambda: True)
-    monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout: {"version": "0.9-test", "portableMode": True})
+    monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout, process=None: {"version": "0.9-test", "portableMode": True})
 
     class FakeProcess:
+        pid = 5678
+
         def poll(self):
             return None
 
@@ -200,6 +299,7 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
             (install_dir / "backend").mkdir(parents=True, exist_ok=True)
             (install_dir / "dashboard").mkdir(parents=True, exist_ok=True)
             (install_dir / "VRCForge.exe").write_text("desktop", encoding="utf-8")
+            (install_dir / "VERSION").write_text("0.9-test\n", encoding="utf-8")
             (install_dir / "backend" / "vrcforge_backend.exe").write_text("backend", encoding="utf-8")
             (install_dir / "dashboard" / "index.html").write_text("dashboard", encoding="utf-8")
             (install_dir / "Uninstall.exe").write_text("uninstall", encoding="utf-8")
