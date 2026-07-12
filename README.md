@@ -12,7 +12,7 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release version: `1.1.2`. Latest published stable release: `1.1.1` until the `v1.1.2` release is published.
+Current source and latest published stable release: `1.1.2` (`v1.1.2`).
 
 ## Install / 安装
 
@@ -26,7 +26,7 @@ https://github.com/ayyitong888/VRCForge/releases/latest
 
 Program files: `%ProgramFiles%\VRCForge`. User data: `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-Portable zip (`VRCForge_Windows_x64_1.1.1.zip` for the current published stable release) is also available for no-install/debug use. The versioned `1.1.2` zip appears with the `v1.1.2` release.
+Portable zip (`VRCForge_Windows_x64_1.1.2.zip`) is also available for no-install/debug use.
 
 ## Features / 功能概览
 
