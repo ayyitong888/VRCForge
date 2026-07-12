@@ -273,6 +273,10 @@ DESKTOP_VISION_MAX_HEIGHT = 720
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
 AGENT_MEMORY_MAX_ITEMS = 120
 AGENT_GOAL_MAX_ITEMS = 60
+# Goal 唤醒调度的护栏：重复间隔必须落在 [5 分钟, 7 天]，
+# 防止误配置把网关变成高频自动执行器。
+AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES = 5
+AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES = 7 * 24 * 60
 AGENT_DESKTOP_ACTION_MAX_ITEMS = 120
 DESKTOP_BRIDGE_HEARTBEAT_TTL_SECONDS = 45
 DESKTOP_BRIDGE_ACTION_TYPES = {"desktop_rescue", "computer_use"}
@@ -4127,15 +4131,70 @@ class AgentGateway:
             "idempotent": False,
         }
 
+    @staticmethod
+    def _parse_goal_wake_timestamp(value: Any) -> datetime | None:
+        """Parse a stored/user-supplied wake timestamp into an aware UTC datetime."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _parse_goal_wake_fields(self, params: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        """Validate optional wakeAt / wakeEveryMinutes inputs.
+
+        Returns only the keys that were explicitly provided, normalized:
+        wakeAt becomes a UTC ISO string ("" clears the schedule), and
+        wakeEveryMinutes becomes a bounded int (0 clears the interval).
+        """
+        fields: dict[str, Any] = {}
+        if "wakeEveryMinutes" in params or "wake_every_minutes" in params:
+            raw_interval = params.get("wakeEveryMinutes", params.get("wake_every_minutes"))
+            if raw_interval in (None, "", 0, "0"):
+                fields["wakeEveryMinutes"] = 0
+            else:
+                try:
+                    interval = int(raw_interval)
+                except (TypeError, ValueError):
+                    raise AgentGatewayError("wakeEveryMinutes must be an integer number of minutes.", status_code=400)
+                if not (AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES <= interval <= AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES):
+                    raise AgentGatewayError(
+                        "wakeEveryMinutes must be between "
+                        f"{AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES} and {AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES}.",
+                        status_code=400,
+                    )
+                fields["wakeEveryMinutes"] = interval
+        if "wakeAt" in params or "wake_at" in params:
+            raw_wake_at = params.get("wakeAt", params.get("wake_at"))
+            if raw_wake_at in (None, ""):
+                fields["wakeAt"] = ""
+            else:
+                parsed = self._parse_goal_wake_timestamp(raw_wake_at)
+                if parsed is None:
+                    raise AgentGatewayError("wakeAt must be an ISO-8601 timestamp.", status_code=400)
+                fields["wakeAt"] = parsed.isoformat()
+        elif fields.get("wakeEveryMinutes"):
+            # Recurring schedule without an explicit first wake: start one interval from now.
+            fields["wakeAt"] = (now + timedelta(minutes=fields["wakeEveryMinutes"])).isoformat()
+        return fields
+
     def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         title = summarize_text(str(params.get("title") or params.get("goal") or "").strip(), 240)
         if not title:
             raise AgentGatewayError("Goal title is required.", status_code=400)
-        goal_id = f"goal_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        now = datetime.now(timezone.utc)
+        wake_fields = self._parse_goal_wake_fields(params, now=now)
+        goal_id = f"goal_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         event = {
             "event": "goal_created",
             "status": "active",
+            **wake_fields,
             "goalId": goal_id,
             "title": title,
             "summary": summarize_text(str(params.get("summary") or ""), 1000),
@@ -4158,9 +4217,11 @@ class AgentGateway:
         current = self._project_agent_goals()
         if goal_id not in current:
             raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
+        wake_fields = self._parse_goal_wake_fields(params, now=datetime.now(timezone.utc))
         event = {
             "event": "goal_updated",
             "status": status,
+            **wake_fields,
             "goalId": goal_id,
             "summary": summarize_text(str(params.get("summary") or params.get("note") or ""), 1000),
             "projectRoot": str(params.get("projectRoot") or current[goal_id].get("projectRoot") or ""),
@@ -4184,6 +4245,74 @@ class AgentGateway:
         goals.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         goals = goals[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
+
+    def _goal_is_due(self, goal: dict[str, Any], *, now: datetime) -> bool:
+        if str(goal.get("status") or "") != "active":
+            return False
+        wake_at = self._parse_goal_wake_timestamp(goal.get("wakeAt"))
+        if wake_at is None or wake_at > now:
+            return False
+        last_woken = self._parse_goal_wake_timestamp(goal.get("lastWokenAt"))
+        # A goal is due once per scheduled wakeAt: after goal_woken either
+        # advances wakeAt (recurring) or clears it (one-shot), so a stale
+        # lastWokenAt newer than wakeAt means the schedule was already consumed.
+        return last_woken is None or last_woken < wake_at
+
+    def list_due_agent_goals(
+        self, *, limit: int = 20, project_root: str = "", session_id: str = "", now: datetime | None = None
+    ) -> dict[str, Any]:
+        now = now or datetime.now(timezone.utc)
+        listed = self.list_agent_goals(limit=AGENT_GOAL_MAX_ITEMS, project_root=project_root, session_id=session_id)
+        due = [goal for goal in listed.get("goals", []) if self._goal_is_due(goal, now=now)]
+        due.sort(key=lambda item: str(item.get("wakeAt") or ""))
+        due = due[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goals_due.v1",
+            "now": now.isoformat(),
+            "goals": due,
+            "count": len(due),
+        }
+
+    def wake_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        goal_id = str(goal_id or "").strip()
+        if not goal_id:
+            raise AgentGatewayError("goalId is required.", status_code=400)
+        current = self._project_agent_goals()
+        if goal_id not in current:
+            raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
+        goal = current[goal_id]
+        now = datetime.now(timezone.utc)
+        if not self._goal_is_due(goal, now=now):
+            raise AgentGatewayError("Goal is not due for wake.", status_code=409)
+        interval = 0
+        try:
+            interval = int(goal.get("wakeEveryMinutes") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        next_wake_at = (now + timedelta(minutes=interval)).isoformat() if interval > 0 else ""
+        wake_count = 0
+        try:
+            wake_count = int(goal.get("wakeCount") or 0)
+        except (TypeError, ValueError):
+            wake_count = 0
+        event = {
+            "event": "goal_woken",
+            "status": "active",
+            "goalId": goal_id,
+            "lastWokenAt": now.isoformat(),
+            "wakeAt": next_wake_at,
+            "wakeCount": wake_count + 1,
+            "projectRoot": str(goal.get("projectRoot") or ""),
+            "sessionId": str(params.get("sessionId") or params.get("session_id") or goal.get("sessionId") or ""),
+        }
+        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
+        woken = self._project_agent_goals()[goal_id]
+        title = str(woken.get("title") or "").strip()
+        summary = str(woken.get("summary") or "").strip()
+        resume_prompt = f"Resume goal: {title}" + (f"\nContext: {summary}" if summary else "")
+        return {"ok": True, "goal": redact_sensitive(woken), "resumePrompt": resume_prompt}
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}

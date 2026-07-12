@@ -995,7 +995,8 @@
   },
   "goal": {
     "empty": "Write a goal after /goal.",
-    "created": "Goal saved."
+    "created": "Goal saved.",
+    "woken": "Goal \"{{title}}\" woke up and is resuming."
   },
   "memory": {
     "empty": "Write a memory after /memory.",

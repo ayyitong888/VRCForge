@@ -995,7 +995,8 @@
   },
   "goal": {
     "empty": "请在 /goal 后写目标。",
-    "created": "目标已保存。"
+    "created": "目标已保存。",
+    "woken": "目标「{{title}}」已唤醒，正在续跑。"
   },
   "memory": {
     "empty": "请在 /memory 后写要记住的内容。",

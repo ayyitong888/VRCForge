@@ -51,6 +51,7 @@ import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
+import { parseGoalWakeDirective, useGoalWake } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useOptimizationWorkspaceController } from "./hooks/use-optimization-workspace-controller";
 import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
@@ -754,6 +755,28 @@ export default function App() {
     setError,
   });
   refreshRuntimeRunsRef.current = refreshRuntimeRuns;
+  useGoalWake({
+    endpoint,
+    runtimeConnected,
+    chatAvailable,
+    sending,
+    sessionId,
+    projectRoot: activeRuntimeProjectPath,
+    onGoalWoken: async (goal, resumePrompt) => {
+      // 唤醒后的续跑走既有可见运行队列：先同步 goal 状态，再入队一次续跑轮。
+      upsertAgentGoal(goal);
+      setRuntimeNotice(t("goal.woken", { title: goal.title || goal.goalId || "" }));
+      const turn: QueuedTurn = {
+        id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        text: resumePrompt,
+        attachments: [],
+        providerLabel: providerSnapshot.providerLabel,
+        provider: providerSnapshot.provider,
+        model: providerSnapshot.model,
+      };
+      await submitTurn(turn);
+    },
+  });
   useEffect(() => {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
       return;
@@ -1956,14 +1979,22 @@ export default function App() {
   }
 
   async function createGoalFromSlash(raw: string) {
-    const title = raw.replace(/^\/goal\s*/i, "").trim();
-    if (!title) {
+    const body = raw.replace(/^\/goal\s*/i, "").trim();
+    if (!body) {
+      setError(t("goal.empty"));
+      return;
+    }
+    // 支持尾部唤醒指令："… +30m/+2h" 一次性、"… every 30m/2h" 周期；间隔越界由网关报错。
+    const directive = parseGoalWakeDirective(body);
+    if (!directive.title) {
       setError(t("goal.empty"));
       return;
     }
     try {
       const payload = await createAgentGoal(endpoint, {
-        title,
+        title: directive.title,
+        wakeAt: directive.wakeAt,
+        wakeEveryMinutes: directive.wakeEveryMinutes,
         sessionId: sessionId || undefined,
         projectPath: activeRuntimeProjectPath || undefined,
         projectRoot: activeRuntimeProjectPath || undefined,

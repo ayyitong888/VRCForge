@@ -863,6 +863,8 @@ class AgentGoalCreateRequest(BaseModel):
     title: str = ""
     goal: str = ""
     summary: str = ""
+    wake_at: str | None = Field(default=None, alias="wakeAt")
+    wake_every_minutes: int | None = Field(default=None, alias="wakeEveryMinutes")
     session_id: str | None = Field(default=None, alias="sessionId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
@@ -874,6 +876,15 @@ class AgentGoalUpdateRequest(BaseModel):
     status: Literal["active", "paused", "completed", "cancelled"]
     summary: str = ""
     note: str = ""
+    wake_at: str | None = Field(default=None, alias="wakeAt")
+    wake_every_minutes: int | None = Field(default=None, alias="wakeEveryMinutes")
+    session_id: str | None = Field(default=None, alias="sessionId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalWakeRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     project_root: str | None = Field(default=None, alias="projectRoot")
 
@@ -2327,18 +2338,43 @@ def app_agent_goals(limit: int = 50, sessionId: str = "", projectRoot: str = "")
     return AGENT_GATEWAY.list_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 
+@app.get("/api/app/agent/goals/due")
+def app_due_agent_goals(limit: int = 20, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_due_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
+
+
 @app.post("/api/app/agent/goals")
 async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "title": request.title,
+        "goal": request.goal,
+        "summary": request.summary,
+        "sessionId": request.session_id,
+        "projectPath": request.project_path,
+        "projectRoot": request.project_root,
+    }
+    # 只有显式提供时才透传唤醒字段：网关用“键是否存在”区分“清除”与“保持不变”。
+    if request.wake_at is not None:
+        params["wakeAt"] = request.wake_at
+    if request.wake_every_minutes is not None:
+        params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
-        payload = AGENT_GATEWAY.create_agent_goal(
+        payload = AGENT_GATEWAY.create_agent_goal(params)
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.post("/api/app/agent/goals/{goal_id}/wake")
+async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.wake_agent_goal(
+            goal_id,
             {
-                "title": request.title,
-                "goal": request.goal,
-                "summary": request.summary,
                 "sessionId": request.session_id,
-                "projectPath": request.project_path,
                 "projectRoot": request.project_root,
-            }
+            },
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -2348,17 +2384,19 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
 
 @app.post("/api/app/agent/goals/{goal_id}")
 async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "status": request.status,
+        "summary": request.summary,
+        "note": request.note,
+        "sessionId": request.session_id,
+        "projectRoot": request.project_root,
+    }
+    if request.wake_at is not None:
+        params["wakeAt"] = request.wake_at
+    if request.wake_every_minutes is not None:
+        params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
-        payload = AGENT_GATEWAY.update_agent_goal(
-            goal_id,
-            {
-                "status": request.status,
-                "summary": request.summary,
-                "note": request.note,
-                "sessionId": request.session_id,
-                "projectRoot": request.project_root,
-            },
-        )
+        payload = AGENT_GATEWAY.update_agent_goal(goal_id, params)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))

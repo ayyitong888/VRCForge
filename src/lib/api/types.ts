@@ -615,6 +615,10 @@ export type AgentGoal = {
   approvalPolicy?: string;
   createdAt?: string;
   updatedAt?: string;
+  wakeAt?: string;
+  wakeEveryMinutes?: number;
+  lastWokenAt?: string;
+  wakeCount?: number;
 };
 
 export type AgentProgress = {

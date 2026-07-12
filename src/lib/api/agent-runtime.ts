@@ -227,7 +227,16 @@ export async function fetchAgentGoals(
 
 export async function createAgentGoal(
   endpoint: string,
-  payload: { title?: string; goal?: string; summary?: string; sessionId?: string; projectPath?: string; projectRoot?: string },
+  payload: {
+    title?: string;
+    goal?: string;
+    summary?: string;
+    wakeAt?: string;
+    wakeEveryMinutes?: number;
+    sessionId?: string;
+    projectPath?: string;
+    projectRoot?: string;
+  },
 ): Promise<{ ok: boolean; goal: AgentGoal }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("create_agent_goal", {
@@ -244,7 +253,7 @@ export async function createAgentGoal(
 export async function updateAgentGoal(
   endpoint: string,
   goalId: string,
-  payload: { status: string; summary?: string; note?: string; sessionId?: string; projectRoot?: string },
+  payload: { status: string; summary?: string; note?: string; wakeAt?: string; wakeEveryMinutes?: number; sessionId?: string; projectRoot?: string },
 ): Promise<{ ok: boolean; goal: AgentGoal }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("update_agent_goal", {
@@ -252,6 +261,46 @@ export async function updateAgentGoal(
     });
   }
   return requestJson(`${endpoint}/api/app/agent/goals/${encodeURIComponent(goalId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchDueAgentGoals(
+  endpoint: string,
+  params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; schema?: string; now?: string; goals: AgentGoal[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.sessionId) {
+    query.set("sessionId", params.sessionId);
+  }
+  if (params.projectRoot) {
+    query.set("projectRoot", params.projectRoot);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_due_agent_goals", {
+      request: { ...params, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/goals/due${suffix}`, { preferTauriIpc: true });
+}
+
+export async function wakeAgentGoal(
+  endpoint: string,
+  goalId: string,
+  payload: { sessionId?: string; projectRoot?: string } = {},
+): Promise<{ ok: boolean; goal: AgentGoal; resumePrompt?: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("wake_agent_goal", {
+      request: { id: goalId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/goals/${encodeURIComponent(goalId)}/wake`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

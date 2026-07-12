@@ -1638,6 +1638,36 @@ pub fn update_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json
 }
 
 #[tauri::command]
+pub async fn fetch_due_agent_goals(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/agent/goals/due{}", agent_list_query(&request)),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn wake_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    backend_json_request(
+        "POST",
+        format!(
+            "/api/app/agent/goals/{}/wake",
+            percent_encode_query_component(&request.id)
+        ),
+        Some(request.body),
+        request.timeout_ms.or(Some(60_000)),
+    )
+    .map(sanitize_webview_response)
+}
+
+#[tauri::command]
 pub async fn fetch_agent_progress(
     request: DesktopAgentListRequest,
 ) -> Result<serde_json::Value, String> {
