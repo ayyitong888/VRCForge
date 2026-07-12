@@ -1628,6 +1628,101 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(reopened_goals[one_shot["goalId"]]["wakeCount"], 1)
             self.assertEqual(reopened_goals[one_shot["goalId"]]["wakeAt"], "")
 
+    def test_agent_goal_projection_keeps_creation_fields_beyond_legacy_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+            created = gateway.create_agent_goal(
+                {
+                    "title": "Long-lived recurring goal",
+                    "summary": "Creation metadata must survive",
+                    "wakeAt": past,
+                    "wakeEveryMinutes": 30,
+                }
+            )["goal"]
+
+            with gateway.agent_goal_log_path.open("a", encoding="utf-8") as log_file:
+                for index in range(2001):
+                    log_file.write(
+                        json.dumps(
+                            {
+                                "schema": "vrcforge.agent_goal.v1",
+                                "event": "goal_updated",
+                                "goalId": created["goalId"],
+                                "status": "active",
+                                "summary": f"event {index}",
+                                "createdAt": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                        + "\n"
+                    )
+
+            projected = gateway.list_agent_goals(limit=1)["goals"][0]
+            self.assertEqual(projected["title"], "Long-lived recurring goal")
+            self.assertEqual(projected["wakeAt"], past)
+            self.assertEqual(projected["wakeEveryMinutes"], 30)
+
+    def test_agent_goal_due_filter_runs_before_display_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+            due_goal = gateway.create_agent_goal({"title": "Old due goal", "wakeAt": past})["goal"]
+            for index in range(60):
+                gateway.create_agent_goal({"title": f"New unscheduled goal {index}"})
+
+            due = gateway.list_due_agent_goals(limit=20)
+            self.assertEqual([goal["goalId"] for goal in due["goals"]], [due_goal["goalId"]])
+
+    def test_agent_goal_wake_is_atomic_within_gateway_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+            goal = gateway.create_agent_goal({"title": "Wake once", "wakeAt": past})["goal"]
+            start = threading.Barrier(4)
+            results: list[str | int] = []
+            results_lock = threading.Lock()
+            original_append = gateway._append_jsonl
+
+            def slow_append(*args, **kwargs):
+                time.sleep(0.05)
+                return original_append(*args, **kwargs)
+
+            def wake() -> None:
+                start.wait()
+                try:
+                    gateway.wake_agent_goal(goal["goalId"])
+                    result: str | int = "ok"
+                except AgentGatewayError as exc:
+                    result = exc.status_code
+                with results_lock:
+                    results.append(result)
+
+            def update() -> None:
+                start.wait()
+                gateway.update_agent_goal(goal["goalId"], {"status": "active", "summary": "concurrent update"})
+                with results_lock:
+                    results.append("updated")
+
+            with patch.object(gateway, "_append_jsonl", side_effect=slow_append):
+                threads = [threading.Thread(target=wake) for _ in range(2)] + [threading.Thread(target=update)]
+                for thread in threads:
+                    thread.start()
+                start.wait()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertCountEqual(results, ["ok", 409, "updated"])
+            projected = gateway.list_agent_goals(limit=1)["goals"][0]
+            self.assertEqual(projected["wakeCount"], 1)
+            self.assertEqual(projected["summary"], "concurrent update")
+            events = gateway._read_jsonl(gateway.agent_goal_log_path, limit=0)
+            self.assertEqual(sum(event.get("event") == "goal_woken" for event in events), 1)
+            self.assertEqual(sum(event.get("event") == "goal_updated" for event in events), 1)
+
     def test_agent_goal_wake_routes_and_key_presence_semantics(self) -> None:
         with TestClient(dashboard_server.app) as client:
             past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
@@ -1637,6 +1732,7 @@ class DashboardServerTests(unittest.TestCase):
                     "title": "Wake route goal",
                     "summary": "Route proof",
                     "sessionId": "sess-wake",
+                    "chatId": "chat-wake",
                     "wakeAt": past,
                     "wakeEveryMinutes": 60,
                 },
@@ -1646,6 +1742,14 @@ class DashboardServerTests(unittest.TestCase):
             woken = client.post(f"/api/app/agent/goals/{goal_id}/wake", json={"sessionId": "sess-wake"})
             second = client.post(f"/api/app/agent/goals/{goal_id}/wake", json={"sessionId": "sess-wake"})
             paused = client.post(f"/api/app/agent/goals/{goal_id}", json={"status": "paused", "sessionId": "sess-wake"})
+            cleared = client.post(
+                f"/api/app/agent/goals/{goal_id}",
+                json={"status": "active", "sessionId": "sess-wake", "wakeAt": None, "wakeEveryMinutes": None},
+            )
+            overflow = client.post(
+                "/api/app/agent/goals",
+                json={"title": "Overflow timestamp", "wakeAt": "9999-12-31T23:59:59-23:59"},
+            )
 
         self.assertEqual(created.status_code, 200)
         self.assertEqual(due.status_code, 200)
@@ -1653,6 +1757,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(woken.status_code, 200)
         woken_goal = woken.json()["goal"]
         self.assertEqual(woken_goal["wakeCount"], 1)
+        self.assertEqual(woken_goal["chatId"], "chat-wake")
         self.assertTrue(woken_goal["wakeAt"])
         self.assertEqual(woken.json()["resumePrompt"], "Resume goal: Wake route goal\nContext: Route proof")
         self.assertEqual(second.status_code, 409)
@@ -1661,6 +1766,11 @@ class DashboardServerTests(unittest.TestCase):
         # A status-only update sends no wake keys; presence-based semantics keep the schedule.
         self.assertEqual(paused_goal["wakeAt"], woken_goal["wakeAt"])
         self.assertEqual(paused_goal["wakeEveryMinutes"], 60)
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.json()["goal"]["wakeAt"], "")
+        self.assertEqual(cleared.json()["goal"]["wakeEveryMinutes"], 0)
+        self.assertEqual(overflow.status_code, 400)
+        self.assertIn("ISO-8601", overflow.json()["detail"])
 
     def test_agent_progress_replace_update_and_delete(self) -> None:
         with TestClient(dashboard_server.app) as client:

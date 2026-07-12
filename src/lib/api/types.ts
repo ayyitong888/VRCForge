@@ -612,6 +612,7 @@ export type AgentGoal = {
   status?: "active" | "paused" | "completed" | "cancelled" | string;
   projectRoot?: string;
   sessionId?: string;
+  chatId?: string;
   approvalPolicy?: string;
   createdAt?: string;
   updatedAt?: string;

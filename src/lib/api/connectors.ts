@@ -92,7 +92,9 @@ export type ExternalAgentConnectorStatus = {
       label?: string;
       scope?: "user" | "project" | string;
       configPath?: string;
+      requestedConfigPath?: string;
       installed?: boolean;
+      conflict?: boolean;
       installable?: boolean;
       requiresConfigPath?: boolean;
       lastError?: string;
@@ -183,13 +185,20 @@ export type ExternalAgentConnectorActionResult = {
   suggestion?: string;
 };
 
-export async function fetchExternalAgentConnectors(endpoint: string, projectPath?: string): Promise<ExternalAgentConnectorStatus> {
+export async function fetchExternalAgentConnectors(
+  endpoint: string,
+  projectPath?: string,
+  configPath?: string,
+): Promise<ExternalAgentConnectorStatus> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ExternalAgentConnectorStatus>("fetch_external_agent_connectors", {
-      request: { projectPath: projectPath || undefined, timeoutMs: 30000 },
+      request: { projectPath: projectPath || undefined, configPath: configPath || undefined, timeoutMs: 30000 },
     });
   }
-  const query = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : "";
+  const queryParams = new URLSearchParams();
+  if (projectPath) queryParams.set("projectPath", projectPath);
+  if (configPath) queryParams.set("configPath", configPath);
+  const query = queryParams.size ? `?${queryParams.toString()}` : "";
   return requestJson<ExternalAgentConnectorStatus>(`${endpoint}/api/app/external-agent/connectors${query}`);
 }
 

@@ -4139,11 +4139,11 @@ class AgentGateway:
             return None
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (OverflowError, ValueError):
             return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
 
     def _parse_goal_wake_fields(self, params: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         """Validate optional wakeAt / wakeEveryMinutes inputs.
@@ -4200,6 +4200,7 @@ class AgentGateway:
             "summary": summarize_text(str(params.get("summary") or ""), 1000),
             "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
             "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
+            "chatId": str(params.get("chatId") or params.get("chat_id") or "").strip(),
             "approvalPolicy": "uses_vrcforge_approval_checkpoint_rollback",
         }
         self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
@@ -4226,6 +4227,7 @@ class AgentGateway:
             "summary": summarize_text(str(params.get("summary") or params.get("note") or ""), 1000),
             "projectRoot": str(params.get("projectRoot") or current[goal_id].get("projectRoot") or ""),
             "sessionId": str(params.get("sessionId") or current[goal_id].get("sessionId") or ""),
+            "chatId": str(params.get("chatId") or current[goal_id].get("chatId") or ""),
         }
         self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
         return {"ok": True, "goal": self._project_agent_goals()[goal_id]}
@@ -4262,8 +4264,18 @@ class AgentGateway:
         self, *, limit: int = 20, project_root: str = "", session_id: str = "", now: datetime | None = None
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
-        listed = self.list_agent_goals(limit=AGENT_GOAL_MAX_ITEMS, project_root=project_root, session_id=session_id)
-        due = [goal for goal in listed.get("goals", []) if self._goal_is_due(goal, now=now)]
+        goals = list(self._project_agent_goals().values())
+        if project_root:
+            normalized_project_root = normalize_filesystem_path(project_root)
+            goals = [
+                goal
+                for goal in goals
+                if not str(goal.get("projectRoot") or "").strip()
+                or normalize_filesystem_path(str(goal.get("projectRoot") or "")) == normalized_project_root
+            ]
+        if session_id:
+            goals = [goal for goal in goals if str(goal.get("sessionId") or "") in {"", session_id}]
+        due = [redact_sensitive(goal) for goal in goals if self._goal_is_due(goal, now=now)]
         due.sort(key=lambda item: str(item.get("wakeAt") or ""))
         due = due[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {
@@ -4279,36 +4291,41 @@ class AgentGateway:
         goal_id = str(goal_id or "").strip()
         if not goal_id:
             raise AgentGatewayError("goalId is required.", status_code=400)
-        current = self._project_agent_goals()
-        if goal_id not in current:
-            raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
-        goal = current[goal_id]
-        now = datetime.now(timezone.utc)
-        if not self._goal_is_due(goal, now=now):
-            raise AgentGatewayError("Goal is not due for wake.", status_code=409)
-        interval = 0
-        try:
-            interval = int(goal.get("wakeEveryMinutes") or 0)
-        except (TypeError, ValueError):
+        # Keep the due check and schedule-consuming append in one instance-local
+        # critical section. The gateway lock is re-entrant because projection
+        # and append helpers are also used by already-locked runtime paths.
+        with self._lock:
+            current = self._project_agent_goals()
+            if goal_id not in current:
+                raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
+            goal = current[goal_id]
+            now = datetime.now(timezone.utc)
+            if not self._goal_is_due(goal, now=now):
+                raise AgentGatewayError("Goal is not due for wake.", status_code=409)
             interval = 0
-        next_wake_at = (now + timedelta(minutes=interval)).isoformat() if interval > 0 else ""
-        wake_count = 0
-        try:
-            wake_count = int(goal.get("wakeCount") or 0)
-        except (TypeError, ValueError):
+            try:
+                interval = int(goal.get("wakeEveryMinutes") or 0)
+            except (TypeError, ValueError):
+                interval = 0
+            next_wake_at = (now + timedelta(minutes=interval)).isoformat() if interval > 0 else ""
             wake_count = 0
-        event = {
-            "event": "goal_woken",
-            "status": "active",
-            "goalId": goal_id,
-            "lastWokenAt": now.isoformat(),
-            "wakeAt": next_wake_at,
-            "wakeCount": wake_count + 1,
-            "projectRoot": str(goal.get("projectRoot") or ""),
-            "sessionId": str(params.get("sessionId") or params.get("session_id") or goal.get("sessionId") or ""),
-        }
-        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
-        woken = self._project_agent_goals()[goal_id]
+            try:
+                wake_count = int(goal.get("wakeCount") or 0)
+            except (TypeError, ValueError):
+                wake_count = 0
+            event = {
+                "event": "goal_woken",
+                "status": "active",
+                "goalId": goal_id,
+                "lastWokenAt": now.isoformat(),
+                "wakeAt": next_wake_at,
+                "wakeCount": wake_count + 1,
+                "projectRoot": str(goal.get("projectRoot") or ""),
+                "sessionId": str(params.get("sessionId") or params.get("session_id") or goal.get("sessionId") or ""),
+                "chatId": str(params.get("chatId") or params.get("chat_id") or goal.get("chatId") or ""),
+            }
+            self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
+            woken = self._project_agent_goals()[goal_id]
         title = str(woken.get("title") or "").strip()
         summary = str(woken.get("summary") or "").strip()
         resume_prompt = f"Resume goal: {title}" + (f"\nContext: {summary}" if summary else "")
@@ -7906,18 +7923,20 @@ class AgentGateway:
                 **entry,
             }
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
         return safe_entry
 
     def _read_jsonl(self, path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
+        with self._lock:
+            if not path.exists():
+                return []
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return []
         if limit <= 0:
             selected_lines = lines
         else:
@@ -7934,7 +7953,10 @@ class AgentGateway:
 
     def _project_agent_goals(self) -> dict[str, dict[str, Any]]:
         goals: dict[str, dict[str, Any]] = {}
-        for event in self._read_jsonl(self.agent_goal_log_path, limit=2000):
+        # Goal state is an event-sourced projection. Reading only a tail can
+        # discard the creation event and silently lose durable fields such as
+        # title and recurring schedule after a busy/long-running history.
+        for event in self._read_jsonl(self.agent_goal_log_path, limit=0):
             goal_id = str(event.get("goalId") or "").strip()
             if not goal_id:
                 continue

@@ -760,12 +760,25 @@ export default function App() {
     runtimeConnected,
     chatAvailable,
     sending,
-    sessionId,
-    projectRoot: activeRuntimeProjectPath,
     onGoalWoken: async (goal, resumePrompt) => {
-      // 唤醒后的续跑走既有可见运行队列：先同步 goal 状态，再入队一次续跑轮。
+      const goalProjectKey = normalizeProjectPathKey(goal.projectRoot);
+      const projectChats = !goal.sessionId && goalProjectKey
+        ? chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === goalProjectKey)
+        : [];
+      const targetChat =
+        (goal.chatId ? chats.find((chat) => chat.id === goal.chatId) : undefined) ||
+        (goal.sessionId
+          ? chats.find((chat) => chat.sessionId === goal.sessionId)
+          : projectChats.length === 1
+            ? projectChats[0]
+            : !goalProjectKey
+              ? activeChat
+              : undefined);
+      if (!targetChat || chatRunSending || compacting) {
+        return "retry";
+      }
+      // 唤醒后的续跑走原聊天的可见运行队列，不能误投到当前打开的聊天。
       upsertAgentGoal(goal);
-      setRuntimeNotice(t("goal.woken", { title: goal.title || goal.goalId || "" }));
       const turn: QueuedTurn = {
         id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         text: resumePrompt,
@@ -773,8 +786,16 @@ export default function App() {
         providerLabel: providerSnapshot.providerLabel,
         provider: providerSnapshot.provider,
         model: providerSnapshot.model,
+        chatId: targetChat.id,
+        sessionId: goal.sessionId || targetChat.sessionId || undefined,
+        projectPath: goal.projectRoot || targetChat.projectPath || undefined,
       };
-      await submitTurn(turn);
+      const result = await submitTurn(turn);
+      if (result === "queue_full" || result === "failed") {
+        return "retry";
+      }
+      setRuntimeNotice(t("goal.woken", { title: goal.title || goal.goalId || "" }));
+      return "dispatched";
     },
   });
   useEffect(() => {
@@ -1996,6 +2017,7 @@ export default function App() {
         wakeAt: directive.wakeAt,
         wakeEveryMinutes: directive.wakeEveryMinutes,
         sessionId: sessionId || undefined,
+        chatId: activeChat?.id || undefined,
         projectPath: activeRuntimeProjectPath || undefined,
         projectRoot: activeRuntimeProjectPath || undefined,
       });

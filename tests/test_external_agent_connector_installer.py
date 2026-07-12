@@ -122,12 +122,74 @@ def test_generic_install_preserves_existing_server_and_uninstalls(tmp_path: Path
     assert second["ok"] is True
     assert second["changed"] is False
 
-    removed = uninstall_connector("generic", config_path=str(config))
+    removed = uninstall_connector("generic", root_dir=root, config_path=str(config))
     payload_after = json.loads(config.read_text(encoding="utf-8"))
     assert removed["ok"] is True
     assert removed["removed"] is True
     assert "vrcforge" not in payload_after["mcpServers"]
     assert payload_after["mcpServers"]["existing"]["command"] == "node"
+
+
+def test_generic_install_and_remove_refuse_different_named_server(tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    config = tmp_path / "mcp.json"
+    original = json.dumps(
+        {"mcpServers": {"vrcforge": {"command": "custom-vrcforge", "args": ["--owned-by-user"]}}},
+        indent=2,
+    )
+    config.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ConnectorInstallError) as install_error:
+        install_connector("generic", root_dir=root, config_path=str(config), run_self_test=False)
+    assert install_error.value.stage == "config_conflict"
+    assert config.read_text(encoding="utf-8") == original
+
+    with pytest.raises(ConnectorInstallError) as remove_error:
+        uninstall_connector("generic", root_dir=root, config_path=str(config))
+    assert remove_error.value.stage == "config_conflict"
+    assert config.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.vrcforge-backup-*"))
+
+
+def test_generic_remove_missing_target_is_strict_noop(tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    missing = tmp_path / "missing.json"
+
+    result = uninstall_connector("generic", root_dir=root, config_path=str(missing))
+
+    assert result["ok"] is True
+    assert result["changed"] is False
+    assert result["removed"] is False
+    assert not missing.exists()
+
+    existing = tmp_path / "existing.json"
+    original = '{"other": true}\n'
+    existing.write_text(original, encoding="utf-8")
+    result = uninstall_connector("generic", root_dir=root, config_path=str(existing))
+    assert result["changed"] is False
+    assert existing.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.vrcforge-backup-*"))
+
+
+def test_generic_status_is_scoped_to_requested_config_and_managed_fingerprint(tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    managed = tmp_path / "managed.json"
+    conflicting = tmp_path / "conflicting.json"
+    install_connector("generic", root_dir=root, config_path=str(managed), run_self_test=False)
+    conflicting.write_text(
+        json.dumps({"mcpServers": {"vrcforge": {"command": "someone-else"}}}),
+        encoding="utf-8",
+    )
+
+    managed_status = connector_client_statuses(root_dir=root, generic_config_path_value=str(managed))["generic"]
+    conflict_status = connector_client_statuses(root_dir=root, generic_config_path_value=str(conflicting))["generic"]
+
+    assert managed_status["configPath"] == str(managed.resolve())
+    assert managed_status["installed"] is True
+    assert managed_status["conflict"] is False
+    assert conflict_status["installed"] is False
+    assert conflict_status["conflict"] is True
+    assert "not managed" in conflict_status["lastError"]
 
 
 @pytest.mark.parametrize(

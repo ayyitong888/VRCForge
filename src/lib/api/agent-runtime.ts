@@ -234,6 +234,7 @@ export async function createAgentGoal(
     wakeAt?: string;
     wakeEveryMinutes?: number;
     sessionId?: string;
+    chatId?: string;
     projectPath?: string;
     projectRoot?: string;
   },
@@ -253,7 +254,7 @@ export async function createAgentGoal(
 export async function updateAgentGoal(
   endpoint: string,
   goalId: string,
-  payload: { status: string; summary?: string; note?: string; wakeAt?: string; wakeEveryMinutes?: number; sessionId?: string; projectRoot?: string },
+  payload: { status: string; summary?: string; note?: string; wakeAt?: string; wakeEveryMinutes?: number; sessionId?: string; chatId?: string; projectRoot?: string },
 ): Promise<{ ok: boolean; goal: AgentGoal }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("update_agent_goal", {
@@ -293,7 +294,7 @@ export async function fetchDueAgentGoals(
 export async function wakeAgentGoal(
   endpoint: string,
   goalId: string,
-  payload: { sessionId?: string; projectRoot?: string } = {},
+  payload: { sessionId?: string; chatId?: string; projectRoot?: string } = {},
 ): Promise<{ ok: boolean; goal: AgentGoal; resumePrompt?: string }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("wake_agent_goal", {

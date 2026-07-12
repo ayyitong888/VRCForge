@@ -210,6 +210,7 @@ pub(crate) struct DesktopResolveRecoveryRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopExternalAgentConnectorsRequest {
     project_path: Option<String>,
+    config_path: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -1654,17 +1655,20 @@ pub async fn fetch_due_agent_goals(
 }
 
 #[tauri::command]
-pub fn wake_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/goals/{}/wake",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn wake_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/goals/{}/wake",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1890,12 +1894,14 @@ pub fn fetch_optimization_proof(
 pub fn fetch_external_agent_connectors(
     request: DesktopExternalAgentConnectorsRequest,
 ) -> Result<serde_json::Value, String> {
-    let suffix = request
-        .project_path
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("?projectPath={}", percent_encode_query_component(value)))
-        .unwrap_or_default();
+    let mut query = Vec::new();
+    append_query_param(&mut query, "projectPath", &request.project_path);
+    append_query_param(&mut query, "configPath", &request.config_path);
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
     backend_json_request(
         "GET",
         format!("/api/app/external-agent/connectors{suffix}"),

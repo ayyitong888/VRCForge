@@ -154,6 +154,7 @@ def install_connector(
 def uninstall_connector(
     client: ConnectorClient,
     *,
+    root_dir: Path | None = None,
     project_path: str | None = None,
     config_path: str | None = None,
 ) -> dict[str, Any]:
@@ -165,7 +166,14 @@ def uninstall_connector(
         result = _update_json_mcp_server(path, DEFAULT_SERVER_NAME, None)
     elif client == "generic":
         path = generic_config_path(config_path)
-        result = _update_json_mcp_server(path, DEFAULT_SERVER_NAME, None)
+        if root_dir is None:
+            raise ConnectorInstallError(
+                "Generic MCP connector removal needs the VRCForge installation root to verify ownership.",
+                stage="verify_ownership",
+                suggestion="Remove the connector from VRCForge Settings, or delete the vrcforge entry manually after verifying it belongs to VRCForge.",
+            )
+        expected = build_claude_code_stdio_config(resolve_stdio_bridge(root_dir).to_options())["mcpServers"][DEFAULT_SERVER_NAME]
+        result = _update_generic_json_mcp_server(path, expected, install=False)
     elif client in {"codex", "codexApp", "codexCli"}:
         path = codex_config_path()
         result = _update_codex_toml_server(path, DEFAULT_SERVER_NAME, None)
@@ -180,7 +188,12 @@ def uninstall_connector(
     }
 
 
-def connector_client_statuses(*, root_dir: Path, project_path: str | None = None) -> dict[str, Any]:
+def connector_client_statuses(
+    *,
+    root_dir: Path,
+    project_path: str | None = None,
+    generic_config_path_value: str | None = None,
+) -> dict[str, Any]:
     bridge: dict[str, Any]
     try:
         bridge = resolve_stdio_bridge(root_dir).as_dict()
@@ -191,7 +204,7 @@ def connector_client_statuses(*, root_dir: Path, project_path: str | None = None
         "codexCli": _codex_status("codexCli", bridge),
         "claudeCode": _claude_code_status(project_path, bridge),
         "claudeCowork": _claude_cowork_status(bridge),
-        "generic": _generic_status(bridge),
+        "generic": _generic_status(bridge, generic_config_path_value),
     }
 
 
@@ -246,7 +259,7 @@ def _install_codex(*, options: ExternalAgentConnectorOptions) -> dict[str, Any]:
 def _install_generic(*, config_path: str | None, options: ExternalAgentConnectorOptions) -> dict[str, Any]:
     path = generic_config_path(config_path)
     block = build_claude_code_stdio_config(options)["mcpServers"][DEFAULT_SERVER_NAME]
-    return {"configPath": str(path), **_update_json_mcp_server(path, DEFAULT_SERVER_NAME, block)}
+    return {"configPath": str(path), **_update_generic_json_mcp_server(path, block, install=True)}
 
 
 def claude_code_config_path(project_path: str | None) -> Path:
@@ -539,6 +552,59 @@ def _update_json_mcp_server(path: Path, server_name: str, server_block: dict[str
     }
 
 
+def _update_generic_json_mcp_server(path: Path, expected_block: dict[str, Any], *, install: bool) -> dict[str, Any]:
+    if not path.exists() and not install:
+        return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
+
+    payload = _load_json_object(path)
+    servers = payload.get("mcpServers")
+    if servers is None:
+        if not install:
+            return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
+        servers = {}
+        payload["mcpServers"] = servers
+    if not isinstance(servers, dict):
+        raise ConnectorInstallError(
+            "mcpServers must be a JSON object.",
+            stage="parse_config",
+            suggestion=f"Repair {path} so mcpServers is an object, then retry.",
+        )
+
+    existing = servers.get(DEFAULT_SERVER_NAME)
+    if existing is not None and existing != expected_block:
+        action = "install" if install else "remove"
+        raise ConnectorInstallError(
+            f"Refusing to {action}: mcpServers.{DEFAULT_SERVER_NAME} already contains a different configuration.",
+            stage="config_conflict",
+            suggestion=(
+                f"Rename the existing {DEFAULT_SERVER_NAME} server or choose another config file. "
+                "VRCForge did not modify this file."
+            ),
+        )
+
+    if install:
+        if existing == expected_block:
+            return {"changed": False, "installed": True, "removed": False, "backupPath": ""}
+        servers[DEFAULT_SERVER_NAME] = expected_block
+        installed = True
+        removed = False
+    else:
+        if existing is None:
+            return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
+        del servers[DEFAULT_SERVER_NAME]
+        installed = False
+        removed = True
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    backup_path = _write_config_atomically(path, text, _validate_json_object)
+    return {
+        "changed": True,
+        "installed": installed,
+        "removed": removed,
+        "backupPath": str(backup_path) if backup_path else "",
+    }
+
+
 def _load_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -776,19 +842,63 @@ def _claude_cowork_status(bridge: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _generic_status(bridge: dict[str, Any]) -> dict[str, Any]:
+def _generic_status(bridge: dict[str, Any], config_path: str | None) -> dict[str, Any]:
+    path = ""
+    installed = False
+    conflict = False
+    last_error = ""
+    value = str(config_path or "").strip()
+    if value:
+        try:
+            resolved = generic_config_path(value)
+            path = str(resolved)
+            payload = _load_json_object(resolved)
+            servers = payload.get("mcpServers")
+            if servers is not None and not isinstance(servers, dict):
+                raise ConnectorInstallError(
+                    "mcpServers must be a JSON object.",
+                    stage="parse_config",
+                    suggestion=f"Repair {resolved} so mcpServers is an object, then retry.",
+                )
+            existing = servers.get(DEFAULT_SERVER_NAME) if isinstance(servers, dict) else None
+            expected = _generic_expected_block_from_bridge(bridge)
+            installed = existing is not None and expected is not None and existing == expected
+            conflict = existing is not None and not installed
+            if conflict:
+                last_error = f"mcpServers.{DEFAULT_SERVER_NAME} exists but is not managed by this VRCForge installation."
+        except ConnectorInstallError as exc:
+            last_error = str(exc)
     return {
         "label": CLIENT_LABELS["generic"],
         "scope": "custom",
-        "configPath": "",
-        "installed": False,
+        "configPath": path or value,
+        "requestedConfigPath": value,
+        "installed": installed,
+        "conflict": conflict,
         "installable": True,
         "requiresConfigPath": True,
+        "lastError": last_error,
         "cliDetected": None,
         "appDetected": None,
         "bridge": bridge,
         "restartInstruction": restart_instruction("generic"),
     }
+
+
+def _generic_expected_block_from_bridge(bridge: dict[str, Any]) -> dict[str, Any] | None:
+    command = str(bridge.get("command") or "").strip()
+    args = bridge.get("args")
+    cwd = str(bridge.get("cwd") or "").strip()
+    if not command or not isinstance(args, list):
+        return None
+    normalized_args = [str(arg) for arg in args]
+    options = ExternalAgentConnectorOptions(
+        stdio_command=command,
+        stdio_script=normalized_args[0] if normalized_args else "",
+        stdio_extra_args=tuple(normalized_args[1:]),
+        stdio_cwd=cwd,
+    )
+    return build_claude_code_stdio_config(options)["mcpServers"][DEFAULT_SERVER_NAME]
 
 
 def _probe_codex_cli() -> dict[str, Any]:

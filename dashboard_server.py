@@ -866,6 +866,7 @@ class AgentGoalCreateRequest(BaseModel):
     wake_at: str | None = Field(default=None, alias="wakeAt")
     wake_every_minutes: int | None = Field(default=None, alias="wakeEveryMinutes")
     session_id: str | None = Field(default=None, alias="sessionId")
+    chat_id: str | None = Field(default=None, alias="chatId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
 
@@ -879,6 +880,7 @@ class AgentGoalUpdateRequest(BaseModel):
     wake_at: str | None = Field(default=None, alias="wakeAt")
     wake_every_minutes: int | None = Field(default=None, alias="wakeEveryMinutes")
     session_id: str | None = Field(default=None, alias="sessionId")
+    chat_id: str | None = Field(default=None, alias="chatId")
     project_root: str | None = Field(default=None, alias="projectRoot")
 
     model_config = {"populate_by_name": True}
@@ -886,6 +888,7 @@ class AgentGoalUpdateRequest(BaseModel):
 
 class AgentGoalWakeRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
+    chat_id: str | None = Field(default=None, alias="chatId")
     project_root: str | None = Field(default=None, alias="projectRoot")
 
     model_config = {"populate_by_name": True}
@@ -2350,13 +2353,14 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
         "goal": request.goal,
         "summary": request.summary,
         "sessionId": request.session_id,
+        "chatId": request.chat_id,
         "projectPath": request.project_path,
         "projectRoot": request.project_root,
     }
     # 只有显式提供时才透传唤醒字段：网关用“键是否存在”区分“清除”与“保持不变”。
-    if request.wake_at is not None:
+    if "wake_at" in request.model_fields_set:
         params["wakeAt"] = request.wake_at
-    if request.wake_every_minutes is not None:
+    if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
         payload = AGENT_GATEWAY.create_agent_goal(params)
@@ -2373,6 +2377,7 @@ async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> di
             goal_id,
             {
                 "sessionId": request.session_id,
+                "chatId": request.chat_id,
                 "projectRoot": request.project_root,
             },
         )
@@ -2389,11 +2394,12 @@ async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -
         "summary": request.summary,
         "note": request.note,
         "sessionId": request.session_id,
+        "chatId": request.chat_id,
         "projectRoot": request.project_root,
     }
-    if request.wake_at is not None:
+    if "wake_at" in request.model_fields_set:
         params["wakeAt"] = request.wake_at
-    if request.wake_every_minutes is not None:
+    if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
         payload = AGENT_GATEWAY.update_agent_goal(goal_id, params)
@@ -3830,14 +3836,18 @@ def _selected_project_path_or(project_path: str | None = None) -> str:
     return DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
 
 
-def external_agent_status_sync(project_path: str | None = None) -> dict[str, Any]:
+def external_agent_status_sync(project_path: str | None = None, generic_config_path: str | None = None) -> dict[str, Any]:
     config = AGENT_GATEWAY.ensure_config()
     health = safe_agent_health()
     manifest = safe_agent_manifest()
     selected_project_path = _selected_project_path_or(project_path)
     return {
         **connector_bundle_sync({}),
-        "clients": connector_client_statuses(root_dir=ROOT_DIR, project_path=selected_project_path),
+        "clients": connector_client_statuses(
+            root_dir=ROOT_DIR,
+            project_path=selected_project_path,
+            generic_config_path_value=generic_config_path,
+        ),
         "gateway": {
             "enabled": bool(config.enabled),
             "requiresToken": bool(config.require_token),
@@ -3929,6 +3939,8 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
             "error": str(exc),
             "suggestion": "Export a support bundle and retry after restarting VRCForge.",
         }
+    if config_path:
+        action.setdefault("configPath", config_path)
     emit_log(
         "success" if action.get("ok") else "warn",
         "connectors",
@@ -3942,7 +3954,7 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
             "handshake": action.get("handshake", {}),
         },
     )
-    return {**external_agent_status_sync(project_path), "lastConnectorAction": action}
+    return {**external_agent_status_sync(project_path, config_path), "lastConnectorAction": action}
 
 
 def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -3950,7 +3962,7 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
     config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = uninstall_connector(client, project_path=project_path, config_path=config_path)
+        action = uninstall_connector(client, root_dir=ROOT_DIR, project_path=project_path, config_path=config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="uninstall")
     except Exception as exc:  # noqa: BLE001
@@ -3962,6 +3974,8 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
             "error": str(exc),
             "suggestion": "Export a support bundle and retry after restarting VRCForge.",
         }
+    if config_path:
+        action.setdefault("configPath", config_path)
     emit_log(
         "success" if action.get("ok") else "warn",
         "connectors",
@@ -3974,12 +3988,17 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
             "suggestion": action.get("suggestion", ""),
         },
     )
-    return {**external_agent_status_sync(project_path), "lastConnectorAction": action}
+    return {**external_agent_status_sync(project_path, config_path), "lastConnectorAction": action}
 
 
 @app.get("/api/app/external-agent/connectors")
-def app_external_agent_connectors(projectPath: str | None = None, project_path: str | None = None) -> dict[str, Any]:
-    return external_agent_status_sync(projectPath or project_path)
+def app_external_agent_connectors(
+    projectPath: str | None = None,
+    project_path: str | None = None,
+    configPath: str | None = None,
+    config_path: str | None = None,
+) -> dict[str, Any]:
+    return external_agent_status_sync(projectPath or project_path, configPath or config_path)
 
 
 @app.post("/api/app/external-agent/connectors")

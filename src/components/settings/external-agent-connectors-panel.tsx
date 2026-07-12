@@ -30,6 +30,11 @@ function storeGenericConfigPath(value: string) {
   }
 }
 
+function sameConnectorConfigPath(left: string | undefined, right: string): boolean {
+  const normalize = (value: string) => value.trim().replace(/[/\\]+/g, "\\").replace(/\\+$/, "").toLocaleLowerCase();
+  return Boolean(left && right && normalize(left) === normalize(right));
+}
+
 type ExternalAgentConnectorsPanelProps = {
   status: ExternalAgentConnectorStatus | null;
   loading: boolean;
@@ -373,17 +378,21 @@ function GenericConnectorRow({
   const { t } = useTranslation();
   const [configPath, setConfigPath] = useState(readStoredGenericConfigPath);
   const trimmedPath = configPath.trim();
-  const actionMatches = normalizeConnectorClient(lastAction?.client) === "generic";
+  const statusMatchesCurrent = sameConnectorConfigPath(state?.requestedConfigPath || state?.configPath, trimmedPath);
+  const actionMatches =
+    normalizeConnectorClient(lastAction?.client) === "generic" &&
+    statusMatchesCurrent &&
+    (sameConnectorConfigPath(lastAction?.configPath, trimmedPath) || sameConnectorConfigPath(lastAction?.configPath, state?.configPath || ""));
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
-  const lastInstalledHere = Boolean(action?.ok && action?.action === "install" && action?.configPath);
+  const installedHere = Boolean(state?.installed && statusMatchesCurrent);
   return (
     <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
-          <Badge tone={lastInstalledHere ? "ok" : "muted"} className="shrink-0">
-            {lastInstalledHere ? t("connector.installed") : t("connector.notInstalled")}
+          <Badge tone={installedHere ? "ok" : state?.conflict ? "warn" : "muted"} className="shrink-0">
+            {installedHere ? t("connector.installed") : t("connector.notInstalled")}
           </Badge>
           <Badge tone="muted" className="shrink-0">
             {t("connector.customConfig")}
@@ -402,6 +411,9 @@ function GenericConnectorRow({
             }}
             className="h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 font-mono text-xs text-foreground outline-none focus:border-primary"
           />
+          {state?.lastError && statusMatchesCurrent ? (
+            <div className="break-words text-amber-700 dark:text-amber-300">{state.lastError}</div>
+          ) : null}
           {state?.restartInstruction ? <div className="break-words">{state.restartInstruction}</div> : null}
           {action ? (
             <div
@@ -438,7 +450,7 @@ function GenericConnectorRow({
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
           Install
         </Button>
-        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onUninstall("generic", trimmedPath)}>
+        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installedHere} onClick={() => onUninstall("generic", trimmedPath)}>
           <Trash2 className="h-3.5 w-3.5" />
           {t("connector.remove")}
         </Button>

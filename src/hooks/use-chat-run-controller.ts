@@ -55,7 +55,7 @@ export type RunSingleTurnOptions = {
   onFailure?: (message: string) => void;
 };
 
-type SubmitTurnResult = "started" | "queued" | "queue_full";
+export type SubmitTurnResult = "started" | "queued" | "queue_full" | "failed";
 
 type UseChatRunControllerParams = {
   endpoint: string;
@@ -135,14 +135,14 @@ export function useChatRunController({
         setError(t("chat.queueFull", { max: MAX_QUEUED_TURNS }));
         return "queue_full";
       }
-      const ownerChatId = ensureActiveChat();
+      const ownerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
       const ownerChat = getChatById(ownerChatId);
       const queuedTurn = {
         ...turn,
         queuedFrom: true,
         chatId: ownerChatId,
-        sessionId: ownerChat?.sessionId || sessionId || undefined,
-        projectPath: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
+        sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || undefined,
+        projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
       };
       queueRef.current.push(queuedTurn);
       setQueued([...queueRef.current]);
@@ -162,15 +162,25 @@ export function useChatRunController({
       return "queued";
     }
 
-    const chatId = ensureActiveChat();
+    const chatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
     sendingRef.current = true;
     setSending(true);
     setStopRequested(false);
     stopRequestedRef.current = false;
     try {
       let next: QueuedTurn | undefined = turn;
+      let initialTurnSucceeded = false;
+      let isInitialTurn = true;
       while (next !== undefined) {
-        await runSingleTurn(next.chatId || chatId, next, next.sessionId ? { sessionId: next.sessionId } : undefined);
+        const succeeded = await runSingleTurn(
+          next.chatId || chatId,
+          next,
+          next.sessionId ? { sessionId: next.sessionId } : undefined,
+        );
+        if (isInitialTurn) {
+          initialTurnSucceeded = succeeded;
+          isInitialTurn = false;
+        }
         if (stopRequestedRef.current) {
           queueRef.current = [];
           break;
@@ -178,7 +188,7 @@ export function useChatRunController({
         next = queueRef.current.shift();
         setQueued([...queueRef.current]);
       }
-      return "started";
+      return initialTurnSucceeded ? "started" : "failed";
     } finally {
       queueRef.current = [];
       setQueued([]);

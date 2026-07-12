@@ -28,6 +28,16 @@ type GatewaySettingsRequest = {
   checkpointArchiveDirectory?: string;
 };
 
+const GENERIC_CONFIG_PATH_STORAGE_KEY = "vrcforge.genericMcpConfigPath";
+
+function readStoredGenericConfigPath(): string {
+  try {
+    return window.localStorage.getItem(GENERIC_CONFIG_PATH_STORAGE_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
 type UseSettingsWorkspaceControllerParams = {
   endpoint: string;
   runtimeConnected: boolean;
@@ -165,7 +175,13 @@ export function useSettingsWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      setConnectorStatus(await fetchExternalAgentConnectors(targetEndpoint, activeProjectPath || undefined));
+      setConnectorStatus(
+        await fetchExternalAgentConnectors(
+          targetEndpoint,
+          activeProjectPath || undefined,
+          readStoredGenericConfigPath() || undefined,
+        ),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
