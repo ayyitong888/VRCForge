@@ -6,13 +6,16 @@ export const CONNECTOR_CLIENT_LABELS: Record<ExternalAgentConnectorClient, strin
   codexCli: "Codex CLI",
   claudeCode: "Claude Code CLI",
   claudeCowork: "Claude Cowork App",
+  generic: "Generic MCP client",
 };
 
 export function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
   if (client === "codex") {
     return "codexApp";
   }
-  return client === "codexApp" || client === "codexCli" || client === "claudeCode" || client === "claudeCowork" ? client : "";
+  return client === "codexApp" || client === "codexCli" || client === "claudeCode" || client === "claudeCowork" || client === "generic"
+    ? client
+    : "";
 }
 
 export function formatConnectorActionMessage(client: ExternalAgentConnectorClient, action?: ExternalAgentConnectorStatus["lastConnectorAction"]) {

@@ -19,12 +19,16 @@ from external_agent_connectors import (
     build_claude_code_style_config,
     build_codex_stdio_config,
     build_connector_bundle,
+    build_generic_http_config,
+    build_generic_stdio_config,
     build_skills_projection,
     render_claude_code_stdio_json,
     render_claude_code_json,
     render_codex_stdio_toml,
     render_codex_toml,
     render_connector_bundle_json,
+    render_generic_http_json,
+    render_generic_stdio_json,
 )
 
 
@@ -106,6 +110,30 @@ def test_connector_bundle_includes_launcher_and_smoke_metadata() -> None:
     assert "codexStdio" in bundle["clientConfigs"]
     assert "claudeCodeStdio" in bundle["clientConfigs"]
     assert "claudeCowork" in bundle["clientConfigs"]
+    assert "generic" in bundle["clientConfigs"]
+    assert "genericHttp" in bundle["clientConfigs"]
+
+
+def test_generic_client_configs_use_standard_mcp_servers_shape() -> None:
+    stdio_parsed = json.loads(render_generic_stdio_json())
+    stdio_server = stdio_parsed["mcpServers"][DEFAULT_SERVER_NAME]
+    assert stdio_server["command"] == "python"
+    assert stdio_server["args"] == [DEFAULT_STDIO_SCRIPT, *DEFAULT_STDIO_EXTRA_ARGS]
+    assert stdio_server["env"] == {}
+    assert build_generic_stdio_config() == build_claude_code_stdio_config()
+
+    http_parsed = json.loads(render_generic_http_json())
+    http_server = http_parsed["mcpServers"][DEFAULT_SERVER_NAME]
+    assert http_server["type"] == "http"
+    assert http_server["url"] == DEFAULT_MCP_URL
+    assert http_server["headers"]["Authorization"] == f"Bearer ${{{DEFAULT_TOKEN_ENV_VAR}}}"
+    assert build_generic_http_config() == build_claude_code_style_config()
+
+    bundle = build_connector_bundle()
+    assert bundle["clientConfigs"]["generic"]["transport"] == "stdio"
+    assert bundle["clientConfigs"]["generic"]["format"] == "json"
+    assert bundle["clientConfigs"]["genericHttp"]["transport"] == "streamable_http"
+    assert bundle["clientConfigs"]["genericHttp"]["format"] == "json"
 
 
 def test_skills_projection_suggests_user_data_skill_package_layout() -> None:

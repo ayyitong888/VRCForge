@@ -3720,6 +3720,24 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(with_project.json()["clients"]["claudeCode"]["installable"])
         self.assertEqual(Path(with_project.json()["clients"]["claudeCode"]["configPath"]), project / ".mcp.json")
 
+    def test_external_agent_generic_install_requires_config_path(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/external-agent/connectors/install",
+                json={"client": "generic"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        action = payload["lastConnectorAction"]
+        self.assertFalse(action["ok"])
+        self.assertEqual(action["client"], "generic")
+        self.assertEqual(action["action"], "install")
+        self.assertEqual(action["stage"], "resolve_config_path")
+        self.assertIn("generic", payload["clients"])
+        self.assertEqual(payload["clients"]["generic"]["scope"], "custom")
+        self.assertTrue(payload["clients"]["generic"]["requiresConfigPath"])
+
     def test_external_agent_gateway_settings_update_and_revoke_token(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         original_token = config.token

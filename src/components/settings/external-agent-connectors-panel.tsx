@@ -1,4 +1,5 @@
 import { Copy, Download, Loader2, RefreshCw, Shield, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExternalAgentConnectorClient, ExternalAgentConnectorStatus } from "../../lib/api";
 import { normalizeConnectorClient } from "../../lib/connector-ui";
@@ -6,6 +7,28 @@ import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
+
+const GENERIC_CONFIG_PATH_STORAGE_KEY = "vrcforge.genericMcpConfigPath";
+
+function readStoredGenericConfigPath(): string {
+  try {
+    return window.localStorage.getItem(GENERIC_CONFIG_PATH_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function storeGenericConfigPath(value: string) {
+  try {
+    if (value) {
+      window.localStorage.setItem(GENERIC_CONFIG_PATH_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(GENERIC_CONFIG_PATH_STORAGE_KEY);
+    }
+  } catch {
+    // Persistence is best-effort; the input value still drives the action.
+  }
+}
 
 type ExternalAgentConnectorsPanelProps = {
   status: ExternalAgentConnectorStatus | null;
@@ -16,8 +39,8 @@ type ExternalAgentConnectorsPanelProps = {
   onToggleGateway: (enabled: boolean) => void;
   onToggleWriteRequests: (enabled: boolean) => void;
   onRevoke: () => void;
-  onInstall: (client: ExternalAgentConnectorClient) => void;
-  onUninstall: (client: ExternalAgentConnectorClient) => void;
+  onInstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
+  onUninstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
   onCopy: (text: string, label: string) => void;
 };
 
@@ -47,6 +70,8 @@ export function ExternalAgentConnectorsPanel({
   const smokeArgs = status?.launcher?.smoke?.args || [];
   const smokeLiveArgs = status?.launcher?.smoke?.liveWriteRollbackArgs || [];
   const smokeCommand = [status?.launcher?.smoke?.command, ...smokeArgs, ...smokeLiveArgs].filter(Boolean).join(" ");
+  const genericStdioText = status?.clientConfigs?.generic?.text || claudeStdioText;
+  const genericHttpText = status?.clientConfigs?.genericHttp?.text || claudeText;
   const clients = status?.clients;
   const lastAction = status?.lastConnectorAction;
   const connectorRows: Array<{
@@ -141,6 +166,16 @@ export function ExternalAgentConnectorsPanel({
             onCopy={onCopy}
           />
         ))}
+        <GenericConnectorRow
+          loading={loading}
+          state={clients?.generic}
+          lastAction={lastAction}
+          stdioText={genericStdioText}
+          httpText={genericHttpText}
+          onInstall={onInstall}
+          onUninstall={onUninstall}
+          onCopy={onCopy}
+        />
       </div>
 
       <div className="mt-5 flex flex-wrap justify-end gap-2">
@@ -308,6 +343,102 @@ function ConnectorClientRow({
           Install
         </Button>
         <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installed} onClick={() => onUninstall(client)}>
+          <Trash2 className="h-3.5 w-3.5" />
+          {t("connector.remove")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function GenericConnectorRow({
+  loading,
+  state,
+  lastAction,
+  stdioText,
+  httpText,
+  onInstall,
+  onUninstall,
+  onCopy,
+}: {
+  loading: boolean;
+  state?: ConnectorClientState;
+  lastAction?: ExternalAgentConnectorStatus["lastConnectorAction"];
+  stdioText: string;
+  httpText: string;
+  onInstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
+  onUninstall: (client: ExternalAgentConnectorClient, configPath?: string) => void;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [configPath, setConfigPath] = useState(readStoredGenericConfigPath);
+  const trimmedPath = configPath.trim();
+  const actionMatches = normalizeConnectorClient(lastAction?.client) === "generic";
+  const action = actionMatches ? lastAction : undefined;
+  const handshake = action?.handshake;
+  const lastInstalledHere = Boolean(action?.ok && action?.action === "install" && action?.configPath);
+  return (
+    <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
+          <Badge tone={lastInstalledHere ? "ok" : "muted"} className="shrink-0">
+            {lastInstalledHere ? t("connector.installed") : t("connector.notInstalled")}
+          </Badge>
+          <Badge tone="muted" className="shrink-0">
+            {t("connector.customConfig")}
+          </Badge>
+        </div>
+        <div className="mt-2 grid gap-2 text-xs text-muted-foreground">
+          <div className="break-words">{t("connector.genericHint")}</div>
+          <input
+            type="text"
+            value={configPath}
+            disabled={loading}
+            placeholder={t("connector.genericPathPlaceholder")}
+            onChange={(event) => {
+              setConfigPath(event.target.value);
+              storeGenericConfigPath(event.target.value.trim());
+            }}
+            className="h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 font-mono text-xs text-foreground outline-none focus:border-primary"
+          />
+          {state?.restartInstruction ? <div className="break-words">{state.restartInstruction}</div> : null}
+          {action ? (
+            <div
+              className={cn(
+                "mt-1 grid gap-1 rounded-md px-2 py-1.5",
+                action.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-destructive/10 text-destructive",
+              )}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="font-medium">{action.ok ? t("connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
+                {handshake?.toolCount !== undefined ? <span>{handshake.toolCount} tools</span> : null}
+                {handshake?.connected ? <span>{t("connector.connected")}</span> : null}
+                {handshake?.ready ? <span>{t("connector.ready")}</span> : null}
+              </div>
+              {action.configPath ? <div className="truncate font-mono text-[11px]">{action.configPath}</div> : null}
+              {action.error ? <div className="break-words">{action.error}</div> : null}
+              {handshake?.warning ? <div className="break-words">{handshake.warning}</div> : null}
+              {action.suggestion || handshake?.suggestion ? <div className="break-words">{action.suggestion || handshake?.suggestion}</div> : null}
+              {action.backupPath ? <div className="truncate font-mono text-[11px]">Backup {action.backupPath}</div> : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-start justify-end gap-2">
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !stdioText} onClick={() => onCopy(stdioText, "Generic stdio config")}>
+          <Copy className="h-3.5 w-3.5" />
+          {t("connector.copyStdio")}
+        </Button>
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !httpText} onClick={() => onCopy(httpText, "Generic HTTP config")}>
+          <Copy className="h-3.5 w-3.5" />
+          {t("connector.copyHttp")}
+        </Button>
+        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onInstall("generic", trimmedPath)}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Install
+        </Button>
+        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onUninstall("generic", trimmedPath)}>
           <Trash2 className="h-3.5 w-3.5" />
           {t("connector.remove")}
         </Button>

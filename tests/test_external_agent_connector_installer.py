@@ -95,6 +95,73 @@ def test_invalid_claude_json_is_rejected_without_overwrite(monkeypatch: pytest.M
     assert not list(config.parent.glob("*.vrcforge-backup-*"))
 
 
+def test_generic_install_preserves_existing_server_and_uninstalls(tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+    config_dir = tmp_path / ".cursor"
+    config_dir.mkdir()
+    config = config_dir / "mcp.json"
+    config.write_text(
+        json.dumps({"mcpServers": {"existing": {"command": "node", "args": ["server.js"]}}}, indent=2),
+        encoding="utf-8",
+    )
+
+    first = install_connector("generic", root_dir=root, config_path=str(config), run_self_test=False)
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    server = payload["mcpServers"]["vrcforge"]
+
+    assert first["ok"] is True
+    assert first["changed"] is True
+    assert first["configPath"] == str(config.resolve())
+    assert payload["mcpServers"]["existing"]["command"] == "node"
+    assert server["command"] == sys.executable
+    assert server["args"] == [str((root / "tools" / "vrcforge_agent_mcp_stdio.py").resolve()), "--no-start"]
+    assert server["env"] == {}
+    assert "type" not in server
+
+    second = install_connector("generic", root_dir=root, config_path=str(config), run_self_test=False)
+    assert second["ok"] is True
+    assert second["changed"] is False
+
+    removed = uninstall_connector("generic", config_path=str(config))
+    payload_after = json.loads(config.read_text(encoding="utf-8"))
+    assert removed["ok"] is True
+    assert removed["removed"] is True
+    assert "vrcforge" not in payload_after["mcpServers"]
+    assert payload_after["mcpServers"]["existing"]["command"] == "node"
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        None,
+        "",
+        "   ",
+        "relative-or-not\nmulti-line.json",
+    ],
+)
+def test_generic_install_rejects_missing_or_multiline_path(tmp_path: Path, config_path: str | None) -> None:
+    root = make_source_root(tmp_path)
+
+    with pytest.raises(ConnectorInstallError) as error:
+        install_connector("generic", root_dir=root, config_path=config_path, run_self_test=False)
+
+    assert error.value.stage == "resolve_config_path"
+
+
+def test_generic_install_rejects_non_json_and_missing_parent(tmp_path: Path) -> None:
+    root = make_source_root(tmp_path)
+
+    with pytest.raises(ConnectorInstallError) as toml_error:
+        install_connector("generic", root_dir=root, config_path=str(tmp_path / "config.toml"), run_self_test=False)
+    assert toml_error.value.stage == "resolve_config_path"
+    assert "JSON" in str(toml_error.value)
+
+    with pytest.raises(ConnectorInstallError) as parent_error:
+        install_connector("generic", root_dir=root, config_path=str(tmp_path / "missing-dir" / "mcp.json"), run_self_test=False)
+    assert parent_error.value.stage == "resolve_config_path"
+    assert "parent directory" in str(parent_error.value)
+
+
 def test_codex_app_and_cli_share_safe_toml_install_uninstall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root = make_source_root(tmp_path)
     codex_home = tmp_path / ".codex"
@@ -203,11 +270,14 @@ def test_connector_statuses_are_split_by_app_and_cli(monkeypatch: pytest.MonkeyP
 
     statuses = connector_client_statuses(root_dir=root, project_path=str(project))
 
-    assert set(statuses) == {"codexApp", "codexCli", "claudeCode", "claudeCowork"}
+    assert set(statuses) == {"codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"}
     assert statuses["codexApp"]["label"] == "Codex App"
     assert statuses["codexCli"]["label"] == "Codex CLI"
     assert statuses["claudeCode"]["scope"] == "project"
     assert statuses["claudeCowork"]["scope"] == "user"
+    assert statuses["generic"]["scope"] == "custom"
+    assert statuses["generic"]["installable"] is True
+    assert statuses["generic"]["requiresConfigPath"] is True
 
 
 def test_connector_status_does_not_treat_broken_path_shim_as_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

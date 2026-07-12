@@ -655,7 +655,13 @@
     "projectConfig": "Project config",
     "desktopConfig": "Desktop config",
     "sharedWithCli": "Shared with Codex CLI",
-    "sharedWithApp": "Shared with Codex App"
+    "sharedWithApp": "Shared with Codex App",
+    "genericTitle": "Generic MCP client",
+    "customConfig": "Custom config",
+    "genericHint": "Writes the standard mcpServers stdio block into any JSON MCP config (Cursor, Cline, Windsurf, ...). TOML/YAML clients: copy the JSON block manually.",
+    "genericPathPlaceholder": "Path to the client's MCP config, e.g. C:\\Users\\you\\.cursor\\mcp.json",
+    "copyStdio": "Stdio JSON",
+    "copyHttp": "HTTP JSON"
   },
   "encryption": {
     "title": "Anti-Rip Protection",

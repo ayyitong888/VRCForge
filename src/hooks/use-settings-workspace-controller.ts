@@ -260,7 +260,7 @@ export function useSettingsWorkspaceController({
     await updateGatewaySettings({ checkpointArchiveDirectory: trimmed });
   }
 
-  async function runConnectorAction(client: ExternalAgentConnectorClient, action: "install" | "uninstall") {
+  async function runConnectorAction(client: ExternalAgentConnectorClient, action: "install" | "uninstall", configPath?: string) {
     setLoadingConnectors(true);
     setConnectorMessage("");
     setError("");
@@ -273,7 +273,7 @@ export function useSettingsWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      const request = { client, projectPath: activeProjectPath || undefined };
+      const request = { client, projectPath: activeProjectPath || undefined, configPath: configPath?.trim() || undefined };
       const payload =
         action === "install"
           ? await installExternalAgentConnector(targetEndpoint, request)

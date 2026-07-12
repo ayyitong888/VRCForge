@@ -98,6 +98,18 @@ def build_connector_bundle(options: ExternalAgentConnectorOptions | None = None)
                 "config": build_claude_code_stdio_config(opts),
                 "text": render_claude_code_stdio_json(opts),
             },
+            "generic": {
+                "format": "json",
+                "transport": "stdio",
+                "config": build_generic_stdio_config(opts),
+                "text": render_generic_stdio_json(opts),
+            },
+            "genericHttp": {
+                "format": "json",
+                "transport": "streamable_http",
+                "config": build_generic_http_config(opts),
+                "text": render_generic_http_json(opts),
+            },
         },
     }
 
@@ -178,6 +190,16 @@ def build_claude_code_stdio_config(options: ExternalAgentConnectorOptions | None
     }
 
 
+def build_generic_stdio_config(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
+    """Standard `mcpServers` stdio block accepted by most MCP clients (Cursor, Cline, Windsurf, ...)."""
+    return build_claude_code_stdio_config(options)
+
+
+def build_generic_http_config(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
+    """Standard `mcpServers` streamable-HTTP block for MCP clients that support remote servers."""
+    return build_claude_code_style_config(options)
+
+
 def build_launcher_metadata(options: ExternalAgentConnectorOptions | None = None) -> dict[str, Any]:
     opts = options or ExternalAgentConnectorOptions()
     args = [opts.stdio_script, *opts.stdio_extra_args]
@@ -215,6 +237,14 @@ def render_claude_code_json(options: ExternalAgentConnectorOptions | None = None
 
 def render_claude_code_stdio_json(options: ExternalAgentConnectorOptions | None = None) -> str:
     return _json_text(build_claude_code_stdio_config(options))
+
+
+def render_generic_stdio_json(options: ExternalAgentConnectorOptions | None = None) -> str:
+    return _json_text(build_generic_stdio_config(options))
+
+
+def render_generic_http_json(options: ExternalAgentConnectorOptions | None = None) -> str:
+    return _json_text(build_generic_http_config(options))
 
 
 def render_codex_toml(options: ExternalAgentConnectorOptions | None = None) -> str:
@@ -337,6 +367,8 @@ __all__ = [
     "build_codex_stdio_config",
     "build_codex_style_config",
     "build_connector_bundle",
+    "build_generic_http_config",
+    "build_generic_stdio_config",
     "build_launcher_metadata",
     "build_skills_projection",
     "render_claude_code_stdio_json",
@@ -344,4 +376,6 @@ __all__ = [
     "render_codex_stdio_toml",
     "render_codex_toml",
     "render_connector_bundle_json",
+    "render_generic_http_json",
+    "render_generic_stdio_json",
 ]

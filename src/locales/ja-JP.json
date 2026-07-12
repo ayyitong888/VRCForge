@@ -655,7 +655,13 @@
     "projectConfig": "プロジェクト設定",
     "desktopConfig": "デスクトップ設定",
     "sharedWithCli": "Codex CLI と共有",
-    "sharedWithApp": "Codex App と共有"
+    "sharedWithApp": "Codex App と共有",
+    "genericTitle": "汎用 MCP クライアント",
+    "customConfig": "カスタム設定",
+    "genericHint": "標準の mcpServers stdio 設定ブロックを任意の JSON 形式 MCP 設定ファイルに書き込みます（Cursor、Cline、Windsurf など）。TOML/YAML クライアントは JSON ブロックを手動でコピーしてください。",
+    "genericPathPlaceholder": "クライアントの MCP 設定ファイルパス（例：C:\\Users\\you\\.cursor\\mcp.json）",
+    "copyStdio": "Stdio JSON",
+    "copyHttp": "HTTP JSON"
   },
   "encryption": {
     "title": "Anti-Rip Protection",

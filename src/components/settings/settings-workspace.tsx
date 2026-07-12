@@ -95,7 +95,7 @@ type SettingsWorkspaceProps = {
   onRelocateCheckpointArchives: (directory: string) => void;
   onLoadConnectors: () => void;
   onUpdateGatewaySettings: (settings: { enabled?: boolean; allowWriteRequests?: boolean; revokeToken?: boolean }) => void;
-  onRunConnectorAction: (client: ExternalAgentConnectorClient, action: "install" | "uninstall") => void;
+  onRunConnectorAction: (client: ExternalAgentConnectorClient, action: "install" | "uninstall", configPath?: string) => void;
   onCopyConnectorText: (text: string, label: string) => void;
   onAgentNotesChange: (value: string) => void;
   onSaveNotes: (event: FormEvent) => void;
@@ -489,8 +489,8 @@ export function SettingsWorkspace({
             onToggleGateway={(enabled) => onUpdateGatewaySettings({ enabled })}
             onToggleWriteRequests={(allowWriteRequests) => onUpdateGatewaySettings({ allowWriteRequests })}
             onRevoke={() => onUpdateGatewaySettings({ revokeToken: true })}
-            onInstall={(client) => onRunConnectorAction(client, "install")}
-            onUninstall={(client) => onRunConnectorAction(client, "uninstall")}
+            onInstall={(client, configPath) => onRunConnectorAction(client, "install", configPath)}
+            onUninstall={(client, configPath) => onRunConnectorAction(client, "uninstall", configPath)}
             onCopy={onCopyConnectorText}
           />
         </section>

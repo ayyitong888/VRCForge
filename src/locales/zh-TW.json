@@ -655,7 +655,13 @@
     "projectConfig": "專案設定",
     "desktopConfig": "桌面設定",
     "sharedWithCli": "與 Codex CLI 共用",
-    "sharedWithApp": "與 Codex App 共用"
+    "sharedWithApp": "與 Codex App 共用",
+    "genericTitle": "通用 MCP 用戶端",
+    "customConfig": "自訂設定",
+    "genericHint": "將標準 mcpServers stdio 設定區塊寫入任意 JSON 格式的 MCP 設定檔（Cursor、Cline、Windsurf 等）。TOML/YAML 用戶端請手動複製 JSON 設定區塊。",
+    "genericPathPlaceholder": "用戶端 MCP 設定檔路徑，例如 C:\\Users\\you\\.cursor\\mcp.json",
+    "copyStdio": "Stdio JSON",
+    "copyHttp": "HTTP JSON"
   },
   "encryption": {
     "title": "Anti-Rip Protection",

@@ -230,6 +230,7 @@ pub(crate) struct DesktopExternalAgentGatewayRequest {
 pub(crate) struct DesktopExternalAgentConnectorActionRequest {
     client: String,
     project_path: Option<String>,
+    config_path: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -1904,6 +1905,7 @@ pub fn install_external_agent_connector(
         Some(serde_json::json!({
             "client": request.client,
             "projectPath": request.project_path,
+            "configPath": request.config_path,
         })),
         request.timeout_ms.or(Some(120_000)),
     )
@@ -1920,6 +1922,7 @@ pub fn uninstall_external_agent_connector(
         Some(serde_json::json!({
             "client": request.client,
             "projectPath": request.project_path,
+            "configPath": request.config_path,
         })),
         request.timeout_ms.or(Some(60_000)),
     )

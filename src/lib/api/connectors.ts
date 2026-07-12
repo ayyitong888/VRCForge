@@ -87,13 +87,14 @@ export type ExternalAgentConnectorStatus = {
     };
   };
   clients?: Record<
-    "codexApp" | "codexCli" | "claudeCode" | "claudeCowork",
+    "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic",
     {
       label?: string;
       scope?: "user" | "project" | string;
       configPath?: string;
       installed?: boolean;
       installable?: boolean;
+      requiresConfigPath?: boolean;
       lastError?: string;
       sharedConfigGroup?: string;
       cliDetected?: boolean | null;
@@ -113,6 +114,8 @@ export type ExternalAgentConnectorStatus = {
     claudeCode?: { format: string; text: string; config?: unknown };
     claudeCodeStdio?: { format: string; text: string; config?: unknown; transport?: string };
     claudeCowork?: { format: string; text: string; config?: unknown; transport?: string };
+    generic?: { format: string; text: string; config?: unknown; transport?: string };
+    genericHttp?: { format: string; text: string; config?: unknown; transport?: string };
   };
   launcher?: {
     stdioBridge?: {
@@ -147,7 +150,7 @@ export type ExternalAgentConnectorStatus = {
   lastConnectorAction?: ExternalAgentConnectorActionResult;
 };
 
-export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork";
+export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic";
 
 export type ExternalAgentConnectorActionResult = {
   ok: boolean;
@@ -215,7 +218,7 @@ export async function updateExternalAgentGateway(
 
 export async function installExternalAgentConnector(
   endpoint: string,
-  request: { client: ExternalAgentConnectorClient; projectPath?: string },
+  request: { client: ExternalAgentConnectorClient; projectPath?: string; configPath?: string },
 ): Promise<ExternalAgentConnectorStatus> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ExternalAgentConnectorStatus>("install_external_agent_connector", {
@@ -231,7 +234,7 @@ export async function installExternalAgentConnector(
 
 export async function uninstallExternalAgentConnector(
   endpoint: string,
-  request: { client: ExternalAgentConnectorClient; projectPath?: string },
+  request: { client: ExternalAgentConnectorClient; projectPath?: string; configPath?: string },
 ): Promise<ExternalAgentConnectorStatus> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ExternalAgentConnectorStatus>("uninstall_external_agent_connector", {

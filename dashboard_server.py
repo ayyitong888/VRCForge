@@ -1021,8 +1021,9 @@ class ExternalAgentGatewayUpdateRequest(BaseModel):
 
 
 class ExternalAgentConnectorActionRequest(BaseModel):
-    client: Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork"]
+    client: Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"]
     project_path: str | None = Field(default=None, alias="projectPath")
+    config_path: str | None = Field(default=None, alias="configPath")
 
     model_config = {"populate_by_name": True}
 
@@ -3876,8 +3877,9 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
 def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:
     client = str(params.get("client") or "").strip()
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
+    config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = install_connector(client, root_dir=ROOT_DIR, project_path=project_path)
+        action = install_connector(client, root_dir=ROOT_DIR, project_path=project_path, config_path=config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="install")
     except Exception as exc:  # noqa: BLE001 - connector UX should return diagnostics instead of crashing Settings.
@@ -3908,8 +3910,9 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
 def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, Any]:
     client = str(params.get("client") or "").strip()
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
+    config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = uninstall_connector(client, project_path=project_path)
+        action = uninstall_connector(client, project_path=project_path, config_path=config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="uninstall")
     except Exception as exc:  # noqa: BLE001

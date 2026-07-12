@@ -28,7 +28,7 @@ from external_agent_connectors import (
     render_codex_stdio_toml,
 )
 
-ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork"]
+ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"]
 
 
 class ConnectorInstallError(RuntimeError):
@@ -114,6 +114,7 @@ def install_connector(
     *,
     root_dir: Path,
     project_path: str | None = None,
+    config_path: str | None = None,
     run_self_test: bool = True,
 ) -> dict[str, Any]:
     bridge = resolve_stdio_bridge(root_dir)
@@ -122,6 +123,8 @@ def install_connector(
         result = _install_claude_code(project_path=project_path, options=options)
     elif client == "claudeCowork":
         result = _install_claude_cowork(options=options)
+    elif client == "generic":
+        result = _install_generic(config_path=config_path, options=options)
     elif client in {"codex", "codexApp", "codexCli"}:
         result = _install_codex(options=options)
     else:  # pragma: no cover - Literal request validation should stop this.
@@ -152,12 +155,16 @@ def uninstall_connector(
     client: ConnectorClient,
     *,
     project_path: str | None = None,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     if client == "claudeCode":
         path = claude_code_config_path(project_path)
         result = _update_json_mcp_server(path, DEFAULT_SERVER_NAME, None)
     elif client == "claudeCowork":
         path = claude_cowork_config_path()
+        result = _update_json_mcp_server(path, DEFAULT_SERVER_NAME, None)
+    elif client == "generic":
+        path = generic_config_path(config_path)
         result = _update_json_mcp_server(path, DEFAULT_SERVER_NAME, None)
     elif client in {"codex", "codexApp", "codexCli"}:
         path = codex_config_path()
@@ -184,6 +191,7 @@ def connector_client_statuses(*, root_dir: Path, project_path: str | None = None
         "codexCli": _codex_status("codexCli", bridge),
         "claudeCode": _claude_code_status(project_path, bridge),
         "claudeCowork": _claude_cowork_status(bridge),
+        "generic": _generic_status(bridge),
     }
 
 
@@ -203,6 +211,8 @@ def restart_instruction(client: str) -> str:
         return "Start a new Codex App or CLI session so it reloads the MCP server list."
     if client == "codexCli":
         return "Start a new Codex CLI session so it reloads ~/.codex/config.toml."
+    if client == "generic":
+        return "Restart or reconnect the MCP client so it reloads the edited mcpServers config file."
     return "Start a new client session so it reloads MCP servers."
 
 
@@ -231,6 +241,12 @@ def _install_codex(*, options: ExternalAgentConnectorOptions) -> dict[str, Any]:
     path = codex_config_path()
     text = render_codex_stdio_toml(options)
     return {"configPath": str(path), **_update_codex_toml_server(path, DEFAULT_SERVER_NAME, text)}
+
+
+def _install_generic(*, config_path: str | None, options: ExternalAgentConnectorOptions) -> dict[str, Any]:
+    path = generic_config_path(config_path)
+    block = build_claude_code_stdio_config(options)["mcpServers"][DEFAULT_SERVER_NAME]
+    return {"configPath": str(path), **_update_json_mcp_server(path, DEFAULT_SERVER_NAME, block)}
 
 
 def claude_code_config_path(project_path: str | None) -> Path:
@@ -266,6 +282,44 @@ def codex_config_path() -> Path:
     if home:
         return Path(home).expanduser() / "config.toml"
     return Path.home() / ".codex" / "config.toml"
+
+
+def generic_config_path(config_path: str | None) -> Path:
+    value = str(config_path or "").strip()
+    if not value:
+        raise ConnectorInstallError(
+            "Generic MCP client install needs the target mcpServers JSON config path.",
+            stage="resolve_config_path",
+            suggestion="Enter the client's MCP config file path (for example .cursor/mcp.json), then retry.",
+        )
+    if any(char in value for char in "\r\n\0"):
+        raise ConnectorInstallError(
+            "Config path must be a single path string.",
+            stage="resolve_config_path",
+            suggestion="Remove line breaks from the config path and retry.",
+        )
+    path = Path(value).expanduser()
+    if path.suffix.lower() != ".json":
+        raise ConnectorInstallError(
+            "Generic MCP install only edits JSON config files using the standard mcpServers shape.",
+            stage="resolve_config_path",
+            suggestion="Point at the client's .json MCP config (TOML/YAML clients: copy the stdio JSON block manually).",
+        )
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise ConnectorInstallError(
+            f"Config path could not be resolved: {exc}",
+            stage="resolve_config_path",
+            suggestion="Check the path spelling and drive, then retry.",
+        ) from exc
+    if not resolved.parent.exists():
+        raise ConnectorInstallError(
+            "The config file's parent directory does not exist.",
+            stage="resolve_config_path",
+            suggestion=f"Create {resolved.parent} (or fix the path), then retry. VRCForge only creates the file, not new directory trees.",
+        )
+    return resolved
 
 
 def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float = 20.0) -> dict[str, Any]:
@@ -639,6 +693,7 @@ CLIENT_LABELS = {
     "codexCli": "Codex CLI",
     "claudeCode": "Claude Code CLI",
     "claudeCowork": "Claude Cowork App",
+    "generic": "Generic MCP client",
 }
 
 
@@ -718,6 +773,21 @@ def _claude_cowork_status(bridge: dict[str, Any]) -> dict[str, Any]:
         "appError": _probe_error(app_probe) if not app_probe.get("ok") else "",
         "bridge": bridge,
         "restartInstruction": restart_instruction("claudeCowork"),
+    }
+
+
+def _generic_status(bridge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label": CLIENT_LABELS["generic"],
+        "scope": "custom",
+        "configPath": "",
+        "installed": False,
+        "installable": True,
+        "requiresConfigPath": True,
+        "cliDetected": None,
+        "appDetected": None,
+        "bridge": bridge,
+        "restartInstruction": restart_instruction("generic"),
     }
 
 
