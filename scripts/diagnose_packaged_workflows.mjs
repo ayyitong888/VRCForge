@@ -343,10 +343,20 @@ async function attachProbeImage(cdp, name) {
       const start = performance.now();
       input.files = transfer.files;
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      const body = document.body.innerText;
+      let body = "";
+      let attached = false;
+      const deadline = performance.now() + 5000;
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        body = document.body.innerText;
+        attached = Array.from(document.querySelectorAll("img[alt], [title]")).some((node) => {
+          const alt = node.getAttribute("alt") || "";
+          const title = node.getAttribute("title") || "";
+          return alt === ${JSON.stringify(name)} || title.startsWith(${JSON.stringify(`${name} ·`)});
+        });
+      } while (!attached && performance.now() < deadline);
       return {
-        ok: body.includes(${JSON.stringify(name)}),
+        ok: attached,
         duration: performance.now() - start,
         fileCount: input.files ? input.files.length : null,
         bodyLength: body.length,
@@ -380,15 +390,27 @@ async function clickSubmit(cdp) {
   return evalValue(
     cdp,
     `(async () => {
+      const textarea = document.querySelector("textarea");
       const submit = document.querySelector("button[type='submit']");
+      const form = textarea?.closest("form") || null;
+      if (!submit && !form) {
+        return { ok: false, reason: "composer form not found", bodyLength: document.body.innerText.length };
+      }
       const start = performance.now();
-      submit.click();
+      const method = submit ? "button" : "requestSubmit";
+      if (submit) {
+        submit.click();
+      } else {
+        form.requestSubmit();
+      }
       await new Promise((resolve) => requestAnimationFrame(resolve));
       return {
+        ok: true,
+        method,
         duration: performance.now() - start,
-        disabledAfterFrame: submit.disabled,
+        disabledAfterFrame: submit ? submit.disabled : null,
         bodyLength: document.body.innerText.length,
-        buttonText: submit.innerText,
+        buttonText: submit ? submit.innerText : "",
       };
     })()`,
   );
