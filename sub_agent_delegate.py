@@ -237,7 +237,15 @@ def run_outfit_import_plan_review(
 
 
 # skill_delegate 的控制键：这些不作为工具参数下发。
-_DELEGATE_CONTROL_KEYS = {"toolName", "tool_name", "skillParams", "skill_params", "source"}
+_DELEGATE_CONTROL_KEYS = {
+    "toolName",
+    "tool_name",
+    "skillParams",
+    "skill_params",
+    "skillArguments",
+    "skill_arguments",
+    "source",
+}
 
 
 def run_skill_delegate(
@@ -259,6 +267,11 @@ def run_skill_delegate(
     tool_params = dict(explicit_params) if explicit_params is not None else {
         key: value for key, value in (payload or {}).items() if key not in _DELEGATE_CONTROL_KEYS
     }
+    skill_arguments = str(payload.get("skillArguments") or payload.get("skill_arguments") or "").strip()
+    if skill_arguments:
+        # Registry skills resolve $ARGUMENTS from this semantic field. Direct
+        # tools only receive it when an API caller explicitly supplied it.
+        tool_params.setdefault("arguments", skill_arguments)
     result = _dispatch(gateway, tool_name, tool_params, "sub-agent:skill_delegate")
     _checkpoint(cancel_event)
     ok = bool(result.get("ok")) if "ok" in result else True

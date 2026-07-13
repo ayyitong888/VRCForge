@@ -1,6 +1,6 @@
 import { Brain, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentMemory } from "../../lib/api";
 import { clearAgentMemory, createAgentMemory, deleteAgentMemory, fetchAgentMemory } from "../../lib/api";
@@ -35,12 +35,16 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
   const [confirmDeleteId, setConfirmDeleteId] = useState("");
   const [confirmClearScope, setConfirmClearScope] = useState<"" | MemoryScope>("");
   const [clearingScope, setClearingScope] = useState<"" | MemoryScope>("");
+  const refreshRequestId = useRef(0);
 
   const projectDraftBlocked = draftScope === "project" && !selectedProjectPath;
   const visibleMemories = scopeFilter === "all" ? memories : memories.filter((memory) => (memory.scope || "project") === scopeFilter);
 
   async function refreshMemories(showLoading = true) {
+    const requestId = ++refreshRequestId.current;
     if (!runtimeConnected) {
+      setMemories([]);
+      setLoading(false);
       return;
     }
     if (showLoading) {
@@ -52,18 +56,30 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
         scope: scopeFilter === "all" ? "" : scopeFilter,
         projectRoot: selectedProjectPath,
       });
+      if (requestId !== refreshRequestId.current) {
+        return;
+      }
       setMemories(Array.isArray(payload.memories) ? payload.memories : []);
       setError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (requestId === refreshRequestId.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      if (showLoading) {
+      if (showLoading && requestId === refreshRequestId.current) {
         setLoading(false);
       }
     }
   }
 
   useEffect(() => {
+    if (!selectedProjectPath && scopeFilter === "project") {
+      refreshRequestId.current += 1;
+      setMemories([]);
+      setLoading(false);
+      setScopeFilter("all");
+      return;
+    }
     // 切换筛选/项目/连接状态时重置确认态，避免误触上一个上下文的删除确认。
     setConfirmDeleteId("");
     setConfirmClearScope("");
@@ -174,11 +190,13 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
             key={scope}
             type="button"
             onClick={() => setScopeFilter(scope)}
+            aria-pressed={scopeFilter === scope}
+            disabled={scope === "project" && !selectedProjectPath}
             className={cn(
               "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
               scopeFilter === scope
                 ? "border-primary bg-primary/10 text-primary"
-                : "border-border bg-card text-foreground hover:bg-accent",
+                : "border-border bg-card text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-card",
             )}
           >
             {scope === "all" ? t("settings.memoryScopeAll") : scope === "user" ? t("settings.memoryScopeUser") : t("settings.memoryScopeProject")}
@@ -221,6 +239,7 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
                   className="h-8 shrink-0 px-2 text-xs"
                   disabled={!runtimeConnected || !memoryId || Boolean(busyMemoryId)}
                   onClick={() => void removeMemory(memory)}
+                  aria-label={confirmDeleteId === memoryId ? t("settings.memoryConfirmDelete") : t("common.delete")}
                 >
                   {busyMemoryId === memoryId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                   {confirmDeleteId === memoryId ? t("settings.memoryConfirmDelete") : null}
@@ -274,11 +293,13 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
               key={scope}
               type="button"
               onClick={() => setDraftScope(scope)}
+              aria-pressed={draftScope === scope}
+              disabled={scope === "project" && !selectedProjectPath}
               className={cn(
                 "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
                 draftScope === scope
                   ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-card text-foreground hover:bg-accent",
+                  : "border-border bg-card text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-card",
               )}
             >
               {scope === "user" ? t("settings.memoryScopeUser") : t("settings.memoryScopeProject")}

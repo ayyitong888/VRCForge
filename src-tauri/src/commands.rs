@@ -1477,13 +1477,19 @@ pub async fn fetch_sub_agents(
 }
 
 #[tauri::command]
-pub async fn create_sub_agent(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || post_json_body_command("/api/app/sub-agents", request, 60_000))
-        .await
+pub async fn create_sub_agent(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/sub-agents", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn fetch_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_sub_agent(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
@@ -1500,7 +1506,9 @@ pub async fn fetch_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_
 }
 
 #[tauri::command]
-pub async fn cancel_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub async fn cancel_sub_agent(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "POST",
@@ -1517,7 +1525,9 @@ pub async fn cancel_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde
 }
 
 #[tauri::command]
-pub async fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub async fn retry_sub_agent(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "POST",
@@ -1534,7 +1544,9 @@ pub async fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_
 }
 
 #[tauri::command]
-pub async fn merge_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub async fn merge_sub_agent(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "POST",
@@ -1682,7 +1694,9 @@ pub async fn fetch_due_agent_goals(
 }
 
 #[tauri::command]
-pub async fn wake_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+pub async fn wake_agent_goal(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "POST",
@@ -1812,27 +1826,42 @@ pub async fn fetch_agent_memory(
 }
 
 #[tauri::command]
-pub fn create_agent_memory(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/memory", request, 60_000)
+pub async fn create_agent_memory(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/memory", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_agent_memory(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "DELETE",
-        format!(
-            "/api/app/agent/memory/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn delete_agent_memory(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/agent/memory/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn clear_agent_memory(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/memory/clear", request, 60_000)
+pub async fn clear_agent_memory(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/memory/clear", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]

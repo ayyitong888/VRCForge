@@ -65,3 +65,14 @@ export function updateSubAgentList(current: SubAgentTaskList | null, task: SubAg
     runningCount: tasks.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length,
   };
 }
+
+export function reconcileSelectedSubAgent(
+  selected: SubAgentTask | null,
+  tasks: SubAgentTask[],
+): SubAgentTask | null {
+  if (!selected) {
+    return null;
+  }
+  const updated = tasks.find((task) => task.id === selected.id);
+  return updated ? { ...selected, ...updated } : selected;
+}

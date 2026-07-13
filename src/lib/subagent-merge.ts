@@ -30,3 +30,35 @@ export function subAgentProposedNextAction(task: SubAgentTask): string {
 export function subAgentResultSummaryText(task: SubAgentTask): string {
   return resultText(task, "summaryText") || (task.summary ?? "").trim();
 }
+
+const ADOPTED_HISTORY_MAX_CHARS = 8_000;
+
+export function subAgentAdoptedHistoryText(task: SubAgentTask): string {
+  if (!isMergedAdopted(task)) {
+    return "";
+  }
+  const identity = task.displayName || task.role || task.id;
+  const summary = subAgentResultSummaryText(task);
+  const proposedNextAction = subAgentProposedNextAction(task);
+  let result = "";
+  if (task.result) {
+    try {
+      result = JSON.stringify(task.result, null, 2);
+    } catch {
+      result = String(task.result);
+    }
+  }
+  const text = [
+    `[Adopted sub-agent result: ${identity}]`,
+    task.task ? `Delegated task:\n${task.task}` : "",
+    summary ? `Reviewed summary:\n${summary}` : "",
+    result ? `Result payload:\n${result}` : "",
+    proposedNextAction ? `Proposed next action:\n${proposedNextAction}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  if (text.length <= ADOPTED_HISTORY_MAX_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, ADOPTED_HISTORY_MAX_CHARS)}\n[Adopted result truncated for chat context]`;
+}

@@ -116,7 +116,7 @@ import {
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
 import { subAgentProposedNextAction } from "./lib/subagent-merge";
-import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
+import { pickSubAgentName, reconcileSelectedSubAgent, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
   AgentRuntimeResponse,
@@ -2088,11 +2088,15 @@ export default function App() {
       return;
     }
     if (message === "/delegate" || message.startsWith("/delegate ")) {
-      const command = parseDelegateCommand(message);
+      const command = parseDelegateCommand(
+        message,
+        skills.map((skill) => skill.name),
+      );
       void startSubAgentTask(
         command.toolName ? "skill_delegate" : undefined,
         command.task || undefined,
         command.toolName,
+        command.targetKind === "skill" ? command.task : undefined,
       );
       setInput("");
       return;
@@ -2169,6 +2173,7 @@ export default function App() {
     try {
       const payload = await fetchSubAgents(endpoint, includeEvents);
       setSubAgentList(payload);
+      setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
       setSubAgentError("");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
@@ -2177,7 +2182,12 @@ export default function App() {
     }
   }
 
-  async function startSubAgentTask(roleOverride?: string, taskOverride?: string, toolName?: string) {
+  async function startSubAgentTask(
+    roleOverride?: string,
+    taskOverride?: string,
+    toolName?: string,
+    skillArguments?: string,
+  ) {
     const agentName = pickSubAgentName();
     const projectPath = activeChat?.projectPath || activeProjectPath;
     const hasPackage = outfitPackagePath.trim().length > 0;
@@ -2214,6 +2224,7 @@ export default function App() {
           projectPath,
           packagePath: outfitPackagePath.trim(),
           ...(toolName ? { toolName } : {}),
+          ...(skillArguments?.trim() ? { skillArguments: skillArguments.trim() } : {}),
         },
       });
       setRightSidebarCollapsed(false);

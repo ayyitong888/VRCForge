@@ -186,6 +186,32 @@ def test_skill_delegate_prefers_explicit_skill_params_and_falls_back_summary():
     assert result["summaryText"].startswith("Delegated skill VRCForge_Scan_Project_Index finished")
 
 
+def test_skill_delegate_maps_registry_skill_arguments_without_leaking_control_keys():
+    gateway = FakeGateway({"ok": True, "arguments": "inspect avatar"})
+    run_skill_delegate(
+        gateway,
+        {
+            "toolName": "read-only-avatar-audit",
+            "skillArguments": "inspect avatar",
+            "projectPath": "ProjectA",
+            "task": "visible parent task",
+        },
+        _idle_event(),
+    )
+
+    assert gateway.calls == [
+        (
+            "read-only-avatar-audit",
+            {
+                "arguments": "inspect avatar",
+                "projectPath": "ProjectA",
+                "task": "visible parent task",
+            },
+            "sub-agent:skill_delegate",
+        )
+    ]
+
+
 def test_selected_context_review_never_touches_gateway():
     payload = {"selectedText": "please review this validation output"}
     result = run_selected_context_review(payload, _idle_event())
@@ -235,4 +261,4 @@ def test_non_dict_tool_result_is_wrapped():
         _idle_event(),
     )
     assert result["result"] == {"value": "plain-text"}
-    assert sub_agent_delegate._DELEGATE_CONTROL_KEYS >= {"toolName", "skillParams"}
+    assert sub_agent_delegate._DELEGATE_CONTROL_KEYS >= {"toolName", "skillParams", "skillArguments"}

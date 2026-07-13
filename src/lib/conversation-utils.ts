@@ -9,6 +9,7 @@ import type {
 import { formatAttachmentSize } from "./chat-format";
 import type { ChatAttachment, ContextUsage, ConversationItem } from "./chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
+import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 
 const COMPACT_ENTRY_MAX_CHARS = 400;
@@ -148,6 +149,11 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
       }
     } else if (item.type === "compact") {
       const text = (item.detail || item.text).trim();
+      if (text) {
+        history.push({ role: "agent", text });
+      }
+    } else if (item.type === "subagent") {
+      const text = subAgentAdoptedHistoryText(item.task).trim();
       if (text) {
         history.push({ role: "agent", text });
       }

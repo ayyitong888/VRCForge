@@ -1495,6 +1495,11 @@ class AgentGateway:
         self._lock = threading.RLock()
         self._desktop_action_condition = threading.Condition(self._lock)
         self._computer_use_turn_grants: dict[str, dict[str, str]] = {}
+        # In-progress approved writes, keyed by approval id. This is a global,
+        # deliberately conservative lane: even writes for different projects
+        # remain serialized until per-project and shared-storage locking has its
+        # own proof. It closes the gap before durable apply recovery exists.
+        self._in_flight_apply_writes: dict[str, dict[str, Any]] = {}
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1516,6 +1521,10 @@ class AgentGateway:
         self._runtime_stream_context = threading.local()
         # 审计 JSONL 追加锁：见 append_audit。
         self._audit_append_lock = threading.Lock()
+        # Checkpoint archives, their JSONL projection, and storage relocation
+        # form one consistency domain. Creation calls pruning recursively, so
+        # this must be re-entrant.
+        self._checkpoint_storage_lock = threading.RLock()
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
@@ -4980,6 +4989,24 @@ class AgentGateway:
             if not write_handler:
                 raise AgentGatewayError(f"Write target is no longer available: {target_tool}", status_code=404)
 
+            in_flight_writes = [dict(entry) for entry in self._in_flight_apply_writes.values()]
+            if in_flight_writes:
+                self.append_audit(
+                    {
+                        "event": "approval_blocked_by_in_flight_write",
+                        "approvalId": approval_id,
+                        "targetTool": target_tool,
+                        "inFlightWrites": in_flight_writes,
+                    }
+                )
+                return {
+                    "ok": False,
+                    "status": "blocked_concurrent_write",
+                    "approval": approval,
+                    "inFlightWrites": in_flight_writes,
+                    "error": "Another approved write is still applying. Wait for it to finish (or fail into recovery) before running this write.",
+                }
+
             active_recoveries = self._active_apply_recoveries()
             if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
                 self.append_audit(
@@ -4999,22 +5026,46 @@ class AgentGateway:
                     "error": "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
                 }
 
-            approval["status"] = "applying"
-            self._approvals[approval_id] = approval
-            permission_context = self.permission_audit_context()
-            self.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
-            self._append_runtime_run(
-                {
-                    "event": "approval_applying",
-                    "status": "applying",
-                    "approvalId": approval_id,
-                    "approvalIds": [approval_id],
-                    **permission_context,
-                    "targetTool": target_tool,
-                    "agent": approval.get("agentName") or "",
-                    "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
-                }
-            )
+            self._in_flight_apply_writes[approval_id] = {
+                "approvalId": approval_id,
+                "targetTool": target_tool,
+                "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
+                "startedAt": utc_now_iso(),
+            }
+            try:
+                approval["status"] = "applying"
+                self._approvals[approval_id] = approval
+                permission_context = self.permission_audit_context()
+                self.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
+                self._append_runtime_run(
+                    {
+                        "event": "approval_applying",
+                        "status": "applying",
+                        "approvalId": approval_id,
+                        "approvalIds": [approval_id],
+                        **permission_context,
+                        "targetTool": target_tool,
+                        "agent": approval.get("agentName") or "",
+                        "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - restore a retryable approval on transition I/O failure.
+                approval["status"] = "approved"
+                self._approvals[approval_id] = approval
+                self._in_flight_apply_writes.pop(approval_id, None)
+                try:
+                    self.append_audit(
+                        {
+                            "event": "approval_apply_transition_failed",
+                            "approval": approval,
+                            "approvalId": approval_id,
+                            "targetTool": target_tool,
+                            "error": str(exc),
+                        }
+                    )
+                except Exception:  # noqa: BLE001 - the original failure may be the audit sink itself.
+                    pass
+                raise AgentGatewayError(f"Could not start approved write: {exc}", status_code=500) from exc
 
         checkpoint: dict[str, Any] | None = None
         recovery: dict[str, Any] | None = None
@@ -5024,13 +5075,14 @@ class AgentGateway:
                 ensure_dict(approval.get("arguments") or {}),
                 user_constraints,
             )
-            checkpoint = self._create_pre_write_checkpoint(approval, arguments)
-            if checkpoint:
-                approval["checkpoint"] = checkpoint
-                if checkpoint.get("blocking"):
-                    raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
-                if checkpoint.get("ok"):
-                    recovery = self._start_apply_recovery(approval, arguments, checkpoint)
+            with self._checkpoint_storage_lock:
+                checkpoint = self._create_pre_write_checkpoint(approval, arguments)
+                if checkpoint:
+                    approval["checkpoint"] = checkpoint
+                    if checkpoint.get("blocking"):
+                        raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                    if checkpoint.get("ok"):
+                        recovery = self._start_apply_recovery(approval, arguments, checkpoint)
             result = write_handler.handler(arguments)
             if isinstance(result, dict) and result.get("ok") is False:
                 message = (
@@ -5107,6 +5159,9 @@ class AgentGateway:
             if checkpoint:
                 payload["checkpoint"] = checkpoint
             return payload
+        finally:
+            with self._lock:
+                self._in_flight_apply_writes.pop(approval_id, None)
 
     def list_approvals(
         self,
@@ -5184,6 +5239,10 @@ class AgentGateway:
         return entries
 
     def list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._list_checkpoints_locked(params)
+
+    def _list_checkpoints_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         limit = max(1, min(int(params.get("limit") or 50), 500))
         project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
@@ -5195,6 +5254,10 @@ class AgentGateway:
         return {"ok": True, "checkpoints": entries, "count": len(entries)}
 
     def checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._checkpoint_archive_usage_locked(config)
+
+    def _checkpoint_archive_usage_locked(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self.ensure_config()
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
@@ -5244,6 +5307,10 @@ class AgentGateway:
         return labels
 
     def delete_checkpoint_archives(self, checkpoint_ids: Any) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._delete_checkpoint_archives_locked(checkpoint_ids)
+
+    def _delete_checkpoint_archives_locked(self, checkpoint_ids: Any) -> dict[str, Any]:
         """删除用户在面板里勾选的存档；活跃恢复检查点强制保护，不会被删。"""
         requested = {
             str(cid).strip()
@@ -5306,6 +5373,10 @@ class AgentGateway:
         }
 
     def relocate_checkpoint_archives(self, target_directory: Any) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._relocate_checkpoint_archives_locked(target_directory)
+
+    def _relocate_checkpoint_archives_locked(self, target_directory: Any) -> dict[str, Any]:
         """把检查点存档目录迁到新位置：先复制 ZIP、改写 checkpoints.jsonl 中的
         archivePath、再切换配置、最后删除旧文件。任何一步崩溃都不会让回滚失效，
         因为旧目录在改写+切配置成功前始终保持可用。"""
@@ -5480,6 +5551,18 @@ class AgentGateway:
             current = current.parent
 
     def prune_checkpoint_archives(
+        self,
+        max_size_mb: int | None = None,
+        *,
+        protected_checkpoint_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._prune_checkpoint_archives_locked(
+                max_size_mb,
+                protected_checkpoint_ids=protected_checkpoint_ids,
+            )
+
+    def _prune_checkpoint_archives_locked(
         self,
         max_size_mb: int | None = None,
         *,
@@ -5836,6 +5919,10 @@ class AgentGateway:
         raise AgentGatewayError("selection slot must be A, B, or current.", status_code=400)
 
     def preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._preview_restore_checkpoint_locked(params)
+
+    def _preview_restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -5862,6 +5949,10 @@ class AgentGateway:
         return payload
 
     def restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._checkpoint_storage_lock:
+            return self._restore_checkpoint_locked(params)
+
+    def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -5927,6 +6018,14 @@ class AgentGateway:
         return payload
 
     def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
+        with self._checkpoint_storage_lock:
+            return self._create_pre_write_checkpoint_locked(approval, arguments)
+
+    def _create_pre_write_checkpoint_locked(
+        self,
+        approval: dict[str, Any],
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
         target_tool = str(approval.get("targetTool") or "")
         if not target_tool or target_tool in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
             return None
