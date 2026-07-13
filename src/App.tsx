@@ -2700,6 +2700,7 @@ export default function App() {
           ) : activeView === "settings" ? (
             <SettingsWorkspace
               activeSection={activeSettingsSection}
+              endpoint={endpoint}
               developerOptionsEnabled={developerOptionsEnabled}
               developerOptionsEverEnabled={developerOptionsEverEnabled}
               computerUseEnabled={computerUseEnabled}

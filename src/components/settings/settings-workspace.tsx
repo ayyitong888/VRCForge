@@ -18,10 +18,12 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { CheckpointStoragePanel } from "./checkpoint-storage-panel";
 import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel";
+import { MemorySettingsPanel } from "./memory-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
+  endpoint: string;
   developerOptionsEnabled: boolean;
   developerOptionsEverEnabled: boolean;
   computerUseEnabled: boolean;
@@ -103,6 +105,7 @@ type SettingsWorkspaceProps = {
 
 export function SettingsWorkspace({
   activeSection,
+  endpoint,
   developerOptionsEnabled,
   developerOptionsEverEnabled,
   computerUseEnabled,
@@ -458,6 +461,12 @@ export function SettingsWorkspace({
               )}
             </div>
           </div>
+        </section>
+        ) : null}
+
+        {visibleSection === "memory" ? (
+        <section className="pb-6">
+          <MemorySettingsPanel endpoint={endpoint} runtimeConnected={runtimeConnected} selectedProjectPath={selectedProjectPath} />
         </section>
         ) : null}
 
