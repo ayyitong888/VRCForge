@@ -202,6 +202,12 @@ export function ConversationCard({
           <p className="whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
             {task.summary || task.error || task.task || t("agent.noSummaryReturned")}
           </p>
+          {task.mergeDecision ? (
+            <div className="text-xs text-muted-foreground">
+              {t("subagent.review")}: {task.mergeDecision === "adopted" ? t("subagent.mergedBadge") : t("subagent.dismissedBadge")}
+              {task.mergedAt ? ` · ${task.mergedAt}` : ""}
+            </div>
+          ) : null}
           {task.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(task.result)} /> : null}
           <MessageActions
             onCopy={() => onCopyItem?.(item)}

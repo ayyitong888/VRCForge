@@ -1477,50 +1477,77 @@ pub async fn fetch_sub_agents(
 }
 
 #[tauri::command]
-pub fn create_sub_agent(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/sub-agents", request, 60_000)
+pub async fn create_sub_agent(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || post_json_body_command("/api/app/sub-agents", request, 60_000))
+        .await
 }
 
 #[tauri::command]
-pub fn fetch_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        format!(
-            "/api/app/sub-agents/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        None,
-        request.timeout_ms,
-    )
-    .map(sanitize_webview_response)
+pub async fn fetch_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!(
+                "/api/app/sub-agents/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cancel_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/sub-agents/{}/cancel",
-            percent_encode_query_component(&request.id)
-        ),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn cancel_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/sub-agents/{}/cancel",
+                percent_encode_query_component(&request.id)
+            ),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/sub-agents/{}/retry",
-            percent_encode_query_component(&request.id)
-        ),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn retry_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/sub-agents/{}/retry",
+                percent_encode_query_component(&request.id)
+            ),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn merge_sub_agent(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/sub-agents/{}/merge",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]

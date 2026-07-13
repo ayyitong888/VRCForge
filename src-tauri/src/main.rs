@@ -165,6 +165,7 @@ fn main() {
             import_skill_package,
             install_external_agent_connector,
             issue_computer_use_turn_grant,
+            merge_sub_agent,
             overwrite_adjustment_checkpoint,
             plan_avatar_encryption,
             plan_outfit_import,

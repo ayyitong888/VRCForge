@@ -1240,6 +1240,13 @@ class SubAgentCreateRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SubAgentMergeRequest(BaseModel):
+    decision: str = Field(default="adopted")
+    chat_id: str = Field(default="", alias="chatId")
+
+    model_config = {"populate_by_name": True}
+
+
 class ProviderTestRequest(ApiConfigRequest):
     capability: Literal["text", "structured", "vision"] = "text"
 
@@ -4160,6 +4167,17 @@ async def app_retry_sub_agent(task_id: str) -> dict[str, Any]:
     payload = SUB_AGENT_REGISTRY.retry_task(task_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    return payload
+
+
+@app.post("/api/app/sub-agents/{task_id}/merge")
+async def app_merge_sub_agent(task_id: str, request: SubAgentMergeRequest) -> dict[str, Any]:
+    payload = SUB_AGENT_REGISTRY.merge_task(task_id, decision=request.decision, chat_id=request.chat_id)
+    if not payload.get("ok"):
+        error_text = str(payload.get("error") or "Sub-agent task was not found.")
+        status_code = 404 if "not found" in error_text else 409
+        raise HTTPException(status_code=status_code, detail=error_text)
     await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
     return payload
 

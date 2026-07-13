@@ -611,7 +611,15 @@
     "statusRunningOne": "実行中",
     "statusCancelling": "キャンセル中",
     "statusCompleted": "完了",
-    "statusFailed": "失敗"
+    "statusFailed": "失敗",
+    "awaitingReview": "レビュー待ち",
+    "review": "マージレビュー",
+    "mergeAdopt": "チャットに取り込む",
+    "mergeDismiss": "不採用にする",
+    "mergedBadge": "取り込み済み",
+    "dismissedBadge": "不採用",
+    "nextAction": "提案された次のステップ",
+    "adoptNextAction": "入力に採用"
   },
   "connector": {
     "title": "エージェントコネクタ",

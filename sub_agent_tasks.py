@@ -47,6 +47,11 @@ class SubAgentTask:
     error: str = ""
     cancel_requested: bool = False
     event_count: int = 0
+    # 合并审查状态：completed 任务经用户审查后落 adopted/dismissed，
+    # 终态一旦写入不再改写（历史卫生，与审批终态语义一致）。
+    merged_at: str = ""
+    merged_chat_id: str = ""
+    merge_decision: str = ""
 
 
 class SubAgentTaskRegistry:
@@ -161,6 +166,26 @@ class SubAgentTaskRegistry:
                 params=params,
             )
 
+    def merge_task(self, task_id: str, *, decision: str = "adopted", chat_id: str = "") -> dict[str, Any]:
+        decision_id = str(decision or "adopted").strip().lower()
+        if decision_id not in {"adopted", "dismissed"}:
+            return {"ok": False, "error": "merge decision must be adopted or dismissed."}
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return {"ok": False, "error": "sub-agent task was not found."}
+            if task.merge_decision:
+                # 终态不改写：重复合并请求直接回放既有决定，保持历史卫生。
+                return {"ok": True, "task": self._serialize_task(task), "message": "task already merged"}
+            if task.status != "completed":
+                return {"ok": False, "error": "only completed sub-agent tasks can be merged."}
+            task.merge_decision = decision_id
+            task.merged_chat_id = str(chat_id or "")
+            task.merged_at = utc_now()
+            task.updated_at = task.merged_at
+            self._record_event_locked(task_id, "merged", {"decision": decision_id, "chatId": task.merged_chat_id})
+            return {"ok": True, "task": self._serialize_task(task)}
+
     def recent_events(self, limit: int = 200) -> list[dict[str, Any]]:
         path = self._event_log_path()
         if not path.exists():
@@ -259,6 +284,9 @@ class SubAgentTaskRegistry:
             "summary": task.summary,
             "error": task.error,
             "eventCount": task.event_count,
+            "mergedAt": task.merged_at,
+            "mergedChatId": task.merged_chat_id,
+            "mergeDecision": task.merge_decision,
             "result": task.result,
             "paramsSummary": summarize_params(task.params),
         }

@@ -611,7 +611,15 @@
     "statusRunningOne": "Running",
     "statusCancelling": "Cancelling",
     "statusCompleted": "Completed",
-    "statusFailed": "Failed"
+    "statusFailed": "Failed",
+    "awaitingReview": "Awaiting review",
+    "review": "Merge review",
+    "mergeAdopt": "Merge into chat",
+    "mergeDismiss": "Dismiss",
+    "mergedBadge": "Merged",
+    "dismissedBadge": "Dismissed",
+    "nextAction": "Proposed next action",
+    "adoptNextAction": "Use as input"
   },
   "connector": {
     "title": "Agent Connectors",

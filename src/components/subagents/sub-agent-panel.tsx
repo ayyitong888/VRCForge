@@ -1,7 +1,13 @@
-import { Bot, Check, ChevronDown, ChevronRight, Eye, Loader2, RefreshCw, X } from "lucide-react";
+import { Ban, Bot, Check, ChevronDown, ChevronRight, CornerDownRight, Eye, Loader2, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
+import {
+  isAwaitingMergeReview,
+  isMergedAdopted,
+  isMergedDismissed,
+  subAgentProposedNextAction,
+} from "../../lib/subagent-merge";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -16,7 +22,8 @@ export function SubAgentPanel({
   onInspect,
   onCancel,
   onRetry,
-  onAccept,
+  onMerge,
+  onAdoptNextAction,
   onCloseInspect,
 }: {
   tasks: SubAgentTask[];
@@ -26,7 +33,8 @@ export function SubAgentPanel({
   onInspect: (taskId: string) => void;
   onCancel: (taskId: string) => void;
   onRetry: (taskId: string) => void;
-  onAccept: (task: SubAgentTask) => void;
+  onMerge: (task: SubAgentTask, decision: "adopted" | "dismissed") => void;
+  onAdoptNextAction: (task: SubAgentTask) => void;
   onCloseInspect: () => void;
 }) {
   const { t } = useTranslation();
@@ -77,6 +85,21 @@ export function SubAgentPanel({
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
                       {task.displayName || t("agent.subagentTask")} · {subAgentRoleLabel(task.role)}
                     </span>
+                    {isAwaitingMergeReview(task) ? (
+                      <Badge tone="warn" className="shrink-0">
+                        {t("subagent.awaitingReview")}
+                      </Badge>
+                    ) : null}
+                    {isMergedAdopted(task) ? (
+                      <Badge tone="ok" className="shrink-0">
+                        {t("subagent.mergedBadge")}
+                      </Badge>
+                    ) : null}
+                    {isMergedDismissed(task) ? (
+                      <Badge tone="muted" className="shrink-0">
+                        {t("subagent.dismissedBadge")}
+                      </Badge>
+                    ) : null}
                     <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
                       {displaySubAgentStatus(task.status)}
                     </Badge>
@@ -99,11 +122,17 @@ export function SubAgentPanel({
                         {t("doctor.retry")}
                       </Button>
                     ) : null}
-                    {task.status === "completed" ? (
-                      <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onAccept(task)}>
-                        <Check className="h-3.5 w-3.5" />
-                        Add
-                      </Button>
+                    {isAwaitingMergeReview(task) ? (
+                      <>
+                        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onMerge(task, "adopted")}>
+                          <Check className="h-3.5 w-3.5" />
+                          {t("subagent.mergeAdopt")}
+                        </Button>
+                        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onMerge(task, "dismissed")}>
+                          <Ban className="h-3.5 w-3.5" />
+                          {t("subagent.mergeDismiss")}
+                        </Button>
+                      </>
                     ) : null}
                   </div>
                 </div>
@@ -128,9 +157,39 @@ export function SubAgentPanel({
               <DataLine label="Role" value={subAgentRoleLabel(selected.role)} />
               <DataLine label="Profile" value={selected.toolProfile || t("optimization.readOnly")} />
               {selected.projectPath ? <DataLine label={t("subagent.roles.projectIndexReview")} value={selected.projectPath} mono /> : null}
+              {selected.mergeDecision ? (
+                <DataLine
+                  label={t("subagent.review")}
+                  value={`${selected.mergeDecision === "adopted" ? t("subagent.mergedBadge") : t("subagent.dismissedBadge")}${selected.mergedAt ? ` · ${selected.mergedAt}` : ""}`}
+                />
+              ) : null}
               {selected.summary ? <OutputBlock label="Summary" value={selected.summary} /> : null}
               {selected.error ? <OutputBlock label={t("doctor.error")} value={selected.error} danger /> : null}
+              {subAgentProposedNextAction(selected) ? (
+                <div className="mt-2 rounded-lg border border-dashed border-border px-3 py-2">
+                  <div className="text-xs font-medium text-muted-foreground">{t("subagent.nextAction")}</div>
+                  <div className="mt-1 text-xs">{subAgentProposedNextAction(selected)}</div>
+                  <div className="mt-2 flex justify-end">
+                    <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onAdoptNextAction(selected)}>
+                      <CornerDownRight className="h-3.5 w-3.5" />
+                      {t("subagent.adoptNextAction")}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
               {selected.result !== undefined ? <OutputBlock label="Result" value={formatPayload(selected.result)} /> : null}
+              {isAwaitingMergeReview(selected) ? (
+                <div className="mt-2 flex flex-wrap justify-end gap-2">
+                  <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onMerge(selected, "adopted")}>
+                    <Check className="h-3.5 w-3.5" />
+                    {t("subagent.mergeAdopt")}
+                  </Button>
+                  <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onMerge(selected, "dismissed")}>
+                    <Ban className="h-3.5 w-3.5" />
+                    {t("subagent.mergeDismiss")}
+                  </Button>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

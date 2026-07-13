@@ -611,7 +611,15 @@
     "statusRunningOne": "运行中",
     "statusCancelling": "取消中",
     "statusCompleted": "已完成",
-    "statusFailed": "失败"
+    "statusFailed": "失败",
+    "awaitingReview": "待审查",
+    "review": "合并审查",
+    "mergeAdopt": "合并进对话",
+    "mergeDismiss": "标记不采纳",
+    "mergedBadge": "已合并",
+    "dismissedBadge": "未采纳",
+    "nextAction": "建议的下一步",
+    "adoptNextAction": "采纳为输入"
   },
   "connector": {
     "title": "智能体连接器",

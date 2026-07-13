@@ -1,8 +1,9 @@
-import { Bot, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightClose, RefreshCw, Sparkles, Wrench, X } from "lucide-react";
+import { Ban, Bot, Check, CornerDownRight, FileText, Folder, ListChecks, Monitor, MousePointer2, PanelRightClose, RefreshCw, Sparkles, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, DesktopBridgeStatus, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
+import { isAwaitingMergeReview, subAgentProposedNextAction } from "../../lib/subagent-merge";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { DataLine } from "../ui/data-line";
@@ -63,6 +64,8 @@ export function RightRuntimeSidebar({
   inspectSubAgentTask,
   onCloseSelectedSubAgentPanel,
   onOpenSelectedSubAgentPanel,
+  onMergeSubAgent,
+  onAdoptSubAgentNextAction,
   subAgentRoleLabel,
   subAgentStatusTone,
   displaySubAgentStatus,
@@ -118,6 +121,8 @@ export function RightRuntimeSidebar({
   inspectSubAgentTask: (taskId: string) => void | Promise<void>;
   onCloseSelectedSubAgentPanel: () => void;
   onOpenSelectedSubAgentPanel: () => void;
+  onMergeSubAgent: (task: SubAgentTask, decision: "adopted" | "dismissed") => void | Promise<void>;
+  onAdoptSubAgentNextAction: (task: SubAgentTask) => void;
   subAgentRoleLabel: (role: string) => string;
   subAgentStatusTone: (status: string) => BadgeTone;
   displaySubAgentStatus: (status: string) => string;
@@ -536,6 +541,16 @@ export function RightRuntimeSidebar({
                   <div className="mb-2 flex min-w-0 items-center gap-2">
                     <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
                     <span className="min-w-0 flex-1 truncate font-medium">{selectedSubAgent.displayName || subAgentRoleLabel(selectedSubAgent.role)}</span>
+                    {isAwaitingMergeReview(selectedSubAgent) ? (
+                      <Badge tone="warn" className="shrink-0">
+                        {t("subagent.awaitingReview")}
+                      </Badge>
+                    ) : null}
+                    {selectedSubAgent.mergeDecision ? (
+                      <Badge tone={selectedSubAgent.mergeDecision === "adopted" ? "ok" : "muted"} className="shrink-0">
+                        {selectedSubAgent.mergeDecision === "adopted" ? t("subagent.mergedBadge") : t("subagent.dismissedBadge")}
+                      </Badge>
+                    ) : null}
                     <Badge tone={subAgentStatusTone(selectedSubAgent.status)} className="shrink-0">
                       {displaySubAgentStatus(selectedSubAgent.status)}
                     </Badge>
@@ -552,9 +567,51 @@ export function RightRuntimeSidebar({
                   <div className="grid gap-2">
                     <DataLine label="Role" value={subAgentRoleLabel(selectedSubAgent.role)} />
                     <OutputBlock label="Task" value={selectedSubAgent.task || selectedSubAgent.id} />
+                    {selectedSubAgent.mergeDecision ? (
+                      <DataLine
+                        label={t("subagent.review")}
+                        value={`${selectedSubAgent.mergeDecision === "adopted" ? t("subagent.mergedBadge") : t("subagent.dismissedBadge")}${selectedSubAgent.mergedAt ? ` · ${selectedSubAgent.mergedAt}` : ""}`}
+                      />
+                    ) : null}
                     {selectedSubAgent.summary ? <OutputBlock label="Summary" value={selectedSubAgent.summary} /> : null}
                     {selectedSubAgent.error ? <OutputBlock label={t("doctor.error")} value={selectedSubAgent.error} danger /> : null}
+                    {subAgentProposedNextAction(selectedSubAgent) ? (
+                      <div className="rounded-md border border-dashed border-border px-2 py-1.5">
+                        <div className="text-[11px] font-medium text-muted-foreground">{t("subagent.nextAction")}</div>
+                        <div className="mt-0.5 break-words">{subAgentProposedNextAction(selectedSubAgent)}</div>
+                        <div className="mt-1 flex justify-end">
+                          <button
+                            type="button"
+                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                            onClick={() => onAdoptSubAgentNextAction(selectedSubAgent)}
+                          >
+                            <CornerDownRight className="h-3 w-3" />
+                            {t("subagent.adoptNextAction")}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {selectedSubAgent.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(selectedSubAgent.result)} /> : null}
+                    {isAwaitingMergeReview(selectedSubAgent) ? (
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] transition-colors hover:bg-muted"
+                          onClick={() => void onMergeSubAgent(selectedSubAgent, "adopted")}
+                        >
+                          <Check className="h-3 w-3" />
+                          {t("subagent.mergeAdopt")}
+                        </button>
+                        <button
+                          type="button"
+                          className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+                          onClick={() => void onMergeSubAgent(selectedSubAgent, "dismissed")}
+                        >
+                          <Ban className="h-3 w-3" />
+                          {t("subagent.mergeDismiss")}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : selectedSubAgent ? (

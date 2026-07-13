@@ -115,6 +115,7 @@ import {
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
+import { subAgentProposedNextAction } from "./lib/subagent-merge";
 import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
@@ -145,6 +146,7 @@ import {
   fetchAppHealth,
   fetchSubAgent,
   fetchSubAgents,
+  mergeSubAgent,
   requestAgentDesktopAction,
   refreshProjects,
   repairUnityMcpBridge,
@@ -2256,14 +2258,33 @@ export default function App() {
     }
   }
 
-  function acceptSubAgentSummary(task: SubAgentTask) {
-    const chatId = ensureActiveChat();
+  async function mergeSubAgentTask(task: SubAgentTask, decision: "adopted" | "dismissed") {
+    try {
+      const chatId = decision === "adopted" ? ensureActiveChat() : "";
+      const payload = await mergeSubAgent(endpoint, task.id, { decision, chatId });
+      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      setSelectedSubAgent((current) => (current && current.id === payload.task.id ? payload.task : current));
+      // 终态一次性：仅首次采纳时把结果落进对话，重放请求（message=already merged）不再追加。
+      if (decision === "adopted" && !payload.message) {
+        setActiveView("chat");
+        appendToChat(chatId, {
+          id: `subagent-${payload.task.id}-${Date.now()}`,
+          type: "subagent",
+          task: payload.task,
+        });
+      }
+    } catch (cause) {
+      setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function adoptSubAgentNextAction(task: SubAgentTask) {
+    const nextAction = subAgentProposedNextAction(task);
+    if (!nextAction) {
+      return;
+    }
     setActiveView("chat");
-    appendToChat(chatId, {
-      id: `subagent-${task.id}-${Date.now()}`,
-      type: "subagent",
-      task,
-    });
+    setInput(nextAction);
   }
 
   function handleConversationMouseUp() {
@@ -2881,6 +2902,8 @@ export default function App() {
               inspectSubAgentTask={inspectSubAgentTask}
               onCloseSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(false)}
               onOpenSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(true)}
+              onMergeSubAgent={mergeSubAgentTask}
+              onAdoptSubAgentNextAction={adoptSubAgentNextAction}
               subAgentRoleLabel={subAgentRoleLabel}
               subAgentStatusTone={subAgentStatusTone}
               displaySubAgentStatus={displaySubAgentStatus}
