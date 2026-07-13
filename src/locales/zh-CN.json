@@ -602,6 +602,7 @@
       "validationTriage": "验证",
       "packageInstallDiagnosis": "安装日志",
       "outfitImportPlanReview": "服装计划",
+      "skillDelegate": "技能委派",
       "fallback": "工作进程"
     },
     "taskLabel": "后台任务",

@@ -114,6 +114,7 @@ import {
   createSubAgentContextSmokeTask,
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
+import { parseDelegateCommand } from "./lib/subagent-delegate";
 import { pickSubAgentName, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
@@ -2085,8 +2086,12 @@ export default function App() {
       return;
     }
     if (message === "/delegate" || message.startsWith("/delegate ")) {
-      const task = message.replace(/^\/delegate\s*/i, "").trim();
-      void startSubAgentTask(undefined, task || undefined);
+      const command = parseDelegateCommand(message);
+      void startSubAgentTask(
+        command.toolName ? "skill_delegate" : undefined,
+        command.task || undefined,
+        command.toolName,
+      );
       setInput("");
       return;
     }
@@ -2170,17 +2175,19 @@ export default function App() {
     }
   }
 
-  async function startSubAgentTask(roleOverride?: string, taskOverride?: string) {
+  async function startSubAgentTask(roleOverride?: string, taskOverride?: string, toolName?: string) {
     const agentName = pickSubAgentName();
     const projectPath = activeChat?.projectPath || activeProjectPath;
     const hasPackage = outfitPackagePath.trim().length > 0;
     const role = roleOverride || (hasPackage ? "outfit_import_plan_review" : "project_index_review");
     const defaultTask =
-      role === "outfit_import_plan_review"
-        ? "Inspect the selected outfit package and return a supervised import plan summary."
-        : role === "validation_triage"
-          ? "Run read-only validation triage and summarize findings."
-          : "Review the local Unity project index and summarize changed scanner families.";
+      role === "skill_delegate"
+        ? `Run the delegated skill ${toolName || ""} and report its output.`.trim()
+        : role === "outfit_import_plan_review"
+          ? "Inspect the selected outfit package and return a supervised import plan summary."
+          : role === "validation_triage"
+            ? "Run read-only validation triage and summarize findings."
+            : "Review the local Unity project index and summarize changed scanner families.";
     const task = taskOverride?.trim() || defaultTask;
     setActiveView("chat");
     setError("");
@@ -2204,6 +2211,7 @@ export default function App() {
         params: {
           projectPath,
           packagePath: outfitPackagePath.trim(),
+          ...(toolName ? { toolName } : {}),
         },
       });
       setRightSidebarCollapsed(false);

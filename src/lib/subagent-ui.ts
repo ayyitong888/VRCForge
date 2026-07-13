@@ -14,6 +14,8 @@ export function subAgentRoleLabel(role: string): string {
       return i18n.t("subagent.roles.packageInstallDiagnosis");
     case "outfit_import_plan_review":
       return i18n.t("subagent.roles.outfitImportPlanReview");
+    case "skill_delegate":
+      return i18n.t("subagent.roles.skillDelegate");
     default:
       return role || i18n.t("subagent.roles.fallback");
   }

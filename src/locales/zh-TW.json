@@ -602,6 +602,7 @@
       "validationTriage": "驗證",
       "packageInstallDiagnosis": "安裝日誌",
       "outfitImportPlanReview": "服裝計畫",
+      "skillDelegate": "技能委派",
       "fallback": "工作程序"
     },
     "taskLabel": "背景任務",

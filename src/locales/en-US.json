@@ -602,6 +602,7 @@
       "validationTriage": "Validation",
       "packageInstallDiagnosis": "Install log",
       "outfitImportPlanReview": "Outfit plan",
+      "skillDelegate": "Skill delegate",
       "fallback": "Worker"
     },
     "taskLabel": "Background task",

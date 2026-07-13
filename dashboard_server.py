@@ -86,7 +86,9 @@ from shader_adapter_registry import (
     shader_family_label,
 )
 from skill_packages import SkillPackageError, SkillPackageService
-from sub_agent_tasks import CancelledError, SubAgentRole, SubAgentTaskRegistry
+import sub_agent_delegate
+from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
+from sub_agent_tasks import SubAgentTaskRegistry
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
@@ -1409,54 +1411,13 @@ DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
     DESKTOP_CAPTURE_DIR,
     on_actions_changed=lambda: EVENT_BUS.broadcast_from_sync("agentDesktopActions", {"changed": True}),
 )
+# 子代理角色与执行全部由 sub_agent_delegate 域模块提供：
+# 统一经 AGENT_GATEWAY.execute_runtime_skill 的 allowlist 路径分发，
+# 组合根只负责把 gateway 绑进去。
 SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
     artifact_dir=SUB_AGENT_TASK_DIR,
-    roles=[
-        SubAgentRole(
-            id="project_index_review",
-            title="Project index review",
-            description="Scan the local Unity project index and summarize changed scanner families.",
-            tool_profile="local-index-only",
-        ),
-        SubAgentRole(
-            id="outfit_package_inspection",
-            title="Outfit package inspection",
-            description="Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="validation_triage",
-            title="Validation triage",
-            description="Run the read-only validation report and summarize errors, warnings, and likely next plans.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="selected_context_review",
-            title="Selected context review",
-            description="Open a scoped read-only sub-agent thread from selected chat text.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="package_install_diagnosis",
-            title="Package install diagnosis",
-            description="Classify package install output and Unity compile errors without repairing automatically.",
-            tool_profile="read-only",
-        ),
-        SubAgentRole(
-            id="outfit_import_plan_review",
-            title="Outfit import plan review",
-            description="Inspect a package and build a supervised import plan without writing to Unity.",
-            tool_profile="plan-only",
-        ),
-    ],
-    handlers={
-        "project_index_review": lambda payload, cancel_event: run_project_index_sub_agent(payload, cancel_event),
-        "outfit_package_inspection": lambda payload, cancel_event: run_outfit_package_sub_agent(payload, cancel_event),
-        "validation_triage": lambda payload, cancel_event: run_validation_sub_agent(payload, cancel_event),
-        "selected_context_review": lambda payload, cancel_event: run_selected_context_sub_agent(payload, cancel_event),
-        "package_install_diagnosis": lambda payload, cancel_event: run_package_install_sub_agent(payload, cancel_event),
-        "outfit_import_plan_review": lambda payload, cancel_event: run_outfit_import_plan_sub_agent(payload, cancel_event),
-    },
+    roles=build_sub_agent_roles(),
+    handlers=build_sub_agent_role_handlers(AGENT_GATEWAY),
     max_concurrent=5,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
@@ -3637,146 +3598,31 @@ def plan_outfit_import_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _sub_agent_cancel_checkpoint(cancel_event: Any) -> None:
-    if cancel_event.is_set():
-        raise CancelledError("Sub-agent task was cancelled.")
-
-
+# 子代理角色执行已迁入 sub_agent_delegate 域模块（统一走
+# AGENT_GATEWAY.execute_runtime_skill 的 allowlist 分发）。
+# 下面的薄委托仅为组合根兼容层：既有测试与外部引用继续可用。
 def run_project_index_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    project_path = str(payload.get("projectPath") or "").strip()
-    result = scan_project_index_sync({"projectPath": project_path, "maxFiles": payload.get("maxFiles") or 100000})
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    changed = bool(summary.get("changed"))
-    scanner_families = result.get("summary", {}).get("scannerFamilies") if isinstance(result.get("summary"), dict) else []
-    summary_text = (
-        f"Project index {'changed' if changed else 'is clean'}: "
-        f"+{summary.get('addedFiles', 0)} / ~{summary.get('modifiedFiles', 0)} / -{summary.get('deletedFiles', 0)}; "
-        f"scanner families: {', '.join(scanner_families or []) or 'none'}."
-    )
-    _sub_agent_cancel_checkpoint(cancel_event)
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.project_index_review.v1",
-        "role": "project_index_review",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "projectIndex": result,
-        "proposedNextAction": "Run targeted scanners for the affected families before planning writes." if changed else "No project-index-triggered scanner rerun is needed.",
-    }
+    return sub_agent_delegate.run_project_index_review(AGENT_GATEWAY, payload, cancel_event)
 
 
 def run_outfit_package_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    package_path = str(payload.get("packagePath") or payload.get("package_path") or "").strip()
-    result = inspect_outfit_package_sync({"packagePath": package_path, "maxEntries": payload.get("maxEntries") or 5000})
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    summary_text = (
-        "Outfit package inspected: "
-        f"{summary.get('unityPackageCount', 0)} UnityPackage(s), "
-        f"{summary.get('prefabCandidateCount', 0)} prefab candidate(s), "
-        f"{summary.get('textureCount', 0)} texture(s)."
-    )
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.outfit_package_inspection.v1",
-        "role": "outfit_package_inspection",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "inspection": result,
-        "proposedNextAction": "Create a supervised import plan if the package has a UnityPackage or prefab candidate.",
-    }
+    return sub_agent_delegate.run_outfit_package_inspection(AGENT_GATEWAY, payload, cancel_event)
 
 
 def run_validation_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    result = build_validation_report_sync(
-        {
-            "avatarPath": payload.get("avatarPath") or payload.get("avatar_path") or "",
-            "projectPath": payload.get("projectPath") or payload.get("project_path") or "",
-            "includeQuest": payload.get("includeQuest", True),
-            "maxErrors": payload.get("maxErrors") or 50,
-        }
-    )
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    severity_counts = summary.get("severityCounts") if isinstance(summary.get("severityCounts"), dict) else {}
-    summary_text = (
-        "Validation triage finished: "
-        f"{severity_counts.get('Error', 0)} error(s), "
-        f"{severity_counts.get('Warning', 0)} warning(s), "
-        f"{severity_counts.get('Suggestion', 0)} suggestion(s)."
-    )
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.validation_triage.v1",
-        "role": "validation_triage",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "validation": result,
-        "proposedNextAction": "Convert selected validation findings into separate supervised fix plans.",
-    }
+    return sub_agent_delegate.run_validation_triage(AGENT_GATEWAY, payload, cancel_event)
 
 
 def run_selected_context_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    selected_text = str(payload.get("selectedText") or payload.get("selected_text") or "").strip()
-    if not selected_text:
-        selected_text = str(payload.get("task") or "").strip()
-    preview = selected_text[:1600]
-    omitted = max(0, len(selected_text) - len(preview))
-    summary_text = (
-        f"Selected context opened in a sub-agent thread: {len(selected_text)} character(s)"
-        + (f", preview truncated by {omitted} character(s)." if omitted else ".")
-    )
-    _sub_agent_cancel_checkpoint(cancel_event)
-    return {
-        "ok": True,
-        "schema": "vrcforge.sub_agent.selected_context_review.v1",
-        "role": "selected_context_review",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "selectedTextPreview": preview,
-        "selectedTextCharacters": len(selected_text),
-        "proposedNextAction": "Use this scoped sub-agent thread for follow-up review without branching the main chat history.",
-    }
+    return sub_agent_delegate.run_selected_context_review(payload, cancel_event)
 
 
 def run_package_install_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    result = diagnose_package_install_errors_sync(payload)
-    symptoms = result.get("symptoms") if isinstance(result.get("symptoms"), list) else []
-    titles = [str(item.get("title") or item.get("code") or "") for item in symptoms if isinstance(item, dict)]
-    summary_text = f"Package install diagnosis found {len(symptoms)} symptom(s): {', '.join(titles[:4]) or 'none'}."
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.package_install_diagnosis.v1",
-        "role": "package_install_diagnosis",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "diagnostics": result,
-        "proposedNextAction": "Create a separate supervised repair plan for any selected symptom.",
-    }
+    return sub_agent_delegate.run_package_install_diagnosis(AGENT_GATEWAY, payload, cancel_event)
 
 
 def run_outfit_import_plan_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    _sub_agent_cancel_checkpoint(cancel_event)
-    result = plan_outfit_import_sync(payload)
-    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
-    ready = bool(plan.get("readyToApply"))
-    summary_text = (
-        f"Outfit import plan {'ready' if ready else 'needs review'}: "
-        f"kind={plan.get('kind') or 'unknown'}, writeTarget={plan.get('writeTarget') or 'none'}."
-    )
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.outfit_import_plan_review.v1",
-        "role": "outfit_import_plan_review",
-        "readOnly": True,
-        "planOnly": True,
-        "summaryText": summary_text,
-        "importPlan": result,
-        "proposedNextAction": "Queue the normal VRCForge approval from the parent thread if the user accepts this plan." if ready else "Resolve package ambiguity before requesting a write.",
-    }
+    return sub_agent_delegate.run_outfit_import_plan_review(AGENT_GATEWAY, payload, cancel_event)
 
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:

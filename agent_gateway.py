@@ -1514,6 +1514,8 @@ class AgentGateway:
         self.llm_reasoning_trace: dict[str, Any] = {}
         self.llm_context_usage: dict[str, Any] = {}
         self._runtime_stream_context = threading.local()
+        # 审计 JSONL 追加锁：见 append_audit。
+        self._audit_append_lock = threading.Lock()
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
@@ -7895,9 +7897,12 @@ class AgentGateway:
             "timestamp": utc_now_iso(),
             **entry,
         })
-        self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.audit_log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+        # 子代理 worker 线程与请求线程会并发追加审计行；
+        # 加锁保证每行 JSONL 原子落盘，不互相穿插。
+        with self._audit_append_lock:
+            self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.audit_log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _append_runtime_run(self, entry: dict[str, Any]) -> None:
         safe_entry = redact_sensitive(
@@ -9438,6 +9443,20 @@ class AgentGateway:
             if isinstance(skill, dict) and normalize_skill_id(str(skill.get("name") or "")) == skill_id:
                 return skill
         return None
+
+    def execute_runtime_skill(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """公开的 runtime allowlist 技能分发入口。
+
+        子代理委派（sub_agent_delegate）经这里执行技能，复用与
+        agentic 循环完全相同的阻断/可见性/审计/脱敏路径——
+        不允许在 gateway 之外长出平行分发。
+        """
+        return self._execute_runtime_skill(tool_name, params, agent_name)
 
     def _execute_runtime_skill(
         self,

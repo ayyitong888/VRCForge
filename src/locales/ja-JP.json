@@ -602,6 +602,7 @@
       "validationTriage": "検証",
       "packageInstallDiagnosis": "インストールログ",
       "outfitImportPlanReview": "衣装プラン",
+      "skillDelegate": "スキル委任",
       "fallback": "ワーカー"
     },
     "taskLabel": "バックグラウンドタスク",
