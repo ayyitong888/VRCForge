@@ -10,7 +10,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -476,8 +476,21 @@ class DashboardServerTests(unittest.TestCase):
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
                     patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
+                    patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=True)),
+                    patch.object(
+                        dashboard_server.SUB_AGENT_REGISTRY,
+                        "reconcile_startup",
+                        return_value=True,
+                    ) as reconcile_sub_agents,
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "reconcile_stale_agent_goal_deliveries",
+                        return_value={"ok": True, "deliveries": [], "count": 0},
+                    ) as reconcile_goal_deliveries,
                 ):
                     await dashboard_server.on_startup()
+                    reconcile_sub_agents.assert_called_once_with(refresh_from_disk=True)
+                    reconcile_goal_deliveries.assert_called_once_with()
                     self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
                     self.assertFalse(dashboard_server.AGENT_MCP_INIT_TASK.done())
             finally:
@@ -490,6 +503,170 @@ class DashboardServerTests(unittest.TestCase):
                             pass
                 dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
                 dashboard_server.STATUS_MONITOR_TASK = original_status_task
+
+        asyncio.run(exercise())
+
+    def test_startup_without_backend_owner_does_not_reconcile_durable_work(self) -> None:
+        async def slow_mcp_init() -> None:
+            await asyncio.sleep(60)
+
+        async def slow_status_loop() -> None:
+            await asyncio.sleep(60)
+
+        async def exercise() -> None:
+            original_mcp_task = dashboard_server.AGENT_MCP_INIT_TASK
+            original_status_task = dashboard_server.STATUS_MONITOR_TASK
+            dashboard_server.AGENT_MCP_INIT_TASK = None
+            dashboard_server.STATUS_MONITOR_TASK = None
+            try:
+                with (
+                    patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
+                    patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
+                    patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=False)),
+                    patch("dashboard_server.desktop_executor_enabled", return_value=False),
+                    patch("dashboard_server.load_project_snapshot_cache"),
+                    patch.object(
+                        dashboard_server.SUB_AGENT_REGISTRY,
+                        "reconcile_startup",
+                        side_effect=AssertionError("a non-owner must not reconcile sub-agent tasks"),
+                    ) as reconcile_sub_agents,
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "reconcile_stale_agent_goal_deliveries",
+                        side_effect=AssertionError("a non-owner must not reconcile goal deliveries"),
+                    ) as reconcile_goal_deliveries,
+                ):
+                    await dashboard_server.on_startup()
+                    reconcile_sub_agents.assert_not_called()
+                    reconcile_goal_deliveries.assert_not_called()
+                    self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
+                    self.assertIsNotNone(dashboard_server.STATUS_MONITOR_TASK)
+            finally:
+                for task in (dashboard_server.AGENT_MCP_INIT_TASK, dashboard_server.STATUS_MONITOR_TASK):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
+                dashboard_server.STATUS_MONITOR_TASK = original_status_task
+
+        asyncio.run(exercise())
+
+    def test_startup_reconcile_failures_do_not_block_background_tasks(self) -> None:
+        async def slow_mcp_init() -> None:
+            await asyncio.sleep(60)
+
+        async def slow_status_loop() -> None:
+            await asyncio.sleep(60)
+
+        async def exercise(sub_agent_error: Exception | None, goal_error: Exception | None) -> None:
+            original_mcp_task = dashboard_server.AGENT_MCP_INIT_TASK
+            original_status_task = dashboard_server.STATUS_MONITOR_TASK
+            dashboard_server.AGENT_MCP_INIT_TASK = None
+            dashboard_server.STATUS_MONITOR_TASK = None
+            try:
+                with (
+                    patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
+                    patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
+                    patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=True)),
+                    patch("dashboard_server.desktop_executor_enabled", return_value=False),
+                    patch("dashboard_server.load_project_snapshot_cache"),
+                    patch.object(
+                        dashboard_server.SUB_AGENT_REGISTRY,
+                        "reconcile_startup",
+                        side_effect=sub_agent_error,
+                    ) as reconcile_sub_agents,
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "reconcile_stale_agent_goal_deliveries",
+                        side_effect=goal_error,
+                    ) as reconcile_goal_deliveries,
+                    patch("dashboard_server.emit_log") as emit_log,
+                ):
+                    await dashboard_server.on_startup()
+                    reconcile_sub_agents.assert_called_once_with(refresh_from_disk=True)
+                    reconcile_goal_deliveries.assert_called_once_with()
+                    self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
+                    self.assertFalse(dashboard_server.AGENT_MCP_INIT_TASK.done())
+                    self.assertIsNotNone(dashboard_server.STATUS_MONITOR_TASK)
+                    self.assertFalse(dashboard_server.STATUS_MONITOR_TASK.done())
+                    warning_messages = [
+                        call.args[2]
+                        for call in emit_log.call_args_list
+                        if len(call.args) >= 3 and call.args[0] == "warn"
+                    ]
+                    self.assertEqual(
+                        "Sub-agent startup reconciliation had a warning." in warning_messages,
+                        sub_agent_error is not None,
+                    )
+                    self.assertEqual(
+                        "Goal delivery startup reconciliation had a warning." in warning_messages,
+                        goal_error is not None,
+                    )
+                    if sub_agent_error is not None:
+                        emit_log.assert_any_call(
+                            "warn",
+                            "subagent",
+                            "Sub-agent startup reconciliation had a warning.",
+                            {"error": str(sub_agent_error)},
+                        )
+                    if goal_error is not None:
+                        emit_log.assert_any_call(
+                            "warn",
+                            "agent",
+                            "Goal delivery startup reconciliation had a warning.",
+                            {"error": str(goal_error)},
+                        )
+            finally:
+                for task in (dashboard_server.AGENT_MCP_INIT_TASK, dashboard_server.STATUS_MONITOR_TASK):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
+                dashboard_server.STATUS_MONITOR_TASK = original_status_task
+
+        for sub_agent_error, goal_error in (
+            (RuntimeError("sub-agent disk unavailable"), None),
+            (None, OSError("goal append failed")),
+            (RuntimeError("sub-agent append failed"), OSError("goal disk unavailable")),
+        ):
+            asyncio.run(exercise(sub_agent_error, goal_error))
+
+    def test_shutdown_does_not_release_the_process_owner_lease(self) -> None:
+        async def exercise() -> None:
+            originals = (
+                dashboard_server.AGENT_MCP_INIT_TASK,
+                dashboard_server.STATUS_MONITOR_TASK,
+                dashboard_server.AGENT_MCP_APP,
+                dashboard_server.AGENT_MCP_CONTEXT,
+                dashboard_server.AGENT_MCP_MOUNT.app,
+            )
+            dashboard_server.AGENT_MCP_INIT_TASK = None
+            dashboard_server.STATUS_MONITOR_TASK = None
+            dashboard_server.AGENT_MCP_APP = None
+            dashboard_server.AGENT_MCP_CONTEXT = None
+            dashboard_server.AGENT_MCP_MOUNT.app = None
+            lease = Mock()
+            try:
+                with (
+                    patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+                    patch.object(dashboard_server.DESKTOP_EXECUTOR, "stop"),
+                ):
+                    await dashboard_server.on_shutdown()
+                lease.release.assert_not_called()
+            finally:
+                (
+                    dashboard_server.AGENT_MCP_INIT_TASK,
+                    dashboard_server.STATUS_MONITOR_TASK,
+                    dashboard_server.AGENT_MCP_APP,
+                    dashboard_server.AGENT_MCP_CONTEXT,
+                    dashboard_server.AGENT_MCP_MOUNT.app,
+                ) = originals
 
         asyncio.run(exercise())
 
@@ -9178,6 +9355,128 @@ namespace VRCForge.Editor
         self.assertTrue(default_args.agent_mcp_stdio)
         self.assertFalse(default_args.start_runtime)
         self.assertTrue(start_args.start_runtime)
+
+    def test_agent_mcp_stdio_main_does_not_reconcile_sub_agent_tasks(self) -> None:
+        args = dashboard_server.parse_args(["--agent-mcp-stdio", "--preflight", "--no-start"])
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch.object(
+                dashboard_server.SUB_AGENT_REGISTRY,
+                "reconcile_startup",
+                side_effect=AssertionError("stdio mode must not reconcile backend-owned tasks"),
+            ) as reconcile_sub_agents,
+            patch("tools.vrcforge_agent_mcp_stdio.VRCForgeBridge") as bridge_class,
+            patch.object(
+                dashboard_server.BACKEND_OWNER_LEASE,
+                "acquire",
+                side_effect=AssertionError("stdio mode must not acquire the backend owner lease"),
+            ) as acquire_owner,
+            patch("builtins.print"),
+        ):
+            bridge_class.return_value.preflight.return_value = {"ok": True}
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 0)
+        reconcile_sub_agents.assert_not_called()
+        acquire_owner.assert_not_called()
+
+    def test_cli_main_does_not_reconcile_sub_agent_tasks(self) -> None:
+        args = dashboard_server.parse_args(["--cli", "skill", "list"])
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch.object(
+                dashboard_server.SUB_AGENT_REGISTRY,
+                "reconcile_startup",
+                side_effect=AssertionError("CLI mode must not reconcile backend-owned tasks"),
+            ) as reconcile_sub_agents,
+            patch("tools.vrcforge_cli.main", return_value=0) as cli_main,
+            patch.object(
+                dashboard_server.BACKEND_OWNER_LEASE,
+                "acquire",
+                side_effect=AssertionError("CLI mode must not acquire the backend owner lease"),
+            ) as acquire_owner,
+        ):
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 0)
+        cli_main.assert_called_once_with(["skill", "list"])
+        reconcile_sub_agents.assert_not_called()
+        acquire_owner.assert_not_called()
+
+    def test_backend_main_refuses_an_occupied_bind_target_before_taking_owner(self) -> None:
+        args = dashboard_server.parse_args([])
+        lease = Mock()
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch("dashboard_server.backend_bind_target_occupied", return_value=True),
+            patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+            patch("dashboard_server.uvicorn.run") as uvicorn_run,
+            patch("builtins.print"),
+        ):
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 1)
+        lease.acquire.assert_not_called()
+        uvicorn_run.assert_not_called()
+
+    def test_backend_bind_target_probe_detects_a_live_listener(self) -> None:
+        listener = dashboard_server.socket.socket(dashboard_server.socket.AF_INET, dashboard_server.socket.SOCK_STREAM)
+        try:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = int(listener.getsockname()[1])
+            self.assertTrue(dashboard_server.backend_bind_target_occupied("127.0.0.1", port))
+        finally:
+            listener.close()
+        self.assertFalse(dashboard_server.backend_bind_target_occupied("127.0.0.1", port))
+
+    def test_backend_main_refuses_a_second_owner_without_starting_uvicorn(self) -> None:
+        args = dashboard_server.parse_args([])
+        lease = Mock()
+        lease.acquire.return_value = False
+        lease.path = Path("backend-owner.lock")
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch("dashboard_server.backend_bind_target_occupied", return_value=False),
+            patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+            patch("dashboard_server.uvicorn.run") as uvicorn_run,
+            patch("builtins.print"),
+        ):
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 1)
+        lease.acquire.assert_called_once_with()
+        lease.release.assert_not_called()
+        uvicorn_run.assert_not_called()
+
+    def test_backend_main_keeps_process_owner_with_active_daemon_after_uvicorn_returns(self) -> None:
+        args = dashboard_server.parse_args([])
+        lease = Mock()
+        lease.acquire.return_value = True
+        stop_worker = threading.Event()
+        worker = threading.Thread(target=stop_worker.wait, daemon=True)
+        worker.start()
+        try:
+            with (
+                patch("dashboard_server.parse_args", return_value=args),
+                patch("dashboard_server.backend_bind_target_occupied", return_value=False),
+                patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+                patch("dashboard_server.uvicorn.run") as uvicorn_run,
+            ):
+                result = dashboard_server.main()
+
+            self.assertEqual(result, 0)
+            self.assertTrue(worker.is_alive())
+            uvicorn_run.assert_called_once_with(
+                dashboard_server.app,
+                host=args.host,
+                port=args.port,
+                log_level="info",
+            )
+            lease.release.assert_not_called()
+        finally:
+            stop_worker.set()
+            worker.join(timeout=2)
 
     def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(

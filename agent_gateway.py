@@ -4248,6 +4248,15 @@ class AgentGateway:
             "count": len(due),
         }
 
+    def reconcile_stale_agent_goal_deliveries(self) -> dict[str, Any]:
+        deliveries = self._goal_store.reconcile_stale_running_deliveries()
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal_deliveries_reconciled.v1",
+            "deliveries": [redact_sensitive(delivery) for delivery in deliveries],
+            "count": len(deliveries),
+        }
+
     def wake_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             goal, delivery = self._goal_store.wake(goal_id, params or {})

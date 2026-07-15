@@ -15,6 +15,7 @@ import subprocess
 import re
 import secrets
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -50,6 +51,7 @@ from agent_gateway import (
     normalize_checkpoint_archive_max_size_mb,
     redact_sensitive,
 )
+from backend_owner_lease import BackendOwnerLease
 from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -1436,6 +1438,7 @@ AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
 )
+BACKEND_OWNER_LEASE = BackendOwnerLease(lambda: AGENT_GATEWAY.audit_dir / "backend-owner.lock")
 DESKTOP_CAPTURE_DIR = AGENT_GATEWAY_AUDIT_DIR / "desktop-captures"
 DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
     AGENT_GATEWAY,
@@ -1450,6 +1453,7 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
     roles=build_sub_agent_roles(),
     handlers=build_sub_agent_role_handlers(AGENT_GATEWAY),
     max_concurrent=5,
+    reconcile_on_init=False,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -1579,6 +1583,15 @@ async def on_startup() -> None:
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    if BACKEND_OWNER_LEASE.owned:
+        try:
+            await asyncio.to_thread(SUB_AGENT_REGISTRY.reconcile_startup, refresh_from_disk=True)
+        except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
+            emit_log("warn", "subagent", "Sub-agent startup reconciliation had a warning.", {"error": str(exc)})
+        try:
+            await asyncio.to_thread(AGENT_GATEWAY.reconcile_stale_agent_goal_deliveries)
+        except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
+            emit_log("warn", "agent", "Goal delivery startup reconciliation had a warning.", {"error": str(exc)})
     if desktop_executor_enabled():
         try:
             await asyncio.to_thread(DESKTOP_EXECUTOR.start)
@@ -19789,6 +19802,35 @@ def cleanup_user_data_root(user_data_root: Path) -> dict[str, Any]:
     }
 
 
+def backend_bind_target_occupied(host: str, port: int) -> bool:
+    """Fail closed when the requested HTTP bind target cannot be reserved."""
+
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+    except OSError:
+        return True
+    if not addresses:
+        return True
+    seen: set[tuple[int, tuple[Any, ...]]] = set()
+    for family, socket_type, protocol, _canonical_name, address in addresses:
+        key = (family, tuple(address))
+        if key in seen:
+            continue
+        seen.add(key)
+        probe: socket.socket | None = None
+        try:
+            probe = socket.socket(family, socket_type, protocol)
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            probe.bind(address)
+        except OSError:
+            return True
+        finally:
+            if probe is not None:
+                probe.close()
+    return False
+
+
 def main() -> int:
     args = parse_args()
     if args.cli:
@@ -19820,6 +19862,18 @@ def main() -> int:
             return 0
         run_stdio_server(bridge)
         return 0
+    if backend_bind_target_occupied(args.host, args.port):
+        print(
+            f"VRCForge backend refused to start because {args.host}:{args.port} is already occupied.",
+            file=sys.stderr,
+        )
+        return 1
+    if not BACKEND_OWNER_LEASE.acquire():
+        print(
+            f"VRCForge backend refused to start because another runtime owns {BACKEND_OWNER_LEASE.path}.",
+            file=sys.stderr,
+        )
+        return 1
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 

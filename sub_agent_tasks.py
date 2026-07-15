@@ -79,6 +79,7 @@ class SubAgentTaskRegistry:
         roles: list[SubAgentRole],
         handlers: dict[str, SubAgentHandler],
         max_concurrent: int = 3,
+        reconcile_on_init: bool = True,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
@@ -88,9 +89,32 @@ class SubAgentTaskRegistry:
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
+        self._startup_reconciled = False
         with self._lock:
             self._load_projection_locked()
+        if reconcile_on_init:
+            self.reconcile_startup()
+
+    def reconcile_startup(self, *, refresh_from_disk: bool = False) -> bool:
+        """Reconcile work owned by a prior process, at most once per instance."""
+
+        with self._lock:
+            if self._startup_reconciled:
+                return False
+            if refresh_from_disk:
+                alive_workers = {
+                    task_id: worker for task_id, worker in self._threads.items() if worker.is_alive()
+                }
+                if alive_workers:
+                    raise RuntimeError("Cannot refresh sub-agent startup state while local workers are alive.")
+                refreshed_tasks, refreshed_cancel_events = self._read_projection_state_locked(strict_io=True)
+                self._tasks = refreshed_tasks
+                self._cancel_events = refreshed_cancel_events
+                self._threads.clear()
+            self._recover_orphaned_result_sidecars_locked()
             self._reconcile_interrupted_tasks_locked()
+            self._startup_reconciled = True
+            return True
 
     def list_roles(self) -> list[dict[str, Any]]:
         return [self._serialize_role(role) for role in self.roles.values()]
@@ -315,31 +339,12 @@ class SubAgentTaskRegistry:
             handler = self.handlers[task.role]
             result = handler(self._task_payload(task), cancel_event)
             summary = summarize_worker_result(result)
-            with self._lock:
-                current = self._tasks[task_id]
-                if current.cancel_requested or cancel_event.is_set() or current.status == "cancelling":
-                    self._commit_cancelled_locked(current, "Sub-agent task was cancelled.")
-                    return
-                next_task = copy.deepcopy(current)
-                next_task.status = "completed"
-                next_task.result = copy.deepcopy(result)
-                next_task.result_available = True
-                next_task.result_unavailable = False
-                next_task.summary = summary
-                next_task.stopped_at = utc_now()
-                next_task.handoff_status = "handoff_pending"
-                self._commit_task_event_locked(
-                    current,
-                    next_task,
-                    "completed",
-                    {"summary": summary},
-                    result=result,
-                )
         except CancelledError as exc:
             with self._lock:
                 current = self._tasks.get(task_id)
                 if current and current.status in _RUNNING_STATUSES:
                     self._commit_cancelled_locked(current, str(exc))
+            return
         except Exception as exc:  # noqa: BLE001 - task failures should be visible to users.
             with self._lock:
                 current = self._tasks.get(task_id)
@@ -354,6 +359,26 @@ class SubAgentTaskRegistry:
                 next_task.stopped_at = utc_now()
                 next_task.handoff_status = "handoff_pending"
                 self._commit_task_event_locked(current, next_task, "failed", {"error": str(exc)})
+            return
+
+        with self._lock:
+            current = self._tasks.get(task_id)
+            if not current or current.status not in _RUNNING_STATUSES:
+                return
+            if current.cancel_requested or cancel_event.is_set() or current.status == "cancelling":
+                self._commit_cancelled_locked(current, "Sub-agent task was cancelled.")
+                return
+            try:
+                next_task = self._completed_task(current, result, summary)
+                self._commit_task_event_locked(
+                    current,
+                    next_task,
+                    "completed",
+                    {"summary": summary},
+                    result=result,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve a durable sidecar before classifying failure.
+                self._recover_completion_persistence_error_locked(current, exc)
 
     def _commit_cancelled_locked(self, task: SubAgentTask, error: str) -> SubAgentTask:
         next_task = copy.deepcopy(task)
@@ -362,6 +387,62 @@ class SubAgentTaskRegistry:
         next_task.error = error
         next_task.stopped_at = utc_now()
         return self._commit_task_event_locked(task, next_task, "cancelled", {"error": error})
+
+    @staticmethod
+    def _completed_task(task: SubAgentTask, result: dict[str, Any], summary: str) -> SubAgentTask:
+        next_task = copy.deepcopy(task)
+        next_task.status = "completed"
+        next_task.result = copy.deepcopy(result)
+        next_task.result_available = True
+        next_task.result_unavailable = False
+        next_task.summary = summary
+        next_task.error = ""
+        next_task.cancel_requested = False
+        next_task.stopped_at = utc_now()
+        next_task.handoff_status = "handoff_pending"
+        return next_task
+
+    def _recover_completion_persistence_error_locked(self, task: SubAgentTask, error: Exception) -> None:
+        """Prefer a durable result sidecar over a transient event-append error."""
+
+        try:
+            result, summary = self._load_result_sidecar_locked(task.id)
+        except FileNotFoundError:
+            self._commit_result_persistence_failure_locked(task, error)
+            return
+        except (ValueError, json.JSONDecodeError, UnicodeError):
+            self._commit_result_persistence_failure_locked(task, error)
+            return
+        except OSError:
+            # The sidecar may already be durable but temporarily unreadable.
+            # Keep the in-memory projection active for a later startup retry.
+            return
+        next_task = self._completed_task(task, result, summary)
+        try:
+            self._commit_task_event_locked(
+                task,
+                next_task,
+                "recovered",
+                {
+                    "previousStatus": task.status,
+                    "terminalStatus": "completed",
+                    "summary": summary,
+                    "source": "result_sidecar_after_append_error",
+                },
+            )
+        except Exception:  # noqa: BLE001 - a persistent append failure must leave the task retryable on restart.
+            return
+
+    def _commit_result_persistence_failure_locked(self, task: SubAgentTask, error: Exception) -> None:
+        next_task = copy.deepcopy(task)
+        next_task.status = "failed"
+        next_task.error = f"Unable to persist the completed sub-agent result: {error}"
+        next_task.stopped_at = utc_now()
+        next_task.handoff_status = "handoff_pending"
+        try:
+            self._commit_task_event_locked(task, next_task, "failed", {"error": next_task.error})
+        except Exception:  # noqa: BLE001 - leave the active projection intact if even failure cannot be recorded.
+            return
 
     def _task_payload(self, task: SubAgentTask) -> dict[str, Any]:
         payload = copy.deepcopy(task.params)
@@ -537,29 +618,92 @@ class SubAgentTaskRegistry:
             except OSError:
                 pass
 
-    def _read_result_sidecar_locked(self, task: SubAgentTask) -> None:
+    def _read_result_sidecar_locked(self, task: SubAgentTask, *, strict_io: bool = False) -> None:
         if not task.result_available:
             return
         try:
-            payload = json.loads(self._result_path(task.id).read_text(encoding="utf-8"))
-            result = payload.get("result") if isinstance(payload, dict) else None
-            if not isinstance(result, dict):
-                raise ValueError("result sidecar did not contain an object")
+            result, _summary = self._load_result_sidecar_locked(task.id)
             task.result = result
             task.result_unavailable = False
-        except (OSError, ValueError, json.JSONDecodeError):
+        except FileNotFoundError:
+            task.result = None
+            task.result_available = False
+            task.result_unavailable = True
+        except (ValueError, json.JSONDecodeError, UnicodeError):
+            task.result = None
+            task.result_available = False
+            task.result_unavailable = True
+        except OSError:
+            if strict_io:
+                raise
             task.result = None
             task.result_available = False
             task.result_unavailable = True
 
+    def _load_result_sidecar_locked(self, task_id: str) -> tuple[dict[str, Any], str]:
+        payload = json.loads(self._result_path(task_id).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("result sidecar did not contain an object")
+        if payload.get("schema") != SUB_AGENT_RESULT_SCHEMA:
+            raise ValueError("result sidecar schema did not match")
+        sidecar_task_id = payload.get("taskId")
+        if not isinstance(sidecar_task_id, str) or sidecar_task_id != task_id:
+            raise ValueError("result sidecar task id did not match")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("result sidecar result did not contain an object")
+        summary = payload.get("summary")
+        if not isinstance(summary, str):
+            summary = summarize_worker_result(result)
+        return copy.deepcopy(result), summary[:1000]
+
+    def _recover_orphaned_result_sidecars_locked(self) -> None:
+        """Finish the terminal projection when a crash followed sidecar replace."""
+
+        for task in list(self._tasks.values()):
+            if task.status not in _RUNNING_STATUSES:
+                continue
+            try:
+                result, summary = self._load_result_sidecar_locked(task.id)
+            except FileNotFoundError:
+                continue
+            except (ValueError, json.JSONDecodeError, UnicodeError):
+                # A missing, corrupt, or foreign sidecar is not completion
+                # evidence. The ordinary restart reconciliation below owns it.
+                continue
+            next_task = self._completed_task(task, result, summary)
+            self._commit_task_event_locked(
+                task,
+                next_task,
+                "recovered",
+                {
+                    "previousStatus": task.status,
+                    "terminalStatus": "completed",
+                    "summary": summary,
+                    "source": "result_sidecar",
+                },
+            )
+
     def _load_projection_locked(self) -> None:
+        tasks, cancel_events = self._read_projection_state_locked(strict_io=False)
+        self._tasks = tasks
+        self._cancel_events = cancel_events
+
+    def _read_projection_state_locked(
+        self,
+        *,
+        strict_io: bool,
+    ) -> tuple[dict[str, SubAgentTask], dict[str, threading.Event]]:
         path = self._event_log_path()
-        if not path.exists():
-            return
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return {}, {}
         except OSError:
-            return
+            if strict_io:
+                raise
+            return {}, {}
+        tasks: dict[str, SubAgentTask] = {}
         legacy_tasks: dict[str, SubAgentTask] = {}
         for line in lines:
             try:
@@ -572,16 +716,18 @@ class SubAgentTaskRegistry:
             if isinstance(snapshot, dict):
                 task = self._task_from_snapshot(snapshot)
                 if task:
-                    self._tasks[task.id] = task
+                    tasks[task.id] = task
                 continue
             self._project_legacy_event(entry, legacy_tasks)
         for task_id, task in legacy_tasks.items():
-            self._tasks.setdefault(task_id, task)
-        for task in self._tasks.values():
-            self._read_result_sidecar_locked(task)
-            self._cancel_events[task.id] = threading.Event()
+            tasks.setdefault(task_id, task)
+        cancel_events: dict[str, threading.Event] = {}
+        for task in tasks.values():
+            self._read_result_sidecar_locked(task, strict_io=strict_io)
+            cancel_events[task.id] = threading.Event()
             if task.cancel_requested:
-                self._cancel_events[task.id].set()
+                cancel_events[task.id].set()
+        return tasks, cancel_events
 
     def _project_legacy_event(self, entry: dict[str, Any], tasks: dict[str, SubAgentTask]) -> None:
         task_id = str(entry.get("taskId") or "").strip()

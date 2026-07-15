@@ -14,6 +14,8 @@ GOAL_TERMINAL_STATUSES = {"completed", "cancelled"}
 DELIVERY_TERMINAL_STATUSES = {"completed", "materialized"}
 WAKE_MIN_INTERVAL_MINUTES = 5
 WAKE_MAX_INTERVAL_MINUTES = 10_080
+GOAL_DELIVERY_RESULT_SCHEMA = "vrcforge.agent_goal_delivery_result.v1"
+_PROCESS_INSTANCE_ID = f"goal-runner-{os.getpid()}-{secrets.token_hex(8)}"
 
 
 class AgentGoalStoreError(RuntimeError):
@@ -69,6 +71,7 @@ class AgentGoalStore:
         read_events: Callable[[Path], list[dict[str, Any]]],
         lock: threading.RLock,
         normalize_path: Callable[[str], str],
+        runner_instance_id: str | None = None,
     ) -> None:
         self._log_path = log_path
         self._result_dir = result_dir
@@ -76,6 +79,7 @@ class AgentGoalStore:
         self._read_events_callback = read_events
         self._lock = lock
         self._normalize_path = normalize_path
+        self._runner_instance_id = str(runner_instance_id or _PROCESS_INSTANCE_ID)
 
     def _events(self) -> list[dict[str, Any]]:
         return self._read_events_callback(self._log_path())
@@ -380,7 +384,7 @@ class AgentGoalStore:
                 raise AgentGoalStoreError("Unknown goal delivery.", 404)
             delivery = self._recover_result_if_needed(delivery)
             if str(delivery.get("status") or "") in DELIVERY_TERMINAL_STATUSES:
-                return {"delivery": delivery, "response": self.read_result(delivery_id), "cached": True}
+                return {"delivery": delivery, "response": self._read_result_for_delivery(delivery), "cached": True}
             requested_turn = str(params.get("clientTurnId") or params.get("client_turn_id") or "").strip()
             if requested_turn and requested_turn != str(delivery.get("clientTurnId") or ""):
                 raise AgentGoalStoreError("Goal delivery clientTurnId is immutable.", 409)
@@ -399,6 +403,7 @@ class AgentGoalStore:
                 "provider": _summarize(params.get("provider"), 120),
                 "providerLabel": _summarize(params.get("providerLabel"), 160),
                 "model": _summarize(params.get("model"), 160),
+                "runnerInstanceId": self._runner_instance_id,
             }
             self._append(event)
             return {"delivery": self.project_deliveries()[delivery_id], "response": None, "cached": False}
@@ -413,7 +418,7 @@ class AgentGoalStore:
         path = self._result_path(str(delivery.get("deliveryId") or ""))
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema": "vrcforge.agent_goal_delivery_result.v1",
+            "schema": GOAL_DELIVERY_RESULT_SCHEMA,
             "deliveryId": delivery.get("deliveryId"),
             "goalId": delivery.get("goalId"),
             "clientTurnId": delivery.get("clientTurnId"),
@@ -434,14 +439,31 @@ class AgentGoalStore:
             except OSError:
                 pass
 
-    def read_result(self, delivery_id: str) -> dict[str, Any] | None:
+    def _read_result_for_delivery(self, delivery: dict[str, Any]) -> dict[str, Any] | None:
+        delivery_id = str(delivery.get("deliveryId") or "")
         path = self._result_path(delivery_id)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return None
-        response = payload.get("response") if isinstance(payload, dict) else None
+        except (json.JSONDecodeError, UnicodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("schema") != GOAL_DELIVERY_RESULT_SCHEMA:
+            return None
+        for key in ("deliveryId", "goalId", "clientTurnId"):
+            actual = payload.get(key)
+            expected = delivery.get(key)
+            if not isinstance(actual, str) or actual != str(expected or ""):
+                return None
+        response = payload.get("response")
         return response if isinstance(response, dict) else None
+
+    def read_result(self, delivery_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            delivery = self.project_deliveries().get(str(delivery_id or "").strip())
+            if delivery is None:
+                return None
+            return self._read_result_for_delivery(delivery)
 
     def _next_wake_at(self, goal: dict[str, Any], completed_at: datetime) -> str:
         try:
@@ -453,7 +475,7 @@ class AgentGoalStore:
     def _recover_result_if_needed(self, delivery: dict[str, Any]) -> dict[str, Any]:
         if str(delivery.get("status") or "") in DELIVERY_TERMINAL_STATUSES:
             return delivery
-        response = self.read_result(str(delivery.get("deliveryId") or ""))
+        response = self._read_result_for_delivery(delivery)
         if response is None:
             return delivery
         goal = self.project_goals().get(str(delivery.get("goalId") or ""), {})
@@ -472,6 +494,53 @@ class AgentGoalStore:
             }
         )
         return self.project_deliveries()[str(delivery.get("deliveryId") or "")]
+
+    def reconcile_stale_running_deliveries(self) -> list[dict[str, Any]]:
+        """Reconcile deliveries abandoned by an earlier main-server process.
+
+        This is deliberately explicit: helper, CLI, and stdio processes may
+        construct a store over the main server's audit directory without
+        owning delivery execution. Only the FastAPI startup path calls it.
+        """
+
+        with self._lock:
+            return self._reconcile_stale_running_deliveries_locked()
+
+    def _reconcile_stale_running_deliveries_locked(self) -> list[dict[str, Any]]:
+        """Make deliveries abandoned by an earlier process retryable.
+
+        A second store in the same process may share this log while the first
+        request is still executing, so its matching runner token must retain
+        the normal "already running" conflict. A new process receives a new
+        token. For that case, recover a durable result sidecar first; only a
+        sidecar-free running delivery is marked interrupted for a later retry.
+        """
+
+        reconciled: list[dict[str, Any]] = []
+        for delivery in list(self.project_deliveries().values()):
+            if str(delivery.get("status") or "") != "running":
+                continue
+            recovered = self._recover_result_if_needed(delivery)
+            if str(recovered.get("status") or "") != "running":
+                reconciled.append(recovered)
+                continue
+            runner_instance_id = str(recovered.get("runnerInstanceId") or "")
+            if runner_instance_id == self._runner_instance_id:
+                continue
+            self._append(
+                {
+                    "event": "goal_delivery_interrupted",
+                    "goalId": recovered.get("goalId"),
+                    "deliveryId": recovered.get("deliveryId"),
+                    "status": "interrupted",
+                    "revision": int(recovered.get("revision") or 0) + 1,
+                    "interruptedAt": _iso(_utc_now()),
+                    "retryAt": "",
+                    "reason": "process_restart",
+                }
+            )
+            reconciled.append(self.project_deliveries()[str(recovered.get("deliveryId") or "")])
+        return reconciled
 
     def complete_delivery(self, delivery_id: str, response: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -529,7 +598,7 @@ class AgentGoalStore:
                     continue
                 if chat_id and str(delivery.get("chatId") or "") != chat_id:
                     continue
-                rows.append({**delivery, "response": self.read_result(str(delivery.get("deliveryId") or ""))})
+                rows.append({**delivery, "response": self._read_result_for_delivery(delivery)})
             rows.sort(key=lambda item: str(item.get("completedAt") or item.get("updatedAt") or ""))
             return rows[: max(1, min(limit, 200))]
 

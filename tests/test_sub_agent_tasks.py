@@ -3,8 +3,17 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 
-from sub_agent_tasks import SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT, SubAgentRole, SubAgentTaskRegistry
+import pytest
+
+from sub_agent_tasks import (
+    SUB_AGENT_LOG_SCHEMA,
+    SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT,
+    SUB_AGENT_RESULT_SCHEMA,
+    SubAgentRole,
+    SubAgentTaskRegistry,
+)
 
 
 def test_sub_agent_registry_runs_records_and_retries(tmp_path):
@@ -81,6 +90,55 @@ def _wait_for_status(registry: SubAgentTaskRegistry, task_id: str, statuses: set
         time.sleep(0.02)
         payload = registry.get_task(task_id)
     return payload
+
+
+def _write_task_projection(tmp_path, task_id: str, status: str) -> None:
+    timestamp = "2026-01-01T00:00:00+00:00"
+    snapshot = {
+        "id": task_id,
+        "role": "project_index_review",
+        "displayName": "Manuka",
+        "task": "scan",
+        "parentChatId": "chat-recovery",
+        "parentSessionId": "session-recovery",
+        "projectPath": "ProjectA",
+        "toolProfile": "read-only",
+        "status": status,
+        "createdAt": timestamp,
+        "startedAt": timestamp if status != "queued" else "",
+        "stoppedAt": "",
+        "updatedAt": timestamp,
+        "cancelRequested": status == "cancelling",
+        "summary": "",
+        "error": "",
+        "eventCount": 2,
+        "revision": 2,
+        "retryOf": "",
+        "handoffStatus": "",
+        "handoffAt": "",
+        "mergedAt": "",
+        "mergedChatId": "",
+        "mergeDecision": "",
+        "resultAvailable": False,
+        "resultUnavailable": False,
+        "params": {},
+    }
+    event = {
+        "schema": SUB_AGENT_LOG_SCHEMA,
+        "timestamp": timestamp,
+        "taskId": task_id,
+        "event": "started",
+        "revision": 2,
+        "data": {},
+        "task": snapshot,
+    }
+    (tmp_path / "sub-agent-events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+
+def _write_result_sidecar(tmp_path, task_id: str, payload: dict) -> None:
+    result_dir = tmp_path / "results"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / f"{task_id}.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
 
 def test_merge_task_adopted_records_terminal_decision_and_event(tmp_path):
@@ -331,6 +389,414 @@ def test_restart_reconciles_running_and_cancelling_tasks(tmp_path):
 
     first.cancel_task(task_id)
     release.set()
+
+
+def test_startup_reconcile_can_be_deferred_and_runs_only_once(tmp_path):
+    task_id = "sub_deferred_reconcile"
+    _write_task_projection(tmp_path, task_id, "running")
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        reconcile_on_init=False,
+    )
+
+    imported = registry.get_task(task_id)["task"]
+    assert imported["status"] == "running"
+    assert not [event for event in registry.recent_events() if event.get("event") == "interrupted"]
+
+    assert registry.reconcile_startup() is True
+    reconciled = registry.get_task(task_id)["task"]
+    assert reconciled["status"] == "interrupted"
+    assert registry.reconcile_startup() is False
+    replayed = registry.get_task(task_id)["task"]
+    assert replayed["revision"] == reconciled["revision"]
+    assert len(
+        [
+            event
+            for event in registry.recent_events()
+            if event.get("taskId") == task_id and event.get("event") == "interrupted"
+        ]
+    ) == 1
+
+
+def test_refresh_from_disk_observes_failed_event_written_after_registry_import(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def failing_handler(_payload, _cancel_event):
+        entered.set()
+        release.wait(2)
+        raise RuntimeError("old owner failed")
+
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    old_owner = SubAgentTaskRegistry(tmp_path, roles=roles, handlers={"project_index_review": failing_handler})
+    task_id = old_owner.create_task(role="project_index_review", task="scan", display_name="Manuka")["task"]["id"]
+    assert entered.wait(1)
+
+    new_owner = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        reconcile_on_init=False,
+    )
+    assert new_owner.get_task(task_id)["task"]["status"] == "running"
+
+    release.set()
+    assert _wait_for_status(old_owner, task_id, {"failed"})["task"]["status"] == "failed"
+    assert new_owner.reconcile_startup(refresh_from_disk=True) is True
+    refreshed = new_owner.get_task(task_id)["task"]
+    assert refreshed["status"] == "failed"
+    assert "old owner failed" in refreshed["error"]
+    assert not [
+        event
+        for event in new_owner.recent_events()
+        if event.get("taskId") == task_id and event.get("event") == "interrupted"
+    ]
+
+
+def test_refresh_from_disk_observes_cancelled_event_written_after_registry_import(tmp_path):
+    entered = threading.Event()
+
+    def cancellable_handler(_payload, cancel_event):
+        entered.set()
+        cancel_event.wait(2)
+        return {"ok": True}
+
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    old_owner = SubAgentTaskRegistry(tmp_path, roles=roles, handlers={"project_index_review": cancellable_handler})
+    task_id = old_owner.create_task(role="project_index_review", task="scan", display_name="Manuka")["task"]["id"]
+    assert entered.wait(1)
+
+    new_owner = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        reconcile_on_init=False,
+    )
+    assert new_owner.get_task(task_id)["task"]["status"] == "running"
+
+    assert old_owner.cancel_task(task_id)["ok"] is True
+    assert _wait_for_status(old_owner, task_id, {"cancelled"})["task"]["status"] == "cancelled"
+    assert new_owner.reconcile_startup(refresh_from_disk=True) is True
+    refreshed = new_owner.get_task(task_id)["task"]
+    assert refreshed["status"] == "cancelled"
+    assert refreshed["cancelRequested"] is True
+    assert not [
+        event
+        for event in new_owner.recent_events()
+        if event.get("taskId") == task_id and event.get("event") == "interrupted"
+    ]
+
+
+def test_refresh_from_disk_is_transactional_on_projection_read_error(tmp_path, monkeypatch):
+    task_id = "sub_refresh_io_error"
+    _write_task_projection(tmp_path, task_id, "running")
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        reconcile_on_init=False,
+    )
+    original_task = registry.get_task(task_id, include_events=False)["task"]
+    event_log = registry._event_log_path()
+    original_read_text = Path.read_text
+
+    def fail_event_log_read(path: Path, *args, **kwargs):
+        if path == event_log:
+            raise PermissionError("event log temporarily locked")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_event_log_read)
+    with pytest.raises(PermissionError, match="temporarily locked"):
+        registry.reconcile_startup(refresh_from_disk=True)
+
+    assert registry.get_task(task_id, include_events=False)["task"] == original_task
+    assert registry._startup_reconciled is False
+
+
+def test_refresh_from_disk_rejects_live_local_workers(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(_payload, _cancel_event):
+        entered.set()
+        release.wait(2)
+        return {"ok": True}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": handler},
+        reconcile_on_init=False,
+    )
+    task_id = registry.create_task(role="project_index_review", task="scan", display_name="Manuka")["task"]["id"]
+    assert entered.wait(1)
+    try:
+        with pytest.raises(RuntimeError, match="local workers are alive"):
+            registry.reconcile_startup(refresh_from_disk=True)
+        assert registry.get_task(task_id)["task"]["status"] == "running"
+        assert registry._startup_reconciled is False
+    finally:
+        release.set()
+        registry._threads[task_id].join(3)
+
+
+@pytest.mark.parametrize("active_status", ["queued", "running", "cancelling"])
+def test_restart_recovers_valid_orphan_result_sidecar_once(tmp_path, active_status):
+    task_id = f"sub_orphan_{active_status}"
+    _write_task_projection(tmp_path, task_id, active_status)
+    result = {"ok": True, "summaryText": "recovered result", "details": {"finding": "kept"}}
+    _write_result_sidecar(
+        tmp_path,
+        task_id,
+        {
+            "schema": SUB_AGENT_RESULT_SCHEMA,
+            "taskId": task_id,
+            "summary": "recovered result",
+            "result": result,
+        },
+    )
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    handlers = {"project_index_review": lambda _payload, _cancel_event: {"ok": True}}
+
+    reopened = SubAgentTaskRegistry(tmp_path, roles=roles, handlers=handlers)
+    restored = reopened.get_task(task_id)["task"]
+    assert restored["status"] == "completed"
+    assert restored["resultAvailable"] is True
+    assert restored["resultUnavailable"] is False
+    assert restored["result"] == result
+    assert restored["summary"] == "recovered result"
+    assert restored["handoffStatus"] == "handoff_pending"
+    assert restored["cancelRequested"] is False
+    assert restored["error"] == ""
+    recovered_events = [
+        event
+        for event in reopened.recent_events()
+        if event.get("taskId") == task_id and event.get("event") == "recovered"
+    ]
+    assert len(recovered_events) == 1
+    assert recovered_events[0]["data"]["previousStatus"] == active_status
+    assert recovered_events[0]["data"]["terminalStatus"] == "completed"
+
+    # The recovered full projection is replayable and does not append again.
+    recovered_revision = restored["revision"]
+    replayed = SubAgentTaskRegistry(tmp_path, roles=roles, handlers=handlers)
+    replayed_task = replayed.get_task(task_id)["task"]
+    assert replayed_task["status"] == "completed"
+    assert replayed_task["result"] == result
+    assert replayed_task["revision"] == recovered_revision
+    assert len(
+        [
+            event
+            for event in replayed.recent_events()
+            if event.get("taskId") == task_id and event.get("event") == "recovered"
+        ]
+    ) == 1
+
+
+@pytest.mark.parametrize("invalid_kind", ["schema", "foreign", "result", "json"])
+def test_restart_rejects_invalid_or_foreign_orphan_result_sidecar(tmp_path, invalid_kind):
+    task_id = f"sub_invalid_{invalid_kind}"
+    _write_task_projection(tmp_path, task_id, "running")
+    payload = {
+        "schema": SUB_AGENT_RESULT_SCHEMA,
+        "taskId": task_id,
+        "summary": "must not recover",
+        "result": {"ok": True},
+    }
+    if invalid_kind == "schema":
+        payload["schema"] = "vrcforge.sub_agent_result.future"
+    elif invalid_kind == "foreign":
+        payload["taskId"] = "sub_someone_else"
+    elif invalid_kind == "result":
+        payload["result"] = ["not", "an", "object"]
+    if invalid_kind == "json":
+        result_dir = tmp_path / "results"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        (result_dir / f"{task_id}.json").write_text('{"schema":', encoding="utf-8")
+    else:
+        _write_result_sidecar(tmp_path, task_id, payload)
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+    )
+    task = registry.get_task(task_id)["task"]
+    assert task["status"] == "interrupted"
+    assert task["result"] is None
+    assert task["resultAvailable"] is False
+    assert task["handoffStatus"] == ""
+    assert not [
+        event
+        for event in registry.recent_events()
+        if event.get("taskId") == task_id and event.get("event") == "recovered"
+    ]
+
+
+def test_orphan_result_sidecar_does_not_override_existing_terminal_projection(tmp_path):
+    task_id = "sub_already_failed"
+    _write_task_projection(tmp_path, task_id, "failed")
+    _write_result_sidecar(
+        tmp_path,
+        task_id,
+        {
+            "schema": SUB_AGENT_RESULT_SCHEMA,
+            "taskId": task_id,
+            "summary": "stale result",
+            "result": {"ok": True},
+        },
+    )
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+    )
+    task = registry.get_task(task_id)["task"]
+    assert task["status"] == "failed"
+    assert task["result"] is None
+    assert task["resultAvailable"] is False
+    assert not [event for event in registry.recent_events() if event.get("event") == "recovered"]
+
+
+def test_completed_event_append_failure_recovers_the_durable_sidecar(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(_payload, _cancel_event):
+        entered.set()
+        release.wait(2)
+        return {"ok": True, "summaryText": "durable success", "details": {"kept": True}}
+
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    registry = SubAgentTaskRegistry(tmp_path, roles=roles, handlers={"project_index_review": handler})
+    task_id = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+        parent_chat_id="chat-append-recovery",
+    )["task"]["id"]
+    assert entered.wait(1)
+    original_append = registry._append_event_locked
+    failed_once = False
+
+    def fail_first_completed_append(entry):
+        nonlocal failed_once
+        if entry.get("event") == "completed" and not failed_once:
+            failed_once = True
+            raise OSError("transient completed append failure")
+        return original_append(entry)
+
+    monkeypatch.setattr(registry, "_append_event_locked", fail_first_completed_append)
+    release.set()
+    registry._threads[task_id].join(3)
+
+    task = registry.get_task(task_id)["task"]
+    assert failed_once is True
+    assert task["status"] == "completed"
+    assert task["resultAvailable"] is True
+    assert task["result"]["details"] == {"kept": True}
+    assert task["summary"] == "durable success"
+    assert registry._result_path(task_id).exists()
+    events = [event for event in registry.recent_events() if event.get("taskId") == task_id]
+    assert [event["event"] for event in events] == ["created", "started", "recovered"]
+    assert events[-1]["data"]["source"] == "result_sidecar_after_append_error"
+
+    reopened = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+    )
+    replayed = reopened.get_task(task_id)["task"]
+    assert replayed["status"] == "completed"
+    assert replayed["result"]["details"] == {"kept": True}
+
+
+def test_persistent_completed_event_append_failure_stays_running_until_restart(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(_payload, _cancel_event):
+        entered.set()
+        release.wait(2)
+        return {"ok": True, "summaryText": "recover after restart"}
+
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    registry = SubAgentTaskRegistry(tmp_path, roles=roles, handlers={"project_index_review": handler})
+    task_id = registry.create_task(role="project_index_review", task="scan", display_name="Manuka")["task"]["id"]
+    assert entered.wait(1)
+    original_append = registry._append_event_locked
+
+    def fail_completion_projection(entry):
+        if entry.get("event") in {"completed", "recovered"}:
+            raise OSError("persistent completed append failure")
+        return original_append(entry)
+
+    monkeypatch.setattr(registry, "_append_event_locked", fail_completion_projection)
+    release.set()
+    registry._threads[task_id].join(3)
+
+    stranded = registry.get_task(task_id)["task"]
+    assert stranded["status"] == "running"
+    assert stranded["resultAvailable"] is False
+    assert registry._result_path(task_id).exists()
+    assert not [
+        event
+        for event in registry.recent_events()
+        if event.get("taskId") == task_id and event.get("event") in {"completed", "failed", "recovered"}
+    ]
+
+    reopened = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+    )
+    recovered = reopened.get_task(task_id)["task"]
+    assert recovered["status"] == "completed"
+    assert recovered["result"] == {"ok": True, "summaryText": "recover after restart"}
+    assert len(
+        [
+            event
+            for event in reopened.recent_events()
+            if event.get("taskId") == task_id and event.get("event") == "recovered"
+        ]
+    ) == 1
+
+
+def test_transient_orphan_sidecar_read_error_is_retryable(tmp_path, monkeypatch):
+    task_id = "sub_transient_sidecar_lock"
+    _write_task_projection(tmp_path, task_id, "running")
+    _write_result_sidecar(
+        tmp_path,
+        task_id,
+        {
+            "schema": SUB_AGENT_RESULT_SCHEMA,
+            "taskId": task_id,
+            "summary": "kept",
+            "result": {"ok": True},
+        },
+    )
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True}},
+        reconcile_on_init=False,
+    )
+    original_load = registry._load_result_sidecar_locked
+
+    def fail_locked_sidecar(_task_id):
+        raise PermissionError("sidecar temporarily locked")
+
+    monkeypatch.setattr(registry, "_load_result_sidecar_locked", fail_locked_sidecar)
+    with pytest.raises(PermissionError, match="temporarily locked"):
+        registry.reconcile_startup()
+    assert registry.get_task(task_id)["task"]["status"] == "running"
+
+    monkeypatch.setattr(registry, "_load_result_sidecar_locked", original_load)
+    assert registry.reconcile_startup() is True
+    assert registry.get_task(task_id)["task"]["status"] == "completed"
 
 
 def test_legacy_terminal_event_without_sidecar_is_marked_unavailable(tmp_path):
