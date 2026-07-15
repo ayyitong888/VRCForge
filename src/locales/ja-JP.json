@@ -324,7 +324,7 @@
     "stop": "停止",
     "send": "送信",
     "queue": "キュー",
-    "providerNotConfigured": "{{provider}} API Key が未設定です。設定を開くか、外部 agent を接続してください。",
+    "providerNotConfigured": "モデル API キーが未設定です。設定を開くか、外部 agent を接続してください。",
     "connectProviderBeforeSend": "送信前にモデルプロバイダまたは外部 agent を接続してください。",
     "queueFull": "キューが満杯です（{{max}} 件）。現在のターンを待つか、停止してください。",
     "contextUsage": "コンテキスト {{value}}",

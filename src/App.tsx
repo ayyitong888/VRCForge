@@ -344,7 +344,6 @@ export default function App() {
     visionEnabled,
     setVisionEnabled,
     savingVisionConfig,
-    savedProviderLabel,
     savedBaseUrl,
     providerConfigured,
     providerSnapshot,
@@ -547,7 +546,7 @@ export default function App() {
   const chatDisabledReason = !runtimeConnected
     ? t("agent.modeLabel.notConnected")
     : !chatAvailable
-      ? t("chat.providerNotConfigured", { provider: savedProviderLabel })
+      ? t("chat.providerNotConfigured")
       : "";
 
   useEffect(() => {

@@ -324,7 +324,7 @@
     "stop": "Stop",
     "send": "Send",
     "queue": "Queue",
-    "providerNotConfigured": "{{provider}} API key is not configured. Open Settings or connect an external agent.",
+    "providerNotConfigured": "No model API key is configured. Open Settings or connect an external agent.",
     "connectProviderBeforeSend": "Connect a provider or external agent before sending.",
     "queueFull": "Queue is full ({{max}}). Wait for the running turn or press Stop.",
     "contextUsage": "Context {{value}}",

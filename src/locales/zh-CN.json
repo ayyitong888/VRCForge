@@ -324,7 +324,7 @@
     "stop": "停止",
     "send": "发送",
     "queue": "排队",
-    "providerNotConfigured": "{{provider}} API Key 尚未配置。请打开设置，或连接外部 agent。",
+    "providerNotConfigured": "尚未配置模型 API Key。请打开设置，或连接外部 agent。",
     "connectProviderBeforeSend": "请先连接模型供应商或外部 agent，再发送消息。",
     "queueFull": "队列已满（{{max}} 条）。请等待当前任务结束，或按停止。",
     "contextUsage": "上下文 {{value}}",
