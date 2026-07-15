@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
 import pytest
+
+import external_agent_connector_installer as connector_installer
 
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -282,6 +286,99 @@ def test_invalid_codex_toml_is_rejected_without_overwrite(monkeypatch: pytest.Mo
     assert error.value.stage == "parse_config"
     assert config.read_text(encoding="utf-8") == "[mcp_servers.vrcforge\n"
     assert not list(codex_home.glob("*.vrcforge-backup-*"))
+
+
+def test_generic_install_rejects_external_change_after_read_without_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = make_source_root(tmp_path)
+    config = tmp_path / "mcp.json"
+    config.write_text('{"mcpServers":{"existing":{"command":"node"}}}\n', encoding="utf-8")
+    external_text = '{"mcpServers":{"external":{"command":"changed-elsewhere"}}}\n'
+    original_write = connector_installer._write_config_atomically
+    changed = False
+
+    def modify_before_compare(path: Path, text: str, validator: object, *, expected_snapshot: object) -> Path | None:
+        nonlocal changed
+        if not changed:
+            changed = True
+            config.write_text(external_text, encoding="utf-8")
+        return original_write(path, text, validator, expected_snapshot=expected_snapshot)
+
+    monkeypatch.setattr(connector_installer, "_write_config_atomically", modify_before_compare)
+
+    with pytest.raises(ConnectorInstallError) as error:
+        install_connector("generic", root_dir=root, config_path=str(config), run_self_test=False)
+
+    assert error.value.stage == "config_changed"
+    assert config.read_text(encoding="utf-8") == external_text
+    assert not list(tmp_path.glob("*.vrcforge-backup-*"))
+    assert not list(tmp_path.glob(".*.vrcforge-*.tmp"))
+
+
+def test_codex_install_rejects_external_toml_change_after_read_without_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = make_source_root(tmp_path)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    config = codex_home / "config.toml"
+    config.write_text('model = "gpt-5"\n', encoding="utf-8")
+    external_text = 'model = "gpt-5.1"\nreasoning_effort = "high"\n'
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    original_write = connector_installer._write_config_atomically
+    changed = False
+
+    def modify_before_compare(path: Path, text: str, validator: object, *, expected_snapshot: object) -> Path | None:
+        nonlocal changed
+        if not changed:
+            changed = True
+            config.write_text(external_text, encoding="utf-8")
+        return original_write(path, text, validator, expected_snapshot=expected_snapshot)
+
+    monkeypatch.setattr(connector_installer, "_write_config_atomically", modify_before_compare)
+
+    with pytest.raises(ConnectorInstallError) as error:
+        install_connector("codexApp", root_dir=root, run_self_test=False)
+
+    assert error.value.stage == "config_changed"
+    assert config.read_text(encoding="utf-8") == external_text
+    assert not list(codex_home.glob("*.vrcforge-backup-*"))
+    assert not list(codex_home.glob(".*.vrcforge-*.tmp"))
+
+
+def test_same_canonical_json_config_updates_are_serialized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mcp.json"
+    config.write_text("{}\n", encoding="utf-8")
+    original_write = connector_installer._write_config_atomically
+
+    def slow_write(path: Path, text: str, validator: object, *, expected_snapshot: object) -> Path | None:
+        time.sleep(0.01)
+        return original_write(path, text, validator, expected_snapshot=expected_snapshot)
+
+    monkeypatch.setattr(connector_installer, "_write_config_atomically", slow_write)
+    aliases = [config, config.parent / "unused" / ".." / config.name]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(
+                connector_installer._update_json_mcp_server,
+                aliases[index % len(aliases)],
+                f"server-{index}",
+                {"command": f"command-{index}"},
+            )
+            for index in range(12)
+        ]
+        for future in futures:
+            assert future.result()["changed"] is True
+
+    servers = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
+    assert servers == {f"server-{index}": {"command": f"command-{index}"} for index in range(12)}
 
 
 def test_stdio_mcp_handshake_runs_initialize_and_tools_list(tmp_path: Path) -> None:

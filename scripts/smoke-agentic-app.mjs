@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -11,6 +12,7 @@ const artifactsDir = path.join(smokeRoot, "artifacts");
 const port = Number(process.env.VRCFORGE_SMOKE_PORT || 8769);
 const endpoint = `http://127.0.0.1:${port}`;
 const appSessionToken = "vrcforge-smoke-session-token";
+const shellProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vrcforge-agentic-shell-"));
 
 fs.rmSync(smokeRoot, { recursive: true, force: true });
 for (const dir of [configDir, logsDir, artifactsDir]) {
@@ -197,12 +199,15 @@ try {
   assert(deletedSkill.status === 200, "User skill deletion should succeed.");
   assert(!fs.existsSync(path.join(smokeRoot, "skills", "smoke-review", "SKILL.md")), "Deleted user skill should remove SKILL.md.");
 
-  const highRiskTarget = path.join(smokeRoot, "approved-shell.txt");
+  for (const dir of ["Assets", "Packages", "ProjectSettings"]) {
+    fs.mkdirSync(path.join(shellProjectRoot, dir), { recursive: true });
+  }
+  const highRiskTarget = path.join(shellProjectRoot, "Assets", "approved-shell.txt");
   const highRiskTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "写入测试文件",
-    shell_command: "Set-Content -Path approved-shell.txt -Value ok -Encoding utf8",
-    workspace_root: smokeRoot,
-    cwd: smokeRoot,
+    shell_command: "Set-Content -Path Assets/approved-shell.txt -Value ok -Encoding utf8",
+    workspace_root: shellProjectRoot,
+    cwd: shellProjectRoot,
   });
   assert(highRiskTurn.status === 200, "High-risk shell turn should return normally.");
   assert(highRiskTurn.json.shell.status === "pending_approval", "High-risk shell command should require approval.");
@@ -212,13 +217,17 @@ try {
     {},
   );
   assert(shellApproval.status === 200, "Desktop approval endpoint should approve shell execution.");
-  assert(shellApproval.json.execution.status === "applied", "Approved shell payload should execute.");
+  assert(
+    shellApproval.json.execution.status === "applied",
+    `Approved shell payload should execute: ${JSON.stringify(shellApproval.json.execution)}`,
+  );
   assert(fs.existsSync(highRiskTarget), "Approved high-risk shell command should create the target file.");
 
   console.log("agentic app smoke passed");
 } finally {
   child.kill();
   setTimeout(() => child.kill("SIGKILL"), 500).unref?.();
+  fs.rmSync(shellProjectRoot, { recursive: true, force: true });
 }
 
 function assertFile(filePath, message) {

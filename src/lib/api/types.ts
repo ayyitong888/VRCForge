@@ -400,6 +400,7 @@ export type AgentRuntimeResponse = {
   turn_id: string;
   turnId: string;
   clientTurnId?: string;
+  goalDeliveryId?: string;
   approval_id?: string;
   approvalId?: string;
   observe: Record<string, unknown>;
@@ -620,6 +621,36 @@ export type AgentGoal = {
   wakeEveryMinutes?: number;
   lastWokenAt?: string;
   wakeCount?: number;
+  revision?: number;
+  blockedReason?: string;
+};
+
+export type AgentGoalDelivery = {
+  schema?: string;
+  id?: string;
+  deliveryId: string;
+  goalId: string;
+  status: "pending" | "claimed" | "running" | "failed" | "interrupted" | "completed" | "materialized" | string;
+  revision?: number;
+  scheduledFor?: string;
+  chatId: string;
+  sessionId?: string;
+  projectRoot?: string;
+  resumePrompt?: string;
+  clientTurnId: string;
+  userItemId: string;
+  agentItemId: string;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  resultAvailable?: boolean;
+  response?: AgentRuntimeResponse | null;
+  error?: string;
+  retryAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+  materializedAt?: string;
 };
 
 export type AgentProgress = {

@@ -31,6 +31,7 @@ from optimization_service import (
     OPTIMIZATION_TOOL_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
+from agent_goal_store import AgentGoalStore, AgentGoalStoreError
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -1493,6 +1494,14 @@ class AgentGateway:
         self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
         self._lock = threading.RLock()
+        self._goal_store = AgentGoalStore(
+            log_path=lambda: self.agent_goal_log_path,
+            result_dir=lambda: self.agent_goal_result_dir,
+            append_event=self._append_jsonl,
+            read_events=lambda path: self._read_jsonl(path, limit=0),
+            lock=self._lock,
+            normalize_path=normalize_filesystem_path,
+        )
         self._desktop_action_condition = threading.Condition(self._lock)
         self._computer_use_turn_grants: dict[str, dict[str, str]] = {}
         # In-progress approved writes, keyed by approval id. This is a global,
@@ -1548,6 +1557,10 @@ class AgentGateway:
     @property
     def agent_goal_log_path(self) -> Path:
         return self.audit_dir / "agent-goals.jsonl"
+
+    @property
+    def agent_goal_result_dir(self) -> Path:
+        return self.audit_dir / "agent-goal-results"
 
     @property
     def agent_progress_log_path(self) -> Path:
@@ -4195,152 +4208,95 @@ class AgentGateway:
         return fields
 
     def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        title = summarize_text(str(params.get("title") or params.get("goal") or "").strip(), 240)
-        if not title:
-            raise AgentGatewayError("Goal title is required.", status_code=400)
-        now = datetime.now(timezone.utc)
-        wake_fields = self._parse_goal_wake_fields(params, now=now)
-        goal_id = f"goal_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
-        event = {
-            "event": "goal_created",
-            "status": "active",
-            **wake_fields,
-            "goalId": goal_id,
-            "title": title,
-            "summary": summarize_text(str(params.get("summary") or ""), 1000),
-            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
-            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
-            "chatId": str(params.get("chatId") or params.get("chat_id") or "").strip(),
-            "approvalPolicy": "uses_vrcforge_approval_checkpoint_rollback",
-        }
-        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
-        return {"ok": True, "goal": self._project_agent_goals()[goal_id]}
+        try:
+            goal = self._goal_store.create(params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
 
     def update_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        goal_id = str(goal_id or "").strip()
-        if not goal_id:
-            raise AgentGatewayError("goalId is required.", status_code=400)
-        status = str(params.get("status") or "").strip().lower()
-        allowed = {"active", "paused", "completed", "cancelled"}
-        if status not in allowed:
-            raise AgentGatewayError("Goal status must be active, paused, completed, or cancelled.", status_code=400)
-        current = self._project_agent_goals()
-        if goal_id not in current:
-            raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
-        wake_fields = self._parse_goal_wake_fields(params, now=datetime.now(timezone.utc))
-        event = {
-            "event": "goal_updated",
-            "status": status,
-            **wake_fields,
-            "goalId": goal_id,
-            "summary": summarize_text(str(params.get("summary") or params.get("note") or ""), 1000),
-            "projectRoot": str(params.get("projectRoot") or current[goal_id].get("projectRoot") or ""),
-            "sessionId": str(params.get("sessionId") or current[goal_id].get("sessionId") or ""),
-            "chatId": str(params.get("chatId") or current[goal_id].get("chatId") or ""),
-        }
-        self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
-        return {"ok": True, "goal": self._project_agent_goals()[goal_id]}
+        try:
+            goal = self._goal_store.update(goal_id, params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
+
+    def bind_agent_goal_owner(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            goal = self._goal_store.bind_owner(goal_id, params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
 
     def list_agent_goals(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
-        goals = list(self._project_agent_goals().values())
-        if project_root:
-            normalized_project_root = normalize_filesystem_path(project_root)
-            goals = [
-                goal
-                for goal in goals
-                if not str(goal.get("projectRoot") or "").strip()
-                or normalize_filesystem_path(str(goal.get("projectRoot") or "")) == normalized_project_root
-            ]
-        if session_id:
-            goals = [goal for goal in goals if str(goal.get("sessionId") or "") in {"", session_id}]
-        goals.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
-        goals = goals[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
-        return {"ok": True, "schema": "vrcforge.agent_goals.v1", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
+        goals = self._goal_store.list(limit=limit, project_root=project_root, session_id=session_id)
+        return {"ok": True, "schema": "vrcforge.agent_goals.v2", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
 
     def _goal_is_due(self, goal: dict[str, Any], *, now: datetime) -> bool:
-        if str(goal.get("status") or "") != "active":
-            return False
-        wake_at = self._parse_goal_wake_timestamp(goal.get("wakeAt"))
-        if wake_at is None or wake_at > now:
-            return False
-        last_woken = self._parse_goal_wake_timestamp(goal.get("lastWokenAt"))
-        # A goal is due once per scheduled wakeAt: after goal_woken either
-        # advances wakeAt (recurring) or clears it (one-shot), so a stale
-        # lastWokenAt newer than wakeAt means the schedule was already consumed.
-        return last_woken is None or last_woken < wake_at
+        return self._goal_store.is_due(goal, now=now)
 
     def list_due_agent_goals(
         self, *, limit: int = 20, project_root: str = "", session_id: str = "", now: datetime | None = None
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
-        goals = list(self._project_agent_goals().values())
-        if project_root:
-            normalized_project_root = normalize_filesystem_path(project_root)
-            goals = [
-                goal
-                for goal in goals
-                if not str(goal.get("projectRoot") or "").strip()
-                or normalize_filesystem_path(str(goal.get("projectRoot") or "")) == normalized_project_root
-            ]
-        if session_id:
-            goals = [goal for goal in goals if str(goal.get("sessionId") or "") in {"", session_id}]
-        due = [redact_sensitive(goal) for goal in goals if self._goal_is_due(goal, now=now)]
-        due.sort(key=lambda item: str(item.get("wakeAt") or ""))
-        due = due[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
+        due = [redact_sensitive(goal) for goal in self._goal_store.list_due(limit=limit, project_root=project_root, session_id=session_id, now=now)]
         return {
             "ok": True,
-            "schema": "vrcforge.agent_goals_due.v1",
+            "schema": "vrcforge.agent_goals_due.v2",
             "now": now.isoformat(),
             "goals": due,
             "count": len(due),
         }
 
     def wake_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        goal_id = str(goal_id or "").strip()
-        if not goal_id:
-            raise AgentGatewayError("goalId is required.", status_code=400)
-        # Keep the due check and schedule-consuming append in one instance-local
-        # critical section. The gateway lock is re-entrant because projection
-        # and append helpers are also used by already-locked runtime paths.
-        with self._lock:
-            current = self._project_agent_goals()
-            if goal_id not in current:
-                raise AgentGatewayError(f"Goal was not found: {goal_id}", status_code=404)
-            goal = current[goal_id]
-            now = datetime.now(timezone.utc)
-            if not self._goal_is_due(goal, now=now):
-                raise AgentGatewayError("Goal is not due for wake.", status_code=409)
-            interval = 0
-            try:
-                interval = int(goal.get("wakeEveryMinutes") or 0)
-            except (TypeError, ValueError):
-                interval = 0
-            next_wake_at = (now + timedelta(minutes=interval)).isoformat() if interval > 0 else ""
-            wake_count = 0
-            try:
-                wake_count = int(goal.get("wakeCount") or 0)
-            except (TypeError, ValueError):
-                wake_count = 0
-            event = {
-                "event": "goal_woken",
-                "status": "active",
-                "goalId": goal_id,
-                "lastWokenAt": now.isoformat(),
-                "wakeAt": next_wake_at,
-                "wakeCount": wake_count + 1,
-                "projectRoot": str(goal.get("projectRoot") or ""),
-                "sessionId": str(params.get("sessionId") or params.get("session_id") or goal.get("sessionId") or ""),
-                "chatId": str(params.get("chatId") or params.get("chat_id") or goal.get("chatId") or ""),
-            }
-            self._append_jsonl(self.agent_goal_log_path, "vrcforge.agent_goal.v1", event)
-            woken = self._project_agent_goals()[goal_id]
-        title = str(woken.get("title") or "").strip()
-        summary = str(woken.get("summary") or "").strip()
-        resume_prompt = f"Resume goal: {title}" + (f"\nContext: {summary}" if summary else "")
-        return {"ok": True, "goal": redact_sensitive(woken), "resumePrompt": resume_prompt}
+        try:
+            goal, delivery = self._goal_store.wake(goal_id, params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal_delivery.v1",
+            "goal": redact_sensitive(goal),
+            "delivery": redact_sensitive(delivery),
+            "resumePrompt": str(delivery.get("resumePrompt") or ""),
+        }
+
+    def begin_agent_goal_delivery(self, delivery_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            payload = self._goal_store.begin_delivery(delivery_id, params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", **payload}
+
+    def complete_agent_goal_delivery(self, delivery_id: str, response: dict[str, Any]) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.complete_delivery(delivery_id, response)
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def fail_agent_goal_delivery(self, delivery_id: str, error: str) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.fail_delivery(delivery_id, error)
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def list_recoverable_agent_goal_deliveries(self, *, limit: int = 20, chat_id: str = "") -> dict[str, Any]:
+        deliveries = self._goal_store.list_recoverable(limit=limit, chat_id=chat_id)
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal_deliveries.v1",
+            "deliveries": [redact_sensitive(delivery) for delivery in deliveries],
+            "count": len(deliveries),
+        }
+
+    def materialize_agent_goal_delivery(self, delivery_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.mark_materialized(delivery_id, params or {})
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -4590,15 +4546,19 @@ class AgentGateway:
     def clear_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         project_root = str(params.get("projectRoot") or params.get("project_root") or "").strip()
-        normalized_project_root = normalize_filesystem_path(project_root) if project_root else ""
         scope = str(params.get("scope") or "").strip().lower()
+        if scope not in {"user", "project"}:
+            raise AgentGatewayError("Memory scope must be user or project.", status_code=400)
+        if scope == "project" and not project_root:
+            raise AgentGatewayError("Clearing project memory requires projectRoot.", status_code=400)
+        normalized_project_root = normalize_filesystem_path(project_root) if scope == "project" else ""
         current = self._project_agent_memory()
         cleared = 0
         for memory_id, memory in current.items():
-            memory_project = str(memory.get("projectRoot") or "").strip()
-            if normalized_project_root and normalize_filesystem_path(memory_project) != normalized_project_root:
+            memory_scope = str(memory.get("scope") or "").strip().lower()
+            if memory_scope != scope:
                 continue
-            if scope and str(memory.get("scope") or "") != scope:
+            if scope == "project" and normalize_filesystem_path(str(memory.get("projectRoot") or "")) != normalized_project_root:
                 continue
             self._append_jsonl(
                 self.agent_memory_log_path,
@@ -5075,13 +5035,18 @@ class AgentGateway:
                 ensure_dict(approval.get("arguments") or {}),
                 user_constraints,
             )
-            with self._checkpoint_storage_lock:
-                checkpoint = self._create_pre_write_checkpoint(approval, arguments)
-                if checkpoint:
-                    approval["checkpoint"] = checkpoint
-                    if checkpoint.get("blocking"):
-                        raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
-                    if checkpoint.get("ok"):
+            classification = ensure_dict(arguments.get("classification_snapshot"))
+            requires_checkpoint = not (
+                target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
+            )
+            if requires_checkpoint:
+                with self._checkpoint_storage_lock:
+                    checkpoint = self._create_pre_write_checkpoint(approval, arguments)
+                    if checkpoint:
+                        approval["checkpoint"] = checkpoint
+                        if checkpoint.get("ok") is not True:
+                            checkpoint["blocking"] = True
+                            raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
                         recovery = self._start_apply_recovery(approval, arguments, checkpoint)
             result = write_handler.handler(arguments)
             if isinstance(result, dict) and result.get("ok") is False:
@@ -6053,7 +6018,14 @@ class AgentGateway:
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
         if not self._is_unity_project_root(project_root):
-            record.update({"ok": False, "error": "Resolved checkpoint root is not a Unity project."})
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "error": "Resolved checkpoint root is not a Unity project.",
+                }
+            )
             self._append_checkpoint(record)
             return record
 
@@ -8031,6 +8003,8 @@ class AgentGateway:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+                log_file.flush()
+                os.fsync(log_file.fileno())
         return safe_entry
 
     def _read_jsonl(self, path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
@@ -8056,27 +8030,7 @@ class AgentGateway:
         return events
 
     def _project_agent_goals(self) -> dict[str, dict[str, Any]]:
-        goals: dict[str, dict[str, Any]] = {}
-        # Goal state is an event-sourced projection. Reading only a tail can
-        # discard the creation event and silently lose durable fields such as
-        # title and recurring schedule after a busy/long-running history.
-        for event in self._read_jsonl(self.agent_goal_log_path, limit=0):
-            goal_id = str(event.get("goalId") or "").strip()
-            if not goal_id:
-                continue
-            previous = goals.get(goal_id, {})
-            merged = {
-                **previous,
-                **event,
-                "id": goal_id,
-                "goalId": goal_id,
-                "createdAt": previous.get("createdAt") or event.get("createdAt"),
-                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
-            }
-            if event.get("title"):
-                merged["title"] = event.get("title")
-            goals[goal_id] = merged
-        return goals
+        return self._goal_store.project_goals()
 
     def _project_agent_progress(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         progress: dict[str, dict[str, Any]] = {}
@@ -8363,8 +8317,41 @@ class AgentGateway:
             "reasons": reasons,
             "cwd": str(cwd),
             "workspaceRoot": str(workspace_root),
+            "readOnly": self._shell_command_is_read_only(command),
             "plannedRunner": SHELL_RUNNER_NATIVE if native_shell_argv(command) is not None else SHELL_RUNNER_POWERSHELL,
         }
+
+    @staticmethod
+    def _shell_command_is_read_only(command: str) -> bool:
+        if (
+            "\n" in command
+            or "\r" in command
+            or re.search(r"&&|\|\||[;|]|(?:^|\s)(?:\d?>|\*>|>>)", command)
+            or "$(" in command
+            or "{" in command
+            or "}" in command
+            or '@"' in command
+            or "@'" in command
+        ):
+            return False
+        tokens = [strip_quotes(token) for token in tokenize_command(command)]
+        if not tokens:
+            return False
+        command_name = tokens[0].lower()
+        args = [token.lower() for token in tokens[1:]]
+        if command_name in {"get-childitem", "dir", "ls", "get-content", "type", "findstr"}:
+            return True
+        if command_name == "rg":
+            return not any(
+                arg in {"--pre", "--pre-glob", "--output"}
+                or arg.startswith(("--pre=", "--pre-glob=", "--output="))
+                for arg in args
+            )
+        if command_name in {"python", "node", "npm", "uv"} and args in (["--version"], ["-v"]):
+            return True
+        if command_name == "where" and len(args) == 1:
+            return bool(re.fullmatch(r"[a-zA-Z0-9_.-]+", args[0] or ""))
+        return False
 
     def _shell_auto_manual_approval_reason(self, classification: dict[str, Any]) -> str:
         command = str(classification.get("command") or "")

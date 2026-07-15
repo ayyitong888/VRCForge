@@ -757,6 +757,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     agent_name: str = "desktop-agent"
     session_id: str | None = None
     client_turn_id: str | None = Field(default=None, alias="clientTurnId")
+    goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
     message: str
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     shell_command: str | None = None
@@ -896,6 +897,21 @@ class AgentGoalWakeRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentGoalOwnerBindRequest(BaseModel):
+    session_id: str | None = Field(default=None, alias="sessionId")
+    chat_id: str = Field(alias="chatId")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalDeliveryMaterializeRequest(BaseModel):
+    chat_id: str = Field(alias="chatId")
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentProgressItemRequest(BaseModel):
     id: str | None = None
     progress_id: str | None = Field(default=None, alias="progressId")
@@ -966,7 +982,7 @@ class AgentMemoryDeleteRequest(BaseModel):
 
 
 class AgentMemoryClearRequest(BaseModel):
-    scope: Literal["user", "project"] | str = ""
+    scope: Literal["user", "project"]
     reason: str = "clear"
     project_root: str | None = Field(default=None, alias="projectRoot")
 
@@ -1233,6 +1249,7 @@ class SubAgentCreateRequest(BaseModel):
     role: str = Field(default="project_index_review")
     task: str = Field(default="")
     display_name: str = Field(default="", alias="displayName")
+    parent_chat_id: str = Field(default="", alias="parentChatId")
     parent_session_id: str = Field(default="", alias="parentSessionId")
     project_path: str = Field(default="", alias="projectPath")
     params: dict[str, Any] = Field(default_factory=dict)
@@ -1243,6 +1260,13 @@ class SubAgentCreateRequest(BaseModel):
 class SubAgentMergeRequest(BaseModel):
     decision: str = Field(default="adopted")
     chat_id: str = Field(default="", alias="chatId")
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
+
+    model_config = {"populate_by_name": True}
+
+
+class SubAgentHandoffAckRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
 
     model_config = {"populate_by_name": True}
 
@@ -2003,39 +2027,86 @@ async def update_agentic_app_advanced_settings(request: AdvancedSettingsRequest)
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
+    goal_delivery_started = False
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.require_computer_use_enabled()
+        if runtime_request.goal_delivery_id:
+            delivery_start = AGENT_GATEWAY.begin_agent_goal_delivery(
+                runtime_request.goal_delivery_id,
+                {
+                    "clientTurnId": runtime_request.client_turn_id,
+                    "provider": runtime_request.provider,
+                    "providerLabel": runtime_request.provider_label,
+                    "model": runtime_request.model,
+                },
+            )
+            cached_response = delivery_start.get("response")
+            if delivery_start.get("cached") and isinstance(cached_response, dict):
+                payload = {**cached_response, "goalDeliveryId": runtime_request.goal_delivery_id}
+                await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
+                return payload
+            goal_delivery_started = True
         payload = await asyncio.to_thread(
             AGENT_GATEWAY.runtime_message,
             {
-            "session_id": runtime_request.session_id,
-            "clientTurnId": runtime_request.client_turn_id,
-            "message": runtime_request.message,
-            "attachments": runtime_request.attachments,
-            "shell_command": runtime_request.shell_command,
-            "skill_tool": runtime_request.skill_tool,
-            "skill_params": runtime_request.skill_params,
-            "cwd": runtime_request.cwd,
-            "workspace_root": runtime_request.workspace_root,
-            "projectPath": runtime_request.project_path,
-            "projectRoot": runtime_request.project_root,
-            "provider": runtime_request.provider,
-            "providerLabel": runtime_request.provider_label,
-            "model": runtime_request.model,
-            "history": runtime_request.history,
-            "_computerUseRequested": runtime_request.computer_use_requested,
-            "_computerUseGrantId": runtime_request.computer_use_grant_id,
-            "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
-            "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
+                "session_id": runtime_request.session_id,
+                "clientTurnId": runtime_request.client_turn_id,
+                "goalDeliveryId": runtime_request.goal_delivery_id,
+                "message": runtime_request.message,
+                "attachments": runtime_request.attachments,
+                "shell_command": runtime_request.shell_command,
+                "skill_tool": runtime_request.skill_tool,
+                "skill_params": runtime_request.skill_params,
+                "cwd": runtime_request.cwd,
+                "workspace_root": runtime_request.workspace_root,
+                "projectPath": runtime_request.project_path,
+                "projectRoot": runtime_request.project_root,
+                "provider": runtime_request.provider,
+                "providerLabel": runtime_request.provider_label,
+                "model": runtime_request.model,
+                "history": runtime_request.history,
+                "_computerUseRequested": runtime_request.computer_use_requested,
+                "_computerUseGrantId": runtime_request.computer_use_grant_id,
+                "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
+                "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
             },
             agent_name=runtime_request.agent_name,
         )
+        if runtime_request.goal_delivery_id:
+            payload = {**payload, "goalDeliveryId": runtime_request.goal_delivery_id}
+            await asyncio.to_thread(
+                AGENT_GATEWAY.complete_agent_goal_delivery,
+                runtime_request.goal_delivery_id,
+                payload,
+            )
     except AgentGatewayError as exc:
+        if runtime_request.goal_delivery_id and goal_delivery_started:
+            try:
+                await asyncio.to_thread(
+                    AGENT_GATEWAY.fail_agent_goal_delivery,
+                    runtime_request.goal_delivery_id,
+                    str(exc),
+                )
+            except AgentGatewayError:
+                pass
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        if runtime_request.goal_delivery_id and goal_delivery_started:
+            try:
+                await asyncio.to_thread(
+                    AGENT_GATEWAY.fail_agent_goal_delivery,
+                    runtime_request.goal_delivery_id,
+                    str(exc),
+                )
+            except AgentGatewayError:
+                pass
+        raise
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
     await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=payload.get("sessionId") or payload.get("session_id") or ""))
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if runtime_request.goal_delivery_id:
+        await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals())
     return payload
 
 
@@ -2352,6 +2423,43 @@ async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> di
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.post("/api/app/agent/goals/{goal_id}/bind-owner")
+async def app_bind_agent_goal_owner(goal_id: str, request: AgentGoalOwnerBindRequest) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.bind_agent_goal_owner(
+            goal_id,
+            {
+                "sessionId": request.session_id,
+                "chatId": request.chat_id,
+                "projectRoot": request.project_root,
+            },
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    return payload
+
+
+@app.get("/api/app/agent/goals/deliveries/recoverable")
+def app_recoverable_agent_goal_deliveries(limit: int = 20, chatId: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.list_recoverable_agent_goal_deliveries(limit=limit, chat_id=chatId)
+
+
+@app.post("/api/app/agent/goals/deliveries/{delivery_id}/materialized")
+async def app_materialize_agent_goal_delivery(
+    delivery_id: str,
+    request: AgentGoalDeliveryMaterializeRequest,
+) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.materialize_agent_goal_delivery(
+            delivery_id,
+            {"chatId": request.chat_id, "expectedRevision": request.expected_revision},
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return payload
 
 
@@ -4130,11 +4238,14 @@ def app_list_sub_agents(includeEvents: bool = False, limit: int = 50) -> dict[st
 
 @app.post("/api/app/sub-agents")
 async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]:
+    if not request.parent_chat_id.strip():
+        raise HTTPException(status_code=400, detail="Sub-agent tasks require a durable parentChatId.")
     try:
         payload = SUB_AGENT_REGISTRY.create_task(
             role=request.role,
             task=request.task,
             display_name=request.display_name,
+            parent_chat_id=request.parent_chat_id,
             parent_session_id=request.parent_session_id,
             project_path=request.project_path,
             params=request.params,
@@ -4173,7 +4284,26 @@ async def app_retry_sub_agent(task_id: str) -> dict[str, Any]:
 
 @app.post("/api/app/sub-agents/{task_id}/merge")
 async def app_merge_sub_agent(task_id: str, request: SubAgentMergeRequest) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.merge_task(task_id, decision=request.decision, chat_id=request.chat_id)
+    payload = SUB_AGENT_REGISTRY.merge_task(
+        task_id,
+        decision=request.decision,
+        chat_id=request.chat_id,
+        expected_revision=request.expected_revision,
+    )
+    if not payload.get("ok"):
+        error_text = str(payload.get("error") or "Sub-agent task was not found.")
+        status_code = 404 if "not found" in error_text else 409
+        raise HTTPException(status_code=status_code, detail=error_text)
+    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    return payload
+
+
+@app.post("/api/app/sub-agents/{task_id}/handoff-ack")
+async def app_acknowledge_sub_agent_handoff(task_id: str, request: SubAgentHandoffAckRequest) -> dict[str, Any]:
+    payload = SUB_AGENT_REGISTRY.acknowledge_handoff(
+        task_id,
+        expected_revision=request.expected_revision,
+    )
     if not payload.get("ok"):
         error_text = str(payload.get("error") or "Sub-agent task was not found.")
         status_code = 404 if "not found" in error_text else 409

@@ -29,6 +29,11 @@ export type QueuedTurn = {
   chatId?: string;
   sessionId?: string;
   projectPath?: string;
+  goalDelivery?: {
+    deliveryId: string;
+    userItemId: string;
+    agentItemId: string;
+  };
   computerUseRequested?: boolean;
   computerUseVisualTheme?: "light" | "dark";
   computerUseVisualAccent?: string;
@@ -249,7 +254,7 @@ export function useChatRunController({
         targetEndpoint = readyEndpoint;
       }
       const userItem: ConversationItem = {
-        id: `user-${Date.now()}`,
+        id: turn.goalDelivery?.userItemId || `user-${turn.id}`,
         type: "user",
         text: turn.text,
         attachments: turn.attachments,
@@ -272,7 +277,13 @@ export function useChatRunController({
         ...touchChat(current),
         sessionId: chatSessionId,
         title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-        items: [...stripTransientConversationItems(options?.baseItems ?? current.items), userItem, streamingItem],
+        items: [
+          ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
+            (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
+          ),
+          userItem,
+          streamingItem,
+        ],
       }));
       const computerUseGrant = turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {
@@ -289,6 +300,7 @@ export function useChatRunController({
         providerLabel: turn.providerLabel,
         model: turn.model,
         clientTurnId: turn.id,
+        goalDeliveryId: turn.goalDelivery?.deliveryId,
         computerUseRequested: Boolean(turn.computerUseRequested),
         computerUseGrantId: computerUseGrant?.grantId,
         computerUseVisualTheme: turn.computerUseVisualTheme,
@@ -299,8 +311,10 @@ export function useChatRunController({
         ...touchChat(current),
         sessionId: response.sessionId || response.session_id || current.sessionId,
         items: [
-          ...stripTransientConversationItems(current.items),
-          { id: response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
+          ...stripTransientConversationItems(current.items).filter(
+            (item) => item.id !== (turn.goalDelivery?.agentItemId || response.turnId || response.turn_id),
+          ),
+          { id: turn.goalDelivery?.agentItemId || response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
         ],
       }));
       await refresh(targetEndpoint);

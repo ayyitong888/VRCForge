@@ -108,9 +108,11 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            acknowledge_sub_agent_handoff,
             apply_adjustment_checkpoint,
             answer_agent_question,
             approve_agent_approval,
+            bind_agent_goal_owner,
             block_skill_package,
             cancel_sub_agent,
             check_skills,
@@ -135,6 +137,7 @@ fn main() {
             fetch_agent_approvals,
             fetch_agent_desktop_actions,
             fetch_agent_goals,
+            fetch_recoverable_agent_goal_deliveries,
             fetch_agent_memory,
             fetch_due_agent_goals,
             fetch_agent_notes,
@@ -166,6 +169,7 @@ fn main() {
             install_external_agent_connector,
             issue_computer_use_turn_grant,
             merge_sub_agent,
+            materialize_agent_goal_delivery,
             overwrite_adjustment_checkpoint,
             plan_avatar_encryption,
             plan_outfit_import,

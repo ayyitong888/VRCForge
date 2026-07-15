@@ -14,10 +14,11 @@ export type SubAgentTask = {
   role: string;
   displayName: string;
   task: string;
+  parentChatId?: string;
   parentSessionId?: string;
   projectPath?: string;
   toolProfile?: string;
-  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | string;
+  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted" | string;
   createdAt?: string;
   startedAt?: string;
   stoppedAt?: string;
@@ -26,9 +27,15 @@ export type SubAgentTask = {
   summary?: string;
   error?: string;
   eventCount?: number;
+  revision?: number;
+  retryOf?: string;
+  handoffStatus?: "handoff_pending" | "materialized" | "adopted" | "dismissed" | string;
+  handoffAt?: string;
   mergedAt?: string;
   mergedChatId?: string;
   mergeDecision?: "adopted" | "dismissed" | string;
+  resultAvailable?: boolean;
+  resultUnavailable?: boolean;
   result?: Record<string, unknown> | null;
   paramsSummary?: Record<string, unknown>;
   events?: Array<{ timestamp?: string; event?: string; data?: Record<string, unknown> }>;
@@ -60,6 +67,7 @@ export async function createSubAgent(
     role: string;
     task?: string;
     displayName?: string;
+    parentChatId: string;
     parentSessionId?: string;
     projectPath?: string;
     params?: Record<string, unknown>;
@@ -107,15 +115,33 @@ export async function retrySubAgent(endpoint: string, taskId: string): Promise<{
 export async function mergeSubAgent(
   endpoint: string,
   taskId: string,
-  request: { decision: "adopted" | "dismissed"; chatId?: string },
+  request: { decision: "adopted" | "dismissed"; chatId: string; expectedRevision?: number },
 ): Promise<{ ok: boolean; task: SubAgentTask; message?: string }> {
-  const body = { decision: request.decision, chatId: request.chatId ?? "" };
+  const body = { decision: request.decision, chatId: request.chatId, expectedRevision: request.expectedRevision };
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("merge_sub_agent", {
       request: { id: taskId, body, timeoutMs: 30000 },
     });
   }
   return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function acknowledgeSubAgentHandoff(
+  endpoint: string,
+  taskId: string,
+  expectedRevision?: number,
+): Promise<{ ok: boolean; task: SubAgentTask; message?: string }> {
+  const body = { expectedRevision };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("acknowledge_sub_agent_handoff", {
+      request: { id: taskId, body, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/sub-agents/${encodeURIComponent(taskId)}/handoff-ack`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

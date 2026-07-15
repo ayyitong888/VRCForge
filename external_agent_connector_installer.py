@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -29,6 +30,10 @@ from external_agent_connectors import (
 )
 
 ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"]
+
+
+_CONFIG_PATH_LOCKS_GUARD = threading.Lock()
+_CONFIG_PATH_LOCKS: dict[str, threading.RLock] = {}
 
 
 class ConnectorInstallError(RuntimeError):
@@ -73,6 +78,17 @@ class StdioBridgeSpec:
             stdio_extra_args=tuple(self.args[1:]),
             stdio_cwd=self.cwd,
         )
+
+
+@dataclass(frozen=True)
+class ConfigSnapshot:
+    exists: bool
+    content: bytes
+    digest: str
+    mtime_ns: int
+    size: int
+    device: int
+    inode: int
 
 
 def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
@@ -521,101 +537,205 @@ def _stdio_failure_suggestion(error: str, stderr_tail: list[str]) -> str:
     return "Open VRCForge, run Doctor, confirm the Agent Gateway token exists, then retry connector install."
 
 
-def _update_json_mcp_server(path: Path, server_name: str, server_block: dict[str, Any] | None) -> dict[str, Any]:
-    payload = _load_json_object(path)
-    servers = payload.get("mcpServers")
-    if servers is None:
-        servers = {}
-        payload["mcpServers"] = servers
-    if not isinstance(servers, dict):
-        raise ConnectorInstallError(
-            "mcpServers must be a JSON object.",
-            stage="parse_config",
-            suggestion=f"Repair {path} so mcpServers is an object, then retry.",
+def _canonical_config_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _config_path_lock(path: Path) -> threading.RLock:
+    canonical = _canonical_config_path(path)
+    key = os.path.normcase(str(canonical))
+    with _CONFIG_PATH_LOCKS_GUARD:
+        lock = _CONFIG_PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CONFIG_PATH_LOCKS[key] = lock
+        return lock
+
+
+def _snapshot_identity(stat_result: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_size),
+        int(stat_result.st_dev),
+        int(stat_result.st_ino),
+    )
+
+
+def _read_config_snapshot(path: Path) -> ConfigSnapshot:
+    canonical = _canonical_config_path(path)
+    for _attempt in range(3):
+        try:
+            before = canonical.stat()
+        except FileNotFoundError:
+            try:
+                canonical.stat()
+            except FileNotFoundError:
+                return ConfigSnapshot(False, b"", "", 0, 0, 0, 0)
+            continue
+        except OSError as exc:
+            raise ConnectorInstallError(
+                f"Could not inspect config file: {exc}",
+                stage="read_config",
+                suggestion=f"Close apps that may be locking {canonical}, then retry.",
+            ) from exc
+
+        try:
+            content = canonical.read_bytes()
+            after = canonical.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ConnectorInstallError(
+                f"Could not read config file: {exc}",
+                stage="read_config",
+                suggestion=f"Close apps that may be locking {canonical}, then retry.",
+            ) from exc
+
+        if _snapshot_identity(before) != _snapshot_identity(after) or len(content) != after.st_size:
+            continue
+        return ConfigSnapshot(
+            True,
+            content,
+            hashlib.sha256(content).hexdigest(),
+            int(after.st_mtime_ns),
+            int(after.st_size),
+            int(after.st_dev),
+            int(after.st_ino),
         )
 
-    previous = servers.get(server_name)
-    if server_block is None:
-        changed = server_name in servers
-        servers.pop(server_name, None)
-    else:
-        changed = previous != server_block
-        servers[server_name] = server_block
+    raise ConnectorInstallError(
+        f"Config file changed while VRCForge was reading it: {canonical}",
+        stage="config_changed",
+        suggestion="Retry after the other application finishes editing the config. VRCForge did not modify the file.",
+    )
 
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    backup_path = _write_config_atomically(path, text, _validate_json_object) if changed or not path.exists() else ""
-    return {
-        "changed": changed,
-        "installed": server_block is not None,
-        "removed": server_block is None and changed,
-        "backupPath": str(backup_path) if backup_path else "",
-    }
+
+def _assert_config_snapshot(path: Path, expected: ConfigSnapshot) -> None:
+    current = _read_config_snapshot(path)
+    if current != expected:
+        raise ConnectorInstallError(
+            f"Config file changed after VRCForge read it: {_canonical_config_path(path)}",
+            stage="config_changed",
+            suggestion="Review the other application's changes, then retry. VRCForge did not overwrite them.",
+        )
+
+
+def _decode_config_snapshot(path: Path, snapshot: ConfigSnapshot) -> str:
+    if not snapshot.exists:
+        return ""
+    try:
+        decoded = snapshot.content.decode("utf-8-sig")
+        return decoded.replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError as exc:
+        raise ConnectorInstallError(
+            f"Config file is not valid UTF-8: {exc}",
+            stage="parse_config",
+            suggestion=f"Save {path} as UTF-8, then retry. VRCForge did not modify the file.",
+        ) from exc
+
+
+def _update_json_mcp_server(path: Path, server_name: str, server_block: dict[str, Any] | None) -> dict[str, Any]:
+    path = _canonical_config_path(path)
+    with _config_path_lock(path):
+        snapshot = _read_config_snapshot(path)
+        payload = _load_json_object(path, snapshot=snapshot)
+        servers = payload.get("mcpServers")
+        if servers is None:
+            servers = {}
+            payload["mcpServers"] = servers
+        if not isinstance(servers, dict):
+            raise ConnectorInstallError(
+                "mcpServers must be a JSON object.",
+                stage="parse_config",
+                suggestion=f"Repair {path} so mcpServers is an object, then retry.",
+            )
+
+        previous = servers.get(server_name)
+        if server_block is None:
+            changed = server_name in servers
+            servers.pop(server_name, None)
+        else:
+            changed = previous != server_block
+            servers[server_name] = server_block
+
+        text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        backup_path = (
+            _write_config_atomically(path, text, _validate_json_object, expected_snapshot=snapshot)
+            if changed or not snapshot.exists
+            else ""
+        )
+        return {
+            "changed": changed,
+            "installed": server_block is not None,
+            "removed": server_block is None and changed,
+            "backupPath": str(backup_path) if backup_path else "",
+        }
 
 
 def _update_generic_json_mcp_server(path: Path, expected_block: dict[str, Any], *, install: bool) -> dict[str, Any]:
-    if not path.exists() and not install:
-        return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
-
-    payload = _load_json_object(path)
-    servers = payload.get("mcpServers")
-    if servers is None:
-        if not install:
+    path = _canonical_config_path(path)
+    with _config_path_lock(path):
+        snapshot = _read_config_snapshot(path)
+        if not snapshot.exists and not install:
             return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
-        servers = {}
-        payload["mcpServers"] = servers
-    if not isinstance(servers, dict):
-        raise ConnectorInstallError(
-            "mcpServers must be a JSON object.",
-            stage="parse_config",
-            suggestion=f"Repair {path} so mcpServers is an object, then retry.",
-        )
 
-    existing = servers.get(DEFAULT_SERVER_NAME)
-    if existing is not None and existing != expected_block:
-        action = "install" if install else "remove"
-        raise ConnectorInstallError(
-            f"Refusing to {action}: mcpServers.{DEFAULT_SERVER_NAME} already contains a different configuration.",
-            stage="config_conflict",
-            suggestion=(
-                f"Rename the existing {DEFAULT_SERVER_NAME} server or choose another config file. "
-                "VRCForge did not modify this file."
-            ),
-        )
+        payload = _load_json_object(path, snapshot=snapshot)
+        servers = payload.get("mcpServers")
+        if servers is None:
+            if not install:
+                return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
+            servers = {}
+            payload["mcpServers"] = servers
+        if not isinstance(servers, dict):
+            raise ConnectorInstallError(
+                "mcpServers must be a JSON object.",
+                stage="parse_config",
+                suggestion=f"Repair {path} so mcpServers is an object, then retry.",
+            )
 
-    if install:
-        if existing == expected_block:
-            return {"changed": False, "installed": True, "removed": False, "backupPath": ""}
-        servers[DEFAULT_SERVER_NAME] = expected_block
-        installed = True
-        removed = False
-    else:
-        if existing is None:
-            return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
-        del servers[DEFAULT_SERVER_NAME]
-        installed = False
-        removed = True
+        existing = servers.get(DEFAULT_SERVER_NAME)
+        if existing is not None and existing != expected_block:
+            action = "install" if install else "remove"
+            raise ConnectorInstallError(
+                f"Refusing to {action}: mcpServers.{DEFAULT_SERVER_NAME} already contains a different configuration.",
+                stage="config_conflict",
+                suggestion=(
+                    f"Rename the existing {DEFAULT_SERVER_NAME} server or choose another config file. "
+                    "VRCForge did not modify this file."
+                ),
+            )
 
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    backup_path = _write_config_atomically(path, text, _validate_json_object)
-    return {
-        "changed": True,
-        "installed": installed,
-        "removed": removed,
-        "backupPath": str(backup_path) if backup_path else "",
-    }
+        if install:
+            if existing == expected_block:
+                return {"changed": False, "installed": True, "removed": False, "backupPath": ""}
+            servers[DEFAULT_SERVER_NAME] = expected_block
+            installed = True
+            removed = False
+        else:
+            if existing is None:
+                return {"changed": False, "installed": False, "removed": False, "backupPath": ""}
+            del servers[DEFAULT_SERVER_NAME]
+            installed = False
+            removed = True
+
+        text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        backup_path = _write_config_atomically(path, text, _validate_json_object, expected_snapshot=snapshot)
+        return {
+            "changed": True,
+            "installed": installed,
+            "removed": removed,
+            "backupPath": str(backup_path) if backup_path else "",
+        }
 
 
-def _load_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists():
+def _load_json_object(path: Path, *, snapshot: ConfigSnapshot | None = None) -> dict[str, Any]:
+    snapshot = snapshot or _read_config_snapshot(path)
+    if not snapshot.exists:
         return {}
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
-        raise ConnectorInstallError(
-            f"Could not read config file: {exc}",
-            stage="read_config",
-            suggestion=f"Close apps that may be locking {path}, then retry.",
-        ) from exc
+    text = _decode_config_snapshot(path, snapshot)
     if not text.strip():
         return {}
     try:
@@ -636,37 +756,35 @@ def _load_json_object(path: Path) -> dict[str, Any]:
 
 
 def _update_codex_toml_server(path: Path, server_name: str, server_text: str | None) -> dict[str, Any]:
-    original = ""
-    if path.exists():
-        try:
-            original = path.read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise ConnectorInstallError(
-                f"Could not read config file: {exc}",
-                stage="read_config",
-                suggestion=f"Close apps that may be locking {path}, then retry.",
-            ) from exc
-    if original.strip():
-        _validate_toml_object(original)
-    without_server = _remove_codex_server_block(original, server_name)
-    if server_text is None:
-        changed = without_server != original
-        new_text = _normalize_terminal_newline(without_server)
-    else:
-        insertion = _normalize_terminal_newline(server_text)
-        new_text = _normalize_terminal_newline(without_server)
-        if new_text.strip():
-            new_text = new_text.rstrip() + "\n\n" + insertion
+    path = _canonical_config_path(path)
+    with _config_path_lock(path):
+        snapshot = _read_config_snapshot(path)
+        original = _decode_config_snapshot(path, snapshot)
+        if original.strip():
+            _validate_toml_object(original)
+        without_server = _remove_codex_server_block(original, server_name)
+        if server_text is None:
+            changed = without_server != original
+            new_text = _normalize_terminal_newline(without_server)
         else:
-            new_text = insertion
-        changed = new_text != original
-    backup_path = _write_config_atomically(path, new_text, _validate_toml_object) if changed or (server_text is not None and not path.exists()) else ""
-    return {
-        "changed": changed,
-        "installed": server_text is not None,
-        "removed": server_text is None and changed,
-        "backupPath": str(backup_path) if backup_path else "",
-    }
+            insertion = _normalize_terminal_newline(server_text)
+            new_text = _normalize_terminal_newline(without_server)
+            if new_text.strip():
+                new_text = new_text.rstrip() + "\n\n" + insertion
+            else:
+                new_text = insertion
+            changed = new_text != original
+        backup_path = (
+            _write_config_atomically(path, new_text, _validate_toml_object, expected_snapshot=snapshot)
+            if changed or (server_text is not None and not snapshot.exists)
+            else ""
+        )
+        return {
+            "changed": changed,
+            "installed": server_text is not None,
+            "removed": server_text is None and changed,
+            "backupPath": str(backup_path) if backup_path else "",
+        }
 
 
 def _remove_codex_server_block(text: str, server_name: str) -> str:
@@ -696,17 +814,33 @@ def _normalize_toml_table_name(name: str) -> str:
     return name.replace('"', "").replace("'", "").strip()
 
 
-def _write_config_atomically(path: Path, text: str, validator: Any) -> Path | None:
+def _write_config_atomically(
+    path: Path,
+    text: str,
+    validator: Any,
+    *,
+    expected_snapshot: ConfigSnapshot,
+) -> Path | None:
+    path = _canonical_config_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    backup_path: Path | None = None
-    if path.exists():
-        backup_path = path.with_name(f"{path.name}.vrcforge-backup-{_timestamp()}-{uuid.uuid4().hex[:8]}")
-        shutil.copy2(path, backup_path)
     validator(text)
     temp_path = path.with_name(f".{path.name}.vrcforge-{uuid.uuid4().hex}.tmp")
+    backup_path: Path | None = None
     try:
         temp_path.write_text(text, encoding="utf-8")
         validator(temp_path.read_text(encoding="utf-8"))
+        _assert_config_snapshot(path, expected_snapshot)
+        if expected_snapshot.exists:
+            backup_path = path.with_name(f"{path.name}.vrcforge-backup-{_timestamp()}-{uuid.uuid4().hex[:8]}")
+            backup_path.write_bytes(expected_snapshot.content)
+            shutil.copystat(path, backup_path)
+            try:
+                _assert_config_snapshot(path, expected_snapshot)
+            except ConnectorInstallError:
+                backup_path.unlink(missing_ok=True)
+                backup_path = None
+                raise
+        _assert_config_snapshot(path, expected_snapshot)
         temp_path.replace(path)
     finally:
         if temp_path.exists():

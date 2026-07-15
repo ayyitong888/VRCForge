@@ -25,6 +25,7 @@ from agent_gateway import (
     resolve_powershell_executable,
 )
 from skill_packages import SkillPackageService
+from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
 
@@ -1584,12 +1585,12 @@ class DashboardServerTests(unittest.TestCase):
             audit_dir = root / "audit"
             gateway = AgentGateway(config_path, audit_dir)
             past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
-            one_shot = gateway.create_agent_goal({"title": "One shot", "summary": "Ship wake slice", "wakeAt": past})["goal"]
-            recurring = gateway.create_agent_goal({"title": "Recurring", "wakeAt": past, "wakeEveryMinutes": 30})["goal"]
-            idle = gateway.create_agent_goal({"title": "No schedule"})["goal"]
+            one_shot = gateway.create_agent_goal({"title": "One shot", "summary": "Ship wake slice", "wakeAt": past, "chatId": "chat-one"})["goal"]
+            recurring = gateway.create_agent_goal({"title": "Recurring", "wakeAt": past, "wakeEveryMinutes": 30, "chatId": "chat-recurring"})["goal"]
+            idle = gateway.create_agent_goal({"title": "No schedule", "chatId": "chat-idle"})["goal"]
 
             with self.assertRaises(AgentGatewayError) as bound:
-                gateway.create_agent_goal({"title": "Too fast", "wakeEveryMinutes": 2})
+                gateway.create_agent_goal({"title": "Too fast", "wakeEveryMinutes": 2, "chatId": "chat-fast"})
             self.assertEqual(bound.exception.status_code, 400)
 
             due = gateway.list_due_agent_goals()
@@ -1600,18 +1601,31 @@ class DashboardServerTests(unittest.TestCase):
 
             woken = gateway.wake_agent_goal(one_shot["goalId"])
             self.assertEqual(woken["resumePrompt"], "Resume goal: One shot\nContext: Ship wake slice")
-            self.assertEqual(woken["goal"]["wakeAt"], "")
-            self.assertEqual(woken["goal"]["wakeCount"], 1)
-            with self.assertRaises(AgentGatewayError) as not_due:
-                gateway.wake_agent_goal(one_shot["goalId"])
-            self.assertEqual(not_due.exception.status_code, 409)
+            self.assertEqual(woken["goal"]["wakeAt"], past)
+            self.assertEqual(woken["goal"]["wakeCount"], 0)
+            duplicate = gateway.wake_agent_goal(one_shot["goalId"])
+            self.assertEqual(duplicate["delivery"]["deliveryId"], woken["delivery"]["deliveryId"])
+            gateway.begin_agent_goal_delivery(
+                woken["delivery"]["deliveryId"],
+                {"clientTurnId": woken["delivery"]["clientTurnId"]},
+            )
+            gateway.complete_agent_goal_delivery(woken["delivery"]["deliveryId"], {"turnId": "one-shot-done"})
+            completed_one_shot = gateway._project_agent_goals()[one_shot["goalId"]]
+            self.assertEqual(completed_one_shot["wakeAt"], "")
+            self.assertEqual(completed_one_shot["wakeCount"], 1)
 
             rewoken = gateway.wake_agent_goal(recurring["goalId"])
-            next_wake = datetime.fromisoformat(rewoken["goal"]["wakeAt"])
+            gateway.begin_agent_goal_delivery(
+                rewoken["delivery"]["deliveryId"],
+                {"clientTurnId": rewoken["delivery"]["clientTurnId"]},
+            )
+            gateway.complete_agent_goal_delivery(rewoken["delivery"]["deliveryId"], {"turnId": "recurring-done"})
+            recurring_after_completion = gateway._project_agent_goals()[recurring["goalId"]]
+            next_wake = datetime.fromisoformat(recurring_after_completion["wakeAt"])
             self.assertGreater(next_wake, datetime.now(timezone.utc))
             # Status-only update carries no wake keys, so the schedule must survive untouched.
             updated = gateway.update_agent_goal(recurring["goalId"], {"status": "active", "summary": "still going"})["goal"]
-            self.assertEqual(updated["wakeAt"], rewoken["goal"]["wakeAt"])
+            self.assertEqual(updated["wakeAt"], recurring_after_completion["wakeAt"])
             self.assertEqual(updated["wakeEveryMinutes"], 30)
             # Explicit empty values clear the schedule.
             cleared = gateway.update_agent_goal(recurring["goalId"], {"status": "active", "wakeAt": "", "wakeEveryMinutes": 0})["goal"]
@@ -1639,6 +1653,7 @@ class DashboardServerTests(unittest.TestCase):
                     "summary": "Creation metadata must survive",
                     "wakeAt": past,
                     "wakeEveryMinutes": 30,
+                    "chatId": "chat-long-lived",
                 }
             )["goal"]
 
@@ -1668,7 +1683,7 @@ class DashboardServerTests(unittest.TestCase):
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
-            due_goal = gateway.create_agent_goal({"title": "Old due goal", "wakeAt": past})["goal"]
+            due_goal = gateway.create_agent_goal({"title": "Old due goal", "wakeAt": past, "chatId": "chat-due"})["goal"]
             for index in range(60):
                 gateway.create_agent_goal({"title": f"New unscheduled goal {index}"})
 
@@ -1680,7 +1695,7 @@ class DashboardServerTests(unittest.TestCase):
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
-            goal = gateway.create_agent_goal({"title": "Wake once", "wakeAt": past})["goal"]
+            goal = gateway.create_agent_goal({"title": "Wake once", "wakeAt": past, "chatId": "chat-atomic"})["goal"]
             start = threading.Barrier(4)
             results: list[str | int] = []
             results_lock = threading.Lock()
@@ -1715,12 +1730,13 @@ class DashboardServerTests(unittest.TestCase):
                     thread.join(timeout=5)
 
             self.assertTrue(all(not thread.is_alive() for thread in threads))
-            self.assertCountEqual(results, ["ok", 409, "updated"])
+            self.assertCountEqual(results, ["ok", "ok", "updated"])
             projected = gateway.list_agent_goals(limit=1)["goals"][0]
-            self.assertEqual(projected["wakeCount"], 1)
+            self.assertEqual(projected["wakeCount"], 0)
             self.assertEqual(projected["summary"], "concurrent update")
             events = gateway._read_jsonl(gateway.agent_goal_log_path, limit=0)
-            self.assertEqual(sum(event.get("event") == "goal_woken" for event in events), 1)
+            self.assertEqual(sum(event.get("event") == "goal_delivery_pending" for event in events), 1)
+            self.assertEqual(sum(event.get("event") == "goal_delivery_claimed" for event in events), 1)
             self.assertEqual(sum(event.get("event") == "goal_updated" for event in events), 1)
 
     def test_agent_goal_wake_routes_and_key_presence_semantics(self) -> None:
@@ -1748,7 +1764,7 @@ class DashboardServerTests(unittest.TestCase):
             )
             overflow = client.post(
                 "/api/app/agent/goals",
-                json={"title": "Overflow timestamp", "wakeAt": "9999-12-31T23:59:59-23:59"},
+                json={"title": "Overflow timestamp", "chatId": "chat-overflow", "wakeAt": "9999-12-31T23:59:59-23:59"},
             )
 
         self.assertEqual(created.status_code, 200)
@@ -1756,11 +1772,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn(goal_id, [goal["goalId"] for goal in due.json()["goals"]])
         self.assertEqual(woken.status_code, 200)
         woken_goal = woken.json()["goal"]
-        self.assertEqual(woken_goal["wakeCount"], 1)
+        self.assertEqual(woken_goal["wakeCount"], 0)
         self.assertEqual(woken_goal["chatId"], "chat-wake")
         self.assertTrue(woken_goal["wakeAt"])
         self.assertEqual(woken.json()["resumePrompt"], "Resume goal: Wake route goal\nContext: Route proof")
-        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["delivery"]["deliveryId"], woken.json()["delivery"]["deliveryId"])
         self.assertEqual(paused.status_code, 200)
         paused_goal = paused.json()["goal"]
         # A status-only update sends no wake keys; presence-based semantics keep the schedule.
@@ -1771,6 +1788,113 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(cleared.json()["goal"]["wakeEveryMinutes"], 0)
         self.assertEqual(overflow.status_code, 400)
         self.assertIn("ISO-8601", overflow.json()["detail"])
+
+    def test_agent_goal_delivery_runtime_is_cached_until_chat_ack(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+            created = client.post(
+                "/api/app/agent/goals",
+                json={"title": "Durable runtime", "chatId": "chat-durable", "wakeAt": past},
+            )
+            goal_id = created.json()["goal"]["goalId"]
+            woken = client.post(f"/api/app/agent/goals/{goal_id}/wake", json={"chatId": "chat-durable"})
+            delivery = woken.json()["delivery"]
+            runtime_payload = {
+                "ok": True,
+                "sessionId": "session-durable",
+                "session_id": "session-durable",
+                "turnId": "turn-durable",
+                "turn_id": "turn-durable",
+                "clientTurnId": delivery["clientTurnId"],
+                "observe": {},
+                "plan": {"summary": "done", "planner": "test", "shellNeeded": False, "skillNeeded": False},
+            }
+            request = {
+                "message": delivery["resumePrompt"],
+                "clientTurnId": delivery["clientTurnId"],
+                "goalDeliveryId": delivery["deliveryId"],
+            }
+            with patch.object(dashboard_server.AGENT_GATEWAY, "runtime_message", return_value=runtime_payload) as runtime:
+                first = client.post("/api/app/agent/message", json=request)
+                second = client.post("/api/app/agent/message", json=request)
+
+            recoverable = client.get("/api/app/agent/goals/deliveries/recoverable")
+            acknowledged = client.post(
+                f"/api/app/agent/goals/deliveries/{delivery['deliveryId']}/materialized",
+                json={"chatId": "chat-durable"},
+            )
+            after_ack = client.get("/api/app/agent/goals/deliveries/recoverable")
+            projected = client.get("/api/app/agent/goals").json()["goals"]
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(runtime.call_count, 1)
+        self.assertEqual(second.json()["turnId"], "turn-durable")
+        self.assertEqual(recoverable.json()["count"], 1)
+        self.assertEqual(recoverable.json()["deliveries"][0]["response"]["turnId"], "turn-durable")
+        self.assertEqual(acknowledged.status_code, 200)
+        self.assertEqual(after_ack.json()["count"], 0)
+        goal = next(item for item in projected if item["goalId"] == goal_id)
+        self.assertEqual(goal["wakeAt"], "")
+        self.assertEqual(goal["wakeCount"], 1)
+
+    def test_sub_agent_routes_persist_parent_handoff_and_merge_revision(self) -> None:
+        original_registry = dashboard_server.SUB_AGENT_REGISTRY
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SubAgentTaskRegistry(
+                Path(tmp),
+                roles=[SubAgentRole("test_role", "Test", "Test role")],
+                handlers={"test_role": lambda _payload, _cancel: {"ok": True, "summaryText": "ready"}},
+            )
+            dashboard_server.SUB_AGENT_REGISTRY = registry
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    ownerless = client.post(
+                        "/api/app/sub-agents",
+                        json={"role": "test_role", "task": "run"},
+                    )
+                    created = client.post(
+                        "/api/app/sub-agents",
+                        json={"role": "test_role", "task": "run", "parentChatId": "chat-a"},
+                    )
+                    task_id = created.json()["task"]["id"]
+                    deadline = time.time() + 2
+                    task = created.json()["task"]
+                    while task["status"] not in {"completed", "failed"} and time.time() < deadline:
+                        time.sleep(0.01)
+                        task = client.get(f"/api/app/sub-agents/{task_id}").json()["task"]
+                    acknowledged = client.post(
+                        f"/api/app/sub-agents/{task_id}/handoff-ack",
+                        json={"expectedRevision": task["revision"]},
+                    )
+                    acknowledged_task = acknowledged.json()["task"]
+                    wrong_chat = client.post(
+                        f"/api/app/sub-agents/{task_id}/merge",
+                        json={
+                            "decision": "adopted",
+                            "chatId": "chat-b",
+                            "expectedRevision": acknowledged_task["revision"],
+                        },
+                    )
+                    adopted = client.post(
+                        f"/api/app/sub-agents/{task_id}/merge",
+                        json={
+                            "decision": "adopted",
+                            "chatId": "chat-a",
+                            "expectedRevision": acknowledged_task["revision"],
+                        },
+                    )
+            finally:
+                dashboard_server.SUB_AGENT_REGISTRY = original_registry
+
+        self.assertEqual(ownerless.status_code, 400)
+        self.assertEqual(task["parentChatId"], "chat-a")
+        self.assertEqual(task["handoffStatus"], "handoff_pending")
+        self.assertEqual(acknowledged.status_code, 200)
+        self.assertEqual(acknowledged_task["handoffStatus"], "materialized")
+        self.assertEqual(wrong_chat.status_code, 409)
+        self.assertEqual(adopted.status_code, 200)
+        self.assertEqual(adopted.json()["task"]["mergeDecision"], "adopted")
 
     def test_agent_progress_replace_update_and_delete(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -1983,6 +2107,38 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("projectRoot", missing_project.json()["detail"])
         self.assertEqual(user_memory.status_code, 200)
         self.assertEqual(user_memory.json()["memory"]["scope"], "user")
+
+    def test_agent_memory_clear_requires_valid_scope_and_project_root(self) -> None:
+        with TestClient(dashboard_server.app) as client:
+            missing_scope = client.post("/api/app/agent/memory/clear", json={"reason": "test"})
+            invalid_scope = client.post("/api/app/agent/memory/clear", json={"scope": "all", "reason": "test"})
+            missing_project = client.post("/api/app/agent/memory/clear", json={"scope": "project", "reason": "test"})
+
+        self.assertEqual(missing_scope.status_code, 422)
+        self.assertEqual(invalid_scope.status_code, 422)
+        self.assertEqual(missing_project.status_code, 400)
+        self.assertIn("projectRoot", missing_project.json()["detail"])
+
+    def test_agent_project_memory_clear_is_exactly_project_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project_a = str(root / "ProjectA")
+            project_b = str(root / "ProjectB")
+            gateway.create_agent_memory({"scope": "project", "text": "Project A memory.", "projectRoot": project_a})
+            gateway.create_agent_memory({"scope": "project", "text": "Project B memory.", "projectRoot": project_b})
+            gateway.create_agent_memory({"scope": "user", "text": "User memory."})
+
+            cleared = gateway.clear_agent_memory({"scope": "project", "projectRoot": project_a})
+            project_a_after = gateway.list_agent_memory(project_root=project_a, limit=10)
+            project_b_after = gateway.list_agent_memory(project_root=project_b, limit=10)
+
+        self.assertEqual(cleared["cleared"], 1)
+        self.assertEqual({item["text"] for item in project_a_after["memories"]}, {"User memory."})
+        self.assertEqual(
+            {item["text"] for item in project_b_after["memories"]},
+            {"Project B memory.", "User memory."},
+        )
 
     def test_agent_memory_no_project_list_only_returns_user_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2845,8 +3001,12 @@ class DashboardServerTests(unittest.TestCase):
                     "timeout_seconds": 5,
                 }
             )
-            self.assertEqual(full_delete["status"], "executed")
-            self.assertFalse(victim.exists())
+            # Full permission removes the approval prompt, not the rollback
+            # invariant: a mutating shell command still fails closed when the
+            # workspace is not a checkpointable Unity project.
+            self.assertEqual(full_delete["status"], "failed")
+            self.assertTrue(victim.exists())
+            self.assertIn("Unity project", full_delete["error"])
 
     def test_auto_permission_delete_write_requires_manual_until_full_auto(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3614,7 +3774,9 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            target = Path(workspace) / "agent-loop.txt"
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                (Path(workspace) / directory).mkdir()
+            target = Path(workspace) / "Assets" / "agent-loop.txt"
             with TestClient(dashboard_server.app) as client:
                 low = client.post(
                     "/api/app/agent/message",
@@ -3632,7 +3794,7 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/agent/message",
                     json={
                         "message": "写入测试文件",
-                        "shell_command": "Set-Content -Path agent-loop.txt -Value hi -Encoding utf8",
+                        "shell_command": "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
                     },
@@ -3696,13 +3858,15 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_app_approval_reject_does_not_rewrite_terminal_status(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            target = Path(workspace) / "terminal.txt"
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                (Path(workspace) / directory).mkdir()
+            target = Path(workspace) / "Assets" / "terminal.txt"
             with TestClient(dashboard_server.app) as client:
                 high = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "shell_command": "Set-Content -Path terminal.txt -Value hi -Encoding utf8",
+                        "shell_command": "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
                     },
@@ -5831,6 +5995,53 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn("No Unity project root", applied["error"])
             self.assertTrue(applied["checkpoint"]["blocking"])
             self.assertEqual(called, [])
+
+    def test_checkpoint_blocks_write_for_any_non_success_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            called: list[dict] = []
+            gateway.register_write_handler(
+                "vrcforge_test_failed_checkpoint",
+                "Failed checkpoint",
+                "high",
+                lambda args: called.append(args) or {"ok": True},
+            )
+            request = gateway.create_apply_request(
+                {"target_tool": "vrcforge_test_failed_checkpoint", "arguments": {"projectRoot": str(root)}}
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            gateway._create_pre_write_checkpoint = lambda _approval, _arguments: {  # type: ignore[method-assign]  # noqa: SLF001
+                "id": "ckpt_failed_without_blocking",
+                "ok": False,
+                "error": "checkpoint backend returned an incomplete result",
+            }
+
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+        self.assertFalse(applied["ok"])
+        self.assertEqual(applied["status"], "failed")
+        self.assertIn("incomplete result", applied["error"])
+        self.assertTrue(applied["checkpoint"]["blocking"])
+        self.assertEqual(called, [])
+
+    def test_checkpoint_non_unity_root_is_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            non_unity = root / "NotUnity"
+            non_unity.mkdir()
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+
+            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001
+                {"id": "approval-test", "targetTool": "vrcforge_test_non_unity_write"},
+                {"projectRoot": str(non_unity)},
+            )
+
+        self.assertIsNotNone(checkpoint)
+        self.assertFalse(checkpoint["ok"])
+        self.assertTrue(checkpoint["blocking"])
+        self.assertEqual(checkpoint["status"], "failed")
 
     def test_checkpoint_archive_restore_succeeds_when_unity_reload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

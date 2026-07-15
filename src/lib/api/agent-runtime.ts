@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 export type ChatHistoryEntry = {
   role: "user" | "agent";
@@ -13,12 +13,13 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
     sessionId: sessionId || undefined,
     clientTurnId: options.clientTurnId || undefined,
+    goalDeliveryId: options.goalDeliveryId || undefined,
     message,
     history: history ?? [],
     attachments: options.attachments ?? [],
@@ -42,6 +43,7 @@ export async function sendAgentMessage(
       agent_name: request.agentName,
       session_id: request.sessionId || null,
       clientTurnId: request.clientTurnId,
+      goalDeliveryId: request.goalDeliveryId,
       message: request.message,
       history: request.history,
       attachments: request.attachments,
@@ -295,7 +297,7 @@ export async function wakeAgentGoal(
   endpoint: string,
   goalId: string,
   payload: { sessionId?: string; chatId?: string; projectRoot?: string } = {},
-): Promise<{ ok: boolean; goal: AgentGoal; resumePrompt?: string }> {
+): Promise<{ ok: boolean; goal: AgentGoal; delivery: AgentGoalDelivery; resumePrompt?: string }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("wake_agent_goal", {
       request: { id: goalId, body: payload, timeoutMs: 60000 },
@@ -306,6 +308,65 @@ export async function wakeAgentGoal(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+export async function bindAgentGoalOwner(
+  endpoint: string,
+  goalId: string,
+  payload: { chatId: string; sessionId?: string; projectRoot?: string },
+): Promise<{ ok: boolean; goal: AgentGoal }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("bind_agent_goal_owner", {
+      request: { id: goalId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/goals/${encodeURIComponent(goalId)}/bind-owner`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchRecoverableAgentGoalDeliveries(
+  endpoint: string,
+  params: { limit?: number; chatId?: string } = {},
+): Promise<{ ok: boolean; schema?: string; deliveries: AgentGoalDelivery[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.chatId) {
+    query.set("chatId", params.chatId);
+  }
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_recoverable_agent_goal_deliveries", {
+      request: { ...params, timeoutMs: 30000 },
+    });
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson(`${endpoint}/api/app/agent/goals/deliveries/recoverable${suffix}`, {
+    timeoutMs: 30000,
+  });
+}
+
+export async function materializeAgentGoalDelivery(
+  endpoint: string,
+  deliveryId: string,
+  payload: { chatId: string; expectedRevision?: number },
+): Promise<{ ok: boolean; schema?: string; delivery: AgentGoalDelivery }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("materialize_agent_goal_delivery", {
+      request: { id: deliveryId, body: payload, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(
+    `${endpoint}/api/app/agent/goals/deliveries/${encodeURIComponent(deliveryId)}/materialized`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export async function fetchAgentProgress(
@@ -520,7 +581,7 @@ export async function deleteAgentMemory(
 
 export async function clearAgentMemory(
   endpoint: string,
-  payload: { scope?: string; reason?: string; projectRoot?: string } = {},
+  payload: { scope: "user" | "project"; reason?: string; projectRoot?: string },
 ): Promise<{ ok: boolean; cleared: number }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("clear_agent_memory", {

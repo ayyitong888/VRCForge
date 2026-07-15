@@ -1,5 +1,12 @@
 import { useEffect, useRef } from "react";
-import { AgentGoal, fetchDueAgentGoals, updateAgentGoal, wakeAgentGoal } from "../lib/api";
+import {
+  AgentGoal,
+  AgentGoalDelivery,
+  fetchDueAgentGoals,
+  fetchRecoverableAgentGoalDeliveries,
+  materializeAgentGoalDelivery,
+  wakeAgentGoal,
+} from "../lib/api";
 
 /**
  * Goal 唤醒轮询：网关负责"哪些 goal 到点了"的持久判定，
@@ -9,7 +16,6 @@ import { AgentGoal, fetchDueAgentGoals, updateAgentGoal, wakeAgentGoal } from ".
  */
 const GOAL_WAKE_POLL_INTERVAL_MS = 60_000;
 const GOAL_WAKE_INITIAL_DELAY_MS = 5_000;
-const GOAL_WAKE_RETRY_DELAY_MS = 60_000;
 
 function parseGoalWakeMinutes(raw: string, unit: string): number {
   const magnitude = Number(raw);
@@ -58,7 +64,10 @@ type UseGoalWakeParams = {
   runtimeConnected: boolean;
   chatAvailable: boolean;
   sending: boolean;
-  onGoalWoken: (goal: AgentGoal, resumePrompt: string) => "dispatched" | "retry" | Promise<"dispatched" | "retry">;
+  onGoalDelivery: (
+    goal: AgentGoal | null,
+    delivery: AgentGoalDelivery,
+  ) => "persisted" | "retry" | Promise<"persisted" | "retry">;
 };
 
 export function useGoalWake({
@@ -66,33 +75,29 @@ export function useGoalWake({
   runtimeConnected,
   chatAvailable,
   sending,
-  onGoalWoken,
+  onGoalDelivery,
 }: UseGoalWakeParams) {
   const busyRef = useRef(false);
   const sendingRef = useRef(sending);
-  const pendingRetriesRef = useRef(new Map<string, AgentGoal>());
-  const onGoalWokenRef = useRef(onGoalWoken);
+  const onGoalDeliveryRef = useRef(onGoalDelivery);
   sendingRef.current = sending;
-  onGoalWokenRef.current = onGoalWoken;
+  onGoalDeliveryRef.current = onGoalDelivery;
 
   useEffect(() => {
-    if (!runtimeConnected || !chatAvailable) {
+    if (!runtimeConnected) {
       return;
     }
     let cancelled = false;
 
-    async function rearmGoal(goal: AgentGoal) {
-      const lastWokenAt = Date.parse(goal.lastWokenAt || "");
-      const retryBase = Number.isFinite(lastWokenAt) ? Math.max(Date.now(), lastWokenAt) : Date.now();
-      await updateAgentGoal(endpoint, goal.goalId, {
-        status: goal.status || "active",
-        summary: goal.summary || "",
-        wakeAt: new Date(retryBase + GOAL_WAKE_RETRY_DELAY_MS).toISOString(),
-        sessionId: goal.sessionId || undefined,
-        chatId: goal.chatId || undefined,
-        projectRoot: goal.projectRoot || undefined,
+    async function persistAndAcknowledge(goal: AgentGoal | null, delivery: AgentGoalDelivery) {
+      const result = await onGoalDeliveryRef.current(goal, delivery);
+      if (result !== "persisted" || cancelled) {
+        return false;
+      }
+      await materializeAgentGoalDelivery(endpoint, delivery.deliveryId, {
+        chatId: delivery.chatId,
       });
-      pendingRetriesRef.current.delete(goal.goalId);
+      return true;
     }
 
     async function tick() {
@@ -101,9 +106,14 @@ export function useGoalWake({
       }
       busyRef.current = true;
       try {
-        const pendingRetry = pendingRetriesRef.current.values().next().value as AgentGoal | undefined;
-        if (pendingRetry) {
-          await rearmGoal(pendingRetry);
+        const recoverable = await fetchRecoverableAgentGoalDeliveries(endpoint, { limit: 1 });
+        const completed = recoverable.deliveries?.[0];
+        if (completed?.deliveryId) {
+          await persistAndAcknowledge(null, completed);
+          return;
+        }
+        if (!chatAvailable) {
+          return;
         }
         const due = await fetchDueAgentGoals(endpoint, { limit: 3 });
         const goal = due.goals?.[0];
@@ -115,22 +125,10 @@ export function useGoalWake({
           chatId: goal.chatId || undefined,
           projectRoot: goal.projectRoot || undefined,
         });
-        const resumed = woken.goal || goal;
-        const prompt = (woken.resumePrompt || "").trim() || `Resume goal: ${resumed.title || ""}`.trim();
-        let dispatchResult: "dispatched" | "retry" = "retry";
-        try {
-          dispatchResult = await onGoalWokenRef.current(resumed, prompt);
-        } catch {
-          dispatchResult = "retry";
+        if (!woken.delivery?.deliveryId) {
+          return;
         }
-        if (dispatchResult === "retry") {
-          pendingRetriesRef.current.set(resumed.goalId, resumed);
-          try {
-            await rearmGoal(resumed);
-          } catch {
-            // Keep the in-memory retry so the next poll can re-arm it.
-          }
-        }
+        await persistAndAcknowledge(woken.goal || goal, woken.delivery);
       } catch {
         // 静默：网关不可达或并发唤醒冲突（409）都留给下一个周期重试。
       } finally {

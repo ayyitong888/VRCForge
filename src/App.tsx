@@ -126,6 +126,7 @@ import {
   ApiError,
   AppBootstrap,
   AdvancedSettingsState,
+  acknowledgeSubAgentHandoff,
   DoctorReport,
   compactAgentHistory,
   answerAgentQuestion,
@@ -302,6 +303,7 @@ export default function App() {
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
+  const subAgentHandoffBusyRef = useRef(new Set<string>());
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
   const chatSessionActionsRef = useRef<{
     selectProject: (projectPath: string) => void;
@@ -652,6 +654,7 @@ export default function App() {
     updateChat,
     appendToChat,
     ensureActiveChat,
+    persistChatsNow,
     getChatById,
     newConversation,
     togglePinChat,
@@ -763,42 +766,79 @@ export default function App() {
     runtimeConnected,
     chatAvailable,
     sending,
-    onGoalWoken: async (goal, resumePrompt) => {
-      const goalProjectKey = normalizeProjectPathKey(goal.projectRoot);
-      const projectChats = !goal.sessionId && goalProjectKey
-        ? chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === goalProjectKey)
-        : [];
-      const targetChat =
-        (goal.chatId ? chats.find((chat) => chat.id === goal.chatId) : undefined) ||
-        (goal.sessionId
-          ? chats.find((chat) => chat.sessionId === goal.sessionId)
-          : projectChats.length === 1
-            ? projectChats[0]
-            : !goalProjectKey
-              ? activeChat
-              : undefined);
+    onGoalDelivery: async (goal, delivery) => {
+      const targetChat = chats.find((chat) => chat.id === delivery.chatId);
       if (!targetChat || chatRunSending || compacting) {
         return "retry";
       }
       // 唤醒后的续跑走原聊天的可见运行队列，不能误投到当前打开的聊天。
-      upsertAgentGoal(goal);
+      if (goal) {
+        upsertAgentGoal(goal);
+      }
+      const resumePrompt = (delivery.resumePrompt || "").trim();
+      if (delivery.response) {
+        const response = delivery.response;
+        const completedAt = delivery.completedAt || delivery.updatedAt || new Date().toISOString();
+        updateChat(targetChat.id, (chat) => ({
+          ...touchChat(chat, completedAt),
+          sessionId: response.sessionId || response.session_id || chat.sessionId,
+          title: chat.title || resumePrompt,
+          items: [
+            ...chat.items.filter(
+              (item) => item.id !== delivery.userItemId && item.id !== delivery.agentItemId && item.type !== "streaming",
+            ),
+            {
+              id: delivery.userItemId,
+              type: "user",
+              text: resumePrompt,
+              attachments: [],
+              createdAt: delivery.createdAt || completedAt,
+            },
+            {
+              id: delivery.agentItemId,
+              type: "agent",
+              response,
+              elapsedSeconds: 1,
+              providerLabel: delivery.providerLabel || providerSnapshot.providerLabel,
+              model: delivery.model || providerSnapshot.model,
+              createdAt: completedAt,
+            },
+          ],
+        }));
+        try {
+          await persistChatsNow();
+          return "persisted";
+        } catch {
+          return "retry";
+        }
+      }
       const turn: QueuedTurn = {
-        id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        id: delivery.clientTurnId,
         text: resumePrompt,
         attachments: [],
         providerLabel: providerSnapshot.providerLabel,
         provider: providerSnapshot.provider,
         model: providerSnapshot.model,
-        chatId: targetChat.id,
-        sessionId: goal.sessionId || targetChat.sessionId || undefined,
-        projectPath: goal.projectRoot || targetChat.projectPath || undefined,
+        chatId: delivery.chatId,
+        sessionId: delivery.sessionId || targetChat.sessionId || undefined,
+        projectPath: delivery.projectRoot || targetChat.projectPath || undefined,
+        goalDelivery: {
+          deliveryId: delivery.deliveryId,
+          userItemId: delivery.userItemId,
+          agentItemId: delivery.agentItemId,
+        },
       };
       const result = await submitTurn(turn);
       if (result === "queue_full" || result === "failed") {
         return "retry";
       }
-      setRuntimeNotice(t("goal.woken", { title: goal.title || goal.goalId || "" }));
-      return "dispatched";
+      try {
+        await persistChatsNow();
+      } catch {
+        return "retry";
+      }
+      setRuntimeNotice(t("goal.woken", { title: goal?.title || delivery.goalId || "" }));
+      return "persisted";
     },
   });
   useEffect(() => {
@@ -911,20 +951,10 @@ export default function App() {
   );
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
-    const parentSession = activeChat?.sessionId || "";
-    const projectKeyValue = normalizeProjectPathKey(activeRuntimeProjectPath);
-    return subAgentTasks.filter((task) => {
-      const sameSession = parentSession && task.parentSessionId === parentSession;
-      const sameProject = projectKeyValue && normalizeProjectPathKey(task.projectPath || "") === projectKeyValue;
-      return sameSession || sameProject || (!parentSession && !projectKeyValue);
-    });
-  }, [activeChat?.sessionId, activeRuntimeProjectPath, subAgentTasks]);
-  const visibleSubAgentTasks = useMemo(() => {
-    if (!selectedSubAgent || activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)) {
-      return activeSubAgentTasks;
-    }
-    return [selectedSubAgent, ...activeSubAgentTasks];
-  }, [activeSubAgentTasks, selectedSubAgent]);
+    const parentChatId = activeChat?.id || "";
+    return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
+  }, [activeChat?.id, subAgentTasks]);
+  const visibleSubAgentTasks = activeSubAgentTasks;
   const runtimeSchedule = useMemo(
     () => buildRuntimeSchedule({ currentTurn, stopRequested, queued, activeSubAgentTasks }),
     [activeSubAgentTasks, currentTurn, i18n.language, queued, stopRequested],
@@ -1408,6 +1438,16 @@ export default function App() {
   }, [runtimeConnected, endpoint]);
 
   useEffect(() => {
+    if (smokeMode || !selectedSubAgent) {
+      return;
+    }
+    if (!activeChat?.id || selectedSubAgent.parentChatId !== activeChat.id) {
+      setSelectedSubAgent(null);
+      setSelectedSubAgentPanelOpen(false);
+    }
+  }, [activeChat?.id, selectedSubAgent?.id, selectedSubAgent?.parentChatId, smokeMode]);
+
+  useEffect(() => {
     if (!runtimeConnected || !hasRunningSubAgents) {
       return;
     }
@@ -1416,6 +1456,13 @@ export default function App() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, [runtimeConnected, endpoint, hasRunningSubAgents]);
+
+  useEffect(() => {
+    if (!runtimeConnected || !subAgentList?.tasks.length || chats.length === 0) {
+      return;
+    }
+    void reconcileSubAgentHandoffs(subAgentList.tasks);
+  }, [runtimeConnected, endpoint, subAgentList, chats.length]);
 
   useEffect(() => {
     if (activeView === "doctor" && runtimeConnected) {
@@ -2015,14 +2062,21 @@ export default function App() {
       return;
     }
     try {
+      const ownerChatId = ensureActiveChat();
+      updateChat(ownerChatId, (chat) => touchChat({
+        ...chat,
+        title: chat.title || directive.title,
+      }));
+      await persistChatsNow();
+      const ownerChat = getChatById(ownerChatId);
       const payload = await createAgentGoal(endpoint, {
         title: directive.title,
         wakeAt: directive.wakeAt,
         wakeEveryMinutes: directive.wakeEveryMinutes,
-        sessionId: sessionId || undefined,
-        chatId: activeChat?.id || undefined,
-        projectPath: activeRuntimeProjectPath || undefined,
-        projectRoot: activeRuntimeProjectPath || undefined,
+        sessionId: ownerChat?.sessionId || sessionId || undefined,
+        chatId: ownerChatId,
+        projectPath: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
+        projectRoot: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
       });
       upsertAgentGoal(payload.goal);
       setRuntimeNotice(t("goal.created"));
@@ -2165,6 +2219,55 @@ export default function App() {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
+  async function reconcileSubAgentHandoffs(tasks: SubAgentTask[]) {
+    for (const task of tasks) {
+      if (!task.parentChatId || !["completed", "failed"].includes(task.status)) {
+        continue;
+      }
+      const parentChat = getChatById(task.parentChatId);
+      if (!parentChat || subAgentHandoffBusyRef.current.has(task.id)) {
+        continue;
+      }
+      const cardId = `subagent-${task.id}`;
+      const existingCard = parentChat.items.find(
+        (item): item is Extract<ConversationItem, { type: "subagent" }> => item.id === cardId && item.type === "subagent",
+      );
+      const needsCardUpdate = !existingCard || existingCard.task.revision !== task.revision;
+      if (!needsCardUpdate && task.handoffStatus !== "handoff_pending") {
+        continue;
+      }
+      subAgentHandoffBusyRef.current.add(task.id);
+      try {
+        if (needsCardUpdate) {
+          updateChat(parentChat.id, (chat) => {
+            const nextItem: ConversationItem = { id: cardId, type: "subagent", task };
+            const index = chat.items.findIndex((item) => item.id === cardId);
+            const items = [...chat.items];
+            if (index >= 0) {
+              items[index] = nextItem;
+            } else {
+              items.push(nextItem);
+            }
+            return touchChat({ ...chat, items }, task.updatedAt || new Date().toISOString());
+          });
+        }
+        if (needsCardUpdate || task.handoffStatus === "handoff_pending") {
+          await persistChatsNow();
+        }
+        if (task.handoffStatus === "handoff_pending") {
+          const acknowledged = await acknowledgeSubAgentHandoff(endpoint, task.id, task.revision);
+          setSubAgentList((current) => updateSubAgentList(current, acknowledged.task));
+          setSelectedSubAgent((current) => (current?.id === acknowledged.task.id ? acknowledged.task : current));
+        }
+      } catch {
+        // Leave handoff_pending durable; the next event/poll retries the exact
+        // same stable card id without duplicating it.
+      } finally {
+        subAgentHandoffBusyRef.current.delete(task.id);
+      }
+    }
+  }
+
   async function loadSubAgents(includeEvents = false) {
     if (!runtimeConnected && !includeEvents) {
       return;
@@ -2175,6 +2278,7 @@ export default function App() {
       setSubAgentList(payload);
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
       setSubAgentError("");
+      await reconcileSubAgentHandoffs(payload.tasks);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -2214,12 +2318,17 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
+      const parentChatId = ensureActiveChat();
+      updateChat(parentChatId, (chat) => touchChat({ ...chat, title: chat.title || task }));
+      await persistChatsNow();
+      const parentChat = getChatById(parentChatId);
       const payload = await createSubAgent(targetEndpoint, {
         role,
         task,
         displayName: agentName,
-        parentSessionId: activeChat?.sessionId || "",
-        projectPath,
+        parentChatId,
+        parentSessionId: parentChat?.sessionId || "",
+        projectPath: parentChat?.projectPath || projectPath,
         params: {
           projectPath,
           packagePath: outfitPackagePath.trim(),
@@ -2271,21 +2380,36 @@ export default function App() {
 
   async function mergeSubAgentTask(task: SubAgentTask, decision: "adopted" | "dismissed") {
     try {
-      const chatId = decision === "adopted" ? ensureActiveChat() : "";
-      const payload = await mergeSubAgent(endpoint, task.id, { decision, chatId });
+      if (!task.parentChatId || !getChatById(task.parentChatId)) {
+        throw new Error("Sub-agent parent chat is unavailable.");
+      }
+      const latest = await fetchSubAgent(endpoint, task.id);
+      const payload = await mergeSubAgent(endpoint, task.id, {
+        decision,
+        chatId: latest.task.parentChatId || task.parentChatId,
+        expectedRevision: latest.task.revision,
+      });
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       setSelectedSubAgent((current) => (current && current.id === payload.task.id ? payload.task : current));
-      // 终态一次性：仅首次采纳时把结果落进对话，重放请求（message=already merged）不再追加。
-      if (decision === "adopted" && !payload.message) {
-        setActiveView("chat");
-        appendToChat(chatId, {
-          id: `subagent-${payload.task.id}-${Date.now()}`,
-          type: "subagent",
-          task: payload.task,
-        });
-      }
+      // The stable card is updated in place. Replayed merge requests cannot
+      // append a second copy because the backend decision and card id are durable.
+      updateChat(task.parentChatId, (chat) => {
+        const cardId = `subagent-${payload.task.id}`;
+        const nextItem: ConversationItem = { id: cardId, type: "subagent", task: payload.task };
+        const index = chat.items.findIndex((item) => item.id === cardId);
+        const items = [...chat.items];
+        if (index >= 0) {
+          items[index] = nextItem;
+        } else {
+          items.push(nextItem);
+        }
+        return touchChat({ ...chat, items });
+      });
+      await persistChatsNow();
+      setActiveView("chat");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+      void loadSubAgents(false);
     }
   }
 
@@ -2350,12 +2474,20 @@ export default function App() {
         }
         targetEndpoint = readyEndpoint;
       }
+      const parentChatId = ensureActiveChat();
+      updateChat(parentChatId, (chat) => touchChat({
+        ...chat,
+        title: chat.title || selectedText.slice(0, 80),
+      }));
+      await persistChatsNow();
+      const parentChat = getChatById(parentChatId);
       const payload = await createSubAgent(targetEndpoint, {
         role: "selected_context_review",
         task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
         displayName: agentName,
-        parentSessionId: activeChat?.sessionId || "",
-        projectPath,
+        parentChatId,
+        parentSessionId: parentChat?.sessionId || "",
+        projectPath: parentChat?.projectPath || projectPath,
         params: {
           projectPath,
           selectedText,
@@ -2365,7 +2497,7 @@ export default function App() {
       setSelectedSubAgent(payload.task);
       setSubAgentList((current) => ({
         ok: true,
-        schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
+        schema: current?.schema || "vrcforge.sub_agent_tasks.v2",
         tasks: [payload.task, ...(current?.tasks || []).filter((taskItem) => taskItem.id !== payload.task.id)],
         count: (current?.count || 0) + 1,
         roles: current?.roles,

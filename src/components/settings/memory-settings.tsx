@@ -36,11 +36,21 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
   const [confirmClearScope, setConfirmClearScope] = useState<"" | MemoryScope>("");
   const [clearingScope, setClearingScope] = useState<"" | MemoryScope>("");
   const refreshRequestId = useRef(0);
+  const contextEpoch = useRef(0);
+  const contextKey = `${endpoint}\u0000${runtimeConnected ? "connected" : "disconnected"}\u0000${selectedProjectPath}\u0000${scopeFilter}`;
+  const previousContextKey = useRef(contextKey);
+  if (previousContextKey.current !== contextKey) {
+    previousContextKey.current = contextKey;
+    contextEpoch.current += 1;
+  }
 
   const projectDraftBlocked = draftScope === "project" && !selectedProjectPath;
   const visibleMemories = scopeFilter === "all" ? memories : memories.filter((memory) => (memory.scope || "project") === scopeFilter);
 
-  async function refreshMemories(showLoading = true) {
+  async function refreshMemories(showLoading = true, expectedEpoch = contextEpoch.current) {
+    if (expectedEpoch !== contextEpoch.current) {
+      return;
+    }
     const requestId = ++refreshRequestId.current;
     if (!runtimeConnected) {
       setMemories([]);
@@ -56,34 +66,37 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
         scope: scopeFilter === "all" ? "" : scopeFilter,
         projectRoot: selectedProjectPath,
       });
-      if (requestId !== refreshRequestId.current) {
+      if (expectedEpoch !== contextEpoch.current || requestId !== refreshRequestId.current) {
         return;
       }
       setMemories(Array.isArray(payload.memories) ? payload.memories : []);
       setError("");
     } catch (cause) {
-      if (requestId === refreshRequestId.current) {
+      if (expectedEpoch === contextEpoch.current && requestId === refreshRequestId.current) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
-      if (showLoading && requestId === refreshRequestId.current) {
+      if (showLoading && expectedEpoch === contextEpoch.current && requestId === refreshRequestId.current) {
         setLoading(false);
       }
     }
   }
 
   useEffect(() => {
+    const expectedEpoch = contextEpoch.current;
+    refreshRequestId.current += 1;
+    setConfirmDeleteId("");
+    setConfirmClearScope("");
+    setSaving(false);
+    setBusyMemoryId("");
+    setClearingScope("");
     if (!selectedProjectPath && scopeFilter === "project") {
-      refreshRequestId.current += 1;
       setMemories([]);
       setLoading(false);
       setScopeFilter("all");
       return;
     }
-    // 切换筛选/项目/连接状态时重置确认态，避免误触上一个上下文的删除确认。
-    setConfirmDeleteId("");
-    setConfirmClearScope("");
-    void refreshMemories();
+    void refreshMemories(true, expectedEpoch);
   }, [runtimeConnected, endpoint, scopeFilter, selectedProjectPath]);
 
   async function submitCreate(event: FormEvent) {
@@ -92,6 +105,7 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
     if (!text || saving || projectDraftBlocked || !runtimeConnected) {
       return;
     }
+    const expectedEpoch = contextEpoch.current;
     setSaving(true);
     setMessage("");
     try {
@@ -101,14 +115,21 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
         source: "settings",
         ...(draftScope === "project" ? { projectRoot: selectedProjectPath } : {}),
       });
+      if (expectedEpoch !== contextEpoch.current) {
+        return;
+      }
       setDraftText("");
       setError("");
       setMessage(t("settings.memoryAdded"));
-      await refreshMemories(false);
+      await refreshMemories(false, expectedEpoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (expectedEpoch === contextEpoch.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setSaving(false);
+      if (expectedEpoch === contextEpoch.current) {
+        setSaving(false);
+      }
     }
   }
 
@@ -122,23 +143,31 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
       setConfirmClearScope("");
       return;
     }
+    const expectedEpoch = contextEpoch.current;
     setBusyMemoryId(memoryId);
     setMessage("");
     try {
       await deleteAgentMemory(endpoint, memoryId, { reason: "settings" });
+      if (expectedEpoch !== contextEpoch.current) {
+        return;
+      }
       setError("");
       setMessage(t("settings.memoryDeleted"));
-      await refreshMemories(false);
+      await refreshMemories(false, expectedEpoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (expectedEpoch === contextEpoch.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setBusyMemoryId("");
-      setConfirmDeleteId("");
+      if (expectedEpoch === contextEpoch.current) {
+        setBusyMemoryId("");
+        setConfirmDeleteId("");
+      }
     }
   }
 
   async function clearScope(scope: MemoryScope) {
-    if (clearingScope) {
+    if (clearingScope || (scope === "project" && !selectedProjectPath)) {
       return;
     }
     if (confirmClearScope !== scope) {
@@ -146,6 +175,7 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
       setConfirmDeleteId("");
       return;
     }
+    const expectedEpoch = contextEpoch.current;
     setClearingScope(scope);
     setMessage("");
     try {
@@ -154,14 +184,21 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
         reason: "settings",
         ...(scope === "project" ? { projectRoot: selectedProjectPath } : {}),
       });
+      if (expectedEpoch !== contextEpoch.current) {
+        return;
+      }
       setError("");
       setMessage(t("settings.memoryCleared", { count: payload.cleared ?? 0 }));
-      await refreshMemories(false);
+      await refreshMemories(false, expectedEpoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (expectedEpoch === contextEpoch.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setClearingScope("");
-      setConfirmClearScope("");
+      if (expectedEpoch === contextEpoch.current) {
+        setClearingScope("");
+        setConfirmClearScope("");
+      }
     }
   }
 
@@ -279,8 +316,12 @@ export function MemorySettingsPanel({ endpoint, runtimeConnected, selectedProjec
       </div>
 
       <form onSubmit={submitCreate} className="mt-6 rounded-xl border border-border bg-card p-4">
-        <div className="text-sm font-medium">{t("settings.memoryAdd")}</div>
+        <label htmlFor="settings-memory-draft" className="text-sm font-medium">
+          {t("settings.memoryAdd")}
+        </label>
         <textarea
+          id="settings-memory-draft"
+          aria-label={t("settings.memoryAdd")}
           value={draftText}
           onChange={(event) => setDraftText(event.target.value)}
           disabled={!runtimeConnected}

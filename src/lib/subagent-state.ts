@@ -57,7 +57,7 @@ export function updateSubAgentList(current: SubAgentTaskList | null, task: SubAg
   const tasks = [task, ...existing.filter((item) => item.id !== task.id)];
   return {
     ok: true,
-    schema: current?.schema || "vrcforge.sub_agent_tasks.v1",
+    schema: current?.schema || "vrcforge.sub_agent_tasks.v2",
     tasks,
     count: tasks.length,
     roles: current?.roles,
@@ -74,5 +74,5 @@ export function reconcileSelectedSubAgent(
     return null;
   }
   const updated = tasks.find((task) => task.id === selected.id);
-  return updated ? { ...selected, ...updated } : selected;
+  return updated ? { ...selected, ...updated } : null;
 }

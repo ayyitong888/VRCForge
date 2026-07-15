@@ -105,6 +105,7 @@ pub(crate) struct DesktopAgentMessageRequest {
     provider_label: Option<String>,
     model: Option<String>,
     client_turn_id: Option<String>,
+    goal_delivery_id: Option<String>,
     #[serde(default)]
     computer_use_requested: bool,
     computer_use_grant_id: Option<String>,
@@ -345,6 +346,7 @@ pub(crate) struct DesktopAgentListRequest {
     session_id: Option<String>,
     project_root: Option<String>,
     client_turn_id: Option<String>,
+    chat_id: Option<String>,
     scope: Option<String>,
     include_events: Option<bool>,
     global_only: Option<bool>,
@@ -572,6 +574,7 @@ pub async fn send_agent_message(
                 "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
                 "session_id": request.session_id,
                 "clientTurnId": request.client_turn_id,
+                "goalDeliveryId": request.goal_delivery_id,
                 "message": request.message,
                 "history": request.history.unwrap_or_default(),
                 "attachments": request.attachments.unwrap_or_default(),
@@ -1260,6 +1263,7 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     append_query_param(&mut query, "sessionId", &request.session_id);
     append_query_param(&mut query, "projectRoot", &request.project_root);
     append_query_param(&mut query, "clientTurnId", &request.client_turn_id);
+    append_query_param(&mut query, "chatId", &request.chat_id);
     append_query_param(&mut query, "scope", &request.scope);
     if request.include_events.unwrap_or(false) {
         query.push("includeEvents=true".to_string());
@@ -1563,6 +1567,25 @@ pub async fn merge_sub_agent(
 }
 
 #[tauri::command]
+pub async fn acknowledge_sub_agent_handoff(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/sub-agents/{}/handoff-ack",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn fetch_agent_runs(
     request: DesktopAgentListRequest,
 ) -> Result<serde_json::Value, String> {
@@ -1659,22 +1682,32 @@ pub async fn fetch_agent_goals(
 }
 
 #[tauri::command]
-pub fn create_agent_goal(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/goals", request, 60_000)
+pub async fn create_agent_goal(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/goals", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn update_agent_goal(request: DesktopIdJsonBodyRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/goals/{}",
-            percent_encode_query_component(&request.id)
-        ),
-        Some(request.body),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn update_agent_goal(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/goals/{}",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1702,6 +1735,63 @@ pub async fn wake_agent_goal(
             "POST",
             format!(
                 "/api/app/agent/goals/{}/wake",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bind_agent_goal_owner(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/goals/{}/bind-owner",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fetch_recoverable_agent_goal_deliveries(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!(
+                "/api/app/agent/goals/deliveries/recoverable{}",
+                agent_list_query(&request)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn materialize_agent_goal_delivery(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/goals/deliveries/{}/materialized",
                 percent_encode_query_component(&request.id)
             ),
             Some(request.body),

@@ -208,8 +208,9 @@ def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatc
             "/api/app/sub-agents",
             json={
                 "role": "project_index_review",
-                "displayName": "Kikyo",
-                "task": "Scan the project index.",
+                    "displayName": "Kikyo",
+                    "task": "Scan the project index.",
+                    "parentChatId": "chat-project-index",
                 "projectPath": str(project),
                 "params": {"projectPath": str(project)},
             },
@@ -243,8 +244,9 @@ def test_sub_agent_endpoint_runs_selected_context_worker(tmp_path: Path, monkeyp
             "/api/app/sub-agents",
             json={
                 "role": "selected_context_review",
-                "displayName": "Kikyo",
-                "task": "Review selected text.",
+                    "displayName": "Kikyo",
+                    "task": "Review selected text.",
+                    "parentChatId": "chat-selected-context",
                 "params": {"selectedText": "This selected passage should open on the right."},
             },
         )

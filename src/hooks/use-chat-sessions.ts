@@ -60,7 +60,8 @@ export function useChatSessions({
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
-  const chatsRef = useRef<ChatThread[]>([]);
+  const chatsRef = useRef<ChatThread[]>(initialChatState.chats);
+  const chatsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const chatSidebar = useMemo(
@@ -152,7 +153,7 @@ export function useChatSessions({
                 if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restoredLengthAfterMerge) {
                   return;
                 }
-                void saveChats(endpoint, filterPersistableChats(chatsRef.current));
+                void enqueueChatSave(filterPersistableChats(chatsRef.current), chatsSaveVersionRef.current, false);
               }, 3000);
             }
         }
@@ -177,15 +178,7 @@ export function useChatSessions({
     }
     const saveVersion = chatsSaveVersionRef.current;
     const timer = window.setTimeout(() => {
-      void saveChats(endpoint, filterPersistableChats(chats))
-        .then(() => {
-          if (chatsSaveVersionRef.current === saveVersion) {
-            chatsDirtyRef.current = false;
-          }
-        })
-        .catch(() => {
-          chatsDirtyRef.current = true;
-        });
+      void enqueueChatSave(filterPersistableChats(chats), saveVersion, true);
     }, 800);
     return () => window.clearTimeout(timer);
   }, [chats, runtimeConnected, endpoint]);
@@ -195,20 +188,51 @@ export function useChatSessions({
     chatsSaveVersionRef.current += 1;
   }
 
+  /**
+   * Whole-chat persistence is serialized so an older request can never finish
+   * after (and overwrite) a newer snapshot. Callers that need a durable owner
+   * or handoff boundary can await persistChatsNow instead of relying on the
+   * normal debounce.
+   */
+  function enqueueChatSave(snapshot: ChatThread[], saveVersion: number, clearDirty: boolean): Promise<void> {
+    const pending = chatsSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await saveChats(endpoint, snapshot);
+        if (clearDirty && chatsSaveVersionRef.current === saveVersion) {
+          chatsDirtyRef.current = false;
+        }
+      });
+    chatsSaveQueueRef.current = pending.catch(() => undefined);
+    return pending.catch((cause) => {
+      if (clearDirty) {
+        chatsDirtyRef.current = true;
+      }
+      throw cause;
+    });
+  }
+
+  function persistChatsNow(): Promise<void> {
+    const saveVersion = chatsSaveVersionRef.current;
+    return enqueueChatSave(filterPersistableChats(chatsRef.current), saveVersion, true);
+  }
+
   function touchChat(chat: ChatThread, timestamp = new Date().toISOString()): ChatThread {
     return { ...chat, createdAt: chat.createdAt || timestamp, updatedAt: timestamp };
   }
 
   function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
     markChatsDirty();
-    setChats((list) => list.map((chat) => {
+    const next = chatsRef.current.map((chat) => {
       if (chat.id !== chatId) {
         return chat;
       }
       const updated = updater(chat);
       const items = stripSupersededStreamingItems(updated.items);
       return cacheChatContextUsageFast(items === updated.items ? updated : { ...updated, items });
-    }));
+    });
+    chatsRef.current = next;
+    setChats(next);
   }
 
   function appendToChat(chatId: string, item: ConversationItem) {
@@ -216,13 +240,16 @@ export function useChatSessions({
   }
 
   function ensureActiveChat(): string {
-    if (activeChat) {
-      return activeChat.id;
+    const existing = chatsRef.current.find((chat) => chat.id === activeChatId);
+    if (existing) {
+      return existing.id;
     }
     const id = `chat-${Date.now()}`;
     const now = new Date().toISOString();
     markChatsDirty();
-    setChats((list) => [{ id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] }, ...list]);
+    const created = { id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] };
+    chatsRef.current = [created, ...chatsRef.current];
+    setChats(chatsRef.current);
     setActiveChatId(id);
     return id;
   }
@@ -330,6 +357,7 @@ export function useChatSessions({
     updateChat,
     appendToChat,
     ensureActiveChat,
+    persistChatsNow,
     getChatById,
     newConversation,
     togglePinChat,
