@@ -146,8 +146,7 @@ async function prepareManifestBoundPackage(sourceVersion) {
     try {
       $entry = @($archive.Entries | Where-Object {
         $name = $_.FullName.Replace('\\', '/')
-        $name.Equals('VRCForge.exe', [StringComparison]::OrdinalIgnoreCase) -or
-          $name.EndsWith('/VRCForge.exe', [StringComparison]::OrdinalIgnoreCase)
+        $name.Equals('VRCForge.exe', [StringComparison]::OrdinalIgnoreCase)
       } | Select-Object -First 1)
       if ($entry.Count -ne 1) { throw 'Portable package did not contain exactly one VRCForge.exe entry.' }
       $sha = [Security.Cryptography.SHA256]::Create()
