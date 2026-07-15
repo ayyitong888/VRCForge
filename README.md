@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/source-v1.1.2-blue)](https://github.com/ayyitong888/VRCForge)
+[![Version](https://img.shields.io/badge/source-v1.2.0-blue)](https://github.com/ayyitong888/VRCForge)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -12,7 +12,8 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source and latest published stable release: `1.1.2` (`v1.1.2`).
+Current source / target release: `1.2.0`. Latest published stable release:
+`1.1.2` (`v1.1.2`) until the 1.2.0 release gate and publication complete.
 
 ## Install / 安装
 
@@ -26,7 +27,7 @@ https://github.com/ayyitong888/VRCForge/releases/latest
 
 Program files: `%ProgramFiles%\VRCForge`. User data: `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-Portable zip (`VRCForge_Windows_x64_1.1.2.zip`) is also available for no-install/debug use.
+Portable zip (`VRCForge_Windows_x64_1.2.0.zip`) is also available for no-install/debug use after the 1.2.0 release is published.
 
 ## Features / 功能概览
 
@@ -39,6 +40,8 @@ Portable zip (`VRCForge_Windows_x64_1.1.2.zip`) is also available for no-install
 **Wardrobe / 衣柜管理:** Int-exclusive wardrobe scan, outfit import planning (`.unitypackage`, Booth folder, loose prefab), and supervised apply.
 
 **Agent gateway / Agent 接入:** Local MCP + REST gateway for external agents (Codex, Claude Code, etc.). Read/plan/request-only; writes require desktop approval. One-click connector install for Codex App, Codex CLI, Claude Code CLI, and Claude Cowork.
+
+**Agentic runtime / Agent 运行时:** Scheduled Goals with durable restart delivery, explicit user/project Memory controls, allowlisted `/delegate` skill dispatch, reviewed sub-agent Adopt/Dismiss handoffs, and explicit-user-only Computer Use.
 
 **Skill packages / 技能包:** `.vsk` community skill packages with manifest validation, SHA-256 lock-file checks, optional Ed25519 signature verification, import/export/preflight.
 

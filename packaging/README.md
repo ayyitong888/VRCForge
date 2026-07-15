@@ -70,8 +70,8 @@ distribution notes.
 
 ## Commands
 
-`1.1.2` is the current target stable package; `1.1.1` remains the latest
-published stable package until `v1.1.2` is published. The Avatar Encryption /
+`1.2.0` is the current target stable package; `1.1.2` remains the latest
+published stable package until `v1.2.0` is published. The Avatar Encryption /
 Anti-Rip addon remains a connector preview and is not bundled with the stable
 package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
@@ -86,12 +86,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.1.2 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.1.2/VRCForge_Windows_x64_1.1.2.zip `
+  -Version 1.2.0 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.2.0/VRCForge_Windows_x64_1.2.0.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.1.2
+  -Version 1.2.0
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -174,12 +174,12 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.1.2
+python scripts\smoke_stable_readiness_gate.py --version 1.2.0
 ```
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.1.2` target stable line,
+pointers when they exist in the checkout. For the current `1.2.0` target stable line,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

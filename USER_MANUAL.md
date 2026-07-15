@@ -5,7 +5,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source and latest published stable release: `1.1.2` (`v1.1.2`).
+Current source / target release: `1.2.0`. Latest published stable release:
+`1.1.2` (`v1.1.2`) until the 1.2.0 release gate and publication complete.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -45,11 +46,14 @@ Paranoid remains preview-only pending additional proof.
 | `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
+| Scheduled Goals | Durable background wake/resume into the owning chat with restart recovery and idempotent materialization | Available |
+| Agent Memory controls | Explicit user-wide or exact-project memory create, review, and clear controls; local persistence only | Available |
+| Explicit Computer Use | User-started desktop turns with protected-target checks, visible activity/Stop controls, cancellation, and capture feedback | Beta, Developer Options and explicit activation required |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |
 | Project memory / incremental scan | Local index shows added, modified, and deleted project files in the desktop workspace | 已可用 / Available |
 | Outfit package import planning | Inspect `.unitypackage`, Booth folders, and loose prefab/texture folders, then request a supervised import; VRCForge's fallback Unity package supports fresh-project direct import | Beta, approval/checkpoint required |
 | Package/plugin install diagnostics | Read VPM/ALCOM/vrc-get status, install output, and compile-error context before planning repairs | Beta, read-only diagnostics |
-| Delegated sub-agent workers | Independent read-only/plan workers with lifecycle state, cancel/retry/inspect, redacted logs, and parent-thread summaries | Beta |
+| Delegated sub-agent workers | Allowlisted read/plan skill dispatch with durable owner-chat result cards, restart recovery, and revision-checked Adopt/Dismiss review | Beta |
 | Tool Registry v1 | Standard tool metadata exposed to desktop, MCP/gateway, and CLI surfaces | Available |
 | CLI diagnostics and readiness | Packaged `vrcforge` CLI covers doctor, provider test, Unity/project/avatar scans, validation, Build/Test readiness, checkpoints, skill/tool registry, and request-based apply/rollback | Available |
 | Full Validator and Build/Test readiness | `vrcforge.validation.v1` plus Build/Test readiness gates for compile, SDK/plugin/package, expression, animator, material, performance, and generated-residue findings | Available |
@@ -69,7 +73,7 @@ Paranoid remains preview-only pending additional proof.
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 | Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | Current source line, approval/checkpoint required |
-| External agent connector templates and smoke | HTTP + stdio MCP snippets without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
+| External agent connector templates and smoke | Built-in and custom JSON/TOML MCP config installation without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
 | `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |

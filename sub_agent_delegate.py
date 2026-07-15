@@ -1,16 +1,9 @@
-"""Sub-agent skill delegation domain module.
+"""Sub-agent skill delegation domain module for the ROADMAP 1.2.0 runtime.
 
-把子代理六个既有角色以及新的 skill_delegate 角色统一路由到
-AgentGateway 的 runtime allowlist 分发（execute_runtime_skill），
-不再各自直接调用 *_sync 工具函数——这是 ROADMAP 1.4.0 的
-"/delegate 任意技能分发" 约束：所有子代理执行汇入既有分发路径，
-不长平行分发。
-
-行为保持约定：
-- 六个既有角色的结果 envelope（schema/summaryText/载荷键名）不变；
-- selected_context_review 无外部工具，保留为本模块内纯文本处理；
-- 被 allowlist 阻断或工具未知时抛 RuntimeError，让注册表把任务
-  显性标记为 failed 并带上阻断原因，而不是静默吞掉。
+Every delegated skill runs through AgentGateway's existing allowlist and
+runtime dispatch path. The legacy role result envelopes remain compatible,
+selected-context review stays local and read-only, and blocked or unknown
+skills fail visibly through the durable task registry.
 """
 
 from __future__ import annotations
