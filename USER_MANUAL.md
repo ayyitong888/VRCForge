@@ -229,9 +229,12 @@ blocked reason before it can be treated as stable.
 2. Keep Safe Mode enabled for medium/high-risk packages until you understand the
    permission request.
 3. A valid signature means integrity and signer continuity, not "verified safe".
-4. Use trust signer, revoke signer, package block, disable, and uninstall when
+4. Signed updates must keep the package ID, author identity, and Ed25519 signer;
+   downgrades and changed payloads under the same semantic version are rejected.
+   The signing private key is never part of the `.vsk` or installed package.
+5. Use trust signer, revoke signer, package block, disable, and uninstall when
    reviewing community skills.
-5. Path-to-Skill exports should contain variables, detector rules, validation
+6. Path-to-Skill exports should contain variables, detector rules, validation
    gates, and rollback requirements, not private absolute paths, paid assets,
    API keys, or gateway tokens.
 
@@ -247,8 +250,14 @@ blocked reason before it can be treated as stable.
 ### Local Logs and Developer Options
 
 - Logging controls remain available in normal Settings even when Developer
-  Options are off. The Error / Warn / Info / Debug / Trace slider takes effect
-  immediately and does not require an app restart.
+  Options are off. Error / Warn / Info / Debug take effect immediately; Trace
+  appears only while Developer Options are enabled and automatically falls
+  back to Debug when Developer Options are turned off.
+- Error is intentionally non-empty but sparse: it keeps startup/shutdown safety
+  posture, high-risk permission-flag changes, and real failures. Warn adds
+  recoverable/client-side failures, Info adds user actions and key stages,
+  Debug adds user-triggered request/decision summaries, and Trace adds internal
+  handoffs, reads, and polling.
 - VRCForge writes UTF-8 text logs named from their start time, keeps at most
   five days, and also enforces file-count and size limits. Settings can open
   the log folder directly.
@@ -259,6 +268,11 @@ blocked reason before it can be treated as stable.
 - Developer Options control additional high-risk diagnostic capabilities. On
   enable, the risk dialog keeps Cancel available immediately and keeps Confirm
   disabled for a server-enforced five-second warning period.
+- Support bundles include the current permission/developer/Computer Use safety
+  posture without challenge values, credentials, or private identity mappings.
+  `ipc` and `direct_http` log labels describe the observed desktop request path
+  for troubleshooting; they are diagnostic provenance, not an authorization
+  or operating-system identity boundary.
 
 ## Privacy Boundary
 
