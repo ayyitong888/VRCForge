@@ -676,6 +676,7 @@ async function prepareManifestBoundPackage(sourceVersion) {
   const immutablePortablePath = resolve(evidenceRoot, portableName);
   const escapedImmutablePortable = escapePowerShellLiteral(immutablePortablePath);
   const archivePayload = JSON.parse(await runPowerShell(`
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $sourceStream = [IO.File]::Open(
       '${escapedPortable}',

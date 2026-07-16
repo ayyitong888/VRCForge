@@ -55,6 +55,10 @@ const privateStoreFragments = new Set([privateMappingName, privateKeyName]);
 const trackedProcesses = new Map();
 let packageExecutableNames = [];
 let appSessionToken = "";
+const powershellCompressionPrelude = [
+  "System.IO.Compression",
+  "System.IO.Compression.FileSystem",
+].map((assembly) => `Add-Type -AssemblyName ${assembly}`).join("\n");
 
 const allowedOptions = new Set(["--allow-unpushed", "--self-test", "--help", "-h"]);
 if (process.argv.slice(2).some((item) => !allowedOptions.has(item))) {
@@ -421,7 +425,7 @@ async function prepareManifestBoundPackage() {
   const archivePath = escapePowerShellLiteral(portableSnapshot);
   const destination = escapePowerShellLiteral(packagedRoot);
   const archiveRaw = await runPowerShell(`
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    ${powershellCompressionPrelude}
     $stream = [IO.File]::Open('${archivePath}', [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $archive = $null
     try {
@@ -1441,7 +1445,7 @@ async function assertPrivateStoreProjectionAbsent(cdp, diagnostics) {
 async function readSupportBundleMembers(bundlePath) {
   const archive = escapePowerShellLiteral(bundlePath);
   const raw = await runPowerShell(`
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    ${powershellCompressionPrelude}
     $stream = [IO.File]::Open('${archive}', [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $zip = $null
     try {
@@ -2072,6 +2076,8 @@ function runSelfTest() {
     ).length > 0,
     timing4999Disabled: challengeReady(4_999) === false,
     timing5000Enabled: challengeReady(5_000) === true,
+    compressionCoreLoadsBeforeFileSystem: powershellCompressionPrelude.indexOf("System.IO.Compression\n")
+      < powershellCompressionPrelude.indexOf("System.IO.Compression.FileSystem"),
     scopedPackagePathAccepted: processPathInScope(scopedExe, scopedRoot) === true,
     siblingPrefixRejected: processPathInScope(siblingExe, scopedRoot) === false,
     unrelatedShellPathRejected: processPathInScope(
