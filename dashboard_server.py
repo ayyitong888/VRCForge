@@ -57,6 +57,14 @@ from agent_gateway import (
     redact_sensitive,
 )
 from backend_owner_lease import BackendOwnerLease
+from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
+from diagnostic_logging import (
+    DiagnosticLogManager,
+    install_standard_stream_capture,
+    parse_log_line as parse_diagnostic_log_line,
+    parse_log_timestamp as parse_diagnostic_log_timestamp,
+)
+from diagnostic_privacy import DiagnosticPrivacy
 from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -194,7 +202,7 @@ RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
 )
 LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
-LOG_RETENTION = timedelta(hours=24)
+LOG_RETENTION = timedelta(days=5)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
 DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
@@ -481,7 +489,10 @@ class VisionConfigRequest(BaseModel):
 
 
 class DiagnosticsConfigRequest(BaseModel):
-    debug_logging: bool = Field(default=False, alias="debugLogging")
+    log_level: Literal["error", "warn", "info", "debug", "trace"] | None = Field(default=None, alias="logLevel")
+    debug_logging: bool | None = Field(default=None, alias="debugLogging")
+
+    model_config = {"populate_by_name": True}
 
 
 class SupportBundleRequest(BaseModel):
@@ -1020,6 +1031,7 @@ class AgentPermissionRequest(BaseModel):
 class AdvancedSettingsRequest(BaseModel):
     developer_options_enabled: bool = Field(default=False, alias="developerOptionsEnabled")
     computer_use_enabled: bool = Field(default=False, alias="computerUseEnabled")
+    developer_challenge_id: str | None = Field(default=None, alias="developerChallengeId", max_length=128)
 
     model_config = {"populate_by_name": True}
 
@@ -1414,8 +1426,12 @@ app.mount("/artifacts", StaticFiles(directory=str(DASHBOARD_ARTIFACTS_DIR)), nam
 app.mount("/runtime-artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="runtime_artifacts")
 
 EVENT_BUS = DashboardEventBus()
-RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=300)
-LOCAL_LOG_LOCK = Lock()
+DIAGNOSTIC_PRIVACY = DiagnosticPrivacy(CONFIG_DIR)
+DIAGNOSTIC_LOGGER = DiagnosticLogManager(LOG_DIR, DIAGNOSTICS_CONFIG_PATH, DIAGNOSTIC_PRIVACY)
+DEVELOPER_OPTIONS_GUARD = DeveloperOptionsGuard()
+RECENT_LOGS = DIAGNOSTIC_LOGGER.recent_entries
+LOCAL_LOG_LOCK = DIAGNOSTIC_LOGGER.lock
+ADVANCED_SETTINGS_TRANSITION_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 PROJECT_SNAPSHOT_CACHE_LOCK = Lock()
@@ -1589,6 +1605,7 @@ async def on_startup() -> None:
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
     if BACKEND_OWNER_LEASE.owned:
         try:
             await asyncio.to_thread(SUB_AGENT_REGISTRY.reconcile_startup, refresh_from_disk=True)
@@ -2034,14 +2051,44 @@ def read_agentic_app_advanced_settings() -> dict[str, Any]:
     }
 
 
+@app.post("/api/app/advanced-settings/developer-challenge")
+def create_developer_options_challenge() -> dict[str, object]:
+    return DEVELOPER_OPTIONS_GUARD.create()
+
+
+@app.delete("/api/app/advanced-settings/developer-challenge/{challenge_id}")
+def cancel_developer_options_challenge(challenge_id: str) -> dict[str, Any]:
+    if not DEVELOPER_OPTIONS_GUARD.valid_id(challenge_id):
+        raise HTTPException(status_code=404, detail="Developer Options challenge was not found.")
+    return {
+        "ok": True,
+        "schema": "vrcforge.developer_options_challenge.v1",
+        "cancelled": DEVELOPER_OPTIONS_GUARD.cancel(challenge_id),
+    }
+
+
 @app.post("/api/app/advanced-settings")
 async def update_agentic_app_advanced_settings(request: AdvancedSettingsRequest) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.update_advanced_settings(
-        developer_options_enabled=request.developer_options_enabled,
-        computer_use_enabled=request.computer_use_enabled,
-    )
+    payload = await asyncio.to_thread(update_agentic_app_advanced_settings_guarded, request)
     await EVENT_BUS.broadcast("advancedSettings", payload["settings"])
     return payload
+
+
+def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsRequest) -> dict[str, Any]:
+    with ADVANCED_SETTINGS_TRANSITION_LOCK:
+        current = AGENT_GATEWAY.advanced_settings_state()
+        enabling_developer_options = bool(request.developer_options_enabled) and not bool(
+            current.get("developerOptionsEnabled")
+        )
+        if enabling_developer_options:
+            try:
+                DEVELOPER_OPTIONS_GUARD.consume(request.developer_challenge_id or "")
+            except DeveloperOptionsChallengeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return AGENT_GATEWAY.update_advanced_settings(
+            developer_options_enabled=request.developer_options_enabled,
+            computer_use_enabled=request.computer_use_enabled,
+        )
 
 
 @app.post("/api/app/agent/message")
@@ -4845,41 +4892,35 @@ def serialize_app_api_config() -> dict[str, Any]:
 
 
 def load_diagnostics_config() -> dict[str, Any]:
-    try:
-        payload = json.loads(DIAGNOSTICS_CONFIG_PATH.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        payload = {}
-    return {"debugLogging": bool(payload.get("debugLogging", payload.get("debug_logging", False)))}
-
-
-def save_diagnostics_config(payload: dict[str, Any]) -> dict[str, Any]:
-    state = {"debugLogging": bool(payload.get("debugLogging", payload.get("debug_logging", False)))}
-    DIAGNOSTICS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DIAGNOSTICS_CONFIG_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return state
-
-
-def diagnostics_state() -> dict[str, Any]:
-    config = load_diagnostics_config()
+    state = DIAGNOSTIC_LOGGER.status()
     return {
-        "ok": True,
-        "schema": "vrcforge.diagnostics.v1",
-        "debugLogging": bool(config.get("debugLogging")),
-        "configPath": str(DIAGNOSTICS_CONFIG_PATH),
-        "logsDir": str(LOG_DIR),
-        "dashboardLogPath": str(LOCAL_LOG_PATH),
-        "interactionLogPath": str(INTERACTION_LOG_PATH),
-        "supportBundleDir": str(SUPPORT_BUNDLE_DIR),
-        "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
+        "schema": state["schema"],
+        "logLevel": state["logLevel"],
+        "debugLogging": state["debugLogging"],
     }
 
 
+def save_diagnostics_config(payload: dict[str, Any]) -> dict[str, Any]:
+    log_level = payload.get("logLevel", payload.get("log_level"))
+    debug_logging = payload.get("debugLogging", payload.get("debug_logging"))
+    state = DIAGNOSTIC_LOGGER.update_config(log_level=log_level, debug_logging=debug_logging)
+    return {
+        "schema": state["schema"],
+        "logLevel": state["logLevel"],
+        "debugLogging": state["debugLogging"],
+    }
+
+
+def diagnostics_state() -> dict[str, Any]:
+    return DIAGNOSTIC_LOGGER.status()
+
+
 def debug_logging_enabled() -> bool:
-    return bool(load_diagnostics_config().get("debugLogging"))
+    return DIAGNOSTIC_LOGGER.log_level in {"debug", "trace"}
 
 
 def summarize_debug_payload(value: Any) -> Any:
-    value = redact_sensitive(value)
+    value = DIAGNOSTIC_PRIVACY.redact(value, context=current_diagnostic_identity_context())
     if isinstance(value, dict):
         return {str(key): summarize_debug_payload(item) for key, item in list(value.items())[:40]}
     if isinstance(value, list):
@@ -4892,16 +4933,7 @@ def summarize_debug_payload(value: Any) -> Any:
 
 
 def record_debug_interaction(entry: dict[str, Any]) -> None:
-    if not debug_logging_enabled():
-        return
-    if isinstance(entry.get("query"), dict):
-        entry = {**entry, "query": redact_sensitive(entry["query"])}
-    safe_entry = summarize_debug_payload({"timestamp": utc_now_iso(), **entry})
-    with LOCAL_LOG_LOCK:
-        INTERACTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with INTERACTION_LOG_PATH.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
-        prune_jsonl_log_file(INTERACTION_LOG_PATH)
+    emit_log("debug", "http", "HTTP interaction.", entry)
 
 
 def read_jsonl_tail(path: Path, limit: int = 200) -> list[dict[str, Any]]:
@@ -4931,15 +4963,27 @@ def read_text_tail(path: Path, limit: int = 200) -> list[str]:
 
 
 def redact_support_payload(value: Any, include_full_paths: bool = False) -> Any:
-    redacted = redact_sensitive(value)
-    if include_full_paths:
-        return redacted
-    return _redact_doctor_detail(redacted)
+    # includeFullPaths is accepted for wire compatibility only. Support bundles
+    # always remain safe to share and never reverse pre-persistence redaction.
+    return DIAGNOSTIC_PRIVACY.redact(value, context=current_diagnostic_identity_context())
 
 
 def write_support_bundle_member(bundle: zipfile.ZipFile, name: str, payload: Any, include_full_paths: bool = False) -> None:
-    redacted = redact_support_payload(payload, include_full_paths=include_full_paths)
+    try:
+        redacted = redact_support_payload(payload, include_full_paths=include_full_paths)
+    except Exception:  # noqa: BLE001 - omit private content when redaction storage is unavailable.
+        redacted = {"omitted": True, "reason": "redaction_unavailable"}
     bundle.writestr(name, json.dumps(redacted, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def write_support_bundle_text_member(bundle: zipfile.ZipFile, name: str, lines: list[str]) -> None:
+    safe_lines: list[str] = []
+    for line in lines:
+        try:
+            safe_lines.append(DIAGNOSTIC_PRIVACY.redact_text(line, context=current_diagnostic_identity_context()))
+        except Exception:  # noqa: BLE001 - never fall back to an unredacted diagnostic line.
+            continue
+    bundle.writestr(name, ("\n".join(safe_lines) + "\n") if safe_lines else "")
 
 
 def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
@@ -4952,20 +4996,17 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         "generatedAt": generated_at.isoformat(),
         "version": app.version,
         "portableMode": PORTABLE_MODE,
+        "logLevel": DIAGNOSTIC_LOGGER.log_level,
         "debugLogging": debug_logging_enabled(),
-        "includeFullPaths": bool(request.include_full_paths),
-        "paths": {
-            "programDir": str(ROOT_DIR),
-            "userDataDir": str(USER_DATA_DIR),
-            "configDir": str(CONFIG_DIR),
-            "logsDir": str(LOG_DIR),
-            "artifactsDir": str(ARTIFACTS_DIR),
-        },
+        "includeFullPathsRequested": bool(request.include_full_paths),
+        "includeFullPaths": False,
         "privacy": {
             "redactsSecrets": True,
             "includesScreenshots": False,
             "includesPaidAssetContents": False,
-            "includesFullPaths": bool(request.include_full_paths),
+            "includesFullPaths": False,
+            "redactsBeforeDisk": True,
+            "includesIdentityMapping": False,
         },
     }
     try:
@@ -4980,19 +5021,18 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         checkpoints = AGENT_GATEWAY.list_checkpoints({"limit": 50})
     except Exception as exc:  # noqa: BLE001
         checkpoints = {"ok": False, "error": str(exc)}
+    diagnostics = diagnostics_state()
+    diagnostics.pop("identities", None)
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
         write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
         write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
-        write_support_bundle_member(bundle, "diagnostics.json", diagnostics_state(), request.include_full_paths)
-        write_support_bundle_member(bundle, "dashboard-log.json", read_jsonl_tail(LOCAL_LOG_PATH, log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "interaction-log.json", read_jsonl_tail(INTERACTION_LOG_PATH, log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
+        write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
         write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_REGISTRY.recent_events(limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_REGISTRY.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
-        write_support_bundle_member(bundle, "backend-stdout-tail.json", read_text_tail(LOG_DIR / "backend_stdout.log", log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "backend-stderr-tail.json", read_text_tail(LOG_DIR / "backend_stderr.log", log_limit), request.include_full_paths)
     emit_log(
         "success",
         "diagnostics",
@@ -5006,7 +5046,7 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         "bundleUrl": to_artifact_url(str(bundle_path)),
         "bytes": bundle_path.stat().st_size,
         "debugLogging": debug_logging_enabled(),
-        "redacted": not bool(request.include_full_paths),
+        "redacted": True,
     }
 
 
@@ -5642,13 +5682,18 @@ def read_app_diagnostics() -> dict[str, Any]:
 
 @app.post("/api/app/diagnostics")
 async def update_app_diagnostics(request: DiagnosticsConfigRequest) -> dict[str, Any]:
-    save_diagnostics_config(request.model_dump(by_alias=True))
-    payload = diagnostics_state()
+    try:
+        payload = DIAGNOSTIC_LOGGER.update_config(
+            log_level=request.log_level,
+            debug_logging=request.debug_logging,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Unsupported diagnostic log level.") from exc
     await emit_log_async(
         "success",
         "diagnostics",
         "Diagnostics settings updated.",
-        {"debugLogging": payload["debugLogging"], "interactionLogPath": payload["interactionLogPath"]},
+        {"debugLogging": payload["debugLogging"], "logLevel": payload["logLevel"]},
     )
     return payload
 
@@ -11002,21 +11047,40 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def current_diagnostic_identity_context() -> dict[str, Any]:
+    return {
+        "projectPath": str(getattr(DASHBOARD_STATE, "selected_project_path", "") or ""),
+        "avatarPath": str(getattr(DASHBOARD_RUNTIME, "current_avatar_path", "") or ""),
+        "avatarName": str(getattr(DASHBOARD_RUNTIME, "current_avatar_name", "") or ""),
+    }
+
+
 def emit_log(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
-    entry = build_log_entry(level, scope, message, data)
-    record_log_entry(entry)
-    EVENT_BUS.broadcast_from_sync("log", entry)
+    entry = DIAGNOSTIC_LOGGER.emit(
+        level,
+        scope,
+        message,
+        data,
+        context=current_diagnostic_identity_context(),
+    )
+    if entry is not None:
+        EVENT_BUS.broadcast_from_sync("log", entry)
 
 
 async def emit_log_async(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
-    entry = build_log_entry(level, scope, message, data)
-    record_log_entry(entry)
-    await EVENT_BUS.broadcast("log", entry)
+    entry = DIAGNOSTIC_LOGGER.emit(
+        level,
+        scope,
+        message,
+        data,
+        context=current_diagnostic_identity_context(),
+    )
+    if entry is not None:
+        await EVENT_BUS.broadcast("log", entry)
 
 
 def build_log_entry(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
-        "id": f"{scope}-{datetime.now().strftime('%H%M%S%f')}",
         "timestamp": utc_now_iso(),
         "level": level,
         "scope": scope,
@@ -11026,92 +11090,56 @@ def build_log_entry(level: str, scope: str, message: str, data: dict[str, Any] |
 
 
 def record_log_entry(entry: dict[str, Any]) -> None:
-    RECENT_LOGS.append(entry)
-    prune_recent_logs()
-    append_local_log(entry)
+    DIAGNOSTIC_LOGGER.emit(
+        entry.get("level"),
+        entry.get("scope"),
+        entry.get("message"),
+        entry.get("data"),
+        context=current_diagnostic_identity_context(),
+    )
 
 
 def recent_log_snapshot() -> list[dict[str, Any]]:
-    prune_recent_logs()
-    return list(RECENT_LOGS)
+    return DIAGNOSTIC_LOGGER.recent_snapshot()
 
 
 def prune_recent_logs() -> None:
-    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
-    while RECENT_LOGS:
-        timestamp = parse_log_timestamp(RECENT_LOGS[0].get("timestamp"))
-        if timestamp is not None and timestamp >= cutoff:
-            break
-        RECENT_LOGS.popleft()
+    DIAGNOSTIC_LOGGER.cleanup()
 
 
 def append_local_log(entry: dict[str, Any]) -> None:
-    with LOCAL_LOG_LOCK:
-        LOCAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with LOCAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
-        prune_local_log_file()
-        prune_stale_dashboard_log_files()
+    record_log_entry(entry)
 
 
 def prune_local_log_file() -> None:
-    if not LOCAL_LOG_PATH.exists():
-        return
-
-    prune_jsonl_log_file(LOCAL_LOG_PATH)
+    DIAGNOSTIC_LOGGER.cleanup()
 
 
 def prune_jsonl_log_file(path: Path) -> None:
-    if not path.exists():
-        return
-    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
-    kept_lines: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if should_keep_log_line(line, cutoff):
-            kept_lines.append(line)
-
-    path.write_text(("\n".join(kept_lines) + "\n") if kept_lines else "", encoding="utf-8")
+    # Legacy JSONL diagnostics are never rewritten: startup cleanup removes
+    # the known raw files after the unified pre-redaction logger is active.
+    if path.parent == LOG_DIR and path.name in {"dashboard.log", "interactions.jsonl"}:
+        path.unlink(missing_ok=True)
 
 
 def prune_stale_dashboard_log_files() -> None:
-    if not DASHBOARD_ARTIFACTS_DIR.exists():
-        return
-
-    cutoff = datetime.now(timezone.utc) - LOG_RETENTION
-    for log_path in DASHBOARD_ARTIFACTS_DIR.glob("*.log"):
-        if log_path == LOCAL_LOG_PATH:
-            continue
-        try:
-            modified_at = datetime.fromtimestamp(log_path.stat().st_mtime, timezone.utc)
-        except OSError:
-            continue
-        if modified_at < cutoff:
-            log_path.unlink(missing_ok=True)
+    DIAGNOSTIC_LOGGER.cleanup()
 
 
 def should_keep_log_line(line: str, cutoff: datetime) -> bool:
-    if not line.strip():
-        return False
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError:
-        return False
-
+    payload = parse_diagnostic_log_line(line)
+    if payload is None:
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        payload = candidate if isinstance(candidate, dict) else {}
     timestamp = parse_log_timestamp(payload.get("timestamp"))
     return timestamp is not None and timestamp >= cutoff
 
 
 def parse_log_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parse_diagnostic_log_timestamp(value)
 
 
 async def status_monitor_loop() -> None:
@@ -12189,7 +12217,7 @@ def recent_unity_mcp_execution_error(window_seconds: int = 300) -> dict[str, Any
         "Unity plugin session",
         "Unity MCP disconnected",
     )
-    entries = read_jsonl_tail(LOCAL_LOG_PATH, 250)
+    entries = DIAGNOSTIC_LOGGER.tail_entries(250)
     entries.extend(recent_log_snapshot())
     for entry in reversed(entries):
         timestamp = parse_log_timestamp(entry.get("timestamp"))
@@ -20158,7 +20186,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    if getattr(sys, "frozen", False):
+        install_standard_stream_capture(DIAGNOSTIC_LOGGER)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
     return 0
 
 

@@ -2577,27 +2577,30 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(check_by_id["doctor.degraded"]["status"], "warning")
         self.assertIn("doctor exploded", check_by_id["doctor.degraded"]["message"])
 
-    def test_debug_diagnostics_toggle_records_interaction_log(self) -> None:
+    def test_debug_diagnostics_toggle_records_unified_redacted_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            original_config_path = dashboard_server.DIAGNOSTICS_CONFIG_PATH
-            original_interaction_log_path = dashboard_server.INTERACTION_LOG_PATH
-            dashboard_server.DIAGNOSTICS_CONFIG_PATH = temp_path / "diagnostics.json"
-            dashboard_server.INTERACTION_LOG_PATH = temp_path / "interactions.jsonl"
-            try:
+            privacy = dashboard_server.DiagnosticPrivacy(temp_path / "config")
+            manager = dashboard_server.DiagnosticLogManager(
+                temp_path / "logs",
+                temp_path / "config" / "diagnostics.json",
+                privacy,
+            )
+            with (
+                patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+                patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+                patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            ):
                 with TestClient(dashboard_server.app) as client:
                     update = client.post("/api/app/diagnostics", json={"debugLogging": True})
                     self.assertEqual(update.status_code, 200)
                     self.assertTrue(update.json()["debugLogging"])
+                    self.assertEqual(update.json()["logLevel"], "debug")
 
                     bootstrap = client.get("/api/app/bootstrap?app_token=query-secret&artifact_sig=artifact-secret")
                     self.assertEqual(bootstrap.status_code, 200)
 
-                entries = [
-                    json.loads(line)
-                    for line in dashboard_server.INTERACTION_LOG_PATH.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
+                entries = [entry["data"] for entry in manager.tail_entries(100) if entry.get("scope") == "http"]
                 paths = {entry.get("path") for entry in entries}
                 self.assertIn("/api/app/diagnostics", paths)
                 self.assertIn("/api/app/bootstrap", paths)
@@ -2606,66 +2609,52 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertNotIn("api_key", serialized)
                 self.assertNotIn("query-secret", serialized)
                 self.assertNotIn("artifact-secret", serialized)
-            finally:
-                dashboard_server.DIAGNOSTICS_CONFIG_PATH = original_config_path
-                dashboard_server.INTERACTION_LOG_PATH = original_interaction_log_path
+                self.assertFalse((temp_path / "logs" / "interactions.jsonl").exists())
 
     def test_support_bundle_exports_redacted_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            original_config_path = dashboard_server.DIAGNOSTICS_CONFIG_PATH
-            original_support_bundle_dir = dashboard_server.SUPPORT_BUNDLE_DIR
-            original_log_path = dashboard_server.LOCAL_LOG_PATH
-            original_interaction_log_path = dashboard_server.INTERACTION_LOG_PATH
-            dashboard_server.DIAGNOSTICS_CONFIG_PATH = temp_path / "diagnostics.json"
-            dashboard_server.SUPPORT_BUNDLE_DIR = temp_path / "support-bundles"
-            dashboard_server.LOCAL_LOG_PATH = temp_path / "dashboard.log"
-            dashboard_server.INTERACTION_LOG_PATH = temp_path / "interactions.jsonl"
-            private_path = r"C:\Users\xiao123\PrivateAvatarProjects\PaidAvatar"
-            try:
-                dashboard_server.save_diagnostics_config({"debugLogging": True})
-                dashboard_server.LOCAL_LOG_PATH.write_text(
-                    json.dumps(
-                        {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "level": "error",
-                            "scope": "test",
-                            "message": "failure",
-                            "data": {"api_key": "provider-secret", "projectPath": private_path},
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                dashboard_server.INTERACTION_LOG_PATH.write_text(
-                    json.dumps(
-                        {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "path": "/api/test",
-                            "authorization": "Bearer secret-token",
-                            "query": {"app_token": "query-secret", "artifact_sig": "artifact-secret"},
-                            "cwd": private_path,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-
+            privacy = dashboard_server.DiagnosticPrivacy(temp_path / "config")
+            manager = dashboard_server.DiagnosticLogManager(
+                temp_path / "logs",
+                temp_path / "config" / "diagnostics.json",
+                privacy,
+            )
+            manager.update_config(log_level="debug")
+            separator = chr(92)
+            private_path = "C:" + separator + separator.join(("Users", "BundleProbe", "PrivateAvatarProjects", "PaidAvatar"))
+            manager.emit(
+                "error",
+                "test",
+                "failure",
+                {"api_key": "provider-secret", "projectPath": private_path},
+            )
+            with (
+                patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+                patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+                patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+                patch.object(dashboard_server, "SUPPORT_BUNDLE_DIR", temp_path / "support-bundles"),
+            ):
                 with TestClient(dashboard_server.app) as client:
-                    response = client.post("/api/app/support-bundle", json={"logLimit": 20})
+                    response = client.post(
+                        "/api/app/support-bundle",
+                        json={"logLimit": 20, "includeFullPaths": True},
+                    )
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
                 self.assertTrue(payload["ok"])
+                self.assertTrue(payload["redacted"])
                 bundle_path = Path(payload["bundlePath"])
                 self.assertTrue(bundle_path.exists())
                 with zipfile.ZipFile(bundle_path) as bundle:
                     names = set(bundle.namelist())
                     self.assertIn("metadata.json", names)
-                    self.assertIn("dashboard-log.json", names)
-                    self.assertIn("interaction-log.json", names)
+                    self.assertIn("diagnostic-log.txt", names)
+                    self.assertNotIn("dashboard-log.json", names)
+                    self.assertNotIn("interaction-log.json", names)
+                    diagnostics = json.loads(bundle.read("diagnostics.json"))
+                    self.assertNotIn("identities", diagnostics)
                     content = "\n".join(bundle.read(name).decode("utf-8") for name in names)
                 lowered = content.lower()
                 self.assertNotIn("provider-secret", lowered)
@@ -2674,12 +2663,8 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertNotIn("artifact-secret", lowered)
                 self.assertNotIn(private_path.lower(), lowered)
                 self.assertNotIn("privateavatarprojects", lowered)
-                self.assertIn(".../paidavatar", lowered)
-            finally:
-                dashboard_server.DIAGNOSTICS_CONFIG_PATH = original_config_path
-                dashboard_server.SUPPORT_BUNDLE_DIR = original_support_bundle_dir
-                dashboard_server.LOCAL_LOG_PATH = original_log_path
-                dashboard_server.INTERACTION_LOG_PATH = original_interaction_log_path
+                self.assertNotIn("diagnostic-identities.json", lowered)
+                self.assertNotIn("diagnostic-alias.key", lowered)
 
     def test_validation_report_mvp_is_read_only_and_registered(self) -> None:
         with (
@@ -8253,7 +8238,7 @@ namespace VRCForge.Editor
             self.assertEqual(payload["defaults"]["sourceMode"], "unity_live_export")
             self.assertFalse(payload["defaults"]["mockExecute"])
             self.assertNotIn("recentLogs", payload)
-            self.assertEqual(payload["logRetentionHours"], 24)
+            self.assertEqual(payload["logRetentionHours"], 120)
 
     def test_windows_installer_sources_enforce_x64_and_release_gates(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -8638,10 +8623,10 @@ namespace VRCForge.Editor
         ):
             self.assertEqual(dashboard_server.find_unity_mcp_command_prefix(), ["C:\\Tools\\unity-mcp.exe"])
 
-    def test_recent_log_snapshot_keeps_only_last_24_hours(self) -> None:
+    def test_recent_log_snapshot_keeps_only_last_five_days(self) -> None:
         dashboard_server.RECENT_LOGS.clear()
         old_entry = {
-            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            "timestamp": (datetime.now(timezone.utc) - timedelta(days=6)).isoformat(),
             "level": "info",
             "scope": "test",
             "message": "old",
@@ -8658,58 +8643,43 @@ namespace VRCForge.Editor
 
         self.assertEqual(dashboard_server.recent_log_snapshot(), [fresh_entry])
 
-    def test_local_log_file_keeps_only_last_24_hours(self) -> None:
+    def test_unified_log_cleanup_removes_stale_time_named_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            original_log_path = dashboard_server.LOCAL_LOG_PATH
-            dashboard_server.LOCAL_LOG_PATH = Path(temp_dir) / "dashboard.log"
-            try:
-                old_entry = {
-                    "timestamp": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
-                    "message": "old",
-                }
-                fresh_entry = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "message": "fresh",
-                }
-                dashboard_server.LOCAL_LOG_PATH.write_text(
-                    json.dumps(old_entry, ensure_ascii=False) + "\n"
-                    + json.dumps(fresh_entry, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-
-                dashboard_server.prune_local_log_file()
-
-                lines = dashboard_server.LOCAL_LOG_PATH.read_text(encoding="utf-8").splitlines()
-                self.assertEqual(len(lines), 1)
-                self.assertEqual(json.loads(lines[0])["message"], "fresh")
-            finally:
-                dashboard_server.LOCAL_LOG_PATH = original_log_path
-
-    def test_prune_stale_dashboard_log_files_removes_old_sidecar_logs(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            original_artifacts_dir = dashboard_server.DASHBOARD_ARTIFACTS_DIR
-            original_log_path = dashboard_server.LOCAL_LOG_PATH
             temp_path = Path(temp_dir)
-            dashboard_server.DASHBOARD_ARTIFACTS_DIR = temp_path
-            dashboard_server.LOCAL_LOG_PATH = temp_path / "dashboard.log"
-            try:
-                stale_log = temp_path / "dashboard_stdout.log"
-                fresh_log = temp_path / "dashboard_stderr.log"
-                current_log = dashboard_server.LOCAL_LOG_PATH
-                stale_log.write_text("old", encoding="utf-8")
-                fresh_log.write_text("fresh", encoding="utf-8")
-                current_log.write_text("current", encoding="utf-8")
-                old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).timestamp()
-                os.utime(stale_log, (old_time, old_time))
+            privacy = dashboard_server.DiagnosticPrivacy(temp_path / "config")
+            manager = dashboard_server.DiagnosticLogManager(
+                temp_path / "logs",
+                temp_path / "config" / "diagnostics.json",
+                privacy,
+            )
+            logs = temp_path / "logs"
+            logs.mkdir(parents=True)
+            stale = logs / "vrcforge_2026-01-01_00-00-00_0.log"
+            stale.write_text("old\n", encoding="utf-8")
+            old_time = (datetime.now(timezone.utc) - timedelta(days=6)).timestamp()
+            os.utime(stale, (old_time, old_time))
+            manager.cleanup()
+            self.assertFalse(stale.exists())
 
-                dashboard_server.prune_stale_dashboard_log_files()
-
-                self.assertFalse(stale_log.exists())
-                self.assertTrue(fresh_log.exists())
-                self.assertTrue(current_log.exists())
-            finally:
-                dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_artifacts_dir
-                dashboard_server.LOCAL_LOG_PATH = original_log_path
+    def test_unified_log_cleanup_removes_known_legacy_raw_logs_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            privacy = dashboard_server.DiagnosticPrivacy(temp_path / "config")
+            manager = dashboard_server.DiagnosticLogManager(
+                temp_path / "logs",
+                temp_path / "config" / "diagnostics.json",
+                privacy,
+            )
+            logs = temp_path / "logs"
+            logs.mkdir(parents=True)
+            legacy = [logs / name for name in ("dashboard.log", "backend_stdout.log", "backend_stderr.log", "interactions.jsonl")]
+            durable = logs / "agent-goals.jsonl"
+            for path in legacy:
+                path.write_text("legacy raw", encoding="utf-8")
+            durable.write_text("durable", encoding="utf-8")
+            manager.cleanup()
+            self.assertTrue(all(not path.exists() for path in legacy))
+            self.assertTrue(durable.exists())
 
     def test_reference_image_context_supports_optional_source_and_target_images(self) -> None:
         data_url = "data:image/png;base64,aW1hZ2U="
@@ -9662,6 +9632,7 @@ namespace VRCForge.Editor
                 host=args.host,
                 port=args.port,
                 log_level="info",
+                access_log=False,
             )
             lease.release.assert_not_called()
         finally:

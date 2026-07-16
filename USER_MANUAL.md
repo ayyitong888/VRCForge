@@ -244,14 +244,32 @@ blocked reason before it can be treated as stable.
    any screenshots you do not want to share.
 5. Open a GitHub issue and upload or paste the reviewed bundle manually.
 
+### Local Logs and Developer Options
+
+- Logging controls remain available in normal Settings even when Developer
+  Options are off. The Error / Warn / Info / Debug / Trace slider takes effect
+  immediately and does not require an app restart.
+- VRCForge writes UTF-8 text logs named from their start time, keeps at most
+  five days, and also enforces file-count and size limits. Settings can open
+  the log folder directly.
+- Paths, credentials, network identifiers, and Avatar Blueprint IDs are
+  replaced before an event reaches disk. Stable local aliases let Settings
+  identify the related Windows user, Unity project, and avatar without placing
+  the private alias map or its key in logs or support bundles.
+- Developer Options control additional high-risk diagnostic capabilities. On
+  enable, the risk dialog keeps Cancel available immediately and keeps Confirm
+  disabled for a server-enforced five-second warning period.
+
 ## Privacy Boundary
 
 VRCForge keeps avatar assets local by default. API key values, gateway token
 values, paid asset payloads, Booth package contents, FBX files, textures,
 material binaries, and private files should not be sent to model context,
 external agents, support bundles, or `.vsk export` packages. Validation
-metadata, project structure, screenshots, and Unity logs are user-controlled
-and should be redacted or reviewed before sharing.
+metadata, project structure, screenshots, and Unity logs are user-controlled.
+Local application logs and exported support-bundle excerpts are redacted by
+default, but should still be reviewed before sharing. The private diagnostic
+alias key and identity map stay local and are never bundled.
 
 ## Requirements / 运行环境
 

@@ -23,6 +23,13 @@ export type AdvancedSettingsState = {
   roslynFullAutoEverEnabled: boolean;
 };
 
+export type DeveloperOptionsChallenge = {
+  ok?: boolean;
+  schema: string;
+  challengeId: string;
+  waitMs: number;
+};
+
 export type AgentNotes = {
   ok: boolean;
   path: string;
@@ -158,10 +165,40 @@ export type ProviderModelInfo = {
   maxOutputTokens?: number;
 };
 
+export type DiagnosticLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+export type DiagnosticIdentitySummary = {
+  alias: string;
+  kind: "user" | "project" | "avatar";
+  lastSeenAt?: string;
+  userAlias?: string;
+  projectAlias?: string;
+  windowsUser?: string;
+  projectName?: string;
+  avatarName?: string;
+};
+
 export type DiagnosticsStatus = {
   ok: boolean;
   schema: string;
+  logLevel: DiagnosticLogLevel;
+  logLevels?: DiagnosticLogLevel[];
   debugLogging: boolean;
+  retentionDays: number;
+  maxFiles: number;
+  maxTotalBytes: number;
+  maxFileBytes: number;
+  activeLogFile?: string;
+  redaction?: {
+    enabled?: boolean;
+    beforeDisk?: boolean;
+    beforeWrite?: boolean;
+    stableAliases?: boolean;
+    mappingExcludedFromBundles?: boolean;
+  };
+  identities?: DiagnosticIdentitySummary[];
+  // Legacy locations remain optional for older backends, but normal UI must
+  // never depend on or display them.
   configPath?: string;
   logsDir?: string;
   dashboardLogPath?: string;

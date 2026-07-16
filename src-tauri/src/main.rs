@@ -112,8 +112,10 @@ fn main() {
             apply_adjustment_checkpoint,
             answer_agent_question,
             approve_agent_approval,
+            begin_developer_options_challenge,
             bind_agent_goal_owner,
             block_skill_package,
+            cancel_developer_options_challenge,
             cancel_sub_agent,
             check_skills,
             clear_agent_memory,
@@ -224,6 +226,7 @@ fn main() {
             ensure_agent_notes_file,
             open_folder,
             open_local_folder,
+            open_logs_folder,
             select_folder
         ])
         .on_window_event(|window, event| {
@@ -247,13 +250,16 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_session_challenge_signature, app_session_challenge_signature_matches,
-        extract_challenge_signature, hmac_sha256_hex, percent_encode_query_component,
-        prepare_runtime_files, provider_config_body, runtime_session_verification_error,
-        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
-        try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open, webview_error_message, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
-        webview2_args_with_accessibility,
+        advanced_settings_update_body, app_session_challenge_signature,
+        app_session_challenge_signature_matches, developer_options_challenge_path,
+        diagnostics_update_body, extract_challenge_signature, hmac_sha256_hex,
+        percent_encode_query_component, prepare_runtime_files, provider_config_body,
+        resolve_logs_folder, runtime_session_verification_error, sanitize_backend_event,
+        sanitize_text_for_webview, sanitize_webview_response, try_ensure_agent_notes_file,
+        validate_local_folder_to_open, validate_project_folder_to_open,
+        webview2_args_with_accessibility, webview_error_message,
+        DesktopAdvancedSettingsUpdateRequest, DesktopDiagnosticsUpdateRequest,
+        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
@@ -570,6 +576,97 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_update_body_preserves_independent_optional_fields() {
+        assert_eq!(
+            diagnostics_update_body(Some("DEBUG".to_string()), None),
+            serde_json::json!({"logLevel": "DEBUG"}),
+        );
+        assert_eq!(
+            diagnostics_update_body(None, Some(false)),
+            serde_json::json!({"debugLogging": false}),
+        );
+        assert_eq!(
+            diagnostics_update_body(Some("WARNING".to_string()), Some(true)),
+            serde_json::json!({"logLevel": "WARNING", "debugLogging": true}),
+        );
+
+        let _: DesktopDiagnosticsUpdateRequest =
+            serde_json::from_value(serde_json::json!({"logLevel": "INFO"}))
+                .expect("log-level-only requests must remain valid");
+        let _: DesktopDiagnosticsUpdateRequest =
+            serde_json::from_value(serde_json::json!({"debugLogging": true}))
+                .expect("legacy debug-logging-only requests must remain valid");
+    }
+
+    #[test]
+    fn diagnostics_commands_run_backend_io_off_the_ui_thread() {
+        let source = include_str!("commands.rs");
+        for signature in [
+            "pub async fn fetch_diagnostics(",
+            "pub async fn update_diagnostics(",
+            "pub async fn export_support_bundle(",
+        ] {
+            assert!(
+                source.contains(signature),
+                "diagnostics backend I/O must stay asynchronous"
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_settings_body_only_adds_challenge_when_present() {
+        assert_eq!(
+            advanced_settings_update_body(true, false, Some("challenge-123".to_string())),
+            serde_json::json!({
+                "developerOptionsEnabled": true,
+                "computerUseEnabled": false,
+                "developerChallengeId": "challenge-123",
+            }),
+        );
+        assert_eq!(
+            advanced_settings_update_body(false, false, None),
+            serde_json::json!({
+                "developerOptionsEnabled": false,
+                "computerUseEnabled": false,
+            }),
+        );
+
+        let _: DesktopAdvancedSettingsUpdateRequest = serde_json::from_value(serde_json::json!({
+            "developerOptionsEnabled": false,
+            "computerUseEnabled": false,
+        }))
+        .expect("existing advanced-settings requests must not require a challenge ID");
+    }
+
+    #[test]
+    fn developer_challenge_path_percent_encodes_opaque_ids() {
+        assert_eq!(
+            developer_options_challenge_path("challenge/with ?#")
+                .expect("opaque challenge ID should be accepted"),
+            "/api/app/advanced-settings/developer-challenge/challenge%2Fwith%20%3F%23",
+        );
+        assert!(developer_options_challenge_path("").is_err());
+        assert!(developer_options_challenge_path(&"x".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn packaged_backend_launch_discards_raw_standard_streams() {
+        let source = include_str!("backend.rs");
+        for forbidden in [
+            ["backend", "_stdout", ".log"].concat(),
+            ["backend", "_stderr", ".log"].concat(),
+            ["Stdio", "::from("].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "packaged backend launch must not use raw file redirection"
+            );
+        }
+        assert!(source.contains(".stdout(Stdio::null())"));
+        assert!(source.contains(".stderr(Stdio::null())"));
+    }
+
+    #[test]
     fn open_folder_validation_rejects_empty_and_relative_paths() {
         assert!(validate_project_folder_to_open("").is_err());
         assert!(validate_project_folder_to_open("Documents").is_err());
@@ -609,6 +706,36 @@ mod tests {
         assert_eq!(resolved, folder.canonicalize().unwrap());
         assert!(validate_local_folder_to_open("").is_err());
         assert!(validate_local_folder_to_open("relative\\archives").is_err());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn logs_folder_resolution_is_internal_and_does_not_launch_shell() {
+        let base = test_dir("logs-folder-resolution");
+        let user_data = base.join("nested").join("user-data");
+
+        let resolved = resolve_logs_folder(&user_data)
+            .expect("logs folder should be created below the user data root");
+
+        assert!(resolved.is_dir());
+        assert_eq!(resolved, user_data.join("logs").canonicalize().unwrap());
+        assert!(resolved.starts_with(user_data.canonicalize().unwrap()));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn logs_folder_resolution_errors_do_not_expose_local_paths() {
+        let base = test_dir("logs-folder-error");
+        let user_data = base.join("user-data");
+        fs::create_dir_all(&user_data).expect("user data directory should be created");
+        fs::write(user_data.join("logs"), "not a directory")
+            .expect("logs path conflict should be created");
+
+        let error = resolve_logs_folder(&user_data)
+            .expect_err("a file at the logs path must block folder resolution");
+
+        assert_eq!(error, "Unable to prepare the logs folder.");
+        assert!(!error.contains(&base.display().to_string()));
         let _ = fs::remove_dir_all(base);
     }
 }

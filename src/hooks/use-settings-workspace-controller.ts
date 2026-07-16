@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../lib/app-view";
 import { isTauriRuntime } from "../lib/app-runtime";
@@ -15,7 +15,7 @@ import {
   updateDiagnostics,
   updateExternalAgentGateway,
 } from "../lib/api";
-import type { DiagnosticsStatus, ExternalAgentConnectorClient, ExternalAgentConnectorStatus } from "../lib/api";
+import type { DiagnosticLogLevel, DiagnosticsStatus, ExternalAgentConnectorClient, ExternalAgentConnectorStatus } from "../lib/api";
 import { formatConnectorActionMessage } from "../lib/connector-ui";
 import { markdownSmokeAgentNotes } from "../lib/markdown-smoke";
 
@@ -73,6 +73,19 @@ export function useSettingsWorkspaceController({
   const [loadingConnectors, setLoadingConnectors] = useState(false);
   const [connectorMessage, setConnectorMessage] = useState("");
   const [checkpointArchiveLimitInput, setCheckpointArchiveLimitInput] = useState("10240");
+  const diagnosticsRequestSequenceRef = useRef(0);
+  const diagnosticsPendingRef = useRef(0);
+  const diagnosticsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  function beginDiagnosticsRequest() {
+    diagnosticsPendingRef.current += 1;
+    setLoadingDiagnostics(true);
+  }
+
+  function endDiagnosticsRequest() {
+    diagnosticsPendingRef.current = Math.max(0, diagnosticsPendingRef.current - 1);
+    setLoadingDiagnostics(diagnosticsPendingRef.current > 0);
+  }
 
   useEffect(() => {
     const configuredLimit = connectorStatus?.gateway?.checkpointArchiveMaxSizeMb;
@@ -106,7 +119,8 @@ export function useSettingsWorkspaceController({
   }
 
   async function loadDiagnostics(target = endpoint) {
-    setLoadingDiagnostics(true);
+    const requestSequence = ++diagnosticsRequestSequenceRef.current;
+    beginDiagnosticsRequest();
     try {
       let targetEndpoint = target;
       if (!runtimeConnected && target === endpoint) {
@@ -116,27 +130,79 @@ export function useSettingsWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      setDiagnosticsStatus(await fetchDiagnostics(targetEndpoint));
+      const payload = await fetchDiagnostics(targetEndpoint);
+      if (requestSequence === diagnosticsRequestSequenceRef.current) {
+        setDiagnosticsStatus(payload);
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (requestSequence === diagnosticsRequestSequenceRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setLoadingDiagnostics(false);
+      endDiagnosticsRequest();
+    }
+  }
+
+  async function setLogLevel(level: DiagnosticLogLevel) {
+    const requestSequence = ++diagnosticsRequestSequenceRef.current;
+    beginDiagnosticsRequest();
+    setDiagnosticsMessage("");
+    setError("");
+    setDiagnosticsStatus((current) =>
+      current
+        ? {
+            ...current,
+            logLevel: level,
+            debugLogging: level === "debug" || level === "trace",
+          }
+        : current,
+    );
+    // Range changes can arrive faster than the loopback request completes.
+    // Preserve invocation order so the user's newest slider position is also
+    // the final value persisted by the backend, not merely the newest UI
+    // response we happened to accept.
+    const operation = diagnosticsWriteQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        let targetEndpoint = endpoint;
+        if (!runtimeConnected) {
+          const readyEndpoint = await startRuntime();
+          if (!readyEndpoint) {
+            return null;
+          }
+          targetEndpoint = readyEndpoint;
+        }
+        return updateDiagnostics(targetEndpoint, { logLevel: level });
+      });
+    diagnosticsWriteQueueRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      const payload = await operation;
+      if (!payload) {
+        return;
+      }
+      if (requestSequence === diagnosticsRequestSequenceRef.current) {
+        setDiagnosticsStatus(payload);
+        setDiagnosticsMessage(
+          t("settings.logLevelUpdated", {
+            level: t(`settings.logLevel${level[0].toUpperCase()}${level.slice(1)}`),
+          }),
+        );
+      }
+    } catch (cause) {
+      if (requestSequence === diagnosticsRequestSequenceRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        void loadDiagnostics();
+      }
+    } finally {
+      endDiagnosticsRequest();
     }
   }
 
   async function setDebugLogging(enabled: boolean) {
-    setLoadingDiagnostics(true);
-    setDiagnosticsMessage("");
-    setError("");
-    try {
-      const payload = await updateDiagnostics(endpoint, { debugLogging: enabled });
-      setDiagnosticsStatus(payload);
-      setDiagnosticsMessage(enabled ? "Debug logging enabled" : "Debug logging disabled");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingDiagnostics(false);
-    }
+    await setLogLevel(enabled ? "debug" : "info");
   }
 
   async function createSupportBundle() {
@@ -153,8 +219,9 @@ export function useSettingsWorkspaceController({
         targetEndpoint = readyEndpoint;
       }
       const payload = await exportSupportBundle(targetEndpoint, { logLimit: 200 });
-      setDoctorMessage(`Support bundle exported: ${payload.bundlePath}`);
-      setDiagnosticsMessage(`Support bundle exported: ${payload.bundlePath}`);
+      const successMessage = t("settings.supportBundleExported", { path: payload.bundlePath });
+      setDoctorMessage(successMessage);
+      setDiagnosticsMessage(successMessage);
       void loadDiagnostics(targetEndpoint);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -240,6 +307,18 @@ export function useSettingsWorkspaceController({
         throw new Error("Open folder is available in the desktop app.");
       }
       await invoke("open_local_folder", { path: targetPath });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function openLogsFolder() {
+    setError("");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error(t("settings.logsFolderDesktopOnly"));
+      }
+      await invoke("open_logs_folder");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -351,12 +430,14 @@ export function useSettingsWorkspaceController({
     checkpointArchiveLimitInput,
     openSettings,
     loadDiagnostics,
+    setLogLevel,
     setDebugLogging,
     createSupportBundle,
     loadConnectors,
     updateGatewaySettings,
     saveCheckpointArchiveLimit,
     openCheckpointArchiveFolder,
+    openLogsFolder,
     pickCheckpointArchiveDirectory,
     deleteCheckpointArchives,
     relocateCheckpointArchives,

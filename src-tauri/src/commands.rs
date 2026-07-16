@@ -85,9 +85,18 @@ pub(crate) struct DesktopPermissionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DesktopAdvancedSettingsRequest {
+pub(crate) struct DesktopAdvancedSettingsUpdateRequest {
     developer_options_enabled: bool,
     computer_use_enabled: bool,
+    developer_challenge_id: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopDeveloperOptionsChallengeRequest {
+    challenge_id: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
@@ -270,7 +279,8 @@ pub(crate) struct DesktopUnityMcpRepairRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopDiagnosticsUpdateRequest {
-    debug_logging: bool,
+    log_level: Option<String>,
+    debug_logging: Option<bool>,
     timeout_ms: Option<u64>,
 }
 
@@ -543,21 +553,84 @@ pub async fn fetch_advanced_settings(
     .await
 }
 
+pub(crate) fn advanced_settings_update_body(
+    developer_options_enabled: bool,
+    computer_use_enabled: bool,
+    developer_challenge_id: Option<String>,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::from_iter([
+        (
+            "developerOptionsEnabled".to_string(),
+            serde_json::Value::Bool(developer_options_enabled),
+        ),
+        (
+            "computerUseEnabled".to_string(),
+            serde_json::Value::Bool(computer_use_enabled),
+        ),
+    ]);
+    if let Some(challenge_id) = developer_challenge_id {
+        body.insert(
+            "developerChallengeId".to_string(),
+            serde_json::Value::String(challenge_id),
+        );
+    }
+    serde_json::Value::Object(body)
+}
+
 #[tauri::command]
 pub async fn update_advanced_settings(
-    request: DesktopAdvancedSettingsRequest,
+    request: DesktopAdvancedSettingsUpdateRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "POST",
             "/api/app/advanced-settings".to_string(),
-            Some(serde_json::json!({
-                "developerOptionsEnabled": request.developer_options_enabled,
-                "computerUseEnabled": request.computer_use_enabled,
-            })),
+            Some(advanced_settings_update_body(
+                request.developer_options_enabled,
+                request.computer_use_enabled,
+                request.developer_challenge_id,
+            )),
             request.timeout_ms,
         )
         .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn begin_developer_options_challenge(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/advanced-settings/developer-challenge".to_string(),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+pub(crate) fn developer_options_challenge_path(challenge_id: &str) -> Result<String, String> {
+    if challenge_id.is_empty() || challenge_id.len() > 512 {
+        return Err("Developer Options challenge is invalid.".to_string());
+    }
+    Ok(format!(
+        "/api/app/advanced-settings/developer-challenge/{}",
+        percent_encode_query_component(challenge_id)
+    ))
+}
+
+#[tauri::command]
+pub async fn cancel_developer_options_challenge(
+    request: DesktopDeveloperOptionsChallengeRequest,
+) -> Result<serde_json::Value, String> {
+    let path = developer_options_challenge_path(&request.challenge_id)?;
+    blocking_backend_json_request(move || {
+        backend_json_request("DELETE", path, None, request.timeout_ms)
+            .map(sanitize_webview_response)
     })
     .await
 }
@@ -978,45 +1051,74 @@ pub fn repair_unity_mcp_bridge(
 }
 
 #[tauri::command]
-pub fn fetch_diagnostics(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        "/api/app/diagnostics".to_string(),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn fetch_diagnostics(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/diagnostics".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+pub(crate) fn diagnostics_update_body(
+    log_level: Option<String>,
+    debug_logging: Option<bool>,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(log_level) = log_level {
+        body.insert("logLevel".to_string(), serde_json::Value::String(log_level));
+    }
+    if let Some(debug_logging) = debug_logging {
+        body.insert(
+            "debugLogging".to_string(),
+            serde_json::Value::Bool(debug_logging),
+        );
+    }
+    serde_json::Value::Object(body)
 }
 
 #[tauri::command]
-pub fn update_diagnostics(
+pub async fn update_diagnostics(
     request: DesktopDiagnosticsUpdateRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/diagnostics".to_string(),
-        Some(serde_json::json!({
-            "debugLogging": request.debug_logging,
-        })),
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/diagnostics".to_string(),
+            Some(diagnostics_update_body(
+                request.log_level,
+                request.debug_logging,
+            )),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn export_support_bundle(
+pub async fn export_support_bundle(
     request: DesktopSupportBundleRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/support-bundle".to_string(),
-        Some(serde_json::json!({
-            "includeFullPaths": request.include_full_paths,
-            "logLimit": request.log_limit,
-        })),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/support-bundle".to_string(),
+            Some(serde_json::json!({
+                "includeFullPaths": request.include_full_paths,
+                "logLimit": request.log_limit,
+            })),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2137,6 +2239,14 @@ pub fn open_local_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn open_logs_folder() -> Result<(), String> {
+    let user_data =
+        user_data_dir().map_err(|_| "Unable to resolve the logs folder.".to_string())?;
+    let folder = resolve_logs_folder(&user_data)?;
+    open_folder_in_shell(folder).map_err(|_| "Unable to open the logs folder.".to_string())
+}
+
+#[tauri::command]
 pub fn select_folder(initial_path: Option<String>) -> Result<Option<String>, String> {
     select_folder_dialog(initial_path.as_deref())
 }
@@ -2166,6 +2276,19 @@ pub(crate) fn open_folder_in_shell(folder: PathBuf) -> Result<(), String> {
             .map_err(|error| format!("unable to open folder: {error}"))?;
         Ok(())
     }
+}
+
+pub(crate) fn resolve_logs_folder(user_data: &Path) -> Result<PathBuf, String> {
+    const ERROR: &str = "Unable to prepare the logs folder.";
+
+    let logs = user_data.join("logs");
+    fs::create_dir_all(&logs).map_err(|_| ERROR.to_string())?;
+    let user_data = fs::canonicalize(user_data).map_err(|_| ERROR.to_string())?;
+    let logs = fs::canonicalize(logs).map_err(|_| ERROR.to_string())?;
+    if !logs.is_dir() || !logs.starts_with(&user_data) {
+        return Err(ERROR.to_string());
+    }
+    Ok(logs)
 }
 
 pub(crate) fn validate_local_folder_to_open(path: &str) -> Result<PathBuf, String> {

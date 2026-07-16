@@ -1,10 +1,11 @@
-import { Check, Download, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
+import { Check, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
 import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
 import type {
   DiagnosticsStatus,
+  DiagnosticLogLevel,
   ExecutionMode,
   ExternalAgentConnectorClient,
   ExternalAgentConnectorStatus,
@@ -17,6 +18,8 @@ import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { CheckpointStoragePanel } from "./checkpoint-storage-panel";
+import { DeveloperOptionsControl } from "./developer-options-control";
+import { DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
 import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel";
 import { MemorySettingsPanel } from "./memory-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
@@ -68,7 +71,7 @@ type SettingsWorkspaceProps = {
   savingNotes: boolean;
   compactDebugEntries: Array<{ id: string; text: string; entryCount?: number; createdAt?: string }>;
   onSectionChange: (section: SettingsSection) => void;
-  onDeveloperOptionsChange: (enabled: boolean) => void;
+  onDeveloperOptionsChange: (enabled: boolean, developerChallengeId?: string) => Promise<void> | void;
   onComputerUseChange: (enabled: boolean) => void;
   onSwitchMode: (mode: ExecutionMode) => void;
   onRestartOnboarding: () => void;
@@ -87,7 +90,8 @@ type SettingsWorkspaceProps = {
   onVisionEnabledChange: (value: boolean) => void;
   onSaveVisionProfile: (event?: FormEvent) => void;
   onClearVisionProfile: () => void;
-  onSetDebugLogging: (enabled: boolean) => void;
+  onSetLogLevel: (level: DiagnosticLogLevel) => void;
+  onOpenLogsFolder: () => void;
   onCreateSupportBundle: () => void;
   onCheckpointArchiveLimitInputChange: (value: string) => void;
   onSaveCheckpointArchiveLimit: () => void;
@@ -169,7 +173,8 @@ export function SettingsWorkspace({
   onVisionEnabledChange,
   onSaveVisionProfile,
   onClearVisionProfile,
-  onSetDebugLogging,
+  onSetLogLevel,
+  onOpenLogsFolder,
   onCreateSupportBundle,
   onCheckpointArchiveLimitInputChange,
   onSaveCheckpointArchiveLimit,
@@ -188,8 +193,8 @@ export function SettingsWorkspace({
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
-  const updateDeveloperOptions = (enabled: boolean) => {
-    onDeveloperOptionsChange(enabled);
+  const updateDeveloperOptions = async (enabled: boolean, developerChallengeId?: string) => {
+    await onDeveloperOptionsChange(enabled, developerChallengeId);
     if (!enabled && visibleSection === "developer") {
       onSectionChange("general");
     }
@@ -236,32 +241,26 @@ export function SettingsWorkspace({
               </div>
             </section>
 
+            <section className="mt-10">
+              <DiagnosticsSettingsPanel
+                status={diagnosticsStatus}
+                message={diagnosticsMessage}
+                loading={loadingDiagnostics}
+                exportingSupportBundle={exportingSupportBundle}
+                onLogLevelChange={onSetLogLevel}
+                onOpenLogsFolder={onOpenLogsFolder}
+                onCreateSupportBundle={onCreateSupportBundle}
+              />
+            </section>
+
             <section className="mt-10 pb-6">
-              <div className="rounded-xl border border-border bg-card p-4">
-                <div className="flex min-w-0 flex-wrap items-center gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{t("settings.developerOptions")}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{t("settings.developerOptionsDesc")}</div>
-                  </div>
-                  <Badge tone={developerOptionsEnabled ? "warn" : "muted"} className="shrink-0">
-                    {developerOptionsEnabled ? t("settings.enabled") : t("connector.off")}
-                  </Badge>
-                  {!developerOptionsEnabled && developerOptionsEverEnabled ? (
-                    <Badge tone="muted" className="shrink-0">
-                      {t("settings.everEnabled")}
-                    </Badge>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant={developerOptionsEnabled ? "outline" : "primary"}
-                    disabled={savingAdvancedSettings}
-                    onClick={() => updateDeveloperOptions(!developerOptionsEnabled)}
-                  >
-                    {savingAdvancedSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                    {developerOptionsEnabled ? t("settings.turnOffDeveloperOptions") : t("settings.turnOnDeveloperOptions")}
-                  </Button>
-                </div>
-              </div>
+              <DeveloperOptionsControl
+                endpoint={endpoint}
+                enabled={developerOptionsEnabled}
+                everEnabled={developerOptionsEverEnabled}
+                saving={savingAdvancedSettings}
+                onChange={updateDeveloperOptions}
+              />
             </section>
           </>
         ) : null}
@@ -404,42 +403,6 @@ export function SettingsWorkspace({
                 {computerUseEnabled ? t("settings.turnOff") : t("settings.turnOn")}
               </Button>
             </div>
-          </div>
-
-          <div className="mt-8 flex min-w-0 items-center gap-2">
-            <h2 className="truncate text-base font-semibold">{t("settings.diagnostics")}</h2>
-            {diagnosticsMessage ? (
-              <Badge tone="ok" className="shrink-0">
-                {diagnosticsMessage}
-              </Badge>
-            ) : null}
-          </div>
-          <div className="mt-4 rounded-lg border border-border bg-card p-4">
-            <div className="flex min-w-0 flex-wrap items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{t("settings.debugLogging")}</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {diagnosticsStatus?.debugLogging ? t("settings.debugLoggingDesc") : t("connector.off")}
-                </div>
-              </div>
-              <Badge tone={diagnosticsStatus?.debugLogging ? "warn" : "muted"} className="shrink-0">
-                {diagnosticsStatus?.debugLogging ? t("settings.debugOn") : t("settings.debugOff")}
-              </Badge>
-              <Button
-                type="button"
-                variant={diagnosticsStatus?.debugLogging ? "outline" : "primary"}
-                disabled={loadingDiagnostics}
-                onClick={() => onSetDebugLogging(!diagnosticsStatus?.debugLogging)}
-              >
-                {loadingDiagnostics ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                {diagnosticsStatus?.debugLogging ? t("settings.turnOff") : t("settings.turnOn")}
-              </Button>
-              <Button type="button" variant="outline" disabled={exportingSupportBundle} onClick={onCreateSupportBundle}>
-                {exportingSupportBundle ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                {t("settings.exportBundle")}
-              </Button>
-            </div>
-            {diagnosticsStatus?.logsDir ? <div className="mt-3 truncate text-xs text-muted-foreground/70">{diagnosticsStatus.logsDir}</div> : null}
           </div>
           <div className="mt-6 rounded-lg border border-border bg-card p-4">
             <div className="text-sm font-medium">{t("settings.compactDebugTitle")}</div>

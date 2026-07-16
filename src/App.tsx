@@ -379,12 +379,13 @@ export default function App() {
     checkpointArchiveLimitInput,
     openSettings,
     loadDiagnostics,
-    setDebugLogging,
+    setLogLevel,
     createSupportBundle,
     loadConnectors,
     updateGatewaySettings,
     saveCheckpointArchiveLimit,
     openCheckpointArchiveFolder,
+    openLogsFolder,
     pickCheckpointArchiveDirectory,
     deleteCheckpointArchives,
     relocateCheckpointArchives,
@@ -1730,7 +1731,9 @@ export default function App() {
   }
 
   async function saveAdvancedSettings(
-    next: Partial<Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">>,
+    next: Partial<Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">> & {
+      developerChallengeId?: string;
+    },
   ) {
     const nextDeveloperOptionsEnabled = next.developerOptionsEnabled ?? developerOptionsEnabled;
     const nextComputerUseEnabled = nextDeveloperOptionsEnabled && (next.computerUseEnabled ?? computerUseEnabled);
@@ -1748,6 +1751,7 @@ export default function App() {
       const payload = await updateAdvancedSettings(targetEndpoint, {
         developerOptionsEnabled: nextDeveloperOptionsEnabled,
         computerUseEnabled: nextComputerUseEnabled,
+        developerChallengeId: next.developerChallengeId,
       });
       const settings = payload.settings;
       setDeveloperOptionsEnabled(settings.developerOptionsEnabled);
@@ -2894,10 +2898,11 @@ export default function App() {
               savingNotes={savingNotes}
               compactDebugEntries={compactDebugEntries}
               onSectionChange={setActiveSettingsSection}
-              onDeveloperOptionsChange={(enabled) =>
-                void saveAdvancedSettings({
+              onDeveloperOptionsChange={(enabled, developerChallengeId) =>
+                saveAdvancedSettings({
                   developerOptionsEnabled: enabled,
                   computerUseEnabled: enabled ? computerUseEnabled : false,
+                  developerChallengeId,
                 })
               }
               onComputerUseChange={(enabled) => void saveAdvancedSettings({ computerUseEnabled: enabled })}
@@ -2918,7 +2923,8 @@ export default function App() {
               onVisionEnabledChange={setVisionEnabled}
               onSaveVisionProfile={saveVisionProfile}
               onClearVisionProfile={() => void clearVisionProfile()}
-              onSetDebugLogging={(enabled) => void setDebugLogging(enabled)}
+              onSetLogLevel={(level) => void setLogLevel(level)}
+              onOpenLogsFolder={() => void openLogsFolder()}
               onCreateSupportBundle={() => void createSupportBundle()}
               onCheckpointArchiveLimitInputChange={setCheckpointArchiveLimitInput}
               onSaveCheckpointArchiveLimit={() => void saveCheckpointArchiveLimit()}

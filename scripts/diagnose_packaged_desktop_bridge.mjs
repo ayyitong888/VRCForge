@@ -407,17 +407,37 @@ async function restorePermissionMode(mode, attempts = 3) {
   return latest || { ok: false, mode, restoredMode: "" };
 }
 
+async function advancedSettingsRequestBody(developerOptionsEnabled, computerUseEnabled) {
+  const body = {
+    developerOptionsEnabled: Boolean(developerOptionsEnabled),
+    computerUseEnabled: Boolean(computerUseEnabled && developerOptionsEnabled),
+  };
+  if (!body.developerOptionsEnabled) return body;
+
+  const current = await appApi("/api/app/advanced-settings");
+  if (current?.payload?.settings?.developerOptionsEnabled) return body;
+
+  const challenge = await appApi("/api/app/advanced-settings/developer-challenge", {
+    method: "POST",
+  });
+  const challengeId = String(challenge?.payload?.challengeId || "");
+  const waitMs = Number(challenge?.payload?.waitMs || 0);
+  if (!challengeId || !Number.isFinite(waitMs) || waitMs < 5_000) {
+    throw new Error("Developer Options challenge did not provide the required safety wait.");
+  }
+  await sleep(waitMs + 100);
+  return { ...body, developerChallengeId: challengeId };
+}
+
 async function restoreAdvancedSettings(settings, attempts = 3) {
   let latest = null;
   const expectedDeveloper = Boolean(settings?.developerOptionsEnabled);
   const expectedComputer = Boolean(settings?.computerUseEnabled && expectedDeveloper);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const body = await advancedSettingsRequestBody(expectedDeveloper, expectedComputer);
     const update = await appApi("/api/app/advanced-settings", {
       method: "POST",
-      body: {
-        developerOptionsEnabled: expectedDeveloper,
-        computerUseEnabled: expectedComputer,
-      },
+      body,
     }).catch((error) => ({ ok: false, error: String(error) }));
     const readback = update?.ok
       ? await appApi("/api/app/advanced-settings").catch((error) => ({ ok: false, error: String(error) }))
@@ -619,9 +639,10 @@ async function main() {
       output.assertions.push("Computer Use entry remained visible while advanced settings were disabled");
     }
 
+    const enabledAdvancedSettingsBody = await advancedSettingsRequestBody(true, true);
     output.advancedSettingsEnabled = await appApi("/api/app/advanced-settings", {
       method: "POST",
-      body: { developerOptionsEnabled: true, computerUseEnabled: true },
+      body: enabledAdvancedSettingsBody,
     });
     output.advancedSettingsEnabledReadback = await appApi("/api/app/advanced-settings");
     const enabledSettings = output.advancedSettingsEnabledReadback?.payload?.settings || {};

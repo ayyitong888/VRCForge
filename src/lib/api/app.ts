@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DiagnosticsStatus, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
@@ -95,7 +95,10 @@ export async function fetchDiagnostics(endpoint: string): Promise<DiagnosticsSta
   return requestJson<DiagnosticsStatus>(`${endpoint}/api/app/diagnostics`);
 }
 
-export async function updateDiagnostics(endpoint: string, request: { debugLogging: boolean }): Promise<DiagnosticsStatus> {
+export async function updateDiagnostics(
+  endpoint: string,
+  request: { logLevel?: DiagnosticLogLevel; debugLogging?: boolean },
+): Promise<DiagnosticsStatus> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<DiagnosticsStatus>("update_diagnostics", {
       request: { ...request, timeoutMs: 30000 },
@@ -152,9 +155,38 @@ export async function fetchAdvancedSettings(
   return requestJson(`${endpoint}/api/app/advanced-settings`, { timeoutMs: 15000 });
 }
 
+export async function beginDeveloperOptionsChallenge(endpoint: string): Promise<DeveloperOptionsChallenge> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DeveloperOptionsChallenge>("begin_developer_options_challenge", {
+      request: { timeoutMs: 15000 },
+    });
+  }
+  return requestJson<DeveloperOptionsChallenge>(`${endpoint}/api/app/advanced-settings/developer-challenge`, {
+    method: "POST",
+    timeoutMs: 15000,
+  });
+}
+
+export async function cancelDeveloperOptionsChallenge(
+  endpoint: string,
+  challengeId: string,
+): Promise<{ ok: boolean; schema?: string; cancelled?: boolean }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("cancel_developer_options_challenge", {
+      request: { challengeId, timeoutMs: 15000 },
+    });
+  }
+  return requestJson(
+    `${endpoint}/api/app/advanced-settings/developer-challenge/${encodeURIComponent(challengeId)}`,
+    { method: "DELETE", timeoutMs: 15000 },
+  );
+}
+
 export async function updateAdvancedSettings(
   endpoint: string,
-  settings: Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">,
+  settings: Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled"> & {
+    developerChallengeId?: string;
+  },
 ): Promise<{ ok: boolean; schema: string; settings: AdvancedSettingsState }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("update_advanced_settings", {

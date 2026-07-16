@@ -45,7 +45,7 @@ Portable zip (`VRCForge_Windows_x64_1.3.0.zip`) is also available for no-install
 
 **Skill packages / 技能包:** `.vsk` community skill packages with manifest and SHA-256 lock validation, Ed25519 signing/trust governance, atomic import/projection, Path-to-Skill capture, SDK scaffolding, and searchable runtime audit evidence.
 
-**Doctor / 诊断:** Startup health checks, debug logging, redacted support bundle export.
+**Doctor / 诊断:** Startup health checks, live log-level controls, redacted timestamped local logs, one-click log-folder access, and redacted support bundle export.
 
 **Avatar Encryption / Anti-Rip (preview):** lilToon and Poiyomi scan/plan/preview with private-addon connector request interfaces. Windows PC-only; requires separately installed private module for execution.
 
