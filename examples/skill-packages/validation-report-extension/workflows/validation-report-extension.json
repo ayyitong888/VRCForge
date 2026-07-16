@@ -1,0 +1,27 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "read_only",
+  "steps": [
+    {
+      "name": "build_extended_validation_report",
+      "tool": "vrcforge_run_validation_report",
+      "writes": false
+    }
+  ],
+  "output": {
+    "format": "validation-report-extension",
+    "appendSections": [
+      "Release blockers",
+      "Cross-platform warnings",
+      "Suggested next checks"
+    ]
+  },
+  "approval": {
+    "required": false,
+    "reason": "The single tool call and all report formatting are read-only."
+  },
+  "rollback": {
+    "required": false,
+    "reason": "The workflow does not mutate local state or Unity assets."
+  }
+}

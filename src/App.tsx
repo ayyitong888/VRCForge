@@ -422,6 +422,8 @@ export default function App() {
     preflightVskPackage,
     importVskPackage,
     exportVskPackage,
+    previewCapturedPath,
+    writeCapturedPath,
     setVskPackageEnabled,
     uninstallVskPackage,
     setVskPackageSafeMode,
@@ -2757,6 +2759,8 @@ export default function App() {
               onTrustSigner={trustVskPackageSigner}
               onRevokeSigner={revokeVskPackageSigner}
               onBlockPackage={blockVskPackage}
+              onPreviewPathToSkill={previewCapturedPath}
+              onWritePathToSkill={writeCapturedPath}
             />
           ) : activeView === "checkpoints" ? (
             <CheckpointWorkspace

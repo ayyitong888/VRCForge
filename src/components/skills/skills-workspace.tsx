@@ -1,7 +1,14 @@
 import { ChevronDown, Loader2, Search, Wrench } from "lucide-react";
 import { type FormEvent, type ReactNode, useMemo, useState } from "react";
 import i18n from "../../i18n";
-import type { AgentSkill, AgentSkillCheck, SkillPackageEntry, SkillPackagePreflight } from "../../lib/api";
+import type {
+  AgentSkill,
+  AgentSkillCheck,
+  PathToSkillCaptureRequest,
+  PathToSkillCaptureResult,
+  SkillPackageEntry,
+  SkillPackagePreflight,
+} from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -83,6 +90,8 @@ export function SkillsWorkspace({
   onTrustSigner,
   onRevokeSigner,
   onBlockPackage,
+  onPreviewPathToSkill,
+  onWritePathToSkill,
 }: {
   skills: AgentSkill[];
   skillCount: number;
@@ -113,6 +122,8 @@ export function SkillsWorkspace({
   onTrustSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
   onRevokeSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
   onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
+  onPreviewPathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
+  onWritePathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
 }) {
   const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
@@ -507,6 +518,8 @@ export function SkillsWorkspace({
           onTrustSigner={onTrustSigner}
           onRevokeSigner={onRevokeSigner}
           onBlockPackage={onBlockPackage}
+          onPreviewPathToSkill={onPreviewPathToSkill}
+          onWritePathToSkill={onWritePathToSkill}
         />
         </div>
       </div>

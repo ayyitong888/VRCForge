@@ -1,0 +1,18 @@
+{
+  "id": "community.examples.optimizer-report-helper",
+  "name": "Optimizer Report Helper",
+  "skill_name": "optimizer-report-helper",
+  "version": "1.0.0",
+  "author": "VRCForge Examples",
+  "description": "Read-only optimizer plan formatting skill package example.",
+  "min_vrcforge_version": "1.3.0",
+  "permissions": [
+    "read_project",
+    "unity_run_validation",
+    "unity_scan_scene"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/optimizer-report-helper.json"
+  }
+}

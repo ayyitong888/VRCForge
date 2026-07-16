@@ -1,0 +1,33 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "approval_required",
+  "steps": [
+    {
+      "name": "request_material_preset_apply",
+      "tool": "vrcforge_request_apply",
+      "writes": true,
+      "request": {
+        "targetTool": "vrcforge_apply_shader_tuning",
+        "presetSource": "presets/material-presets.json",
+        "onePresetPerExecution": true
+      }
+    }
+  ],
+  "approval": {
+    "required": true,
+    "reason": "The selected preset changes Unity material properties through vrcforge_apply_shader_tuning."
+  },
+  "checkpoint": {
+    "required": true,
+    "scope": [
+      "Assets",
+      "Packages",
+      "ProjectSettings"
+    ]
+  },
+  "rollback": {
+    "required": true,
+    "tool": "vrcforge_restore_shader_tuning",
+    "reason": "The approved shader tuning write must remain restorable."
+  }
+}

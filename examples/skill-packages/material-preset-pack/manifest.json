@@ -1,0 +1,18 @@
+{
+  "id": "community.examples.material-preset-pack",
+  "name": "Material Preset Pack",
+  "skill_name": "material-preset-pack",
+  "version": "1.0.0",
+  "author": "VRCForge Examples",
+  "description": "Approval-gated material preset skill package example using the existing shader tuning channel.",
+  "min_vrcforge_version": "1.3.0",
+  "permissions": [
+    "read_project",
+    "unity_modify_materials"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/material-preset-pack.json",
+    "presets": "presets/material-presets.json"
+  }
+}

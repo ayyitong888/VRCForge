@@ -4664,7 +4664,16 @@ class DashboardServerTests(unittest.TestCase):
             preview_dir = root / "preview-should-not-write"
             source_dir = root / "captured-source"
             export_source_dir = root / "captured-export-source"
+            occupied_source_dir = root / "occupied-source"
+            occupied_source_dir.mkdir()
+            occupied_marker = occupied_source_dir / "keep.txt"
+            occupied_marker.write_text("keep", encoding="utf-8")
+            temp_output_root = root / "server-temp-output"
+            temp_output_root.mkdir()
             package_path = root / "shader-preset.vsk"
+            occupied_package_path = root / "occupied-package.vsk"
+            occupied_package_path.write_bytes(b"original-package-bytes")
+            blocked_export_source = root / "blocked-export-source"
             summary = {
                 "status": "passed",
                 "workflow": "shader_adapter_semantic_tuning",
@@ -4712,6 +4721,32 @@ class DashboardServerTests(unittest.TestCase):
                         "writeSource": True,
                     },
                 )
+                existing_output = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(occupied_source_dir),
+                        "writeSource": True,
+                    },
+                )
+                with patch(
+                    "dashboard_server.tempfile",
+                    SimpleNamespace(mkdtemp=Mock(return_value=str(temp_output_root))),
+                ):
+                    temp_exported = client.post(
+                        "/api/app/path-to-skill/write",
+                        json={
+                            "summary": summary,
+                            "packageId": "community.path-to-skill.shader-preset",
+                            "skillName": "shader-preset",
+                            "title": "Shader Preset",
+                            "exportVsk": True,
+                            "confirmExport": True,
+                        },
+                    )
                 exported = client.post(
                     "/api/app/path-to-skill/write",
                     json={
@@ -4723,6 +4758,19 @@ class DashboardServerTests(unittest.TestCase):
                         "exportVsk": True,
                         "confirmExport": True,
                         "packageOutputPath": str(package_path),
+                    },
+                )
+                existing_package_output = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(blocked_export_source),
+                        "exportVsk": True,
+                        "confirmExport": True,
+                        "packageOutputPath": str(occupied_package_path),
                     },
                 )
 
@@ -4742,10 +4790,27 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue((source_dir / "SKILL.md").is_file())
             self.assertTrue((source_dir / "workflows" / "captured-path.json").is_file())
 
+            self.assertEqual(existing_output.status_code, 400, existing_output.text)
+            self.assertIn("already exists", existing_output.json()["detail"])
+            self.assertEqual(occupied_marker.read_text(encoding="utf-8"), "keep")
+            self.assertEqual({item.name for item in occupied_source_dir.iterdir()}, {"keep.txt"})
+
+            self.assertEqual(temp_exported.status_code, 200, temp_exported.text)
+            temp_source_dir = temp_output_root / "source"
+            temp_export_payload = temp_exported.json()
+            self.assertEqual(Path(temp_export_payload["writtenSource"]["path"]), temp_source_dir)
+            self.assertTrue((temp_source_dir / "SKILL.md").is_file())
+            self.assertEqual(Path(temp_export_payload["exported"]["package_path"]).parent, temp_output_root)
+
+            self.assertEqual(existing_package_output.status_code, 400, existing_package_output.text)
+            self.assertIn("already exists", existing_package_output.json()["detail"])
+            self.assertEqual(occupied_package_path.read_bytes(), b"original-package-bytes")
+            self.assertFalse(blocked_export_source.exists())
+
             self.assertEqual(exported.status_code, 200, exported.text)
             self.assertTrue(package_path.is_file())
             self.assertEqual(exported.json()["exported"]["signature_status"], "dev")
-            package_preview = SkillPackageService(root / "inspect-store", vrcforge_version="0.9.0-beta").inspect_package(package_path)
+            package_preview = SkillPackageService(root / "inspect-store", vrcforge_version="1.3.0").inspect_package(package_path)
             self.assertEqual(package_preview.manifest["id"], "community.path-to-skill.shader-preset")
             self.assertEqual(package_preview.manifest["entrypoints"]["workflow"], "workflows/captured-path.json")
 

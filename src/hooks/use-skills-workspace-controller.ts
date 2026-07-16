@@ -11,14 +11,23 @@ import {
   fetchSkills,
   importSkillPackage,
   preflightSkillPackage,
+  previewPathToSkill,
   revokeSkillPackageSigner,
   setSkillPackageEnabled,
   setSkillPackageSafeMode,
   trustSkillPackageSigner,
   uninstallSkillPackage,
   updateSkill,
+  writePathToSkill,
 } from "../lib/api";
-import type { AgentSkill, AgentSkillCheck, AgentSkillRegistry, SkillPackageEntry } from "../lib/api";
+import type {
+  AgentSkill,
+  AgentSkillCheck,
+  AgentSkillRegistry,
+  PathToSkillCaptureRequest,
+  PathToSkillCaptureResult,
+  SkillPackageEntry,
+} from "../lib/api";
 import { emptySkillDraft } from "../lib/skill-draft";
 
 type UseSkillsWorkspaceControllerParams = {
@@ -153,6 +162,30 @@ export function useSkillsWorkspaceController({
     } finally {
       setLoadingSkillPackages(false);
     }
+  }
+
+  async function previewCapturedPath(request: PathToSkillCaptureRequest): Promise<PathToSkillCaptureResult> {
+    let targetEndpoint = endpoint;
+    if (!runtimeConnected) {
+      const readyEndpoint = await startRuntime();
+      if (!readyEndpoint) {
+        throw new Error(t("package.pathToSkill.runtimeUnavailable"));
+      }
+      targetEndpoint = readyEndpoint;
+    }
+    return previewPathToSkill(targetEndpoint, request);
+  }
+
+  async function writeCapturedPath(request: PathToSkillCaptureRequest): Promise<PathToSkillCaptureResult> {
+    let targetEndpoint = endpoint;
+    if (!runtimeConnected) {
+      const readyEndpoint = await startRuntime();
+      if (!readyEndpoint) {
+        throw new Error(t("package.pathToSkill.runtimeUnavailable"));
+      }
+      targetEndpoint = readyEndpoint;
+    }
+    return writePathToSkill(targetEndpoint, request);
   }
 
   async function setVskPackageEnabled(skillPackageId: string, enabled: boolean) {
@@ -373,6 +406,8 @@ export function useSkillsWorkspaceController({
     preflightVskPackage,
     importVskPackage,
     exportVskPackage,
+    previewCapturedPath,
+    writeCapturedPath,
     setVskPackageEnabled,
     uninstallVskPackage,
     setVskPackageSafeMode,

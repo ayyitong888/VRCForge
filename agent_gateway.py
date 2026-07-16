@@ -36,6 +36,13 @@ from agent_goal_store import AgentGoalStore, AgentGoalStoreError
 
 ToolHandler = Callable[[dict[str, Any]], Any]
 
+RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
+RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
+RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES = 256 * 1024
+PROJECTED_SKILL_STATE_NAME = ".vrcforge-package-state.json"
+PROJECTED_SKILL_STATE_MAX_BYTES = 4 * 1024
+PROJECTED_SKILL_STATE_SCHEMA = "vrcforge.projected-skill-state.v1"
+
 ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
 ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
 APPLY_RECOVERY_SCHEMA = "vrcforge.interrupted_apply_recovery.v1"
@@ -1862,8 +1869,7 @@ class AgentGateway:
         skill = self._normalize_user_skill(payload)
         skill_id = str(skill["name"])
         self._ensure_user_skill_can_use_id(skill_id, skills)
-        skills.append(skill)
-        self._save_user_skills(skills)
+        self._save_user_skill(skill)
         self.append_audit({"event": "user_skill_created", "skill": skill_id})
         return {"ok": True, "skill": skill, **self.build_skill_registry()}
 
@@ -1874,7 +1880,7 @@ class AgentGateway:
             if existing.get("name") == skill_id:
                 next_payload = {**existing, **payload, "name": skill_id}
                 skills[index] = self._normalize_user_skill(next_payload, existing_id=skill_id)
-                self._save_user_skills(skills)
+                self._save_user_skill(skills[index])
                 self.append_audit({"event": "user_skill_updated", "skill": skill_id})
                 return {"ok": True, "skill": skills[index], **self.build_skill_registry()}
         raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
@@ -1885,7 +1891,10 @@ class AgentGateway:
         kept = [skill for skill in skills if skill.get("name") != skill_id]
         if len(kept) == len(skills):
             raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
-        self._save_user_skills(kept)
+        skill_dir = self.user_skills_dir / skill_id
+        if _path_is_link_like(skill_dir):
+            raise AgentGatewayError(f"Refusing to delete a linked user skill directory: {skill_id}", status_code=400)
+        remove_tree(skill_dir)
         self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
         return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
 
@@ -7692,6 +7701,10 @@ class AgentGateway:
             try:
                 parsed = parse_skill_markdown(skill_file)
                 normalized = self._normalize_user_skill(parsed, existing_id=str(parsed.get("name") or skill_file.parent.name))
+                projected_state = self._load_projected_skill_state(skill_file)
+                if projected_state is not None:
+                    normalized["enabled"] = projected_state
+                    normalized["available"] = projected_state
                 normalized["storagePath"] = str(skill_file)
                 skills.append(normalized)
             except Exception as exc:  # noqa: BLE001 - one broken user skill must not break startup.
@@ -7736,6 +7749,31 @@ class AgentGateway:
                 )
         return skills
 
+    def _load_projected_skill_state(self, skill_file: Path) -> bool | None:
+        state_path = skill_file.parent / PROJECTED_SKILL_STATE_NAME
+        if not state_path.exists():
+            return None
+        if _path_is_link_like(state_path) or not state_path.is_file():
+            raise AgentGatewayError("Projected skill state must be a regular non-link file.", status_code=400)
+        metadata = state_path.stat(follow_symlinks=False)
+        if metadata.st_size > PROJECTED_SKILL_STATE_MAX_BYTES:
+            raise AgentGatewayError("Projected skill state exceeds its size limit.", status_code=400)
+        with state_path.open("rb") as stream:
+            raw = stream.read(PROJECTED_SKILL_STATE_MAX_BYTES + 1)
+        if len(raw) > PROJECTED_SKILL_STATE_MAX_BYTES:
+            raise AgentGatewayError("Projected skill state exceeds its size limit.", status_code=400)
+        try:
+            state = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentGatewayError("Projected skill state is not valid UTF-8 JSON.", status_code=400) from exc
+        if (
+            not isinstance(state, dict)
+            or state.get("schema") != PROJECTED_SKILL_STATE_SCHEMA
+            or not isinstance(state.get("enabled"), bool)
+        ):
+            raise AgentGatewayError("Projected skill state has an invalid schema.", status_code=400)
+        return bool(state["enabled"])
+
     def _find_user_skill(self, skill_id: str) -> dict[str, Any] | None:
         skill_id = normalize_skill_id(skill_id)
         for skill in self._load_user_skills():
@@ -7752,10 +7790,18 @@ class AgentGateway:
             if name not in wanted and SKILL_ID_RE.fullmatch(name):
                 remove_tree(path)
         for skill in skills:
-            skill_id = normalize_skill_id(str(skill.get("name") or ""))
-            skill_dir = skills_dir / skill_id
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            (skill_dir / "SKILL.md").write_text(render_skill_markdown(skill), encoding="utf-8")
+            self._save_user_skill(skill)
+
+    def _save_user_skill(self, skill: dict[str, Any]) -> None:
+        skill_id = normalize_skill_id(str(skill.get("name") or ""))
+        skill_dir = self.user_skills_dir / skill_id
+        if skill_dir.exists() and _path_is_link_like(skill_dir):
+            raise AgentGatewayError(f"Refusing to write through a linked user skill directory: {skill_id}", status_code=400)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.exists() and _path_is_link_like(skill_file):
+            raise AgentGatewayError(f"Refusing to overwrite a linked user skill file: {skill_id}", status_code=400)
+        skill_file.write_text(render_skill_markdown(skill), encoding="utf-8")
 
     def _normalize_user_skill(self, payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
         skill_id = normalize_skill_id(str(first_payload_value(payload, "name") or existing_id or ""))
@@ -7893,10 +7939,110 @@ class AgentGateway:
             status = "error"
             reasons.append(f"unsupported os: {current_os_key()}")
 
+        try:
+            self._load_runtime_skill_support_files(skill)
+        except AgentGatewayError as exc:
+            status = "error"
+            reasons.append(str(exc))
+
         if not skill.get("available", True) and status == "ok":
             status = "warning"
             reasons.append("dependencies unavailable")
         return {"status": status, "reasons": reasons}
+
+    def _load_runtime_skill_support_files(self, skill: dict[str, Any]) -> list[dict[str, str]]:
+        """Load declared projected support files through a small, text-only boundary."""
+
+        declared = ensure_string_list(skill.get("supportFiles"))
+        if not declared:
+            return []
+        if len(declared) > RUNTIME_SKILL_SUPPORT_MAX_FILES:
+            raise AgentGatewayError(
+                f"skill support files exceed the {RUNTIME_SKILL_SUPPORT_MAX_FILES}-file runtime limit",
+                status_code=400,
+            )
+
+        storage_value = str(skill.get("storagePath") or "").strip()
+        if not storage_value:
+            raise AgentGatewayError("skill support files require a projected SKILL.md storage path", status_code=400)
+        storage_path = Path(storage_value)
+        try:
+            storage_resolved = storage_path.resolve(strict=True)
+            support_root = storage_resolved.parent
+            user_skills_root = self.user_skills_dir.resolve(strict=True)
+            support_root.relative_to(user_skills_root)
+        except (OSError, ValueError) as exc:
+            raise AgentGatewayError("skill support root is missing or outside the user skill store", status_code=400) from exc
+        if _path_is_link_like(storage_path) or not storage_resolved.is_file():
+            raise AgentGatewayError("projected SKILL.md must be a regular non-link file", status_code=400)
+
+        try:
+            from skill_packages import SkillPackageService
+        except ImportError as exc:  # pragma: no cover - packaged builds always include package support.
+            raise AgentGatewayError("skill support validation is unavailable", status_code=500) from exc
+
+        loaded: list[dict[str, str]] = []
+        total_bytes = 0
+        seen: set[str] = set()
+        for raw_relative in declared:
+            relative = str(raw_relative or "").strip()
+            if not relative or "\\" in relative:
+                raise AgentGatewayError("skill support paths must use non-empty forward-slash relative paths", status_code=400)
+            relative_path = PurePosixPath(relative)
+            if relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_path.parts):
+                raise AgentGatewayError(f"unsafe skill support path: {relative}", status_code=400)
+            normalized = relative_path.as_posix()
+            collision_key = normalized.casefold()
+            if collision_key in seen:
+                raise AgentGatewayError(f"duplicate skill support path: {normalized}", status_code=400)
+            seen.add(collision_key)
+
+            candidate = support_root.joinpath(*relative_path.parts)
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(support_root)
+            except (OSError, ValueError) as exc:
+                raise AgentGatewayError(f"skill support file is missing or escapes its projection: {normalized}", status_code=400) from exc
+            if _path_is_link_like(candidate) or _path_has_link_like_parent(candidate, support_root) or not resolved.is_file():
+                raise AgentGatewayError(f"skill support file must be a regular non-link file: {normalized}", status_code=400)
+            try:
+                metadata = resolved.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AgentGatewayError(f"skill support file metadata is unavailable: {normalized}", status_code=400) from exc
+            if metadata.st_size > RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES:
+                raise AgentGatewayError(
+                    f"skill support file exceeds the {RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES}-byte limit: {normalized}",
+                    status_code=400,
+                )
+            if total_bytes + metadata.st_size > RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES:
+                raise AgentGatewayError(
+                    f"skill support files exceed the {RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES}-byte total limit",
+                    status_code=400,
+                )
+            try:
+                with resolved.open("rb") as stream:
+                    data = stream.read(RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES + 1)
+            except OSError as exc:
+                raise AgentGatewayError(f"skill support file cannot be read: {normalized}", status_code=400) from exc
+            if len(data) > RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES:
+                raise AgentGatewayError(
+                    f"skill support file exceeds the {RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES}-byte limit: {normalized}",
+                    status_code=400,
+                )
+            total_bytes += len(data)
+            if total_bytes > RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES:
+                raise AgentGatewayError(
+                    f"skill support files exceed the {RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES}-byte total limit",
+                    status_code=400,
+                )
+            if SkillPackageService._contains_sensitive_content(data):
+                raise AgentGatewayError(f"skill support file contains secret or binary material: {normalized}", status_code=400)
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AgentGatewayError(f"skill support file must be UTF-8 text: {normalized}", status_code=400) from exc
+            loaded.append({"path": normalized, "content": content})
+        return loaded
 
     def visible_write_targets(self, config: AgentGatewayConfig | None = None) -> list[dict[str, Any]]:
         config = config or self.ensure_config()
@@ -9653,9 +9799,17 @@ class AgentGateway:
         agent_name: str,
         config: AgentGatewayConfig,
     ) -> dict[str, Any]:
+        package_audit_context = self._runtime_skill_package_audit_context(skill)
         validation = ensure_dict(skill.get("validation")) or self._validate_skill(skill, config)
         status = "loaded" if skill.get("enabled", True) and validation.get("status") != "error" else "blocked"
-        result = redact_sensitive(build_runtime_skill_payload(skill, params))
+        support_files: list[dict[str, str]] = []
+        if status == "loaded":
+            try:
+                support_files = self._load_runtime_skill_support_files(skill)
+            except AgentGatewayError as exc:
+                status = "blocked"
+                validation = {"status": "error", "reasons": [str(exc)]}
+        result = redact_sensitive(build_runtime_skill_payload(skill, params, support_files=support_files))
         payload = {
             "ok": status == "loaded",
             "status": status,
@@ -9676,13 +9830,21 @@ class AgentGateway:
                     "agent": agent_name,
                     "status": payload["status"],
                     "error": payload.get("error"),
+                    **package_audit_context,
                 }
             )
             return payload
 
         entrypoint = str(skill.get("entrypointTool") or "").strip()
         if entrypoint:
-            entrypoint_result = self._execute_skill_entrypoint(skill, entrypoint, params, agent_name, config)
+            entrypoint_result = self._execute_skill_entrypoint(
+                skill,
+                entrypoint,
+                params,
+                agent_name,
+                config,
+                package_audit_context=package_audit_context,
+            )
             payload["entrypointTool"] = entrypoint
             payload["entrypoint"] = entrypoint_result
             if entrypoint_result.get("status") == "executed":
@@ -9700,9 +9862,51 @@ class AgentGateway:
                 "agent": agent_name,
                 "status": payload["status"],
                 "entrypointTool": entrypoint,
+                **package_audit_context,
             }
         )
         return payload
+
+    def _runtime_skill_package_audit_context(self, skill: dict[str, Any]) -> dict[str, Any]:
+        """Resolve immutable installed-package identity for a projected skill.
+
+        Projected user skills intentionally remain plain ``SKILL.md`` files, so
+        package identity is read from the validated package registry at runtime.
+        The projection must still match the package lock before signer identity is
+        attached; edited or hand-authored skills therefore keep the legacy audit
+        shape instead of being misattributed to a signed package.
+        """
+
+        skill_name = normalize_skill_id(str(skill.get("name") or ""))
+        storage_value = str(skill.get("storagePath") or "").strip()
+        if not skill_name or not storage_value:
+            return {}
+
+        package_store = self.user_constraints_path.parent / "skill-packages"
+        registry_path = package_store / "registry.json"
+        if not registry_path.is_file() or registry_path.is_symlink():
+            return {}
+
+        try:
+            # Local import keeps the gateway usable in minimal environments that
+            # do not expose package management, while the desktop/backend build
+            # uses the same validator as import, trust, and revocation flows.
+            from skill_packages import SkillPackageService
+
+            storage_path = Path(storage_value)
+            storage_resolved = storage_path.resolve(strict=True)
+            skills_root = self.user_skills_dir.resolve(strict=True)
+            storage_resolved.relative_to(skills_root)
+            if not storage_path.is_file() or storage_path.is_symlink():
+                return {}
+            service = SkillPackageService(package_store, vrcforge_version="0.0.0")
+            return service.runtime_audit_context(
+                skill_name,
+                storage_resolved,
+                ensure_string_list(skill.get("supportFiles")),
+            )
+        except Exception:  # noqa: BLE001 - enrichment must not break legacy skill execution.
+            return {}
 
     def _execute_skill_entrypoint(
         self,
@@ -9711,6 +9915,8 @@ class AgentGateway:
         params: dict[str, Any],
         agent_name: str,
         config: AgentGatewayConfig,
+        *,
+        package_audit_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         allowed_tools = ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
         disallowed_tools = ensure_string_list(skill.get("disallowedTools"))
@@ -9741,6 +9947,7 @@ class AgentGateway:
                     "tool": entrypoint,
                     "agent": agent_name,
                     "status": "ok",
+                    **(package_audit_context or {}),
                 }
             )
             return {
@@ -10591,7 +10798,12 @@ def extract_skill_invocation(message: str) -> tuple[str, str] | None:
     return skill_name, (match.group(2) or "").strip()
 
 
-def build_runtime_skill_payload(skill: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+def build_runtime_skill_payload(
+    skill: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    support_files: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     arguments = str(params.get("arguments") or params.get("rawArguments") or params.get("skillArguments") or "").strip()
     resolved_instructions = resolve_skill_arguments(str(skill.get("instructions") or ""), arguments)
     return {
@@ -10613,10 +10825,36 @@ def build_runtime_skill_payload(skill: dict[str, Any], params: dict[str, Any]) -
         "argumentHint": skill.get("argumentHint"),
         "arguments": arguments,
         "instructions": resolved_instructions,
+        "supportFiles": list(support_files or []),
         "validation": skill.get("validation"),
         "availabilityReasons": skill.get("availabilityReasons"),
         "tags": skill.get("tags"),
     }
+
+
+def _path_is_link_like(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+    except OSError:
+        return True
+
+
+def _path_has_link_like_parent(path: Path, root: Path) -> bool:
+    current = path
+    while True:
+        if _path_is_link_like(current):
+            return True
+        if current == root:
+            return False
+        if root not in current.parents:
+            return True
+        current = current.parent
 
 
 def resolve_skill_arguments(instructions: str, arguments: str) -> str:

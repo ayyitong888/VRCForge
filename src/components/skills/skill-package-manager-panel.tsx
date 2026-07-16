@@ -1,10 +1,17 @@
 import { Check, Copy, Eye, EyeOff, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import i18n from "../../i18n";
-import type { SkillPackageEntry, SkillPackagePreflight } from "../../lib/api";
+import type {
+  PathToSkillCaptureRequest,
+  PathToSkillCaptureResult,
+  SkillPackageEntry,
+  SkillPackagePreflight,
+} from "../../lib/api";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
+import { PathToSkillCapturePanel } from "./path-to-skill-capture-panel";
+import { SkillPackageAuditList } from "./skill-package-audit-list";
 
 export function SkillPackageManagerPanel({
   packages,
@@ -24,6 +31,8 @@ export function SkillPackageManagerPanel({
   onTrustSigner,
   onRevokeSigner,
   onBlockPackage,
+  onPreviewPathToSkill,
+  onWritePathToSkill,
 }: {
   packages: SkillPackageEntry[];
   packageStore: string;
@@ -42,6 +51,8 @@ export function SkillPackageManagerPanel({
   onTrustSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
   onRevokeSigner: (signerFingerprint: string, reason?: string) => Promise<unknown>;
   onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
+  onPreviewPathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
+  onWritePathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
 }) {
   const [packagePath, setPackagePath] = useState("");
   const [exportSkillName, setExportSkillName] = useState("");
@@ -57,7 +68,6 @@ export function SkillPackageManagerPanel({
   const [blockPackageId, setBlockPackageId] = useState("");
   const preview = normalizeSkillPackagePreview(preflight);
   const safeModeEnabled = skillPackageSafeModeEnabled(governance);
-  const auditTail = audit.slice(-3).reverse();
   async function runPreflight() {
     if (!packagePath.trim()) {
       return;
@@ -285,16 +295,7 @@ export function SkillPackageManagerPanel({
               {i18n.t("package.block")}
             </Button>
           </div>
-          {auditTail.length ? (
-            <div className="grid gap-1 border-t border-border pt-3 text-xs text-muted-foreground">
-              {auditTail.map((item, index) => (
-                <div key={`${String(item.event || i18n.t("package.audit"))}-${index}`} className="flex min-w-0 gap-2">
-                  <span className="shrink-0 font-mono">{String(item.event || i18n.t("package.audit"))}</span>
-                  <span className="min-w-0 truncate">{String(item.skill_id || item.signer_fingerprint || item.package_id || item.reason || "")}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <SkillPackageAuditList audit={audit} />
         </div>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
@@ -336,6 +337,8 @@ export function SkillPackageManagerPanel({
             {preview.manifest ? <SkillOutputBlock label="Manifest" value={formatPayload(preview.manifest)} /> : null}
           </div>
         ) : null}
+
+        <PathToSkillCapturePanel onPreview={onPreviewPathToSkill} onWrite={onWritePathToSkill} />
 
         <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">

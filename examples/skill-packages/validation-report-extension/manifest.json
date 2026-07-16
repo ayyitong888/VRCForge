@@ -1,0 +1,18 @@
+{
+  "id": "community.examples.validation-report-extension",
+  "name": "Validation Report Extension",
+  "skill_name": "validation-report-extension",
+  "version": "1.0.0",
+  "author": "VRCForge Examples",
+  "description": "Read-only validation report extension skill package example.",
+  "min_vrcforge_version": "1.3.0",
+  "permissions": [
+    "read_project",
+    "unity_run_validation",
+    "unity_scan_scene"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/validation-report-extension.json"
+  }
+}

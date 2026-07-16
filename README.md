@@ -61,9 +61,16 @@ backend\vrcforge_backend.exe --cli checkpoint list --project C:\Path\To\UnityPro
 # Source checkout
 python tools\vrcforge_cli.py doctor
 python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
+
+# Skill SDK (VRCForge 1.3+)
+python tools\vrcforge_cli.py skill init .\my-avatar-report --id community.example.my-avatar-report --tool vrcforge_run_validation_report --permission read_project --permission unity_run_validation --permission unity_scan_scene
+python tools\vrcforge_cli.py --json skill lock-validate .\my-avatar-report.vsk
 ```
 
 Write commands (`apply`, `rollback`) create approval requests; actual writes still go through the desktop approval path.
+For a generated write skill, pass `--writes`, the explicit target tool, and a
+matching mutating permission. The SDK emits a request-only package with no
+direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 

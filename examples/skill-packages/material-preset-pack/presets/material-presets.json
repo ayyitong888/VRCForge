@@ -1,0 +1,25 @@
+{
+  "schema": "vrcforge.material-preset-pack.v1",
+  "presets": [
+    {
+      "id": "balanced-toon",
+      "title": "Balanced Toon",
+      "description": "A restrained general-purpose toon baseline.",
+      "values": {
+        "smoothness": 0.35,
+        "specular_strength": 0.25,
+        "emission_strength": 0.0
+      }
+    },
+    {
+      "id": "quest-conservative",
+      "title": "Quest Conservative",
+      "description": "A conservative mobile-oriented semantic profile.",
+      "values": {
+        "smoothness": 0.2,
+        "specular_strength": 0.1,
+        "emission_strength": 0.0
+      }
+    }
+  ]
+}

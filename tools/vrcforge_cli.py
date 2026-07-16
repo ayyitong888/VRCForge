@@ -3,16 +3,42 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8757"
 PLAN_SCHEMA = "vrcforge.cli_plan.v1"
+SKILL_WORKFLOW_SCHEMA = "vrcforge.skill-package.workflow.v1"
+SKILL_LOCK_VALIDATION_SCHEMA = "vrcforge.skill-lock-validation.v1"
+DEFAULT_SKILL_MIN_VRCFORGE_VERSION = "1.3.0"
+SKILL_WRITE_ENTRYPOINT = "vrcforge_request_apply"
+SKILL_WRITE_CONTROL_TOOLS = {
+    SKILL_WRITE_ENTRYPOINT,
+    "vrcforge_apply_approved",
+    "vrcforge_execute_approved_shell",
+}
+SKILL_MUTATING_PERMISSIONS = {
+    "unity_modify_materials",
+    "unity_modify_prefab",
+    "unity_modify_components",
+    "write_project_files",
+    "delete_files",
+    "execute_shell",
+    "run_editor_script",
+    "write_outside_project",
+}
+SKILL_ID_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)+$"
+)
 
 
 class CliError(RuntimeError):
@@ -226,6 +252,423 @@ def command_skill_list(client: VRCForgeClient, args: argparse.Namespace) -> dict
     return client.request("GET", "/api/app/skills")
 
 
+def _skill_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-_")
+    if not normalized or len(normalized) > 80:
+        raise CliError("Skill name must contain lowercase letters, numbers, dashes, or underscores.")
+    return normalized
+
+
+def _skill_title(value: str) -> str:
+    raw = str(value or "")
+    if "---" in raw:
+        raise CliError("Skill frontmatter values cannot contain the '---' document delimiter.")
+    title = re.sub(r"[\r\n]+", " ", raw).strip()
+    if not title:
+        raise CliError("Skill title cannot be empty.")
+    return title[:120]
+
+
+def _frontmatter_scalar(value: str) -> str:
+    raw = str(value or "")
+    if "---" in raw:
+        raise CliError("Skill frontmatter values cannot contain the '---' document delimiter.")
+    text = re.sub(r"[\r\n]+", " ", raw).strip()
+    if not text:
+        return '""'
+    if re.search(r"[:#\[\],]|^\s|\s$", text):
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _skill_skeleton_files(args: argparse.Namespace) -> dict[str, str]:
+    package_id = str(args.package_id or "").strip().lower()
+    if not SKILL_ID_RE.fullmatch(package_id):
+        raise CliError("--id must be a lowercase reverse-domain package id.")
+    name = _skill_name(args.name or package_id.rsplit(".", 1)[-1])
+    title = _skill_title(args.title or name.replace("-", " ").replace("_", " ").title())
+    tool = str(args.tool or "").strip()
+    if not re.fullmatch(r"vrcforge_[a-z0-9_]{1,71}", tool):
+        raise CliError("--tool must be a static VRCForge tool id.")
+    permissions = sorted({str(item).strip() for item in (args.permission or ["read_project"]) if str(item).strip()})
+    if not permissions:
+        raise CliError("At least one --permission is required.")
+    writes = bool(args.writes)
+    if writes and tool in SKILL_WRITE_CONTROL_TOOLS:
+        raise CliError("--tool must name the explicit write target, not an approval control or wrapper tool.")
+    if not writes and tool == SKILL_WRITE_ENTRYPOINT:
+        raise CliError("vrcforge_request_apply is only a generated wrapper entrypoint for --writes skills.")
+    if writes and not SKILL_MUTATING_PERMISSIONS.intersection(permissions):
+        supported = ", ".join(sorted(SKILL_MUTATING_PERMISSIONS))
+        raise CliError(
+            "--writes requires at least one explicit mutating --permission; "
+            f"choose the permission matching the target tool ({supported})."
+        )
+    workflow_tool = SKILL_WRITE_ENTRYPOINT if writes else tool
+    runtime_entrypoint_tool = "" if writes else tool
+    target_tool = tool if writes else ""
+    workflow_path = f"workflows/{name}.json"
+    test_path = "tests/test_skill_smoke.py"
+    raw_description = str(args.description or f"{title} VRCForge skill package.")
+    if "---" in raw_description:
+        raise CliError("Skill frontmatter values cannot contain the '---' document delimiter.")
+    description = re.sub(
+        r"[\r\n]+",
+        " ",
+        raw_description,
+    ).strip()
+    author = re.sub(r"[\r\n]+", " ", str(args.author or "VRCForge Skill Author")).strip()
+    manifest = {
+        "id": package_id,
+        "name": title,
+        "skill_name": name,
+        "version": str(args.version or "1.0.0").strip(),
+        "author": author,
+        "description": description,
+        "min_vrcforge_version": str(
+            args.min_vrcforge_version or DEFAULT_SKILL_MIN_VRCFORGE_VERSION
+        ).strip(),
+        "permissions": permissions,
+        "entrypoints": {"skill": "SKILL.md", "workflow": workflow_path},
+    }
+    step: dict[str, Any] = {
+        "name": "request_apply" if writes else "run",
+        "tool": workflow_tool,
+        "writes": writes,
+    }
+    if writes:
+        step["request"] = {"targetTool": target_tool}
+    workflow = {
+        "schema": SKILL_WORKFLOW_SCHEMA,
+        "mode": "approval_gated" if writes else "read_only",
+        "steps": [step],
+        "approval": {
+            "required": writes,
+            "reason": "Write tools must use the VRCForge approval boundary." if writes else "The tool call is read-only.",
+        },
+        "checkpoint": {
+            "required": writes,
+            "scope": ["Assets", "Packages", "ProjectSettings"] if writes else [],
+        },
+        "rollback": {
+            "required": writes,
+            "reason": "Write tools require checkpoint and rollback evidence." if writes else "No project state is mutated.",
+        },
+    }
+    allowed_tool_names = [workflow_tool, *([target_tool] if target_tool else [])]
+    allowed_tools = "\n".join(f"  - {item}" for item in allowed_tool_names)
+    if writes:
+        instructions = (
+            f"Execute exactly one gated `{SKILL_WRITE_ENTRYPOINT}` call with `target_tool` fixed to "
+            f"`{target_tool}`. Never call `{target_tool}` directly. Preserve the runtime approval, "
+            "checkpoint, audit, and rollback boundaries."
+        )
+    else:
+        instructions = (
+            f"Execute exactly one read-only `{tool}` call. Preserve the runtime audit boundary and do not "
+            "introduce project writes."
+        )
+    runtime_entrypoint_line = (
+        f"entrypoint-tool: {runtime_entrypoint_tool}\n" if runtime_entrypoint_tool else ""
+    )
+    skill_markdown = (
+        "---\n"
+        f"name: {name}\n"
+        f"title: {_frontmatter_scalar(title)}\n"
+        f"description: {_frontmatter_scalar(description)}\n"
+        f"permission-mode: {'approval_required' if writes else 'read_only'}\n"
+        f"risk-level: {'high' if writes else 'low'}\n"
+        "allowed-tools:\n"
+        f"{allowed_tools}\n"
+        f"{runtime_entrypoint_line}"
+        "support-files:\n"
+        f"  - {workflow_path}\n"
+        f"test-command: python -m pytest {test_path} -q\n"
+        "---\n\n"
+        f"{instructions}\n"
+    )
+    readme = (
+        f"# {title}\n\n"
+        "Generated by `vrcforge skill init`. The workflow intentionally contains "
+        "one static tool call so package review can reason about its complete effect.\n\n"
+        "Without `--writes`, `--tool` must be a runtime-direct read/plan tool. For a write target, "
+        "use `--writes`; the generated package is request-only, intentionally has no direct runtime "
+        "entrypoint, and keeps that target behind the fixed `vrcforge_request_apply` approval wrapper.\n\n"
+        f"Run the source smoke test with `python -m pytest {test_path} -q`.\n"
+    )
+    smoke = (
+        "import json\n"
+        "from pathlib import Path\n\n\n"
+        "def test_skill_workflow_has_one_gated_tool_call() -> None:\n"
+        "    root = Path(__file__).resolve().parents[1]\n"
+        "    manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))\n"
+        "    workflow_path = manifest['entrypoints']['workflow']\n"
+        "    workflow = json.loads((root / workflow_path).read_text(encoding='utf-8'))\n"
+        f"    assert manifest['id'] == {package_id!r}\n"
+        f"    assert workflow['schema'] == {SKILL_WORKFLOW_SCHEMA!r}\n"
+        "    assert len(workflow['steps']) == 1\n"
+        f"    assert workflow['steps'][0] == {step!r}\n"
+        f"    assert workflow['approval']['required'] is {writes!r}\n"
+        f"    assert workflow['checkpoint']['required'] is {writes!r}\n"
+        f"    assert workflow['checkpoint']['scope'] == {workflow['checkpoint']['scope']!r}\n"
+        f"    assert workflow['rollback']['required'] is {writes!r}\n"
+        f"    skill_markdown = (root / 'SKILL.md').read_text(encoding='utf-8')\n"
+        "    entrypoint_lines = [line for line in skill_markdown.splitlines() if line.startswith('entrypoint-tool:')]\n"
+        f"    assert entrypoint_lines == {([f'entrypoint-tool: {runtime_entrypoint_tool}'] if runtime_entrypoint_tool else [])!r}\n"
+        f"    assert '\\n  - {workflow_path}\\n' in skill_markdown\n"
+    )
+    return {
+        "manifest.json": json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        workflow_path: json.dumps(workflow, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        "SKILL.md": skill_markdown,
+        "README.md": readme,
+        test_path: smoke,
+    }
+
+
+def _validate_skill_skeleton_contract(
+    files: dict[str, str],
+    manifest: dict[str, Any],
+    *,
+    writes: bool,
+    declared_tool: str,
+) -> None:
+    workflow_path = str((manifest.get("entrypoints") or {}).get("workflow") or "")
+    try:
+        workflow = json.loads(files[workflow_path])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise CliError("Generated skill workflow is missing or invalid.") from exc
+    steps = workflow.get("steps")
+    if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict):
+        raise CliError("Generated skill workflow must contain exactly one static tool call.")
+    step = steps[0]
+    expected_workflow_tool = SKILL_WRITE_ENTRYPOINT if writes else declared_tool
+    expected_runtime_entrypoint = "" if writes else declared_tool
+    if step.get("tool") != expected_workflow_tool or step.get("writes") is not writes:
+        raise CliError("Generated skill entrypoint does not match its declared permission mode.")
+    if writes:
+        request = step.get("request")
+        target_tool = str(request.get("targetTool") or "").strip() if isinstance(request, dict) else ""
+        if target_tool != declared_tool or target_tool in SKILL_WRITE_CONTROL_TOOLS:
+            raise CliError("Generated write skill must preserve one explicit non-wrapper target tool.")
+    elif "request" in step:
+        raise CliError("Generated read-only skill cannot contain a write request target.")
+    expected_gate = bool(writes)
+    for key in ("approval", "checkpoint", "rollback"):
+        gate = workflow.get(key)
+        if not isinstance(gate, dict) or gate.get("required") is not expected_gate:
+            raise CliError(f"Generated skill {key} contract does not match its permission mode.")
+    expected_scope = ["Assets", "Packages", "ProjectSettings"] if writes else []
+    if workflow["checkpoint"].get("scope") != expected_scope:
+        raise CliError("Generated skill checkpoint scope is invalid.")
+    skill_markdown = files.get("SKILL.md", "")
+    entrypoint_lines = [line for line in skill_markdown.splitlines() if line.startswith("entrypoint-tool:")]
+    expected_entrypoint_lines = (
+        [f"entrypoint-tool: {expected_runtime_entrypoint}"] if expected_runtime_entrypoint else []
+    )
+    if entrypoint_lines != expected_entrypoint_lines:
+        raise CliError(
+            "Generated SKILL.md must use a direct entrypoint only for read/plan skills; "
+            "write skills must remain request-only."
+        )
+
+
+def _skill_scaffold_path_is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(os.path, "isjunction", None)
+    if callable(is_junction):
+        try:
+            if is_junction(path):
+                return True
+        except OSError:
+            return True
+    try:
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except (FileNotFoundError, OSError):
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _skill_scaffold_existing_entries(destination: Path) -> list[str]:
+    if not destination.exists():
+        return []
+    return sorted(entry.name for entry in destination.iterdir())
+
+
+def _prepare_staged_file(root: Path, relative: str) -> Path:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise CliError("Generated skill paths must stay inside the skill source tree.")
+    parent = root
+    for part in relative_path.parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+            if parent.is_dir() and not parent.is_symlink():
+                shutil.rmtree(parent)
+            else:
+                parent.unlink()
+        parent.mkdir(exist_ok=True)
+    target = root / relative_path
+    if target.is_symlink() or target.exists():
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    return target
+
+
+def _write_skill_tree_atomically(
+    destination: Path,
+    files: dict[str, str],
+    *,
+    force: bool,
+    validate_staged: Callable[[Path], Any],
+) -> None:
+    if _skill_scaffold_path_is_link_like(destination) or (
+        destination.exists() and not destination.is_dir()
+    ):
+        raise CliError("Skill skeleton output must be a directory, not a file or symlink.")
+    existing_entries = _skill_scaffold_existing_entries(destination)
+    if existing_entries and not force:
+        raise CliError(
+            "Skill skeleton would overwrite existing content: "
+            f"{', '.join(existing_entries)}. Use --force to replace the entire directory."
+        )
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=f".{destination.name}.vrcforge-stage-", dir=destination.parent))
+    staged_tree = staging_root / "tree"
+    backup_tree = staging_root / "previous"
+    moved_existing = False
+    preserve_staging = False
+    try:
+        # A scaffold is a closed source tree. Always build it from an empty
+        # staging directory so unrelated local files can never leak into a
+        # later package export, including when --force is explicit.
+        staged_tree.mkdir()
+        for relative, content in files.items():
+            target = _prepare_staged_file(staged_tree, relative)
+            target.write_text(content, encoding="utf-8", newline="\n")
+        validate_staged(staged_tree)
+
+        if destination.exists():
+            if _skill_scaffold_path_is_link_like(destination) or not destination.is_dir():
+                raise CliError("Skill skeleton output became a file or symlink before publication.")
+            existing_entries = _skill_scaffold_existing_entries(destination)
+            if existing_entries and not force:
+                raise CliError(
+                    "Skill skeleton would overwrite existing content: "
+                    f"{', '.join(existing_entries)}. Use --force to replace the entire directory."
+                )
+            os.replace(destination, backup_tree)
+            moved_existing = True
+        try:
+            os.replace(staged_tree, destination)
+        except OSError as swap_error:
+            if moved_existing and backup_tree.exists() and not destination.exists():
+                try:
+                    os.replace(backup_tree, destination)
+                    moved_existing = False
+                except OSError as restore_error:
+                    preserve_staging = True
+                    raise CliError(
+                        "Could not publish the staged skill tree or restore the previous tree; "
+                        f"the previous tree remains at {backup_tree}: {restore_error}"
+                    ) from swap_error
+            raise
+    finally:
+        # Once the staged tree has been swapped in, this removes the old tree;
+        # before the swap it removes all partial output. The destination itself
+        # is never populated file-by-file.
+        if not preserve_staging:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def command_skill_init(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
+    del client
+    # Keep the final path unresolved so the atomic writer can reject a
+    # symlinked output directory instead of silently following it.
+    destination = Path(args.output).expanduser().absolute()
+    files = _skill_skeleton_files(args)
+    try:
+        from skill_packages import SkillPackageService
+
+        service = SkillPackageService(destination.parent / ".vrcforge-cli-validation")
+        manifest = json.loads(files["manifest.json"])
+        service.validate_manifest(manifest)
+        declared_tool = str(args.tool or "").strip()
+        _validate_skill_skeleton_contract(
+            files,
+            manifest,
+            writes=bool(args.writes),
+            declared_tool=declared_tool,
+        )
+
+        def validate_staged(root: Path) -> None:
+            staged_manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            workflow_path = str((staged_manifest.get("entrypoints") or {}).get("workflow") or "")
+            staged_contract_files = {
+                "SKILL.md": (root / "SKILL.md").read_text(encoding="utf-8"),
+                workflow_path: (root / workflow_path).read_text(encoding="utf-8"),
+            }
+            service.validate_manifest(staged_manifest, package_root=root)
+            _validate_skill_skeleton_contract(
+                staged_contract_files,
+                staged_manifest,
+                writes=bool(args.writes),
+                declared_tool=declared_tool,
+            )
+
+        _write_skill_tree_atomically(
+            destination,
+            files,
+            force=bool(args.force),
+            validate_staged=validate_staged,
+        )
+    except (OSError, ValueError) as exc:
+        raise CliError(f"Could not create a valid skill skeleton: {exc}") from exc
+    return {
+        "ok": True,
+        "schema": "vrcforge.skill-sdk-skeleton.v1",
+        "path": str(destination),
+        "packageId": manifest["id"],
+        "skillName": manifest["skill_name"],
+        "files": sorted(files),
+        "toolCallCount": 1,
+        "entrypointTool": None if args.writes else str(args.tool or "").strip(),
+        "workflowTool": SKILL_WRITE_ENTRYPOINT if args.writes else str(args.tool or "").strip(),
+        "requestOnly": bool(args.writes),
+        "targetTool": str(args.tool or "").strip() if args.writes else None,
+    }
+
+
+def command_skill_lock_validate(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
+    del client
+    package_path = Path(args.package).expanduser().resolve()
+    try:
+        from skill_packages import SkillPackageError, SkillPackageService
+
+        preview = SkillPackageService(
+            package_path.parent / ".vrcforge-cli-validation",
+            vrcforge_version=DEFAULT_SKILL_MIN_VRCFORGE_VERSION,
+        ).inspect_package(package_path)
+    except (OSError, SkillPackageError, ValueError) as exc:
+        raise CliError(f"Skill package lock validation failed: {exc}") from exc
+    return {
+        "ok": True,
+        "schema": SKILL_LOCK_VALIDATION_SCHEMA,
+        "packagePath": str(package_path),
+        "packageId": preview.manifest["id"],
+        "version": preview.manifest["version"],
+        "packageSha256": preview.package_sha256,
+        "lockSha256": preview.lock_sha256,
+        "signatureStatus": preview.signature_status,
+        "signerFingerprint": preview.signer_fingerprint,
+        "fileCount": preview.file_count,
+    }
+
+
 def command_tool_registry(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
     return client.request("GET", "/api/app/tools/registry")
 
@@ -368,6 +811,34 @@ def build_parser() -> argparse.ArgumentParser:
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
     skill_list = skill_sub.add_parser("list")
     skill_list.set_defaults(handler=command_skill_list)
+    skill_init = skill_sub.add_parser("init", aliases=["scaffold"], help="Generate a reviewable one-tool skill source tree.")
+    skill_init.add_argument("output")
+    skill_init.add_argument("--id", dest="package_id", required=True)
+    skill_init.add_argument("--name", default="")
+    skill_init.add_argument("--title", default="")
+    skill_init.add_argument("--description", default="")
+    skill_init.add_argument("--version", default="1.0.0")
+    skill_init.add_argument("--author", default="VRCForge Skill Author")
+    skill_init.add_argument(
+        "--min-vrcforge-version",
+        default=DEFAULT_SKILL_MIN_VRCFORGE_VERSION,
+    )
+    skill_init.add_argument(
+        "--tool",
+        required=True,
+        help="Runtime-direct read/plan tool, or the explicit write target when --writes is set.",
+    )
+    skill_init.add_argument("--permission", action="append", default=[])
+    skill_init.add_argument(
+        "--writes",
+        action="store_true",
+        help="Generate a request_apply wrapper around --tool with approval/checkpoint/rollback gates.",
+    )
+    skill_init.add_argument("--force", action="store_true")
+    skill_init.set_defaults(handler=command_skill_init)
+    skill_lock_validate = skill_sub.add_parser("lock-validate", help="Validate a .vsk lock, hashes, and signature metadata.")
+    skill_lock_validate.add_argument("package")
+    skill_lock_validate.set_defaults(handler=command_skill_lock_validate)
 
     tool = sub.add_parser("tool")
     tool_sub = tool.add_subparsers(dest="tool_command", required=True)

@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
@@ -46,9 +47,13 @@ from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     DESKTOP_BRIDGE_ACTION_TYPES,
+    PROJECTED_SKILL_STATE_MAX_BYTES,
+    PROJECTED_SKILL_STATE_NAME,
+    PROJECTED_SKILL_STATE_SCHEMA,
     create_agent_mcp_app,
     ensure_dict,
     normalize_checkpoint_archive_max_size_mb,
+    parse_skill_markdown,
     redact_sensitive,
 )
 from backend_owner_lease import BackendOwnerLease
@@ -1414,6 +1419,7 @@ LOCAL_LOG_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 PROJECT_SNAPSHOT_CACHE_LOCK = Lock()
+SKILL_PACKAGE_WRITE_LOCK = Lock()
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
 PROJECT_SNAPSHOT_UPDATED_AT = ""
@@ -3400,23 +3406,239 @@ def preflight_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "preview": preview.as_dict()}
 
 
+def _skill_projection_path_is_link_like(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+    except OSError:
+        return True
+
+
+def _resolve_skill_projection_source(installed_root: Path, relative: str, *, label: str) -> tuple[Path, PurePosixPath]:
+    if not relative or "\\" in relative:
+        raise SkillPackageError(f"{label} must use a non-empty forward-slash relative path.")
+    relative_path = PurePosixPath(relative)
+    if relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_path.parts):
+        raise SkillPackageError(f"Unsafe {label}: {relative}.")
+    try:
+        root = installed_root.resolve(strict=True)
+        source = installed_root.joinpath(*relative_path.parts)
+        resolved = source.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise SkillPackageError(f"{label} is missing or escapes the installed package: {relative}.") from exc
+    current = source
+    while True:
+        if _skill_projection_path_is_link_like(current):
+            raise SkillPackageError(f"{label} cannot traverse a link or junction: {relative}.")
+        if current == installed_root:
+            break
+        if installed_root not in current.parents:
+            raise SkillPackageError(f"{label} escapes the installed package: {relative}.")
+        current = current.parent
+    if not resolved.is_file():
+        raise SkillPackageError(f"{label} is not a regular file: {relative}.")
+    return resolved, relative_path
+
+
+def _copy_projected_skill_file(source: Path, target_dir: Path, relative: PurePosixPath) -> Path:
+    destination = target_dir.joinpath(*relative.parts)
+    current = target_dir
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.exists():
+            if _skill_projection_path_is_link_like(current) or not current.is_dir():
+                raise RuntimeError(f"Refusing to project through unsafe skill directory: {current}")
+        else:
+            current.mkdir()
+    if destination.exists() and (_skill_projection_path_is_link_like(destination) or not destination.is_file()):
+        raise RuntimeError(f"Refusing to overwrite unsafe projected skill file: {destination}")
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _write_projected_skill_state(target_dir: Path, enabled: bool) -> Path:
+    state_path = target_dir / PROJECTED_SKILL_STATE_NAME
+    if state_path.exists() and (_skill_projection_path_is_link_like(state_path) or not state_path.is_file()):
+        raise RuntimeError(f"Refusing to overwrite unsafe projected skill state: {state_path}")
+    payload = json.dumps(
+        {"enabled": bool(enabled), "schema": PROJECTED_SKILL_STATE_SCHEMA},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    temporary = state_path.with_name(f".{state_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, state_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return state_path
+
+
+def _capture_projected_skill_state(manifest: dict[str, Any]) -> tuple[Path, bytes | None]:
+    target_name = _projected_skill_name(manifest)
+    state_path = AGENT_GATEWAY.user_skills_dir / target_name / PROJECTED_SKILL_STATE_NAME
+    if not os.path.lexists(state_path):
+        return state_path, None
+    if _skill_projection_path_is_link_like(state_path) or not state_path.is_file():
+        raise RuntimeError(f"Projected skill state is not a regular file: {target_name}")
+    metadata = state_path.stat(follow_symlinks=False)
+    if metadata.st_size > PROJECTED_SKILL_STATE_MAX_BYTES:
+        raise RuntimeError(f"Projected skill state exceeds its size limit: {target_name}")
+    with state_path.open("rb") as stream:
+        data = stream.read(PROJECTED_SKILL_STATE_MAX_BYTES + 1)
+    if len(data) > PROJECTED_SKILL_STATE_MAX_BYTES:
+        raise RuntimeError(f"Projected skill state exceeds its size limit: {target_name}")
+    return state_path, data
+
+
+def _restore_projected_skill_state(snapshot: tuple[Path, bytes | None]) -> None:
+    state_path, data = snapshot
+    target_dir = state_path.parent
+    if data is None:
+        if os.path.lexists(state_path):
+            if _skill_projection_path_is_link_like(state_path) or not state_path.is_file():
+                raise RuntimeError(f"Refusing to remove unsafe projected skill state: {target_dir.name}")
+            state_path.unlink()
+        return
+    if (
+        not target_dir.is_dir()
+        or _skill_projection_path_is_link_like(target_dir)
+        or (os.path.lexists(state_path) and _skill_projection_path_is_link_like(state_path))
+    ):
+        raise RuntimeError(f"Refusing to restore linked projected skill state: {target_dir.name}")
+    temporary = state_path.with_name(f".{state_path.name}.{secrets.token_hex(8)}.rollback.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, state_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _set_projected_skills_enabled(manifests: list[dict[str, Any]], enabled: bool) -> list[dict[str, Any]]:
+    snapshots = [_capture_projected_skill_state(manifest) for manifest in manifests]
+    try:
+        return [_set_projected_skill_enabled(manifest, enabled) for manifest in manifests]
+    except Exception as exc:
+        try:
+            for snapshot in reversed(snapshots):
+                _restore_projected_skill_state(snapshot)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Projected skill state update failed and prior state could not be restored: {restore_exc}"
+            ) from exc
+        raise
+
+
 def _project_installed_skill(installed_path: Path, manifest: dict[str, Any], *, enabled: bool = True) -> dict[str, Any] | None:
-    skill_file = installed_path / "SKILL.md"
-    if not skill_file.is_file():
-        return None
+    entrypoints = manifest.get("entrypoints") if isinstance(manifest.get("entrypoints"), dict) else {}
+    skill_relative = str(entrypoints.get("skill") or "SKILL.md").strip()
+    skill_file, _ = _resolve_skill_projection_source(installed_path, skill_relative, label="skill entrypoint")
+    try:
+        parsed_skill = parse_skill_markdown(skill_file)
+    except AgentGatewayError as exc:
+        raise SkillPackageError(f"Installed SKILL.md cannot be projected: {exc}") from exc
+    declared_support = parsed_skill.get("supportFiles") if isinstance(parsed_skill.get("supportFiles"), list) else []
+    projected_entrypoint_paths = {
+        str(value or "").strip()
+        for name, value in entrypoints.items()
+        if name != "skill" and str(value or "").strip() != skill_relative
+    }
+    undeclared_projection_sources = sorted(
+        str(value or "").strip()
+        for value in declared_support
+        if str(value or "").strip() not in projected_entrypoint_paths
+    )
+    if undeclared_projection_sources:
+        raise SkillPackageError(
+            "Runtime support files must also be declared as manifest entrypoints: "
+            + ", ".join(undeclared_projection_sources)
+        )
+    support_sources: list[tuple[Path, PurePosixPath]] = []
+    projected_support: list[str] = []
+    reserved_projection_paths = {"skill.md", PROJECTED_SKILL_STATE_NAME.casefold()}
+    seen_support: set[str] = set(reserved_projection_paths)
+    for entrypoint_name, raw_relative in sorted(entrypoints.items()):
+        relative = str(raw_relative or "").strip()
+        if entrypoint_name == "skill" or relative == skill_relative:
+            continue
+        source, relative_path = _resolve_skill_projection_source(
+            installed_path,
+            relative,
+            label=f"support entrypoint {entrypoint_name}",
+        )
+        normalized = relative_path.as_posix()
+        collision_key = normalized.casefold()
+        if collision_key in reserved_projection_paths:
+            raise SkillPackageError(f"Support entrypoint cannot overwrite reserved projected skill state: {normalized}.")
+        if collision_key in seen_support:
+            continue
+        seen_support.add(collision_key)
+        support_sources.append((source, relative_path))
+        projected_support.append(normalized)
     target_name = _projected_skill_name(manifest)
     if not target_name:
         return None
-    target_dir = AGENT_GATEWAY.user_skills_dir / target_name
-    if target_dir.is_symlink():
+    skills_root = AGENT_GATEWAY.user_skills_dir
+    skills_root.mkdir(parents=True, exist_ok=True)
+    if _skill_projection_path_is_link_like(skills_root):
+        raise RuntimeError(f"Refusing to write through linked user skill root: {skills_root}")
+    target_dir = skills_root / target_name
+    if target_dir.exists() and (_skill_projection_path_is_link_like(target_dir) or not target_dir.is_dir()):
         raise RuntimeError(f"Refusing to write through symlinked skill directory: {target_dir}")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(skill_file, target_dir / "SKILL.md")
-    state: dict[str, Any] | None = None
-    if not enabled:
-        payload = AGENT_GATEWAY.update_user_skill(target_name, {"enabled": False})
-        state = payload.get("skill") if isinstance(payload, dict) else None
-    return {"name": target_name, "path": str(target_dir / "SKILL.md"), "enabled": bool(enabled), "skill": state}
+    staging_root = skills_root / ".package-projection-staging"
+    if staging_root.exists() and (_skill_projection_path_is_link_like(staging_root) or not staging_root.is_dir()):
+        raise RuntimeError(f"Refusing to use unsafe skill projection staging root: {staging_root}")
+    staging_root.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(16)
+    staging_dir = staging_root / f"{target_name}.{token}.new"
+    backup_dir = staging_root / f"{target_name}.{token}.old"
+    staging_dir.mkdir()
+    target_moved = False
+    try:
+        _copy_projected_skill_file(skill_file, staging_dir, PurePosixPath("SKILL.md"))
+        for source, relative_path in support_sources:
+            _copy_projected_skill_file(source, staging_dir, relative_path)
+        _write_projected_skill_state(staging_dir, enabled)
+        if target_dir.exists():
+            os.replace(target_dir, backup_dir)
+            target_moved = True
+        try:
+            os.replace(staging_dir, target_dir)
+        except Exception:
+            if target_moved and backup_dir.exists() and not target_dir.exists():
+                os.replace(backup_dir, target_dir)
+                target_moved = False
+            raise
+        if target_moved:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            target_moved = False
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if target_moved and backup_dir.exists() and not target_dir.exists():
+            os.replace(backup_dir, target_dir)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+    state = AGENT_GATEWAY._find_user_skill(target_name)  # noqa: SLF001 - projection response mirrors runtime state.
+    return {
+        "name": target_name,
+        "path": str(target_dir / "SKILL.md"),
+        "enabled": bool(enabled),
+        "supportFiles": projected_support,
+        "skill": state,
+    }
 
 
 def _projected_skill_name(manifest: dict[str, Any]) -> str:
@@ -3429,26 +3651,56 @@ def _set_projected_skill_enabled(manifest: dict[str, Any], enabled: bool) -> dic
     target_name = _projected_skill_name(manifest)
     if not target_name:
         return {"ok": True, "skipped": True, "reason": "manifest has no projected skill name"}
-    try:
-        payload = AGENT_GATEWAY.update_user_skill(target_name, {"enabled": bool(enabled)})
-        return {"ok": True, "name": target_name, "skill": payload.get("skill")}
-    except AgentGatewayError as exc:
-        if exc.status_code == 404:
-            return {"ok": True, "name": target_name, "missing": True}
-        raise
+    target_dir = AGENT_GATEWAY.user_skills_dir / target_name
+    skill_file = target_dir / "SKILL.md"
+    if not skill_file.is_file():
+        return {"ok": True, "name": target_name, "missing": True}
+    if _skill_projection_path_is_link_like(target_dir) or _skill_projection_path_is_link_like(skill_file):
+        raise RuntimeError(f"Refusing to update linked projected skill state: {target_name}")
+    _write_projected_skill_state(target_dir, enabled)
+    return {"ok": True, "name": target_name, "skill": AGENT_GATEWAY._find_user_skill(target_name)}  # noqa: SLF001
 
 
-def _delete_projected_skill(manifest: dict[str, Any]) -> dict[str, Any]:
+@contextmanager
+def _delete_projected_skill_transaction(manifest: dict[str, Any]) -> Any:
     target_name = _projected_skill_name(manifest)
     if not target_name:
-        return {"ok": True, "skipped": True, "reason": "manifest has no projected skill name"}
+        yield {"ok": True, "skipped": True, "reason": "manifest has no projected skill name"}
+        return
+    target_dir = AGENT_GATEWAY.user_skills_dir / target_name
+    if not os.path.lexists(target_dir):
+        yield {"ok": True, "name": target_name, "missing": True}
+        return
+    if _skill_projection_path_is_link_like(target_dir) or not target_dir.is_dir():
+        raise RuntimeError(f"Refusing to remove unsafe projected skill directory: {target_name}")
+    staging_root = AGENT_GATEWAY.user_skills_dir / ".package-projection-staging"
+    if os.path.lexists(staging_root) and (
+        _skill_projection_path_is_link_like(staging_root) or not staging_root.is_dir()
+    ):
+        raise RuntimeError(f"Refusing to use unsafe skill projection staging root: {staging_root}")
+    staging_root.mkdir(parents=True, exist_ok=True)
+    isolated_dir = staging_root / f"{target_name}.{secrets.token_hex(16)}.removed"
+    os.replace(target_dir, isolated_dir)
     try:
-        payload = AGENT_GATEWAY.delete_user_skill(target_name)
-        return {"ok": True, "name": target_name, "deleted": payload.get("deleted")}
-    except AgentGatewayError as exc:
-        if exc.status_code == 404:
-            return {"ok": True, "name": target_name, "missing": True}
+        yield {"ok": True, "name": target_name, "deleted": target_name}
+    except Exception:
+        try:
+            if os.path.lexists(target_dir):
+                raise RuntimeError(f"Projected skill path was recreated during rollback: {target_name}")
+            os.replace(isolated_dir, target_dir)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Projected skill removal failed and prior projection could not be restored: {target_name}"
+            ) from restore_exc
         raise
+    else:
+        shutil.rmtree(isolated_dir, ignore_errors=True)
+    finally:
+        if staging_root.exists():
+            try:
+                staging_root.rmdir()
+            except OSError:
+                pass
 
 
 def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -3460,19 +3712,20 @@ def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
             dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
         )
         return {"ok": True, "dryRun": True, "preview": preview.as_dict()}
-    result = service.install(
-        str(params.get("packagePath") or params.get("package_path") or ""),
-        source=str(params.get("source") or "local-import"),
-        allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
-        dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
-    )
     projection = None
-    if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
-        projection = _project_installed_skill(
-            result.installed_path,
-            result.preview.manifest,
-            enabled=bool(result.registry_entry.get("enabled", True)),
-        )
+    with SKILL_PACKAGE_WRITE_LOCK:
+        with service.install_transaction(
+            str(params.get("packagePath") or params.get("package_path") or ""),
+            source=str(params.get("source") or "local-import"),
+            allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
+            dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
+        ) as result:
+            if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
+                projection = _project_installed_skill(
+                    result.installed_path,
+                    result.preview.manifest,
+                    enabled=bool(result.registry_entry.get("enabled", True)),
+                )
     return {"ok": True, "imported": result.as_dict(), "projectedSkill": projection}
 
 
@@ -3481,10 +3734,13 @@ def set_skill_package_enabled_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not skill_id:
         raise AgentGatewayError("skillPackageId is required.", status_code=400)
     enabled = bool(params.get("enabled"))
-    result = skill_package_service().set_enabled(skill_id, enabled)
-    projected = None
-    if params.get("syncProjectedSkill", params.get("sync_projected_skill", True)) is not False:
-        projected = _set_projected_skill_enabled(result.manifest, enabled)
+    service = skill_package_service()
+    with SKILL_PACKAGE_WRITE_LOCK:
+        with service.state_transaction([skill_id]):
+            result = service.set_enabled(skill_id, enabled)
+            projected = None
+            if params.get("syncProjectedSkill", params.get("sync_projected_skill", True)) is not False:
+                projected = _set_projected_skills_enabled([result.manifest], enabled)[0]
     return {"ok": True, "state": result.as_dict(), "projectedSkill": projected}
 
 
@@ -3492,16 +3748,19 @@ def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     skill_id = str(params.get("skillPackageId") or params.get("skill_package_id") or params.get("id") or "").strip()
     if not skill_id:
         raise AgentGatewayError("skillPackageId is required.", status_code=400)
-    result = skill_package_service().uninstall(skill_id)
-    projected = None
-    if params.get("removeProjectedSkill", params.get("remove_projected_skill", True)) is not False:
-        projected = _delete_projected_skill(result.manifest)
+    service = skill_package_service()
+    with SKILL_PACKAGE_WRITE_LOCK:
+        projected = None
+        with service.uninstall_transaction(skill_id) as result:
+            if params.get("removeProjectedSkill", params.get("remove_projected_skill", True)) is not False:
+                with _delete_projected_skill_transaction(result.manifest) as projected_result:
+                    projected = projected_result
     return {"ok": True, "uninstalled": result.as_dict(), "projectedSkill": projected}
 
 
 def _disable_projected_skills_for_packages(service: SkillPackageService, skill_ids: list[str]) -> list[dict[str, Any]]:
-    disabled: list[dict[str, Any]] = []
     registry = service.load_registry()
+    manifests: list[dict[str, Any]] = []
     for skill_id in skill_ids:
         entry = registry.get("skills", {}).get(skill_id)
         if not isinstance(entry, dict):
@@ -3509,45 +3768,52 @@ def _disable_projected_skills_for_packages(service: SkillPackageService, skill_i
         manifest = service._read_current_manifest(skill_id, str(entry.get("version") or ""))  # noqa: SLF001 - dashboard owns projection sync.
         if not manifest:
             continue
-        disabled.append(_set_projected_skill_enabled(manifest, False))
-    return disabled
+        manifests.append(manifest)
+    return _set_projected_skills_enabled(manifests, False)
 
 
 def set_skill_package_safe_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
-    result = service.set_safe_mode(bool(params.get("enabled")), reason=params.get("reason"))
-    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    with SKILL_PACKAGE_WRITE_LOCK:
+        with service.state_transaction():
+            result = service.set_safe_mode(bool(params.get("enabled")), reason=params.get("reason"))
+            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
     return {"ok": True, "safeMode": result, "projectedSkills": projected}
 
 
 def trust_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
-    result = service.trust_signer(
-        str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
-        reason=params.get("reason"),
-    )
+    with SKILL_PACKAGE_WRITE_LOCK:
+        result = service.trust_signer(
+            str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
+            reason=params.get("reason"),
+        )
     return {"ok": True, "signer": result}
 
 
 def revoke_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
-    result = service.revoke_signer(
-        str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
-        reason=params.get("reason"),
-    )
-    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    with SKILL_PACKAGE_WRITE_LOCK:
+        with service.state_transaction():
+            result = service.revoke_signer(
+                str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
+                reason=params.get("reason"),
+            )
+            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
     return {"ok": True, "signer": result, "projectedSkills": projected}
 
 
 def block_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
-    result = service.block_package(
-        package_id=params.get("packageId") or params.get("package_id"),
-        package_sha256=params.get("packageSha256") or params.get("package_sha256"),
-        lock_sha256=params.get("lockSha256") or params.get("lock_sha256"),
-        reason=params.get("reason"),
-    )
-    projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
+    with SKILL_PACKAGE_WRITE_LOCK:
+        with service.state_transaction():
+            result = service.block_package(
+                package_id=params.get("packageId") or params.get("package_id"),
+                package_sha256=params.get("packageSha256") or params.get("package_sha256"),
+                lock_sha256=params.get("lockSha256") or params.get("lock_sha256"),
+                reason=params.get("reason"),
+            )
+            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
     return {"ok": True, "blocklist": result, "projectedSkills": projected}
 
 
@@ -3633,6 +3899,16 @@ def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = Fa
     export_vsk = bool(params.get("exportVsk") or params.get("export_vsk") or False)
     if allow_write and export_vsk and not bool(params.get("confirmExport") or params.get("confirm_export") or False):
         raise AgentGatewayError("confirmExport=true is required before exporting a .vsk package.", status_code=400)
+    package_text = str(params.get("packageOutputPath") or params.get("package_output_path") or "").strip()
+    if allow_write and export_vsk and package_text:
+        requested_package_output = Path(package_text).expanduser()
+        if requested_package_output.suffix.lower() != ".vsk":
+            requested_package_output = requested_package_output.with_name(requested_package_output.name + ".vsk")
+        if os.path.lexists(requested_package_output):
+            raise AgentGatewayError(
+                "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
+                status_code=400,
+            )
 
     captured = build_path_to_skill_source(summary, **_path_to_skill_kwargs(params))
     result: dict[str, Any] = {
@@ -3666,7 +3942,8 @@ def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = Fa
         if output_text:
             source_dir = Path(output_text).expanduser()
         elif bool(params.get("useTempOutput", params.get("use_temp_output", True))):
-            source_dir = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+            temp_root = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+            source_dir = temp_root / "source"
         else:
             raise AgentGatewayError("outputPath is required when useTempOutput=false.", status_code=400)
         captured.write_to(source_dir)
@@ -3678,17 +3955,24 @@ def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = Fa
 
     if export_vsk:
         if source_dir is None:
-            source_dir = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+            temp_root = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
+            source_dir = temp_root / "source"
             captured.write_to(source_dir)
             result["dryRun"] = False
             result["writtenSource"] = {
                 "path": str(source_dir),
                 "files": _path_to_skill_file_list(captured.source_files),
             }
-        package_text = str(params.get("packageOutputPath") or params.get("package_output_path") or "").strip()
         package_output = Path(package_text).expanduser() if package_text else source_dir.parent / _path_to_skill_vsk_filename(captured.manifest)
+        if package_output.suffix.lower() != ".vsk":
+            package_output = package_output.with_name(package_output.name + ".vsk")
+        if os.path.lexists(package_output):
+            raise AgentGatewayError(
+                "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
+                status_code=400,
+            )
         package_output.parent.mkdir(parents=True, exist_ok=True)
-        exported = skill_package_service().export_dev(source_dir, package_output)
+        exported = skill_package_service().export_dev(source_dir, package_output, overwrite=False)
         result["exported"] = exported.as_dict()
     return result
 

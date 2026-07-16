@@ -337,6 +337,55 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _read_regular_file_bounded(path: Path, max_bytes: int, *, label: str) -> bytes:
+    if _is_symlink_like(path):
+        raise PackageSecurityError(f"{label} must be a regular non-link file.")
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise PackageIntegrityError(f"{label} metadata is unavailable.") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PackageSecurityError(f"{label} must be a regular file.")
+    if metadata.st_size > max_bytes:
+        raise PackageIntegrityError(f"{label} exceeds the {max_bytes}-byte limit.")
+    try:
+        with path.open("rb") as stream:
+            value = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise PackageIntegrityError(f"{label} cannot be read.") from exc
+    if len(value) > max_bytes:
+        raise PackageIntegrityError(f"{label} exceeds the {max_bytes}-byte limit.")
+    return value
+
+
+def _sha256_regular_file_bounded(path: Path, max_bytes: int, *, label: str) -> str:
+    if _is_symlink_like(path):
+        raise PackageSecurityError(f"{label} must be a regular non-link file.")
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise PackageIntegrityError(f"{label} metadata is unavailable.") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PackageSecurityError(f"{label} must be a regular file.")
+    if metadata.st_size > max_bytes:
+        raise PackageIntegrityError(f"{label} exceeds the {max_bytes}-byte limit.")
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(min(1024 * 1024, max_bytes - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise PackageIntegrityError(f"{label} exceeds the {max_bytes}-byte limit.")
+                digest.update(chunk)
+    except OSError as exc:
+        raise PackageIntegrityError(f"{label} cannot be read.") from exc
+    return digest.hexdigest()
+
+
 def _json_object_no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -619,16 +668,26 @@ class SkillPackageService:
         self,
         source_dir: str | os.PathLike[str],
         output_path: str | os.PathLike[str],
+        *,
+        overwrite: bool = True,
     ) -> ExportResult:
-        return self._export(source_dir, output_path, package_mode="dev", private_key=None)
+        return self._export(source_dir, output_path, package_mode="dev", private_key=None, overwrite=overwrite)
 
     def export_release(
         self,
         source_dir: str | os.PathLike[str],
         output_path: str | os.PathLike[str],
         private_key: Ed25519PrivateKey | bytes | str | os.PathLike[str],
+        *,
+        overwrite: bool = True,
     ) -> ExportResult:
-        return self._export(source_dir, output_path, package_mode="release", private_key=private_key)
+        return self._export(
+            source_dir,
+            output_path,
+            package_mode="release",
+            private_key=private_key,
+            overwrite=overwrite,
+        )
 
     def inspect_package(self, package_path: str | os.PathLike[str]) -> ImportPreview:
         with self._validated_package(package_path) as validated:
@@ -660,6 +719,25 @@ class SkillPackageService:
         allow_downgrade: bool = False,
         dev_mode: bool = False,
     ) -> InstallResult:
+        with self.install_transaction(
+            package_path,
+            source=source,
+            allow_downgrade=allow_downgrade,
+            dev_mode=dev_mode,
+        ) as result:
+            return result
+
+    @contextmanager
+    def install_transaction(
+        self,
+        package_path: str | os.PathLike[str],
+        *,
+        source: str | None = None,
+        allow_downgrade: bool = False,
+        dev_mode: bool = False,
+    ) -> Iterator[InstallResult]:
+        """Keep package metadata reversible until its external projection succeeds."""
+
         with self._validated_package(package_path) as validated:
             self.skill_store.mkdir(parents=True, exist_ok=True)
             registry = self.load_registry()
@@ -685,7 +763,69 @@ class SkillPackageService:
                     },
                 )
                 raise PackageSecurityError(self._format_governance_block("import", governance))
-            return self._install_validated(validated.temp_dir, preview, registry, source=source)
+            snapshot = self._capture_install_state(skill_id, str(preview.manifest["version"]))
+            result = self._install_validated(validated.temp_dir, preview, registry, source=source)
+            try:
+                yield result
+            except Exception:
+                try:
+                    self._restore_install_state(snapshot)
+                except Exception as restore_exc:
+                    raise PackageIntegrityError(
+                        f"Skill package projection failed and install state could not be restored: {skill_id}."
+                    ) from restore_exc
+                raise
+
+    def _capture_install_state(self, skill_id: str, version: str) -> dict[str, Any]:
+        skill_root = self.skill_store / skill_id
+        versions_root = skill_root / "versions"
+        version_root = versions_root / version
+        installed_path = skill_root / "installed.json"
+        registry_exists = self.registry_path.is_file()
+        installed_exists = installed_path.is_file()
+        return {
+            "skill_id": skill_id,
+            "version": version,
+            "skill_root_existed": skill_root.exists(),
+            "versions_root_existed": versions_root.exists(),
+            "version_root_existed": version_root.exists(),
+            "registry_existed": registry_exists,
+            "registry_bytes": self.registry_path.read_bytes() if registry_exists else None,
+            "installed_existed": installed_exists,
+            "installed_bytes": installed_path.read_bytes() if installed_exists else None,
+        }
+
+    def _restore_install_state(self, snapshot: Mapping[str, Any]) -> None:
+        skill_id = str(snapshot["skill_id"])
+        version = str(snapshot["version"])
+        skill_root = self.skill_store / skill_id
+        versions_root = skill_root / "versions"
+        version_root = versions_root / version
+        installed_path = skill_root / "installed.json"
+
+        if not bool(snapshot["version_root_existed"]) and version_root.exists():
+            if _is_symlink_like(version_root):
+                raise PackageSecurityError(f"Refusing to roll back a linked skill version directory: {skill_id}.")
+            shutil.rmtree(version_root)
+        if bool(snapshot["installed_existed"]):
+            self._atomic_write_bytes(installed_path, bytes(snapshot["installed_bytes"]))
+        else:
+            installed_path.unlink(missing_ok=True)
+        if bool(snapshot["registry_existed"]):
+            self._atomic_write_bytes(self.registry_path, bytes(snapshot["registry_bytes"]))
+        else:
+            self.registry_path.unlink(missing_ok=True)
+
+        if not bool(snapshot["versions_root_existed"]) and versions_root.exists():
+            try:
+                versions_root.rmdir()
+            except OSError:
+                pass
+        if not bool(snapshot["skill_root_existed"]) and skill_root.exists():
+            try:
+                skill_root.rmdir()
+            except OSError:
+                pass
 
     def import_package(self, *args: Any, **kwargs: Any) -> InstallResult:
         """Alias for callers that use import terminology."""
@@ -727,7 +867,69 @@ class SkillPackageService:
         manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
         return PackageStateResult(normalized_id, registry_entry, manifest, changed)
 
+    @contextmanager
+    def state_transaction(self, skill_ids: Sequence[str] | None = None) -> Iterator[None]:
+        """Restore registry and installed metadata if a coordinated host write fails."""
+
+        snapshot = self._capture_state_transaction(skill_ids)
+        try:
+            yield
+        except Exception:
+            try:
+                self._restore_state_transaction(snapshot)
+            except Exception as restore_exc:
+                raise PackageIntegrityError(
+                    "Skill package state update failed and registry metadata could not be restored."
+                ) from restore_exc
+            raise
+
+    def _capture_state_transaction(self, skill_ids: Sequence[str] | None) -> dict[str, Any]:
+        registry = self.load_registry()
+        if skill_ids is None:
+            normalized_ids = sorted(registry["skills"])
+        else:
+            normalized_ids = sorted({self._normalize_installed_skill_id(skill_id) for skill_id in skill_ids})
+        registry_existed = self.registry_path.is_file()
+        installed: dict[str, bytes | None] = {}
+        for skill_id in normalized_ids:
+            installed_path = self.skill_store / skill_id / "installed.json"
+            if _is_symlink_like(installed_path):
+                raise PackageSecurityError(f"Installed metadata must not be linked: {skill_id}.")
+            if installed_path.exists() and not installed_path.is_file():
+                raise PackageSecurityError(f"Installed metadata must be a regular file: {skill_id}.")
+            installed[skill_id] = installed_path.read_bytes() if installed_path.is_file() else None
+        return {
+            "registry_existed": registry_existed,
+            "registry_bytes": self.registry_path.read_bytes() if registry_existed else None,
+            "installed": installed,
+        }
+
+    def _restore_state_transaction(self, snapshot: Mapping[str, Any]) -> None:
+        installed = snapshot.get("installed")
+        if not isinstance(installed, Mapping):
+            raise PackageIntegrityError("Skill package state transaction snapshot is invalid.")
+        for raw_skill_id, raw_bytes in installed.items():
+            skill_id = self._normalize_installed_skill_id(str(raw_skill_id))
+            installed_path = self.skill_store / skill_id / "installed.json"
+            if _is_symlink_like(installed_path):
+                raise PackageSecurityError(f"Refusing to restore linked installed metadata: {skill_id}.")
+            if raw_bytes is None:
+                installed_path.unlink(missing_ok=True)
+            else:
+                self._atomic_write_bytes(installed_path, bytes(raw_bytes))
+        if bool(snapshot.get("registry_existed")):
+            self._atomic_write_bytes(self.registry_path, bytes(snapshot.get("registry_bytes") or b""))
+        else:
+            self.registry_path.unlink(missing_ok=True)
+
     def uninstall(self, skill_id: str) -> UninstallResult:
+        with self.uninstall_transaction(skill_id) as result:
+            return result
+
+    @contextmanager
+    def uninstall_transaction(self, skill_id: str) -> Iterator[UninstallResult]:
+        """Keep an uninstalled package tree recoverable until host projection removal succeeds."""
+
         normalized_id = self._normalize_installed_skill_id(skill_id)
         registry = self.load_registry()
         entry = self._find_installed_entry(normalized_id, registry)
@@ -742,6 +944,7 @@ class SkillPackageService:
             raise PackageSecurityError(f"Installed skill path is not a directory: {skill_root}.")
         manifest = self._read_current_manifest(normalized_id, str(registry_entry.get("version") or ""))
         removed_versions = tuple(self._installed_versions(normalized_id))
+        registry_bytes = self.registry_path.read_bytes()
         next_registry = self._registry_document(
             registry,
             skills=dict(registry["skills"]),
@@ -749,17 +952,51 @@ class SkillPackageService:
         )
         next_registry["skills"].pop(normalized_id, None)
         self.skill_store.mkdir(parents=True, exist_ok=True)
-        self._atomic_write_json(self.registry_path, next_registry)
+        staging_root = self.skill_store / ".uninstall-staging"
+        if _is_symlink_like(staging_root) or (staging_root.exists() and not staging_root.is_dir()):
+            raise PackageSecurityError(f"Refusing to use unsafe uninstall staging directory: {staging_root}.")
+        staging_root.mkdir(parents=True, exist_ok=True)
+        isolated_root = staging_root / f"{normalized_id}.{uuid.uuid4().hex}"
+        moved = False
+        committed = False
         try:
             if skill_root.exists():
-                shutil.rmtree(skill_root)
-                changed = True
-            else:
-                changed = normalized_id in registry["skills"]
+                os.replace(skill_root, isolated_root)
+                moved = True
+            self._atomic_write_json(self.registry_path, next_registry)
+            result = UninstallResult(
+                normalized_id,
+                registry_entry,
+                manifest,
+                skill_root,
+                removed_versions,
+                moved or normalized_id in registry["skills"],
+            )
+            yield result
+            committed = True
         except Exception:
-            self._atomic_write_json(self.registry_path, registry)
+            try:
+                if moved and isolated_root.exists():
+                    if skill_root.exists():
+                        raise PackageIntegrityError(
+                            f"Cannot restore uninstalled package because its original path was recreated: {normalized_id}."
+                        )
+                    os.replace(isolated_root, skill_root)
+                    moved = False
+                self._atomic_write_bytes(self.registry_path, registry_bytes)
+            except Exception as restore_exc:
+                raise PackageIntegrityError(
+                    f"Skill package uninstall failed and prior package state could not be restored: {normalized_id}."
+                ) from restore_exc
             raise
-        return UninstallResult(normalized_id, registry_entry, manifest, skill_root, removed_versions, changed)
+        finally:
+            if committed and isolated_root.exists():
+                shutil.rmtree(isolated_root, ignore_errors=True)
+            if staging_root.exists():
+                try:
+                    staging_root.rmdir()
+                except OSError:
+                    pass
 
     def load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
@@ -792,6 +1029,288 @@ class SkillPackageService:
             self._decorate_installed_entry(dict(registry["skills"][key]), registry)
             for key in sorted(registry["skills"])
         ]
+
+    def runtime_audit_context(
+        self,
+        projected_skill_name: str,
+        projected_skill_path: str | os.PathLike[str],
+        projected_support_files: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return verified package identity for an unchanged projected skill.
+
+        Installed manifests, complete lock contents, and release signatures are
+        revalidated before the signer is attributed to a runtime execution. An
+        edited projection or ambiguous projected name deliberately returns no
+        package context so callers can preserve their legacy audit shape.
+        """
+
+        target_name = str(projected_skill_name or "").strip().lower()
+        projected_input = Path(projected_skill_path).expanduser()
+        if not target_name or _is_symlink_like(projected_input) or not projected_input.is_file():
+            return {}
+        try:
+            projected = projected_input.resolve(strict=True)
+            registry = self.load_registry()
+        except (OSError, SkillPackageError):
+            return {}
+
+        matches: list[dict[str, Any]] = []
+        for skill_id in sorted(registry["skills"]):
+            try:
+                entry = self._find_installed_entry(skill_id, registry)
+                if entry is None:
+                    continue
+                version = str(entry.get("version") or "")
+                package_sha256 = str(entry.get("package_sha256") or "")
+                version_root = self.skill_store / skill_id / "versions" / version
+                if (
+                    not version
+                    or not package_sha256
+                    or _is_symlink_like(version_root)
+                    or not version_root.is_dir()
+                ):
+                    continue
+                resolved_root = version_root.resolve(strict=True)
+                resolved_root.relative_to(self.skill_store)
+                manifest_path = resolved_root / MANIFEST_NAME
+                lock_path = resolved_root / LOCK_NAME
+                if (
+                    not manifest_path.is_file()
+                    or _is_symlink_like(manifest_path)
+                    or not lock_path.is_file()
+                    or _is_symlink_like(lock_path)
+                ):
+                    continue
+                manifest_bytes = _read_regular_file_bounded(
+                    manifest_path,
+                    self.max_file_size,
+                    label=f"{skill_id}/{version}/{MANIFEST_NAME}",
+                )
+                manifest_value = _load_json_bytes(manifest_bytes, f"{skill_id}/{version}/{MANIFEST_NAME}")
+                manifest = self.validate_manifest(manifest_value, package_root=resolved_root)
+                projected_name = re.sub(
+                    r"[^a-z0-9_.-]+",
+                    "-",
+                    str(manifest.get("skill_name") or manifest.get("skillName") or skill_id).lower(),
+                ).strip("-._")
+                if projected_name != target_name:
+                    continue
+                skill_entrypoint = str(manifest.get("entrypoints", {}).get("skill") or "").strip()
+                if not skill_entrypoint:
+                    continue
+                installed_skill = (resolved_root / skill_entrypoint).resolve(strict=True)
+                installed_skill.relative_to(resolved_root)
+                if not installed_skill.is_file() or _is_symlink_like(installed_skill):
+                    continue
+
+                lock_bytes = _read_regular_file_bounded(
+                    lock_path,
+                    self.max_file_size,
+                    label=f"{skill_id}/{version}/{LOCK_NAME}",
+                )
+                lock_value = _load_json_bytes(lock_bytes, f"{skill_id}/{version}/{LOCK_NAME}")
+                locked_files = lock_value.get("files") if isinstance(lock_value, dict) else None
+                if (
+                    not isinstance(lock_value, dict)
+                    or lock_value.get("schema") != LOCK_SCHEMA
+                    or lock_value.get("algorithm") != "sha256"
+                    or canonical_json_bytes(lock_value) != lock_bytes
+                    or not isinstance(locked_files, dict)
+                ):
+                    continue
+                expected_files: dict[str, str] = {}
+                lock_valid = True
+                for raw_relative, digest in locked_files.items():
+                    try:
+                        relative = _safe_relative_path(raw_relative, label="runtime audit lock path")
+                    except SkillPackageError:
+                        lock_valid = False
+                        break
+                    if (
+                        relative in RESERVED_PACKAGE_FILES
+                        or not isinstance(digest, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or relative in expected_files
+                    ):
+                        lock_valid = False
+                        break
+                    expected_files[relative] = digest
+                if not lock_valid or not expected_files:
+                    continue
+
+                actual_files: set[str] = set()
+                installed_tree_valid = True
+                installed_total_size = 0
+                for path in resolved_root.rglob("*"):
+                    if _is_symlink_like(path):
+                        installed_tree_valid = False
+                        break
+                    if path.is_dir():
+                        continue
+                    if not path.is_file():
+                        installed_tree_valid = False
+                        break
+                    relative = path.relative_to(resolved_root).as_posix()
+                    if relative not in RESERVED_PACKAGE_FILES:
+                        metadata = path.stat(follow_symlinks=False)
+                        if (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_size > self.max_file_size
+                        ):
+                            installed_tree_valid = False
+                            break
+                        installed_total_size += metadata.st_size
+                        if installed_total_size > self.max_total_size:
+                            installed_tree_valid = False
+                            break
+                        actual_files.add(relative)
+                        if len(actual_files) > self.max_file_count:
+                            installed_tree_valid = False
+                            break
+                if not installed_tree_valid or actual_files != set(expected_files):
+                    continue
+                if any(
+                    _sha256_regular_file_bounded(
+                        resolved_root / relative,
+                        self.max_file_size,
+                        label=f"{skill_id}/{version}/{relative}",
+                    )
+                    != digest
+                    for relative, digest in expected_files.items()
+                ):
+                    continue
+
+                expected_manifest_sha = expected_files.get(MANIFEST_NAME)
+                expected_skill_sha = expected_files.get(skill_entrypoint)
+                if not expected_manifest_sha or not expected_skill_sha:
+                    continue
+                if sha256_bytes(manifest_bytes) != expected_manifest_sha:
+                    continue
+                if (
+                    _sha256_regular_file_bounded(
+                        installed_skill,
+                        self.max_file_size,
+                        label=f"{skill_id}/{version}/{skill_entrypoint}",
+                    )
+                    != expected_skill_sha
+                ):
+                    continue
+                if (
+                    _sha256_regular_file_bounded(
+                        projected,
+                        self.max_file_size,
+                        label=f"projected skill {target_name}",
+                    )
+                    != expected_skill_sha
+                ):
+                    continue
+
+                projected_root = projected.parent
+                projection_valid = True
+                projected_relatives = set(manifest.get("entrypoints", {}).values())
+                for raw_relative in projected_support_files or ():
+                    try:
+                        projected_relatives.add(
+                            _safe_relative_path(raw_relative, label="projected runtime support path")
+                        )
+                    except SkillPackageError:
+                        projection_valid = False
+                        break
+                if not projection_valid:
+                    continue
+                for raw_relative in projected_relatives:
+                    relative = str(raw_relative or "").strip()
+                    if not relative or relative == skill_entrypoint:
+                        continue
+                    expected_digest = expected_files.get(relative)
+                    if not expected_digest:
+                        projection_valid = False
+                        break
+                    relative_path = PurePosixPath(relative)
+                    projected_support_input = projected_root.joinpath(*relative_path.parts)
+                    try:
+                        projected_support = projected_support_input.resolve(strict=True)
+                        projected_support.relative_to(projected_root)
+                    except (OSError, ValueError):
+                        projection_valid = False
+                        break
+                    if (
+                        _path_contains_symlink_like(projected_support_input, projected_root)
+                        or not projected_support.is_file()
+                        or _sha256_regular_file_bounded(
+                            projected_support,
+                            self.max_file_size,
+                            label=f"projected support {relative}",
+                        )
+                        != expected_digest
+                    ):
+                        projection_valid = False
+                        break
+                if not projection_valid:
+                    continue
+
+                signature_status = str(entry.get("signature_status") or "")
+                signer_fingerprint = entry.get("signer_fingerprint")
+                package_mode = lock_value.get("package_mode")
+                public_key_path = resolved_root / PUBLIC_KEY_NAME
+                signature_path = resolved_root / SIGNATURE_NAME
+                public_key_present = public_key_path.exists() or _is_symlink_like(public_key_path)
+                signature_present = signature_path.exists() or _is_symlink_like(signature_path)
+                has_public_key = public_key_present and public_key_path.is_file() and not _is_symlink_like(public_key_path)
+                has_signature = signature_present and signature_path.is_file() and not _is_symlink_like(signature_path)
+                if signature_status == "signed":
+                    if package_mode != "release" or not has_public_key or not has_signature:
+                        continue
+                    public_key_bytes = _decode_fixed_base64(
+                        _read_regular_file_bounded(public_key_path, 4 * 1024, label=PUBLIC_KEY_NAME),
+                        32,
+                        PUBLIC_KEY_NAME,
+                    )
+                    signature_bytes = _decode_fixed_base64(
+                        _read_regular_file_bounded(signature_path, 4 * 1024, label=SIGNATURE_NAME),
+                        64,
+                        SIGNATURE_NAME,
+                    )
+                    try:
+                        Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature_bytes, lock_bytes)
+                    except InvalidSignature:
+                        continue
+                    verified_signer = sha256_bytes(public_key_bytes)
+                    if verified_signer != signer_fingerprint:
+                        continue
+                elif signature_status == "dev":
+                    if package_mode != "dev" or public_key_present or signature_present or signer_fingerprint is not None:
+                        continue
+                    verified_signer = None
+                else:
+                    continue
+
+                tiers = self._permission_tiers(manifest["permissions"])
+                risk_level = "high" if tiers["high"] else "medium" if tiers["medium"] else "low"
+                lock_sha256 = sha256_bytes(lock_bytes)
+                if (
+                    manifest.get("id") != skill_id
+                    or manifest.get("version") != version
+                    or lock_sha256 != entry.get("lock_sha256")
+                    or risk_level != entry.get("risk_level")
+                    or list(manifest["permissions"]) != list(entry.get("permissions") or [])
+                ):
+                    continue
+                decorated = self._decorate_installed_entry(dict(entry), registry)
+                matches.append(
+                    {
+                        "packageId": skill_id,
+                        "packageVersion": version,
+                        "packageSha256": package_sha256,
+                        "lockSha256": lock_sha256,
+                        "signatureStatus": signature_status,
+                        "signerFingerprint": verified_signer,
+                        "signerTrustStatus": decorated.get("signer_trust_status"),
+                    }
+                )
+            except (OSError, ValueError, SkillPackageError):
+                continue
+        return matches[0] if len(matches) == 1 else {}
 
     def set_safe_mode(self, enabled: bool, *, reason: str | None = None) -> dict[str, Any]:
         registry = self.load_registry()
@@ -1406,6 +1925,7 @@ class SkillPackageService:
         *,
         package_mode: str,
         private_key: Ed25519PrivateKey | bytes | str | os.PathLike[str] | None,
+        overwrite: bool,
     ) -> ExportResult:
         source_input = Path(source_dir).expanduser()
         if _is_symlink_like(source_input):
@@ -1459,13 +1979,23 @@ class SkillPackageService:
         output = Path(output_path).expanduser()
         if output.suffix.lower() != ".vsk":
             output = output.with_name(output.name + ".vsk")
-        output = output.resolve()
+        output = output.resolve() if overwrite else output.parent.resolve() / output.name
         output.parent.mkdir(parents=True, exist_ok=True)
+        if not overwrite and os.path.lexists(output):
+            raise SkillPackageError(f"Output package already exists and overwrite was not authorized: {output}.")
         temp_output = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         try:
             self._write_archive(temp_output, archive_files)
             self._validate_zip_metadata(temp_output)
-            os.replace(temp_output, output)
+            if overwrite:
+                os.replace(temp_output, output)
+            else:
+                try:
+                    os.link(temp_output, output)
+                except FileExistsError as exc:
+                    raise SkillPackageError(
+                        f"Output package already exists and overwrite was not authorized: {output}."
+                    ) from exc
         finally:
             temp_output.unlink(missing_ok=True)
 
@@ -1849,7 +2379,15 @@ class SkillPackageService:
         if registry_entry is None and installed_entry is None and versions_dir.exists():
             raise PackageIntegrityError(f"Installed version directory has no trust metadata: {skill_id}.")
         if registry_entry is not None and installed_entry is not None:
-            for field in ("version", "signature_status", "signer_fingerprint", "lock_sha256"):
+            for field in (
+                "version",
+                "package_sha256",
+                "signature_status",
+                "signer_fingerprint",
+                "lock_sha256",
+                "risk_level",
+                "permissions",
+            ):
                 if registry_entry.get(field) != installed_entry.get(field):
                     raise PackageIntegrityError(f"Registry and installed metadata disagree for {skill_id}: {field}.")
         entry = registry_entry or installed_entry
