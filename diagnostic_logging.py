@@ -8,7 +8,8 @@ import os
 import re
 import sys
 import tempfile
-from collections import deque
+import time
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock, get_ident
@@ -24,6 +25,11 @@ LOG_MAX_FILES = 40
 LOG_MAX_TOTAL_BYTES = 52_428_800
 LOG_MAX_FILE_BYTES = 8_388_608
 MAX_EVENT_DATA_BYTES = 262_144
+ERROR_BURST_WINDOW_SECONDS = 5
+ERROR_BURST_EMIT_EVERY = 5
+ERROR_BURST_MAX_KEYS = 256
+STREAM_CONTINUATION_WINDOW_SECONDS = 2.0
+STREAM_CONTINUATION_MAX_LINES = 8
 
 _LEVEL_RANK = {level: index for index, level in enumerate(LOG_LEVELS)}
 _LEVEL_ALIASES = {"success": "info", "warning": "warn"}
@@ -34,7 +40,18 @@ _LEGACY_RAW_LOG_NAMES = {
     "backend_stderr.log",
     "interactions.jsonl",
 }
-_STREAM_LEVEL_RE = re.compile(r"^\s*(TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\s*:\s*", re.IGNORECASE)
+_STREAM_LEVEL_PATTERNS = (
+    re.compile(r"^\s*(TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\s*:\s*", re.IGNORECASE),
+    re.compile(
+        r"^\s*\[[^\]\r\n]{1,64}\]\s+(TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*\d{4}-\d{2}-\d{2}[ T][^\s]{1,32}\s+(TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b",
+        re.IGNORECASE,
+    ),
+)
+_STREAM_CONTINUATION_RE = re.compile(r"^\s{2,}\S")
 _LOG_LINE_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}) "
     r"\[(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\] "
@@ -50,6 +67,19 @@ def normalize_log_level(value: Any, default: str = "info") -> str:
     normalized = str(value or "").strip().lower()
     normalized = _LEVEL_ALIASES.get(normalized, normalized)
     return normalized if normalized in _LEVEL_RANK else default
+
+
+def detect_stream_level(value: Any) -> str | None:
+    text = str(value or "")
+    for pattern in _STREAM_LEVEL_PATTERNS:
+        match = pattern.match(text)
+        if match is None:
+            continue
+        prefix = match.group(1).lower()
+        return {"critical": "error", "warning": "warn"}.get(prefix, normalize_log_level(prefix))
+    if re.match(r"^\s*[^:\r\n]{1,260}(?:Warning):\s*", text):
+        return "warn"
+    return None
 
 
 def parse_log_timestamp(value: Any) -> datetime | None:
@@ -174,6 +204,7 @@ class DiagnosticLogManager:
         self.lock = RLock()
         self._active_path: Path | None = None
         self._log_level = self._read_config_level()
+        self._error_bursts: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def _now(self) -> datetime:
         value = self._now_fn()
@@ -204,10 +235,10 @@ class DiagnosticLogManager:
         with self.lock:
             return self._active_path
 
-    def should_record(self, level: Any) -> bool:
+    def should_record(self, level: Any, *, essential: bool = False) -> bool:
         normalized = normalize_log_level(level)
         with self.lock:
-            return _LEVEL_RANK[normalized] <= _LEVEL_RANK[self._log_level]
+            return bool(essential) or _LEVEL_RANK[normalized] <= _LEVEL_RANK[self._log_level]
 
     def _write_config_locked(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,18 +343,24 @@ class DiagnosticLogManager:
         data: Any = None,
         *,
         context: dict[str, Any] | None = None,
+        essential: bool = False,
     ) -> dict[str, Any] | None:
         normalized_level = normalize_log_level(level)
+        effective_essential = bool(essential) or normalized_level == "error"
         with self.lock:
-            if _LEVEL_RANK[normalized_level] > _LEVEL_RANK[self._log_level]:
+            if not effective_essential and _LEVEL_RANK[normalized_level] > _LEVEL_RANK[self._log_level]:
                 return None
             try:
+                entry_data = data if isinstance(data, dict) else ({"value": data} if data is not None else {})
+                if effective_essential:
+                    entry_data = {**entry_data, "baseline": True}
+                emitted_at = self._now()
                 raw_entry = {
-                    "timestamp": self._now().isoformat(),
+                    "timestamp": emitted_at.isoformat(),
                     "level": normalized_level,
                     "scope": str(scope or "backend")[:128],
                     "message": str(message or "")[:32_768],
-                    "data": data if isinstance(data, dict) else ({"value": data} if data is not None else {}),
+                    "data": entry_data,
                 }
                 safe_entry = self.privacy.redact(raw_entry, context=context)
                 if context and any(str(value or "").strip() for value in context.values()):
@@ -332,6 +369,9 @@ class DiagnosticLogManager:
                     safe_entry["data"] = {**safe_data, "identityContext": safe_context}
                 safe_entry["level"] = normalized_level
                 safe_entry["data"] = self._bounded_data(safe_entry.get("data"))
+                safe_entry = self._coalesce_error_locked(safe_entry, emitted_at)
+                if safe_entry is None:
+                    return None
                 safe_entry["id"] = (
                     f"log-{hashlib.sha256(format_log_line(safe_entry).encode('utf-8')).hexdigest()[:16]}"
                 )
@@ -342,6 +382,62 @@ class DiagnosticLogManager:
             except Exception:  # noqa: BLE001 - never break product work or fall back to raw output.
                 return None
             return dict(safe_entry)
+
+    def _coalesce_error_locked(
+        self,
+        entry: dict[str, Any],
+        emitted_at: datetime,
+    ) -> dict[str, Any] | None:
+        if entry.get("level") != "error":
+            return entry
+        cutoff = emitted_at - timedelta(seconds=ERROR_BURST_WINDOW_SECONDS)
+        for fingerprint, row in list(self._error_bursts.items()):
+            window_started = row.get("windowStarted")
+            if not isinstance(window_started, datetime) or window_started < cutoff:
+                self._error_bursts.pop(fingerprint, None)
+        fingerprint_payload = {
+            "level": entry.get("level"),
+            "scope": entry.get("scope"),
+            "message": entry.get("message"),
+            "data": entry.get("data"),
+        }
+        encoded = json.dumps(
+            _normalize_json_value(fingerprint_payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        fingerprint = hashlib.sha256(encoded).hexdigest()
+        row = self._error_bursts.get(fingerprint)
+        if row is None:
+            self._error_bursts[fingerprint] = {
+                "windowStarted": emitted_at,
+                "occurrenceCount": 1,
+                "lastEmittedCount": 1,
+            }
+            self._error_bursts.move_to_end(fingerprint)
+            while len(self._error_bursts) > ERROR_BURST_MAX_KEYS:
+                self._error_bursts.popitem(last=False)
+            return entry
+        row["occurrenceCount"] = int(row.get("occurrenceCount") or 1) + 1
+        occurrence_count = int(row["occurrenceCount"])
+        self._error_bursts.move_to_end(fingerprint)
+        if occurrence_count % ERROR_BURST_EMIT_EVERY:
+            return None
+        last_emitted_count = int(row.get("lastEmittedCount") or 1)
+        row["lastEmittedCount"] = occurrence_count
+        data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        return {
+            **entry,
+            "data": {
+                **data,
+                "aggregated": True,
+                "occurrenceCount": occurrence_count,
+                "repeatCount": occurrence_count - last_emitted_count,
+                "repeatWindowSeconds": ERROR_BURST_WINDOW_SECONDS,
+            },
+        }
 
     def _create_log_file_locked(self, when: datetime) -> Path:
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -535,6 +631,7 @@ class DiagnosticTextStream(io.TextIOBase):
         self.scope = scope
         self.detect_prefixed_level = detect_prefixed_level
         self._buffers: dict[int, str] = {}
+        self._last_levels: OrderedDict[int, tuple[str, float, int]] = OrderedDict()
         self._lock = RLock()
 
     @property
@@ -562,27 +659,41 @@ class DiagnosticTextStream(io.TextIOBase):
             complete.extend(part.rstrip("\r") for part in parts)
         for line in complete:
             if line:
-                self._emit_line(line)
+                self._emit_line(line, thread_id)
         return len(text)
 
     def flush(self) -> None:
-        pending: list[str] = []
+        pending: list[tuple[int, str]] = []
         with self._lock:
-            pending = [value for value in self._buffers.values() if value]
+            pending = [(thread_id, value) for thread_id, value in self._buffers.items() if value]
             self._buffers.clear()
-        for line in pending:
-            self._emit_line(line.rstrip("\r"))
+        for thread_id, line in pending:
+            self._emit_line(line.rstrip("\r"), thread_id)
 
-    def _emit_line(self, line: str) -> None:
+    def _emit_line(self, line: str, thread_id: int) -> None:
         level = self.level
         if self.detect_prefixed_level:
-            match = _STREAM_LEVEL_RE.match(line)
-            if match is not None:
-                prefix = match.group(1).lower()
-                level = {
-                    "critical": "error",
-                    "warning": "warn",
-                }.get(prefix, normalize_log_level(prefix))
+            explicit_level = detect_stream_level(line)
+            now = time.monotonic()
+            with self._lock:
+                if explicit_level is not None:
+                    level = explicit_level
+                    self._last_levels[thread_id] = (
+                        explicit_level,
+                        now + STREAM_CONTINUATION_WINDOW_SECONDS,
+                        STREAM_CONTINUATION_MAX_LINES,
+                    )
+                    self._last_levels.move_to_end(thread_id)
+                    while len(self._last_levels) > 256:
+                        self._last_levels.popitem(last=False)
+                else:
+                    inherited = self._last_levels.get(thread_id)
+                    is_continuation = _STREAM_CONTINUATION_RE.match(line) is not None
+                    if inherited is not None and is_continuation and now <= inherited[1] and inherited[2] > 0:
+                        level = inherited[0]
+                        self._last_levels[thread_id] = (inherited[0], inherited[1], inherited[2] - 1)
+                    else:
+                        self._last_levels.pop(thread_id, None)
         try:
             self.manager.emit(level, self.scope, line)
         except Exception:  # noqa: BLE001 - stream capture must not recurse into or break the runtime.
@@ -605,12 +716,18 @@ __all__ = [
     "DIAGNOSTICS_SCHEMA",
     "DiagnosticLogManager",
     "DiagnosticTextStream",
+    "ERROR_BURST_EMIT_EVERY",
+    "ERROR_BURST_MAX_KEYS",
+    "ERROR_BURST_WINDOW_SECONDS",
     "LOG_LEVELS",
     "LOG_MAX_FILES",
     "LOG_MAX_FILE_BYTES",
     "LOG_MAX_TOTAL_BYTES",
     "LOG_RETENTION_DAYS",
+    "STREAM_CONTINUATION_MAX_LINES",
+    "STREAM_CONTINUATION_WINDOW_SECONDS",
     "format_log_line",
+    "detect_stream_level",
     "install_standard_stream_capture",
     "normalize_log_level",
     "parse_log_line",

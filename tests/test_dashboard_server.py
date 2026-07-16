@@ -2603,7 +2603,7 @@ class DashboardServerTests(unittest.TestCase):
                 entries = [entry["data"] for entry in manager.tail_entries(100) if entry.get("scope") == "http"]
                 paths = {entry.get("path") for entry in entries}
                 self.assertIn("/api/app/diagnostics", paths)
-                self.assertIn("/api/app/bootstrap", paths)
+                self.assertNotIn("/api/app/bootstrap", paths)
                 serialized = json.dumps(entries).lower()
                 self.assertNotIn("approval_token", serialized)
                 self.assertNotIn("api_key", serialized)

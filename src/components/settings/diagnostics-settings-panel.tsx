@@ -4,11 +4,14 @@ import { useTranslation } from "react-i18next";
 import type { DiagnosticIdentitySummary, DiagnosticLogLevel, DiagnosticsStatus } from "../../lib/api";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-
-export const DIAGNOSTIC_LOG_LEVELS: readonly DiagnosticLogLevel[] = ["error", "warn", "info", "debug", "trace"];
+import { availableDiagnosticLogLevels, normalizeDiagnosticLogLevel } from "./diagnostic-log-levels";
 
 function logLevelLabelKey(level: DiagnosticLogLevel) {
   return `settings.logLevel${level[0].toUpperCase()}${level.slice(1)}`;
+}
+
+function logLevelDescriptionKey(level: DiagnosticLogLevel) {
+  return `${logLevelLabelKey(level)}Desc`;
 }
 
 function safeBasename(value?: string) {
@@ -38,6 +41,7 @@ function identityDetails(identity: DiagnosticIdentitySummary, t: (key: string, o
 }
 
 export function DiagnosticsSettingsPanel({
+  developerOptionsEnabled,
   status,
   message,
   loading,
@@ -46,6 +50,7 @@ export function DiagnosticsSettingsPanel({
   onOpenLogsFolder,
   onCreateSupportBundle,
 }: {
+  developerOptionsEnabled: boolean;
   status: DiagnosticsStatus | null;
   message: string;
   loading: boolean;
@@ -55,14 +60,20 @@ export function DiagnosticsSettingsPanel({
   onCreateSupportBundle: () => void;
 }) {
   const { t } = useTranslation();
-  const statusLevel = status?.logLevel || (status?.debugLogging ? "debug" : "info");
+  const availableLevels = availableDiagnosticLogLevels(developerOptionsEnabled);
+  const statusLevel = normalizeDiagnosticLogLevel(
+    status?.logLevel || (status?.debugLogging ? "debug" : "info"),
+    developerOptionsEnabled,
+  );
   const [selectedLevel, setSelectedLevel] = useState<DiagnosticLogLevel>(statusLevel);
 
   useEffect(() => {
     setSelectedLevel(statusLevel);
   }, [statusLevel]);
 
-  const selectedIndex = Math.max(0, DIAGNOSTIC_LOG_LEVELS.indexOf(selectedLevel));
+  const effectiveSelectedLevel = normalizeDiagnosticLogLevel(selectedLevel, developerOptionsEnabled);
+  const selectedIndex = Math.max(0, availableLevels.indexOf(effectiveSelectedLevel));
+  const selectedDescription = t(logLevelDescriptionKey(effectiveSelectedLevel));
   const activeLogFile = safeBasename(status?.activeLogFile);
   const redactionEnabled = Boolean(status?.redaction?.enabled ?? status?.redaction?.beforeWrite);
   const identities = useMemo(
@@ -71,8 +82,8 @@ export function DiagnosticsSettingsPanel({
   );
 
   const handleLevelChange = (nextIndex: number) => {
-    const level = DIAGNOSTIC_LOG_LEVELS[nextIndex];
-    if (!level || level === selectedLevel) {
+    const level = availableLevels[nextIndex];
+    if (!level || level === effectiveSelectedLevel) {
       return;
     }
     setSelectedLevel(level);
@@ -96,30 +107,56 @@ export function DiagnosticsSettingsPanel({
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium">{t("settings.logLevel")}</div>
-            <div className="mt-1 text-xs text-muted-foreground">{t("settings.logLevelImmediate")}</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {t("settings.logLevelImmediate", { count: availableLevels.length })}
+            </div>
           </div>
-          <Badge tone={selectedLevel === "trace" || selectedLevel === "debug" ? "warn" : "muted"}>
-            {t(logLevelLabelKey(selectedLevel))}
+          <Badge tone={effectiveSelectedLevel === "trace" || effectiveSelectedLevel === "debug" ? "warn" : "muted"}>
+            {t(logLevelLabelKey(effectiveSelectedLevel))}
           </Badge>
         </div>
 
         <input
           type="range"
           min={0}
-          max={DIAGNOSTIC_LOG_LEVELS.length - 1}
+          max={availableLevels.length - 1}
           step={1}
           value={selectedIndex}
           aria-label={t("settings.logLevelSlider")}
-          aria-valuetext={t(logLevelLabelKey(selectedLevel))}
-          data-vrcforge-log-level={selectedLevel}
+          aria-valuetext={t("settings.logLevelAriaValue", {
+            level: t(logLevelLabelKey(effectiveSelectedLevel)),
+            description: selectedDescription,
+          })}
+          data-vrcforge-log-level={effectiveSelectedLevel}
           onChange={(event) => handleLevelChange(Number(event.currentTarget.value))}
           className="mt-5 w-full cursor-pointer accent-primary"
         />
-        <div className="mt-1 grid grid-cols-5 gap-1 text-center text-[11px] text-muted-foreground" aria-hidden="true">
-          {DIAGNOSTIC_LOG_LEVELS.map((level) => (
+        <div
+          className="mt-1 grid gap-1 text-center text-[11px] text-muted-foreground"
+          style={{ gridTemplateColumns: `repeat(${availableLevels.length}, minmax(0, 1fr))` }}
+          aria-hidden="true"
+        >
+          {availableLevels.map((level) => (
             <span key={level}>{t(logLevelLabelKey(level))}</span>
           ))}
         </div>
+
+        <div
+          className="mt-4 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2"
+          data-vrcforge-log-level-description={effectiveSelectedLevel}
+        >
+          <div className="text-xs font-semibold text-foreground">
+            {t(logLevelLabelKey(effectiveSelectedLevel))}
+          </div>
+          <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            {selectedDescription}
+          </div>
+        </div>
+        {!developerOptionsEnabled ? (
+          <p className="mt-3 text-xs text-muted-foreground" data-vrcforge-log-trace-locked>
+            {t("settings.logLevelTraceLockedHint")}
+          </p>
+        ) : null}
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <div className="rounded-lg border border-border bg-background p-3">

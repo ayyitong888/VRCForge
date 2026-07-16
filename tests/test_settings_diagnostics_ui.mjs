@@ -15,6 +15,14 @@ const transpiled = ts.transpileModule(challengeLogicSource, {
 }).outputText;
 const challengeLogic = await import(`data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`);
 
+const logLevelLogicPath = path.join(root, "src/components/settings/diagnostic-log-levels.ts");
+const logLevelLogicSource = await readFile(logLevelLogicPath, "utf8");
+const logLevelTranspiled = ts.transpileModule(logLevelLogicSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+  fileName: logLevelLogicPath,
+}).outputText;
+const logLevelLogic = await import(`data:text/javascript;base64,${Buffer.from(logLevelTranspiled).toString("base64")}`);
+
 assert.equal(challengeLogic.DEVELOPER_OPTIONS_MINIMUM_WAIT_MS, 5_000);
 assert.equal(challengeLogic.developerChallengeCountdown(5_000, 0), 5);
 assert.equal(challengeLogic.developerChallengeCountdown(5_000, 1), 5);
@@ -25,6 +33,12 @@ assert.equal(challengeLogic.developerChallengeReady(5_000, 5_000), true);
 const submitOnce = challengeLogic.createDeveloperChallengeSubmitGuard();
 assert.equal(submitOnce(), true);
 assert.equal(submitOnce(), false);
+assert.deepEqual(logLevelLogic.availableDiagnosticLogLevels(false), ["error", "warn", "info", "debug"]);
+assert.deepEqual(logLevelLogic.availableDiagnosticLogLevels(true), ["error", "warn", "info", "debug", "trace"]);
+assert.equal(logLevelLogic.normalizeDiagnosticLogLevel("trace", false), "debug");
+assert.equal(logLevelLogic.normalizeDiagnosticLogLevel("trace", true), "trace");
+assert.equal(logLevelLogic.normalizeDiagnosticLogLevel("debug", false), "debug");
+assert.equal(logLevelLogic.normalizeDiagnosticLogLevel(undefined, false), "info");
 
 const [workspace, panel, control, dialog, controller, api, app] = await Promise.all([
   read("src/components/settings/settings-workspace.tsx"),
@@ -42,14 +56,25 @@ assert.ok(
   "normal diagnostics must render in General before the developer-only section",
 );
 assert.equal((workspace.match(/<DiagnosticsSettingsPanel/g) || []).length, 1);
+assert.ok(workspace.includes("developerOptionsEnabled={developerOptionsEnabled}"));
 assert.ok(!workspace.includes("onSetDebugLogging"));
 assert.ok(!workspace.includes("diagnosticsStatus?.logsDir"));
 assert.ok(panel.includes("data-vrcforge-diagnostics-settings"));
 assert.ok(panel.includes('type="range"'));
-assert.ok(panel.includes("data-vrcforge-log-level={selectedLevel}"));
-assert.ok(panel.includes('const DIAGNOSTIC_LOG_LEVELS: readonly DiagnosticLogLevel[] = ["error", "warn", "info", "debug", "trace"]'));
+assert.ok(panel.includes("developerOptionsEnabled: boolean"));
+assert.ok(panel.includes("availableDiagnosticLogLevels(developerOptionsEnabled)"));
+assert.ok(panel.includes("normalizeDiagnosticLogLevel("));
+assert.ok(panel.includes("const effectiveSelectedLevel = normalizeDiagnosticLogLevel(selectedLevel, developerOptionsEnabled)"));
+assert.ok(panel.includes("max={availableLevels.length - 1}"));
+assert.ok(panel.includes("gridTemplateColumns: `repeat(${availableLevels.length}, minmax(0, 1fr))`"));
+assert.ok(panel.includes("data-vrcforge-log-level-description={effectiveSelectedLevel}"));
+assert.ok(panel.includes("data-vrcforge-log-trace-locked"));
+assert.ok(panel.includes('t("settings.logLevelAriaValue"'));
+assert.ok(panel.includes("const selectedDescription = t(logLevelDescriptionKey(effectiveSelectedLevel))"));
 assert.ok(panel.includes("onChange={(event) => handleLevelChange"));
 assert.ok(panel.includes("onLogLevelChange(level)"));
+assert.ok(panel.includes("const level = availableLevels[nextIndex]"));
+assert.ok(panel.includes("data-vrcforge-log-level={effectiveSelectedLevel}"));
 assert.ok(panel.includes("data-vrcforge-open-logs"));
 assert.ok(panel.includes("data-vrcforge-export-support"));
 assert.ok(panel.includes("data-vrcforge-log-identities"));
@@ -103,6 +128,10 @@ for (const [name, entries] of flattened) {
   assert.deepEqual([...entries.keys()].sort(), referenceKeys, `${name} locale keys differ`);
   for (const key of referenceKeys) {
     assert.deepEqual(placeholders(entries.get(key)), placeholders(flattened[0][1].get(key)), `${name}:${key} placeholders differ`);
+  }
+  for (const level of ["Error", "Warn", "Info", "Debug", "Trace"]) {
+    const description = entries.get(`settings.logLevel${level}Desc`) || "";
+    assert.ok(description.trim().length >= 20, `${name}:settings.logLevel${level}Desc must explain the level`);
   }
 }
 

@@ -243,6 +243,7 @@ export function SettingsWorkspace({
 
             <section className="mt-10">
               <DiagnosticsSettingsPanel
+                developerOptionsEnabled={developerOptionsEnabled}
                 status={diagnosticsStatus}
                 message={diagnosticsMessage}
                 loading={loadingDiagnostics}

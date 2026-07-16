@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import threading
@@ -8,7 +10,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -23,6 +25,7 @@ from diagnostic_logging import (
     parse_log_line,
 )
 from diagnostic_privacy import DiagnosticPrivacy
+from diagnostic_safety import SAFETY_POSTURE_SCHEMA, build_safety_posture
 
 
 class MutableClock:
@@ -124,6 +127,113 @@ def test_five_level_threshold_is_live_and_legacy_bool_migrates() -> None:
         config.write_text('{"debugLogging": false}\n', encoding="utf-8")
         reloaded = DiagnosticLogManager(root / "other-logs", config, privacy)
         assert reloaded.log_level == "info"
+
+
+def test_error_threshold_keeps_only_essential_baseline_and_real_errors() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        privacy, manager = make_manager(root)
+        manager.update_config(log_level="error")
+        assert manager.emit("info", "ordinary", "ordinary info") is None
+        assert manager.emit("warn", "ordinary", "ordinary warning") is None
+        essential = manager.emit("info", "safety", "essential posture", essential=True)
+        error = manager.emit("error", "runtime", "real failure", {"code": "missing_command"})
+        assert essential is not None
+        assert essential["data"]["baseline"] is True
+        assert error is not None
+        assert error["data"]["baseline"] is True
+
+        permission = {
+            "executionMode": "approval",
+            "perActionApproval": True,
+            "allowWriteRequests": True,
+        }
+        advanced = {
+            "developerOptionsEnabled": False,
+            "developerOptionsEverEnabled": True,
+            "computerUseEnabled": False,
+            "computerUseEverEnabled": False,
+        }
+        with (
+            patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+            patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            patch.object(dashboard_server.AGENT_GATEWAY, "permission_state", return_value=permission),
+            patch.object(dashboard_server.AGENT_GATEWAY, "advanced_settings_state", return_value=advanced),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast", new=AsyncMock()),
+            patch.object(dashboard_server, "current_diagnostic_identity_context", return_value={}),
+        ):
+            asyncio.run(dashboard_server.emit_safety_posture_snapshot("startup"))
+            asyncio.run(dashboard_server.emit_safety_posture_snapshot("normal_shutdown"))
+
+        snapshots = [
+            entry
+            for entry in manager.tail_entries(20)
+            if entry["scope"] == "safety" and entry["data"].get("phase") in {"startup", "normal_shutdown"}
+        ]
+        assert [entry["data"]["phase"] for entry in snapshots[-2:]] == ["startup", "normal_shutdown"]
+        assert all(entry["data"]["baseline"] is True for entry in snapshots)
+        assert all(entry["data"]["posture"]["schema"] == SAFETY_POSTURE_SCHEMA for entry in snapshots)
+
+
+def test_safety_posture_describes_auto_execution_and_restore_exception_truthfully() -> None:
+    posture = build_safety_posture(
+        {
+            "executionMode": "roslyn_full_auto",
+            "perActionApproval": False,
+            "autoApprove": True,
+            "autoApproveDangerousRequiresApproval": False,
+            "allowWriteRequests": True,
+            "roslynRiskAcknowledged": True,
+            "roslynFullAutoEverEnabled": True,
+        },
+        {
+            "developerOptionsEnabled": True,
+            "developerOptionsEverEnabled": True,
+            "computerUseEnabled": True,
+            "computerUseEverEnabled": True,
+        },
+        "trace",
+    )
+    assert posture["externalAgent"] == {
+        "requestOnly": True,
+        "directApplyExposed": False,
+        "requestMayAutoExecute": True,
+        "selectedMode": "roslyn_full_auto",
+    }
+    assert posture["fullPermission"]["canOverrideExplicitApproval"] is True
+    assert posture["checkpoint"] == {
+        "requiredBeforeOrdinaryWrite": True,
+        "restoreAndRecoveryExempt": True,
+    }
+    assert posture["rollback"] == {
+        "availableForCheckpointedWrite": True,
+        "approvalRecordRequired": True,
+        "manualApprovalRequired": False,
+        "restoreMayAutoExecute": True,
+    }
+
+
+def test_exact_error_bursts_are_bounded_without_hiding_first_or_distinct_context() -> None:
+    clock = MutableClock(datetime(2026, 7, 17, 0, 0, 0, tzinfo=timezone.utc))
+    with TemporaryDirectory() as temp_dir:
+        _, manager = make_manager(Path(temp_dir), clock=clock)
+        manager.update_config(log_level="error")
+        for _ in range(5):
+            manager.emit("error", "unity-cli", "Command is missing.", {"command": "alpha"})
+        manager.emit("error", "unity-cli", "Command is missing.", {"command": "beta"})
+        entries = manager.tail_entries(20)
+        assert len(entries) == 3
+        assert entries[0]["data"]["command"] == "alpha"
+        assert entries[0]["data"]["baseline"] is True
+        assert entries[1]["data"]["aggregated"] is True
+        assert entries[1]["data"]["occurrenceCount"] == 5
+        assert entries[1]["data"]["repeatCount"] == 4
+        assert entries[2]["data"]["command"] == "beta"
+
+        clock.value += timedelta(seconds=6)
+        manager.emit("error", "unity-cli", "Command is missing.", {"command": "alpha"})
+        assert len(manager.tail_entries(20)) == 4
 
 
 def test_config_write_failure_rolls_back_live_level() -> None:
@@ -594,13 +704,197 @@ def test_stderr_prefix_level_detection_respects_error_threshold() -> None:
         stream = DiagnosticTextStream(manager, level="error", scope="backend.stderr", detect_prefixed_level=True)
         stream.write("INFO:     server ready\n")
         stream.write("WARNING:  recoverable\n")
+        stream.write("[07/16/26 23:48:59] INFO     StreamableHTTP      streamable_http_manager.py:128\n")
+        stream.write("                             session manager\n")
+        stream.write("                             started\n")
         stream.write("ERROR:    failed\n")
         stream.write("traceback detail\n")
         messages = [entry["message"] for entry in manager.tail_entries(10)]
         assert "INFO:     server ready" not in messages
         assert "WARNING:  recoverable" not in messages
+        assert not any("StreamableHTTP" in message for message in messages)
+        assert "                             session manager" not in messages
+        assert "                             started" not in messages
         assert "ERROR:    failed" in messages
         assert "traceback detail" in messages
+
+
+def test_stderr_rich_explicit_level_and_continuations_remain_info_records() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        _, manager = make_manager(root)
+        manager.update_config(log_level="info")
+        stream = DiagnosticTextStream(manager, level="error", scope="backend.stderr", detect_prefixed_level=True)
+        stream.write(
+            "[07/16/26 23:48:59] INFO     StreamableHTTP      streamable_http_manager.py:128\n"
+            "                             session manager\n"
+            "                             started\n"
+        )
+        entries = manager.tail_entries(10)
+        assert len(entries) == 3
+        assert [entry["level"] for entry in entries] == ["info", "info", "info"]
+        assert all(entry["data"].get("baseline") is not True for entry in entries)
+        assert all(parse_log_line(line) is not None for line in manager.tail_lines(10))
+
+
+def test_stderr_continuation_inheritance_requires_indent_and_expires() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        _, manager = make_manager(root)
+        manager.update_config(log_level="trace")
+        stream = DiagnosticTextStream(manager, level="error", scope="backend.stderr", detect_prefixed_level=True)
+        with patch("diagnostic_logging.time.monotonic", side_effect=[100.0, 100.1, 101.0, 101.1, 102.0, 104.1]):
+            stream.write("[07/16/26 23:48:59] INFO     StreamableHTTP      streamable_http_manager.py:128\n")
+            stream.write("                             immediate continuation\n")
+            stream.write("INFO:     another record\n")
+            stream.write("unprefixed stderr failure\n")
+            stream.write("INFO:     final info record\n")
+            stream.write("    delayed indented failure\n")
+        entries = manager.tail_entries(10)
+        assert [entry["level"] for entry in entries] == ["info", "info", "info", "error", "info", "error"]
+        assert entries[3]["data"]["baseline"] is True
+        assert entries[5]["data"]["baseline"] is True
+
+
+def test_http_interaction_levels_keep_successful_reads_out_of_debug() -> None:
+    with TemporaryDirectory() as temp_dir:
+        privacy, manager = make_manager(Path(temp_dir))
+        manager.update_config(log_level="debug")
+        with (
+            patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+            patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+            patch.object(dashboard_server, "current_diagnostic_identity_context", return_value={}),
+        ):
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/poll", "status": 200, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "POST", "path": "/write", "status": 200, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/failed", "status": 500, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/error", "status": 200, "error": "runtime failure"}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/bad-request", "status": 404, "error": "not found"}
+            )
+            assert [entry["data"]["path"] for entry in manager.tail_entries(10)] == [
+                "/write",
+                "/failed",
+                "/error",
+                "/bad-request",
+            ]
+            assert [entry["level"] for entry in manager.tail_entries(10)] == ["debug", "error", "error", "warn"]
+
+            manager.update_config(log_level="trace")
+            dashboard_server.record_debug_interaction(
+                {"method": "HEAD", "path": "/head-poll", "status": 204, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "OPTIONS", "path": "/preflight", "status": 200, "error": ""}
+            )
+            trace_entries = manager.tail_entries(10)
+            assert [entry["level"] for entry in trace_entries[-2:]] == ["trace", "trace"]
+
+            manager.update_config(log_level="error")
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/filtered-read", "status": 200, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "POST", "path": "/filtered-write", "status": 200, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/filtered-4xx", "status": 401, "error": "unauthorized"}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "GET", "path": "/kept-5xx", "status": 503, "error": ""}
+            )
+            dashboard_server.record_debug_interaction(
+                {"method": "POST", "path": "/kept-exception", "status": 200, "error": "uncaught"}
+            )
+        entries = manager.tail_entries(20)
+        assert [entry["data"]["path"] for entry in entries[-2:]] == ["/kept-5xx", "/kept-exception"]
+        assert all(entry["level"] == "error" for entry in entries[-2:])
+        assert all(entry["data"]["baseline"] is True for entry in entries[-2:])
+        assert all(entry["message"] == "Direct HTTP interaction." for entry in entries)
+        assert all(entry["data"]["kind"] == "direct_http" for entry in entries)
+
+
+def test_tauri_ipc_transport_requires_exact_hmac_proof_and_never_logs_headers() -> None:
+    token = "TEST_ONLY_APP_SESSION_TOKEN_1234567890"
+
+    def make_request(case: str, proof: str = "", marker: str = ""):
+        raw_target = f"/api/health?case={case}"
+        headers: list[tuple[bytes, bytes]] = []
+        if marker:
+            headers.append((b"x-vrcforge-transport", marker.encode("ascii")))
+        if proof:
+            headers.append((b"x-vrcforge-transport-proof", proof.encode("ascii")))
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/health",
+            "raw_path": b"/api/health",
+            "query_string": f"case={case}".encode("ascii"),
+            "headers": headers,
+            "client": ("127.0.0.1", 50000),
+            "server": ("127.0.0.1", 8757),
+            "root_path": "",
+        }
+        return dashboard_server.Request(scope), raw_target
+
+    async def call_next(_request):
+        return dashboard_server.JSONResponse({"ok": True}, status_code=200)
+
+    valid_request, valid_target = make_request("valid")
+    valid_message = f"vrcforge.tauri-ipc-bridge.v1\nGET\n{valid_target}".encode("utf-8")
+    valid_proof = hmac.new(token.encode("utf-8"), valid_message, hashlib.sha256).hexdigest()
+    valid_request, _ = make_request("valid", valid_proof, "tauri-ipc-bridge")
+    forged_request, _ = make_request("forged", "0" * 64, "tauri-ipc-bridge")
+    direct_request, _ = make_request("direct")
+
+    with TemporaryDirectory() as temp_dir:
+        privacy, manager = make_manager(Path(temp_dir))
+        manager.update_config(log_level="trace")
+        with (
+            patch.object(dashboard_server, "APP_SESSION_TOKEN", token),
+            patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+            patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+            patch.object(dashboard_server, "current_diagnostic_identity_context", return_value={}),
+        ):
+            asyncio.run(dashboard_server.authorize_local_requests(valid_request, call_next))
+            asyncio.run(dashboard_server.authorize_local_requests(forged_request, call_next))
+            asyncio.run(dashboard_server.authorize_local_requests(direct_request, call_next))
+
+        interactions = {
+            entry["data"]["query"]["case"]: entry
+            for entry in manager.tail_entries(20)
+            if entry["scope"] in {"ipc", "http"} and "query" in entry["data"]
+        }
+        assert interactions["valid"]["message"] == "Tauri IPC bridge interaction."
+        assert interactions["valid"]["scope"] == "ipc"
+        assert interactions["valid"]["data"]["component"] == "ipc"
+        assert interactions["valid"]["data"]["kind"] == "tauri_ipc_bridge"
+        for case in ("forged", "direct"):
+            assert interactions[case]["message"] == "Direct HTTP interaction."
+            assert interactions[case]["scope"] == "http"
+            assert interactions[case]["data"]["component"] == "http"
+            assert interactions[case]["data"]["kind"] == "direct_http"
+        log_content = "\n".join(
+            path.read_text(encoding="utf-8") for path in (Path(temp_dir) / "logs").glob("vrcforge_*.log")
+        )
+        assert token not in log_content
+        assert valid_proof not in log_content
+        assert "x-vrcforge-transport" not in log_content.lower()
 
 
 def test_developer_options_guard_exact_wait_cancel_and_single_use() -> None:
@@ -624,6 +918,190 @@ def test_developer_options_guard_exact_wait_cancel_and_single_use() -> None:
     with pytest.raises(DeveloperOptionsChallengeError):
         guard.consume(str(second["challengeId"]))
     assert not guard.cancel("bad/path")
+
+
+def test_trace_gate_dynamic_levels_and_atomic_disable_downgrade() -> None:
+    advanced = {
+        "developerOptionsEnabled": False,
+        "developerOptionsEverEnabled": False,
+        "computerUseEnabled": False,
+        "computerUseEverEnabled": False,
+    }
+    permission = {
+        "executionMode": "approval",
+        "perActionApproval": True,
+        "allowWriteRequests": True,
+    }
+
+    def update_advanced(*, developer_options_enabled: bool, computer_use_enabled: bool):
+        advanced["developerOptionsEnabled"] = developer_options_enabled
+        advanced["developerOptionsEverEnabled"] = advanced["developerOptionsEverEnabled"] or developer_options_enabled
+        advanced["computerUseEnabled"] = computer_use_enabled and developer_options_enabled
+        advanced["computerUseEverEnabled"] = advanced["computerUseEverEnabled"] or advanced["computerUseEnabled"]
+        return {"ok": True, "settings": dict(advanced)}
+
+    with TemporaryDirectory() as temp_dir:
+        privacy, manager = make_manager(Path(temp_dir))
+        with (
+            patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+            patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            patch.object(dashboard_server.AGENT_GATEWAY, "permission_state", return_value=permission),
+            patch.object(dashboard_server.AGENT_GATEWAY, "advanced_settings_state", side_effect=lambda: dict(advanced)),
+            patch.object(dashboard_server.AGENT_GATEWAY, "update_advanced_settings", side_effect=update_advanced),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast", new=AsyncMock()),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+            patch.object(dashboard_server, "current_diagnostic_identity_context", return_value={}),
+        ):
+            state = dashboard_server.diagnostics_state()
+            assert state["logLevels"] == ["error", "warn", "info", "debug"]
+            assert state["traceRequiresDeveloperOptions"] is True
+            assert state["safetyPosture"]["diagnostics"]["traceAllowed"] is False
+            with pytest.raises(HTTPException) as blocked:
+                asyncio.run(
+                    dashboard_server.update_app_diagnostics(
+                        dashboard_server.DiagnosticsConfigRequest(logLevel="trace")
+                    )
+                )
+            assert blocked.value.status_code == 409
+            assert manager.log_level == "info"
+
+            advanced["developerOptionsEnabled"] = True
+            advanced["developerOptionsEverEnabled"] = True
+            enabled = asyncio.run(
+                dashboard_server.update_app_diagnostics(
+                    dashboard_server.DiagnosticsConfigRequest(logLevel="trace")
+                )
+            )
+            assert enabled["logLevel"] == "trace"
+            assert enabled["logLevels"] == ["error", "warn", "info", "debug", "trace"]
+
+            with patch.object(
+                dashboard_server.AGENT_GATEWAY,
+                "update_advanced_settings",
+                side_effect=RuntimeError("persist failed"),
+            ):
+                with pytest.raises(RuntimeError):
+                    dashboard_server.update_agentic_app_advanced_settings_guarded(
+                        dashboard_server.AdvancedSettingsRequest(
+                            developerOptionsEnabled=False,
+                            computerUseEnabled=False,
+                        )
+                    )
+            assert advanced["developerOptionsEnabled"] is True
+            assert manager.log_level == "trace"
+
+            disabled = dashboard_server.update_agentic_app_advanced_settings_guarded(
+                dashboard_server.AdvancedSettingsRequest(
+                    developerOptionsEnabled=False,
+                    computerUseEnabled=False,
+                )
+            )
+            assert disabled["settings"]["developerOptionsEnabled"] is False
+            assert manager.log_level == "debug"
+            assert dashboard_server.diagnostics_state()["logLevels"] == ["error", "warn", "info", "debug"]
+
+
+def test_permission_and_advanced_flag_changes_emit_safe_essential_security_evidence() -> None:
+    challenge_id = "challenge_EEEEEEEEEEEEEEEEEEEEEEEE"
+    clock = MutableClock(10.0)
+    guard = DeveloperOptionsGuard(clock=clock, id_factory=lambda: challenge_id)
+    guard.create()
+    clock.value = 15.0
+    permission = {
+        "executionMode": "approval",
+        "perActionApproval": True,
+        "autoApprove": False,
+        "autoApproveDangerousRequiresApproval": False,
+        "roslynRiskAcknowledged": False,
+        "allowWriteRequests": True,
+    }
+    advanced = {
+        "developerOptionsEnabled": False,
+        "developerOptionsEverEnabled": False,
+        "computerUseEnabled": False,
+        "computerUseEverEnabled": False,
+    }
+
+    def update_permission(execution_mode: str, acknowledge_roslyn_risk: bool = False):
+        permission.update(
+            {
+                "executionMode": execution_mode,
+                "perActionApproval": False,
+                "autoApprove": True,
+                "roslynRiskAcknowledged": acknowledge_roslyn_risk,
+                "roslynFullAutoEverEnabled": acknowledge_roslyn_risk,
+            }
+        )
+        return {"ok": True, "permission": dict(permission)}
+
+    def update_advanced(*, developer_options_enabled: bool, computer_use_enabled: bool):
+        advanced.update(
+            {
+                "developerOptionsEnabled": developer_options_enabled,
+                "developerOptionsEverEnabled": developer_options_enabled,
+                "computerUseEnabled": computer_use_enabled and developer_options_enabled,
+                "computerUseEverEnabled": computer_use_enabled and developer_options_enabled,
+            }
+        )
+        return {"ok": True, "settings": dict(advanced)}
+
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        privacy, manager = make_manager(root)
+        manager.update_config(log_level="error")
+        with (
+            patch.object(dashboard_server, "DEVELOPER_OPTIONS_GUARD", guard),
+            patch.object(dashboard_server, "DIAGNOSTIC_PRIVACY", privacy),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+            patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
+            patch.object(dashboard_server.AGENT_GATEWAY, "permission_state", side_effect=lambda: dict(permission)),
+            patch.object(dashboard_server.AGENT_GATEWAY, "update_permission_state", side_effect=update_permission),
+            patch.object(dashboard_server.AGENT_GATEWAY, "advanced_settings_state", side_effect=lambda: dict(advanced)),
+            patch.object(dashboard_server.AGENT_GATEWAY, "update_advanced_settings", side_effect=update_advanced),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast", new=AsyncMock()),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+            patch.object(dashboard_server, "current_diagnostic_identity_context", return_value={}),
+        ):
+            asyncio.run(
+                dashboard_server.update_agentic_app_permission(
+                    dashboard_server.AgentPermissionRequest(
+                        execution_mode="roslyn_full_auto",
+                        acknowledge_roslyn_risk=True,
+                    )
+                )
+            )
+            dashboard_server.update_agentic_app_advanced_settings_guarded(
+                dashboard_server.AdvancedSettingsRequest(
+                    developerOptionsEnabled=True,
+                    computerUseEnabled=True,
+                    developerChallengeId=challenge_id,
+                )
+            )
+
+        entries = [entry for entry in manager.tail_entries(20) if entry["scope"] == "security"]
+        assert [entry["message"] for entry in entries] == [
+            "Permission safety flags changed.",
+            "Advanced safety flags changed.",
+        ]
+        assert all(entry["level"] == "info" for entry in entries)
+        assert all(entry["data"]["baseline"] is True for entry in entries)
+        assert all(entry["data"]["source"] == "app_settings_api" for entry in entries)
+        assert all(entry["data"]["strongConfirmationCompleted"] is True for entry in entries)
+        assert entries[0]["data"]["before"]["executionMode"] == "approval"
+        assert entries[0]["data"]["after"]["executionMode"] == "roslyn_full_auto"
+        assert entries[0]["data"]["before"]["perActionApproval"] is True
+        assert entries[0]["data"]["after"]["autoApprove"] is True
+        assert entries[0]["data"]["after"]["autoApproveDangerousRequiresApproval"] is False
+        assert entries[1]["data"]["before"]["developerOptionsEnabled"] is False
+        assert entries[1]["data"]["after"]["computerUseEnabled"] is True
+        content = "\n".join(
+            path.read_text(encoding="utf-8") for path in (root / "logs").glob("vrcforge_*.log")
+        )
+        assert challenge_id not in content
+        assert "developerChallengeId" not in content
+        assert "proof" not in content.lower()
+        assert "token" not in content.lower()
 
 
 def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None:
@@ -676,6 +1154,26 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
                 return_value={"projectPath": project, "api_key": secret, "blueprintId": blueprint},
             ),
             patch.object(dashboard_server, "read_agentic_app_doctor", return_value={"detail": project}),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY,
+                "permission_state",
+                return_value={
+                    "executionMode": "approval",
+                    "perActionApproval": True,
+                    "allowWriteRequests": True,
+                    "roslynRiskAcknowledged": False,
+                },
+            ),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY,
+                "advanced_settings_state",
+                return_value={
+                    "developerOptionsEnabled": True,
+                    "developerOptionsEverEnabled": True,
+                    "computerUseEnabled": False,
+                    "computerUseEverEnabled": True,
+                },
+            ),
             patch.object(dashboard_server.AGENT_GATEWAY, "list_checkpoints", return_value={"items": []}),
             patch.object(dashboard_server.AGENT_GATEWAY, "recent_audit_logs", return_value=[]),
             patch.object(dashboard_server.SUB_AGENT_REGISTRY, "recent_events", return_value=[]),
@@ -691,14 +1189,32 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             names = set(bundle.namelist())
             content = "\n".join(bundle.read(name).decode("utf-8") for name in names)
             diagnostics = json.loads(bundle.read("diagnostics.json"))
+            safety_posture = json.loads(bundle.read("safety-posture.json"))
             diagnostic_log = bundle.read("diagnostic-log.txt").decode("utf-8")
         assert "diagnostic-log.txt" in names
+        assert "safety-posture.json" in names
         assert "dashboard-log.json" not in names
         assert "interaction-log.json" not in names
         assert "backend-stdout-tail.json" not in names
         assert "backend-stderr-tail.json" not in names
         assert "identities" not in diagnostics
         assert diagnostics["schema"] == "vrcforge.diagnostics.v2"
+        assert diagnostics["safetyPosture"] == safety_posture
+        assert safety_posture["schema"] == SAFETY_POSTURE_SCHEMA
+        assert safety_posture["externalAgent"]["requestOnly"] is True
+        assert safety_posture["checkpoint"]["requiredBeforeOrdinaryWrite"] is True
+        assert safety_posture["checkpoint"]["restoreAndRecoveryExempt"] is True
+        assert safety_posture["rollback"]["approvalRecordRequired"] is True
+        assert safety_posture["rollback"]["manualApprovalRequired"] is True
+        assert safety_posture["rollback"]["restoreMayAutoExecute"] is False
+        assert safety_posture["externalAgent"]["directApplyExposed"] is False
+        assert safety_posture["externalAgent"]["requestMayAutoExecute"] is False
+        assert safety_posture["externalAgent"]["selectedMode"] == "approval"
+        assert safety_posture["fullPermission"]["canOverrideExplicitApproval"] is False
+        assert safety_posture["developerOptions"]["everEnabled"] is True
+        assert safety_posture["computerUse"]["everEnabled"] is True
+        assert safety_posture["diagnostics"]["currentLevel"] == "trace"
+        assert safety_posture["diagnostics"]["traceRequiresDeveloperOptions"] is True
         for sentinel in (project, blueprint, secret, user, "Bundle Avatar"):
             assert sentinel not in content
         assert "diagnostic-alias.key" not in content

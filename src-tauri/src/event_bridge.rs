@@ -127,6 +127,15 @@ pub(crate) fn connect_backend_event_socket(
         HeaderValue::from_str(&format!("Bearer {app_session_token}"))
             .map_err(|error| error.to_string())?,
     );
+    request.headers_mut().insert(
+        "X-VRCForge-Transport",
+        HeaderValue::from_static("tauri-ipc-bridge"),
+    );
+    request.headers_mut().insert(
+        "X-VRCForge-Transport-Proof",
+        HeaderValue::from_str(&tauri_ipc_bridge_proof(app_session_token, "GET", "/ws"))
+            .map_err(|error| error.to_string())?,
+    );
     let (socket, _) = tungstenite::connect(request)
         .map_err(|error| format!("unable to connect backend event socket: {error}"))?;
     Ok(socket)

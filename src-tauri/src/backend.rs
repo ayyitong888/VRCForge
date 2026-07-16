@@ -162,11 +162,14 @@ pub(crate) fn backend_json_request(
         .redirects(0)
         .build();
     let url = format!("{BACKEND_ENDPOINT}{path}");
+    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
     let send_once = || {
         let http_request = agent
             .request(method, &url)
             .set("Accept", "application/json")
             .set("Origin", "tauri://localhost")
+            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+            .set("X-VRCForge-Transport-Proof", &transport_proof)
             .set("Authorization", &format!("Bearer {app_session_token}"));
         let response = if let Some(body) = body.as_ref() {
             http_request
@@ -494,7 +497,6 @@ pub(crate) fn generate_session_token() -> Result<String, String> {
 /// HMAC-SHA256 hex digest backed by the audited RustCrypto `hmac` crate
 /// (replaces a hand-rolled ipad/opad implementation with identical output —
 /// see the known-vector test below).
-#[cfg(test)]
 pub(crate) fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
@@ -504,6 +506,18 @@ pub(crate) fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub(crate) fn tauri_ipc_bridge_proof(token: &str, method: &str, path_and_query: &str) -> String {
+    hmac_sha256_hex(
+        token.as_bytes(),
+        format!(
+            "vrcforge.tauri-ipc-bridge.v1\n{}\n{}",
+            method.to_ascii_uppercase(),
+            path_and_query
+        )
+        .as_bytes(),
+    )
 }
 
 /// Nonce-challenge design (kept intentionally): the shell generates a fresh
@@ -676,10 +690,16 @@ pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
         .timeout(Duration::from_millis(1500))
         .redirects(0)
         .build();
+    let challenge_path = format!(
+        "/api/app/session-challenge?nonce={}",
+        percent_encode_query_component(&nonce)
+    );
+    let transport_proof = tauri_ipc_bridge_proof(token, "GET", &challenge_path);
     let Ok(response) = agent
-        .get(&format!("{BACKEND_ENDPOINT}/api/app/session-challenge"))
+        .get(&format!("{BACKEND_ENDPOINT}{challenge_path}"))
         .set("Origin", "tauri://localhost")
-        .query("nonce", &nonce)
+        .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+        .set("X-VRCForge-Transport-Proof", &transport_proof)
         .call()
     else {
         return false;

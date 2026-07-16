@@ -255,9 +255,9 @@ mod tests {
         diagnostics_update_body, extract_challenge_signature, hmac_sha256_hex,
         percent_encode_query_component, prepare_runtime_files, provider_config_body,
         resolve_logs_folder, runtime_session_verification_error, sanitize_backend_event,
-        sanitize_text_for_webview, sanitize_webview_response, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_project_folder_to_open,
-        webview2_args_with_accessibility, webview_error_message,
+        sanitize_text_for_webview, sanitize_webview_response, tauri_ipc_bridge_proof,
+        try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open, webview2_args_with_accessibility, webview_error_message,
         DesktopAdvancedSettingsUpdateRequest, DesktopDiagnosticsUpdateRequest,
         DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
@@ -367,6 +367,24 @@ mod tests {
             "nonce-value",
             "not-a-valid-hmac",
         ));
+    }
+
+    #[test]
+    fn tauri_ipc_bridge_proof_binds_method_and_path() {
+        let proof = tauri_ipc_bridge_proof("session-token", "post", "/api/app/diagnostics?view=1");
+        assert_eq!(proof.len(), 64);
+        assert_eq!(
+            proof,
+            tauri_ipc_bridge_proof("session-token", "POST", "/api/app/diagnostics?view=1")
+        );
+        assert_ne!(
+            proof,
+            tauri_ipc_bridge_proof("session-token", "GET", "/api/app/diagnostics?view=1")
+        );
+        assert_ne!(
+            proof,
+            tauri_ipc_bridge_proof("session-token", "POST", "/api/app/diagnostics?view=2")
+        );
     }
 
     #[test]

@@ -66,6 +66,14 @@ from diagnostic_logging import (
     parse_log_timestamp as parse_diagnostic_log_timestamp,
 )
 from diagnostic_privacy import DiagnosticPrivacy
+from diagnostic_safety import (
+    TRACE_REQUIRES_DEVELOPER_OPTIONS,
+    advanced_security_state,
+    available_log_levels,
+    build_safety_posture,
+    changed_safety_flags,
+    permission_security_state,
+)
 from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -1522,6 +1530,7 @@ async def authorize_local_requests(request: Request, call_next):
     status_code = 500
     error_message = ""
     is_preflight = is_cors_preflight_request(request)
+    transport_component = request_transport_component(request)
     if not is_preflight and (request.url.path == "/mcp" or request.url.path.startswith("/mcp/")):
         try:
             authenticate_agent_request(request, allow_disabled=False)
@@ -1537,7 +1546,8 @@ async def authorize_local_requests(request: Request, call_next):
                     "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
                     "error": str(exc.detail),
                     "client": request.client.host if request.client else "",
-                }
+                },
+                component=transport_component,
             )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     if not is_preflight and artifact_route_requires_auth(request):
@@ -1555,7 +1565,8 @@ async def authorize_local_requests(request: Request, call_next):
                     "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
                     "error": str(exc.detail),
                     "client": request.client.host if request.client else "",
-                }
+                },
+                component=transport_component,
             )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     if not is_preflight and app_route_requires_auth(request):
@@ -1573,7 +1584,8 @@ async def authorize_local_requests(request: Request, call_next):
                     "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
                     "error": str(exc.detail),
                     "client": request.client.host if request.client else "",
-                }
+                },
+                component=transport_component,
             )
             return JSONResponse({"ok": False, "error": exc.detail}, status_code=exc.status_code)
     try:
@@ -1596,7 +1608,8 @@ async def authorize_local_requests(request: Request, call_next):
                     "durationMs": round((time.perf_counter() - started_at) * 1000, 2),
                     "error": error_message,
                     "client": request.client.host if request.client else "",
-                }
+                },
+                component=transport_component,
             )
 
 
@@ -1607,6 +1620,8 @@ async def on_startup() -> None:
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
     await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
+    await asyncio.to_thread(reconcile_diagnostic_trace_policy)
+    await emit_safety_posture_snapshot("startup")
     if BACKEND_OWNER_LEASE.owned:
         try:
             await asyncio.to_thread(SUB_AGENT_REGISTRY.reconcile_startup, refresh_from_disk=True)
@@ -1648,6 +1663,8 @@ async def on_shutdown() -> None:
     global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
+
+    await emit_safety_posture_snapshot("normal_shutdown")
 
     try:
         await asyncio.to_thread(DESKTOP_EXECUTOR.stop)
@@ -2032,6 +2049,7 @@ def read_agentic_app_permission() -> dict[str, Any]:
 
 @app.post("/api/app/permission")
 async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict[str, Any]:
+    before = permission_security_state(AGENT_GATEWAY.permission_state())
     try:
         payload = AGENT_GATEWAY.update_permission_state(
             request.execution_mode,
@@ -2039,6 +2057,24 @@ async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    after = permission_security_state(payload.get("permission"))
+    changed_flags = changed_safety_flags(before, after)
+    if changed_flags:
+        await emit_log_async(
+            "info",
+            "security",
+            "Permission safety flags changed.",
+            {
+                "before": before,
+                "after": after,
+                "changedFlags": changed_flags,
+                "source": "app_settings_api",
+                "strongConfirmationCompleted": bool(
+                    request.acknowledge_roslyn_risk and after.get("fullPermission")
+                ),
+            },
+            essential=True,
+        )
     await EVENT_BUS.broadcast("agentPermission", payload["permission"])
     return payload
 
@@ -2078,18 +2114,52 @@ async def update_agentic_app_advanced_settings(request: AdvancedSettingsRequest)
 def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsRequest) -> dict[str, Any]:
     with ADVANCED_SETTINGS_TRANSITION_LOCK:
         current = AGENT_GATEWAY.advanced_settings_state()
+        before = advanced_security_state(current)
         enabling_developer_options = bool(request.developer_options_enabled) and not bool(
             current.get("developerOptionsEnabled")
         )
+        strong_confirmation_completed = False
         if enabling_developer_options:
             try:
                 DEVELOPER_OPTIONS_GUARD.consume(request.developer_challenge_id or "")
             except DeveloperOptionsChallengeError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return AGENT_GATEWAY.update_advanced_settings(
-            developer_options_enabled=request.developer_options_enabled,
-            computer_use_enabled=request.computer_use_enabled,
-        )
+            strong_confirmation_completed = True
+        previous_log_level = DIAGNOSTIC_LOGGER.log_level
+        trace_downgraded = not request.developer_options_enabled and previous_log_level == "trace"
+        if trace_downgraded:
+            DIAGNOSTIC_LOGGER.update_config(log_level="debug")
+        try:
+            payload = AGENT_GATEWAY.update_advanced_settings(
+                developer_options_enabled=request.developer_options_enabled,
+                computer_use_enabled=request.computer_use_enabled,
+            )
+        except Exception:
+            if trace_downgraded:
+                try:
+                    actual = AGENT_GATEWAY.advanced_settings_state()
+                    if actual.get("developerOptionsEnabled"):
+                        DIAGNOSTIC_LOGGER.update_config(log_level=previous_log_level)
+                except Exception:  # noqa: BLE001 - keep the safer Debug level if rollback state is uncertain.
+                    pass
+            raise
+        after = advanced_security_state(payload.get("settings"))
+        changed_flags = changed_safety_flags(before, after)
+        if changed_flags:
+            emit_log(
+                "info",
+                "security",
+                "Advanced safety flags changed.",
+                {
+                    "before": before,
+                    "after": after,
+                    "changedFlags": changed_flags,
+                    "source": "app_settings_api",
+                    "strongConfirmationCompleted": strong_confirmation_completed,
+                },
+                essential=True,
+            )
+        return payload
 
 
 @app.post("/api/app/agent/message")
@@ -4893,7 +4963,7 @@ def serialize_app_api_config() -> dict[str, Any]:
 
 
 def load_diagnostics_config() -> dict[str, Any]:
-    state = DIAGNOSTIC_LOGGER.status()
+    state = diagnostics_state()
     return {
         "schema": state["schema"],
         "logLevel": state["logLevel"],
@@ -4904,7 +4974,11 @@ def load_diagnostics_config() -> dict[str, Any]:
 def save_diagnostics_config(payload: dict[str, Any]) -> dict[str, Any]:
     log_level = payload.get("logLevel", payload.get("log_level"))
     debug_logging = payload.get("debugLogging", payload.get("debug_logging"))
-    state = DIAGNOSTIC_LOGGER.update_config(log_level=log_level, debug_logging=debug_logging)
+    with ADVANCED_SETTINGS_TRANSITION_LOCK:
+        if str(log_level or "").strip().lower() == "trace" and not developer_options_enabled_for_diagnostics():
+            raise ValueError("Trace logging requires Developer Options.")
+        DIAGNOSTIC_LOGGER.update_config(log_level=log_level, debug_logging=debug_logging)
+        state = diagnostics_state()
     return {
         "schema": state["schema"],
         "logLevel": state["logLevel"],
@@ -4913,7 +4987,59 @@ def save_diagnostics_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def diagnostics_state() -> dict[str, Any]:
-    return DIAGNOSTIC_LOGGER.status()
+    state = DIAGNOSTIC_LOGGER.status()
+    posture = safety_posture_state()
+    developer_enabled = bool(posture["developerOptions"]["enabled"])
+    return {
+        **state,
+        "logLevels": available_log_levels(developer_enabled),
+        "traceRequiresDeveloperOptions": TRACE_REQUIRES_DEVELOPER_OPTIONS,
+        "safetyPosture": posture,
+    }
+
+
+def developer_options_enabled_for_diagnostics() -> bool:
+    try:
+        state = AGENT_GATEWAY.advanced_settings_state()
+    except Exception:  # noqa: BLE001 - trace availability fails closed.
+        return False
+    return bool(state.get("developerOptionsEnabled"))
+
+
+def safety_posture_state() -> dict[str, Any]:
+    try:
+        permission = AGENT_GATEWAY.permission_state()
+    except Exception:  # noqa: BLE001 - posture uses safe defaults, never raw exception text.
+        permission = {}
+    try:
+        advanced = AGENT_GATEWAY.advanced_settings_state()
+    except Exception:  # noqa: BLE001 - posture uses safe defaults, never raw exception text.
+        advanced = {}
+    return build_safety_posture(permission, advanced, DIAGNOSTIC_LOGGER.log_level)
+
+
+async def emit_safety_posture_snapshot(phase: Literal["startup", "normal_shutdown"]) -> None:
+    posture = await asyncio.to_thread(safety_posture_state)
+    message = (
+        "Safety posture captured at startup."
+        if phase == "startup"
+        else "Safety posture captured for normal shutdown."
+    )
+    await emit_log_async(
+        "info",
+        "safety",
+        message,
+        {"phase": phase, "posture": posture},
+        essential=True,
+    )
+
+
+def reconcile_diagnostic_trace_policy() -> bool:
+    with ADVANCED_SETTINGS_TRANSITION_LOCK:
+        if DIAGNOSTIC_LOGGER.log_level != "trace" or developer_options_enabled_for_diagnostics():
+            return False
+        DIAGNOSTIC_LOGGER.update_config(log_level="debug")
+        return True
 
 
 def debug_logging_enabled() -> bool:
@@ -4933,8 +5059,65 @@ def summarize_debug_payload(value: Any) -> Any:
     return value
 
 
-def record_debug_interaction(entry: dict[str, Any]) -> None:
-    emit_log("debug", "http", "HTTP interaction.", entry)
+def raw_request_path_and_query(request: Request) -> str:
+    raw_path = request.scope.get("raw_path")
+    if isinstance(raw_path, bytes):
+        try:
+            path = raw_path.decode("ascii")
+        except UnicodeDecodeError:
+            return ""
+    else:
+        path = request.url.path
+    query = request.scope.get("query_string", b"")
+    if isinstance(query, bytes):
+        try:
+            query_text = query.decode("ascii")
+        except UnicodeDecodeError:
+            return ""
+    else:
+        query_text = str(query or "")
+    return f"{path}?{query_text}" if query_text else path
+
+
+def request_transport_component(request: Request) -> Literal["ipc", "http"]:
+    # Cooperative diagnostic attribution only. The persistent local session
+    # token makes this replayable by another same-user process; request
+    # authentication remains a separate boundary.
+    marker = str(request.headers.get("x-vrcforge-transport") or "").strip()
+    proof = str(request.headers.get("x-vrcforge-transport-proof") or "").strip()
+    if marker != "tauri-ipc-bridge" or not APP_SESSION_TOKEN or re.fullmatch(r"[0-9a-fA-F]{64}", proof) is None:
+        return "http"
+    raw_target = raw_request_path_and_query(request)
+    if not raw_target:
+        return "http"
+    message = f"vrcforge.tauri-ipc-bridge.v1\n{request.method.upper()}\n{raw_target}".encode("utf-8")
+    expected = hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return "ipc" if hmac.compare_digest(proof.lower(), expected) else "http"
+
+
+def record_debug_interaction(entry: dict[str, Any], *, component: str = "http") -> None:
+    normalized_component = "ipc" if component == "ipc" else "http"
+    method = str(entry.get("method") or "").strip().upper()
+    try:
+        status = int(entry.get("status") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    has_error = bool(str(entry.get("error") or "").strip())
+    if status >= 500 or (has_error and not 400 <= status < 500):
+        level = "error"
+    elif 400 <= status < 500:
+        level = "warn"
+    elif method in {"GET", "HEAD", "OPTIONS"} and 0 < status < 400:
+        level = "trace"
+    else:
+        level = "debug"
+    payload = {
+        **entry,
+        "component": normalized_component,
+        "kind": "tauri_ipc_bridge" if normalized_component == "ipc" else "direct_http",
+    }
+    message = "Tauri IPC bridge interaction." if normalized_component == "ipc" else "Direct HTTP interaction."
+    emit_log(level, normalized_component, message, payload)
 
 
 def read_jsonl_tail(path: Path, limit: int = 200) -> list[dict[str, Any]]:
@@ -5030,11 +5213,13 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         checkpoints = {"ok": False, "error": str(exc)}
     diagnostics = diagnostics_state()
     diagnostics.pop("identities", None)
+    safety_posture = diagnostics.get("safetyPosture") or safety_posture_state()
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
         write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
         write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
         write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
+        write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
         write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
         write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_REGISTRY.recent_events(limit=log_limit), request.include_full_paths)
@@ -5690,10 +5875,7 @@ def read_app_diagnostics() -> dict[str, Any]:
 @app.post("/api/app/diagnostics")
 async def update_app_diagnostics(request: DiagnosticsConfigRequest) -> dict[str, Any]:
     try:
-        payload = DIAGNOSTIC_LOGGER.update_config(
-            log_level=request.log_level,
-            debug_logging=request.debug_logging,
-        )
+        payload = await asyncio.to_thread(update_app_diagnostics_guarded, request)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Unsupported diagnostic log level.") from exc
     await emit_log_async(
@@ -5703,6 +5885,17 @@ async def update_app_diagnostics(request: DiagnosticsConfigRequest) -> dict[str,
         {"debugLogging": payload["debugLogging"], "logLevel": payload["logLevel"]},
     )
     return payload
+
+
+def update_app_diagnostics_guarded(request: DiagnosticsConfigRequest) -> dict[str, Any]:
+    with ADVANCED_SETTINGS_TRANSITION_LOCK:
+        if request.log_level == "trace" and not developer_options_enabled_for_diagnostics():
+            raise HTTPException(status_code=409, detail="Trace logging requires Developer Options.")
+        DIAGNOSTIC_LOGGER.update_config(
+            log_level=request.log_level,
+            debug_logging=request.debug_logging,
+        )
+        return diagnostics_state()
 
 
 @app.post("/api/app/support-bundle")
@@ -11062,25 +11255,41 @@ def current_diagnostic_identity_context() -> dict[str, Any]:
     }
 
 
-def emit_log(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
+def emit_log(
+    level: str,
+    scope: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+    *,
+    essential: bool = False,
+) -> None:
     entry = DIAGNOSTIC_LOGGER.emit(
         level,
         scope,
         message,
         data,
         context=current_diagnostic_identity_context(),
+        essential=essential,
     )
     if entry is not None:
         EVENT_BUS.broadcast_from_sync("log", entry)
 
 
-async def emit_log_async(level: str, scope: str, message: str, data: dict[str, Any] | None = None) -> None:
+async def emit_log_async(
+    level: str,
+    scope: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+    *,
+    essential: bool = False,
+) -> None:
     entry = DIAGNOSTIC_LOGGER.emit(
         level,
         scope,
         message,
         data,
         context=current_diagnostic_identity_context(),
+        essential=essential,
     )
     if entry is not None:
         await EVENT_BUS.broadcast("log", entry)

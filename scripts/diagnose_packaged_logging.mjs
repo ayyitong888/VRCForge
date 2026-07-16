@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import {
   access,
@@ -38,12 +38,24 @@ const privateMappingName = `${["diagnostic", "identities"].join("-")}.json`;
 const privateKeyName = `${["diagnostic", "alias"].join("-")}.key`;
 const canonicalLogName = /^vrcforge_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+\.log$/;
 const physicalLogLine = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}) \[(ERROR|WARN|INFO|DEBUG|TRACE)\] \[((?:\\.|[^\]])*)\] (.*) \| data=(\{.*\})$/;
+const diagnosticsRoute = "/api/app/diagnostics";
+const transportLogContracts = Object.freeze({
+  tauri_ipc_bridge: Object.freeze({
+    scope: "ipc",
+    message: "Tauri IPC bridge interaction.",
+  }),
+  direct_http: Object.freeze({
+    scope: "http",
+    message: "Direct HTTP interaction.",
+  }),
+});
 const legacyLogNames = ["backend_stdout.log", "backend_stderr.log", "dashboard.log", "interactions.jsonl"];
 const requiredSupportMembers = [
   "metadata.json",
   "bootstrap.json",
   "doctor.json",
   "diagnostics.json",
+  "safety-posture.json",
   "diagnostic-log.txt",
   "agent-audit.json",
   "sub-agent-events.json",
@@ -113,6 +125,15 @@ function processPathInScope(candidatePath, rootPath) {
 
 function challengeReady(elapsedMs) {
   return Number(elapsedMs) >= 5_000;
+}
+
+function tauriIpcBridgeProof(token, method, pathAndQuery) {
+  return createHmac("sha256", String(token || ""))
+    .update(
+      `vrcforge.tauri-ipc-bridge.v1\n${String(method || "").toUpperCase()}\n${String(pathAndQuery || "")}`,
+      "utf8",
+    )
+    .digest("hex");
 }
 
 function strictBuildPolicyFromManifest(manifest) {
@@ -205,6 +226,51 @@ function parseLogLine(line) {
     message: match[4],
     data,
   };
+}
+
+function transportInteractionRows(scan, {
+  kind,
+  method,
+  route = diagnosticsRoute,
+} = {}) {
+  const expectedMethod = String(method || "").toUpperCase();
+  return (Array.isArray(scan?.parsed) ? scan.parsed : []).filter((item) => {
+    const itemKind = String(item?.data?.kind || "");
+    const contract = transportLogContracts[itemKind];
+    const itemMethod = String(item?.data?.method || "").toUpperCase();
+    const itemPath = String(item?.data?.path || "").split("?", 1)[0];
+    return Boolean(
+      contract
+      && (!kind || itemKind === kind)
+      && item?.scope === contract.scope
+      && item?.message === contract.message
+      && item?.data?.component === contract.scope
+      && (!expectedMethod || itemMethod === expectedMethod)
+      && (!route || itemPath === route),
+    );
+  });
+}
+
+function summarizeTransportDelta(beforeScan, afterScan, {
+  kind,
+  method,
+  route = diagnosticsRoute,
+}) {
+  const beforeCount = transportInteractionRows(beforeScan, { kind, method, route }).length;
+  const rows = transportInteractionRows(afterScan, { kind, method, route });
+  const latest = rows.at(-1);
+  return {
+    eventCount: Math.max(0, rows.length - beforeCount),
+    method: String(latest?.data?.method || method || "").toUpperCase(),
+    path: String(latest?.data?.path || route || "").split("?", 1)[0],
+    kind: String(latest?.data?.kind || kind || ""),
+  };
+}
+
+function transportProvenanceIsSafe(value) {
+  const serialized = JSON.stringify(value || {});
+  return !/(?:authorization|bearer|appSessionToken|sessionToken|X-VRCForge-Transport|transportProof|requestHeaders)/i.test(serialized)
+    && reportPrivacyFindings(serialized).length === 0;
 }
 
 function registerSensitive(...values) {
@@ -984,12 +1050,19 @@ async function appApiRaw(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Number(options.timeoutMs || 30_000));
   try {
+    const transportClaim = typeof options.forgedTransportClaim === "string"
+      ? {
+        "X-VRCForge-Transport": "tauri-ipc-bridge",
+        "X-VRCForge-Transport-Proof": options.forgedTransportClaim,
+      }
+      : {};
     const response = await fetch(`${appOrigin}${path}`, {
       method: options.method || "GET",
       headers: {
         Origin: appRequestOrigin,
         Authorization: `Bearer ${appSessionToken}`,
         "Content-Type": "application/json",
+        ...transportClaim,
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
@@ -1265,8 +1338,139 @@ async function scanLogDirectory() {
   };
 }
 
-function httpInteractionCount(scan) {
-  return scan.parsed.filter((item) => item.scope === "http" && item.message === "HTTP interaction.").length;
+function transportInteractionCount(scan) {
+  return transportInteractionRows(scan, { route: "" }).length;
+}
+
+function safetyBaselineRows(scan, phase) {
+  const expectedMessage = phase === "startup"
+    ? "Safety posture captured at startup."
+    : phase === "normal_shutdown"
+      ? "Safety posture captured for normal shutdown."
+      : "";
+  return (Array.isArray(scan?.parsed) ? scan.parsed : []).filter((item) =>
+    item?.level === "info"
+      && item?.scope === "safety"
+      && (!expectedMessage || item?.message === expectedMessage)
+      && item?.data?.baseline === true
+      && item?.data?.posture?.schema === "vrcforge.safety-posture.v1"
+      && (!phase || item?.data?.phase === phase));
+}
+
+function essentialAdvancedSecurityRows(scan) {
+  return (Array.isArray(scan?.parsed) ? scan.parsed : []).filter((item) =>
+    item?.level === "info"
+      && item?.scope === "security"
+      && item?.message === "Advanced safety flags changed."
+      && item?.data?.baseline === true
+      && Array.isArray(item?.data?.changedFlags)
+      && item.data.changedFlags.includes("developerOptionsEnabled")
+      && item?.data?.before?.developerOptionsEnabled === true
+      && item?.data?.after?.developerOptionsEnabled === false);
+}
+
+async function waitForTransportDelta(beforeScan, contract, timeoutMs = 15_000) {
+  const baseline = transportInteractionRows(beforeScan, contract).length;
+  const deadline = Date.now() + timeoutMs;
+  let latest = beforeScan;
+  while (Date.now() < deadline) {
+    latest = await scanLogDirectory();
+    if (transportInteractionRows(latest, contract).length > baseline) {
+      return {
+        scan: latest,
+        evidence: summarizeTransportDelta(beforeScan, latest, contract),
+      };
+    }
+    await sleep(50);
+  }
+  throw new Error("Timed out waiting for transport-provenance log evidence.");
+}
+
+async function exerciseTransportProvenance(cdp) {
+  const contract = { method: "POST", route: diagnosticsRoute };
+  const beforeIpc = await scanLogDirectory();
+  const viaIpc = await tauriInvoke(cdp, "update_diagnostics", {
+    request: { logLevel: "debug", timeoutMs: 30_000 },
+  });
+  if (viaIpc?.logLevel !== "debug") throw new Error("Tauri IPC diagnostics write did not stay at Debug.");
+  const ipcObserved = await waitForTransportDelta(beforeIpc, {
+    ...contract,
+    kind: "tauri_ipc_bridge",
+  });
+
+  const beforeDirect = ipcObserved.scan;
+  const viaDirect = await appApiRaw(diagnosticsRoute, {
+    method: "POST",
+    body: { logLevel: "debug" },
+  });
+  if (viaDirect.status !== 200 || viaDirect.payload?.logLevel !== "debug") {
+    throw new Error("Direct authenticated diagnostics write failed.");
+  }
+  const directObserved = await waitForTransportDelta(beforeDirect, {
+    ...contract,
+    kind: "direct_http",
+  });
+
+  const beforeForged = directObserved.scan;
+  const ipcCountBeforeForged = transportInteractionRows(beforeForged, {
+    ...contract,
+    kind: "tauri_ipc_bridge",
+  }).length;
+  const mismatchedClaimProof = tauriIpcBridgeProof(appSessionToken, "GET", diagnosticsRoute);
+  registerSensitive(mismatchedClaimProof);
+  const forged = await appApiRaw(diagnosticsRoute, {
+    method: "POST",
+    body: { logLevel: "debug" },
+    forgedTransportClaim: mismatchedClaimProof,
+  });
+  if (forged.status !== 200 || forged.payload?.logLevel !== "debug") {
+    throw new Error("Forged transport-claim negative control did not reach the authenticated route.");
+  }
+  const forgedObserved = await waitForTransportDelta(beforeForged, {
+    ...contract,
+    kind: "direct_http",
+  });
+  const ipcCountAfterForged = transportInteractionRows(forgedObserved.scan, {
+    ...contract,
+    kind: "tauri_ipc_bridge",
+  }).length;
+  if (ipcCountAfterForged !== ipcCountBeforeForged) {
+    throw new Error("Forged transport claim was incorrectly attributed to Tauri IPC.");
+  }
+
+  const provenance = {
+    attributionScope: "diagnostic_origin_label",
+    securityBoundaryClaimed: false,
+    osOriginAttestationClaimed: false,
+    replayResistanceClaimed: false,
+    webviewTauriInvoke: {
+      ...ipcObserved.evidence,
+      attributedToTauriIpcBridge: ipcObserved.evidence.kind === "tauri_ipc_bridge",
+    },
+    authenticatedDirectRest: {
+      ...directObserved.evidence,
+      attributedToDirectHttp: directObserved.evidence.kind === "direct_http",
+    },
+    forgedClaimRejected: {
+      ...forgedObserved.evidence,
+      attributedToDirectHttp: forgedObserved.evidence.kind === "direct_http",
+      claimMismatch: "method",
+      tauriIpcEventCount: ipcCountAfterForged - ipcCountBeforeForged,
+    },
+    allPathsRedacted: [ipcObserved.evidence, directObserved.evidence, forgedObserved.evidence]
+      .every((item) => item.path === diagnosticsRoute),
+    sensitiveMaterialExcluded: false,
+  };
+  provenance.sensitiveMaterialExcluded = transportProvenanceIsSafe(provenance);
+  if (
+    provenance.webviewTauriInvoke.eventCount < 1
+    || provenance.authenticatedDirectRest.eventCount < 1
+    || provenance.forgedClaimRejected.eventCount < 1
+    || provenance.forgedClaimRejected.tauriIpcEventCount !== 0
+    || provenance.allPathsRedacted !== true
+    || provenance.sensitiveMaterialExcluded !== true
+  ) throw new Error("Packaged transport-provenance contract failed.");
+  return provenance;
 }
 
 function buildPrivateQuery(privateFixture, phase) {
@@ -1493,12 +1697,38 @@ async function validateSupportBundle(bundlePath, privateStore) {
   if (privacyFindings(combined).length > 0) throw new Error("Support bundle privacy scan failed.");
   const diagnostics = JSON.parse(byName.get("diagnostics.json"));
   const metadata = JSON.parse(byName.get("metadata.json"));
+  const safetyPosture = JSON.parse(byName.get("safety-posture.json"));
   if (metadata?.includeFullPathsRequested !== true || metadata?.includeFullPaths !== false) {
     throw new Error("Support bundle did not preserve the safe full-path compatibility contract.");
   }
   if (Object.hasOwn(diagnostics, "identities") || JSON.stringify(diagnostics).includes(privateMappingName)) {
     throw new Error("Support diagnostics exposed private identity state.");
   }
+  if (
+    safetyPosture?.schema !== "vrcforge.safety-posture.v1"
+    || safetyPosture?.externalAgent?.requestOnly !== true
+    || safetyPosture?.externalAgent?.directApplyExposed !== false
+    || typeof safetyPosture?.externalAgent?.requestMayAutoExecute !== "boolean"
+    || !["approval", "auto", "roslyn_full_auto"].includes(safetyPosture?.externalAgent?.selectedMode)
+    || safetyPosture.externalAgent.requestMayAutoExecute
+      !== ["auto", "roslyn_full_auto"].includes(safetyPosture.externalAgent.selectedMode)
+    || safetyPosture?.checkpoint?.requiredBeforeOrdinaryWrite !== true
+    || safetyPosture?.checkpoint?.restoreAndRecoveryExempt !== true
+    || safetyPosture?.rollback?.approvalRecordRequired !== true
+    || typeof safetyPosture?.rollback?.manualApprovalRequired !== "boolean"
+    || safetyPosture.rollback.manualApprovalRequired
+      !== (safetyPosture.externalAgent.selectedMode !== "roslyn_full_auto")
+    || typeof safetyPosture?.rollback?.restoreMayAutoExecute !== "boolean"
+    || safetyPosture.rollback.restoreMayAutoExecute
+      !== (safetyPosture.externalAgent.selectedMode === "roslyn_full_auto")
+    || typeof safetyPosture?.fullPermission?.canOverrideExplicitApproval !== "boolean"
+    || safetyPosture.fullPermission.canOverrideExplicitApproval
+      !== (safetyPosture.externalAgent.selectedMode === "roslyn_full_auto")
+    || safetyPosture?.diagnostics?.traceRequiresDeveloperOptions !== true
+    || safetyPosture?.developerOptions?.enabled !== false
+    || safetyPosture?.diagnostics?.currentLevel !== "debug"
+    || safetyPosture?.diagnostics?.traceAllowed !== false
+  ) throw new Error("Support bundle safety-posture report was incomplete.");
   const logText = byName.get("diagnostic-log.txt");
   const logLines = logText.split(/\r?\n/).filter((line) => line.trim());
   if (
@@ -1517,6 +1747,8 @@ async function validateSupportBundle(bundlePath, privateStore) {
     identityProjectionExcluded: true,
     privateStoreFilesExcluded: true,
     readableRedactedLogExcerpt: true,
+    safetyPosturePresent: true,
+    safetyPostureReflectsFinalSafeState: true,
     privacyScanClean: true,
   };
 }
@@ -1542,6 +1774,38 @@ async function waitForDeveloperUi(cdp, enabled, timeoutMs = 20_000) {
   return waitForEval(cdp, `(() => ({
     ok: window.localStorage.getItem("vrcforge_developer_options_enabled") === ${JSON.stringify(expected)},
   }))()`, timeoutMs);
+}
+
+async function enableDeveloperThroughDirectChallenge(cdp) {
+  const started = await appApiRaw("/api/app/advanced-settings/developer-challenge", { method: "POST" });
+  const challengeId = String(started.payload?.challengeId || "");
+  const waitMs = Number(started.payload?.waitMs || 0);
+  registerSensitive(challengeId);
+  if (started.status !== 200 || !challengeId || waitMs < 5_000) {
+    throw new Error("Direct Developer Options challenge setup failed.");
+  }
+  const startedAt = Date.now();
+  await sleep(waitMs + 75);
+  const enabled = await appApiRaw("/api/app/advanced-settings", {
+    method: "POST",
+    body: {
+      developerOptionsEnabled: true,
+      computerUseEnabled: false,
+      developerChallengeId: challengeId,
+    },
+  });
+  if (enabled.status !== 200 || Date.now() - startedAt < 5_000) {
+    throw new Error("Direct Developer Options challenge was not accepted after the real wait.");
+  }
+  await Promise.all([
+    waitForDeveloperBackend(true),
+    waitForDeveloperUi(cdp, true),
+  ]);
+  return {
+    realWaitObserved: Date.now() - startedAt >= 5_000,
+    backendEnabled: true,
+    uiEnabled: true,
+  };
 }
 
 async function clickDeveloperToggle(cdp) {
@@ -1651,7 +1915,7 @@ async function openDeveloperSettingsSection(cdp) {
   }))()`);
 }
 
-async function disableDeveloperThroughUi(cdp) {
+async function disableDeveloperThroughUi(cdp, { expectedLevel = "debug", expectedIndex = 3 } = {}) {
   await openGeneralSettings(cdp);
   await waitForDeveloperUi(cdp, true);
   await clickDeveloperToggle(cdp);
@@ -1661,9 +1925,82 @@ async function disableDeveloperThroughUi(cdp) {
   ]);
   const modalAbsent = await evalValue(cdp, `!document.querySelector('[data-vrcforge-developer-warning="true"]')`);
   if (!modalAbsent) throw new Error("Developer Options disable unexpectedly opened a warning.");
+  const diagnostics = await waitForDiagnosticsLevel(cdp, expectedLevel, expectedIndex);
+  const ui = await inspectGeneralDiagnosticsUi(cdp);
+  const fourLevelRange = ui.rangePresent
+    && ui.rangeMin === "0"
+    && ui.rangeMax === "3"
+    && ui.rangeStep === "1"
+    && ui.rangeValue === String(expectedIndex)
+    && ui.rangeLevel === expectedLevel;
+  if (!fourLevelRange || diagnostics.status?.logLevel !== expectedLevel) {
+    throw new Error("Disabling Developer Options did not restore the four-level diagnostics contract.");
+  }
+  return {
+    traceDowngradedToDebug: expectedLevel === "debug",
+    expectedLevelPreserved: diagnostics.status?.logLevel === expectedLevel,
+    fourLevelRangeRestored: true,
+  };
 }
 
-async function exerciseDeveloperOptions(cdp, baselineNavCount) {
+async function exerciseErrorLevelGate(cdp) {
+  await setLogSlider(cdp, 0);
+  await waitForDiagnosticsLevel(cdp, "error", 0);
+  const beforeNoise = await scanLogDirectory();
+  const interactionCountBefore = transportInteractionCount(beforeNoise);
+  const securityCountBefore = essentialAdvancedSecurityRows(beforeNoise).length;
+
+  const successfulGet = await appApi(diagnosticsRoute);
+  const successfulPost = await appApi(diagnosticsRoute, {
+    method: "POST",
+    body: { logLevel: "error" },
+  });
+  const validationError = await appApiRaw(diagnosticsRoute, {
+    method: "POST",
+    body: { logLevel: "not-a-level" },
+  });
+  if (
+    successfulGet?.logLevel !== "error"
+    || successfulPost?.logLevel !== "error"
+    || validationError.status !== 422
+  ) throw new Error("Error-level interaction controls did not execute as expected.");
+  await sleep(150);
+  const afterNoise = await scanLogDirectory();
+  const interactionCountAfter = transportInteractionCount(afterNoise);
+  if (interactionCountAfter !== interactionCountBefore) {
+    throw new Error("Error level recorded routine transport interaction noise.");
+  }
+
+  const disabled = await disableDeveloperThroughUi(cdp, { expectedLevel: "error", expectedIndex: 0 });
+  const deadline = Date.now() + 15_000;
+  let afterSecurity = afterNoise;
+  while (Date.now() < deadline) {
+    afterSecurity = await scanLogDirectory();
+    if (essentialAdvancedSecurityRows(afterSecurity).length > securityCountBefore) break;
+    await sleep(50);
+  }
+  const securityEventDelta = essentialAdvancedSecurityRows(afterSecurity).length - securityCountBefore;
+  if (securityEventDelta < 1 || disabled.expectedLevelPreserved !== true) {
+    throw new Error("Error level did not retain the essential Developer Options safety change.");
+  }
+
+  await setLogSlider(cdp, 3);
+  const restored = await waitForDiagnosticsLevel(cdp, "debug", 3);
+  return {
+    reachedViaDom: true,
+    successfulGetSuppressed: true,
+    successfulPostSuppressed: true,
+    validationErrorSuppressed: true,
+    interactionCountBefore,
+    interactionCountAfter,
+    essentialSecurityEventDelta: securityEventDelta,
+    developerDisablePreservedError: disabled.expectedLevelPreserved === true,
+    fourLevelRangeRestored: disabled.fourLevelRangeRestored === true,
+    debugRestoredForSupportBundle: restored.status?.logLevel === "debug",
+  };
+}
+
+async function exerciseDeveloperOptions(cdp, baselineNavCount, onEnabled) {
   await openGeneralSettings(cdp);
   const initialState = await waitForDeveloperBackend(false);
   await waitForDeveloperUi(cdp, false);
@@ -1715,7 +2052,8 @@ async function exerciseDeveloperOptions(cdp, baselineNavCount) {
   }
   await openDeveloperSettingsSection(cdp);
   await openGeneralSettings(cdp);
-  await disableDeveloperThroughUi(cdp);
+  const enabledEvidence = typeof onEnabled === "function" ? await onEnabled() : {};
+  const errorLevelGate = await exerciseErrorLevelGate(cdp);
 
   const noChallenge = await appApiRaw("/api/app/advanced-settings", {
     method: "POST",
@@ -1759,7 +2097,7 @@ async function exerciseDeveloperOptions(cdp, baselineNavCount) {
     waitForDeveloperBackend(true),
     waitForDeveloperUi(cdp, true),
   ]);
-  await disableDeveloperThroughUi(cdp);
+  const directDisable = await disableDeveloperThroughUi(cdp);
   const reused = await appApiRaw("/api/app/advanced-settings", {
     method: "POST",
     body: { developerOptionsEnabled: true, computerUseEnabled: false, developerChallengeId: consumedId },
@@ -1791,6 +2129,9 @@ async function exerciseDeveloperOptions(cdp, baselineNavCount) {
       confirmedOnce: true,
       backendEnabled: true,
     },
+    enabledEvidence,
+    errorLevelGate,
+    fourLevelRangeRestoredOnUiDisable: errorLevelGate.fourLevelRangeRestored === true,
     developerNavHiddenByDefault: enabledNavCount === baselineNavCount + 1,
     developerSectionReachableAfterEnable: true,
     directNegativeControls: {
@@ -1800,6 +2141,7 @@ async function exerciseDeveloperOptions(cdp, baselineNavCount) {
       realWaitObserved: Date.now() - directWaitStartedAt >= 5_000,
     },
     finalDisabled: finalState?.developerOptionsEnabled === false,
+    finalLogLevelDebug: directDisable.traceDowngradedToDebug === true,
     observedUiChallengeCount: instrumentation.challengeIds.length,
   };
 }
@@ -1881,15 +2223,60 @@ function validateFinalContract(report) {
     report.defaultState?.logLevelInfo,
     report.defaultState?.developerLowLevelHidden,
     report.diagnosticsUi?.panelPresent,
-    report.diagnosticsUi?.fiveLevelRange,
+    report.defaultState?.traceHiddenWithoutDeveloper,
+    report.diagnosticsUi?.fourLevelRangeByDefault,
+    report.diagnosticsUi?.fiveLevelRangeWithDeveloper,
     report.diagnosticsUi?.openButtonPresent,
     report.diagnosticsUi?.exportButtonPresent,
     report.logLevels?.debugReachedViaDom,
+    report.logLevels?.warnReachedViaDom,
+    report.logLevels?.traceRejectedWithoutDeveloper,
     report.logLevels?.traceReachedViaDom,
     report.logLevels?.rapidFinalServerMatches,
     report.logLevels?.rapidFinalAriaMatches,
     report.logLevels?.infoInteractionSuppressed,
+    report.logLevels?.warnReadInteractionSuppressed,
+    report.logLevels?.warnValidationRecorded,
+    report.logLevels?.warnInteractionEventCount >= 1,
     report.logLevels?.debugInteractionRecorded,
+    report.logLevels?.debugInteractionEventCount >= 1,
+    report.logLevels?.traceReadInteractionRecorded,
+    report.logLevels?.traceReadInteractionEventCount >= 1,
+    report.logLevels?.traceDowngradedWhenDeveloperDisabled,
+    report.logLevels?.errorActiveAtShutdown,
+    report.logLevels?.errorLevelGate?.reachedViaDom,
+    report.logLevels?.errorLevelGate?.successfulGetSuppressed,
+    report.logLevels?.errorLevelGate?.successfulPostSuppressed,
+    report.logLevels?.errorLevelGate?.validationErrorSuppressed,
+    report.logLevels?.errorLevelGate?.interactionCountBefore
+      === report.logLevels?.errorLevelGate?.interactionCountAfter,
+    report.logLevels?.errorLevelGate?.essentialSecurityEventDelta >= 1,
+    report.logLevels?.errorLevelGate?.developerDisablePreservedError,
+    report.logLevels?.errorLevelGate?.fourLevelRangeRestored,
+    report.logLevels?.errorLevelGate?.debugRestoredForSupportBundle,
+    report.transportProvenance?.webviewTauriInvoke?.attributedToTauriIpcBridge,
+    report.transportProvenance?.attributionScope === "diagnostic_origin_label",
+    report.transportProvenance?.securityBoundaryClaimed === false,
+    report.transportProvenance?.osOriginAttestationClaimed === false,
+    report.transportProvenance?.replayResistanceClaimed === false,
+    report.transportProvenance?.webviewTauriInvoke?.eventCount >= 1,
+    report.transportProvenance?.webviewTauriInvoke?.method === "POST",
+    report.transportProvenance?.webviewTauriInvoke?.path === diagnosticsRoute,
+    report.transportProvenance?.webviewTauriInvoke?.kind === "tauri_ipc_bridge",
+    report.transportProvenance?.authenticatedDirectRest?.attributedToDirectHttp,
+    report.transportProvenance?.authenticatedDirectRest?.eventCount >= 1,
+    report.transportProvenance?.authenticatedDirectRest?.method === "POST",
+    report.transportProvenance?.authenticatedDirectRest?.path === diagnosticsRoute,
+    report.transportProvenance?.authenticatedDirectRest?.kind === "direct_http",
+    report.transportProvenance?.forgedClaimRejected?.attributedToDirectHttp,
+    report.transportProvenance?.forgedClaimRejected?.eventCount >= 1,
+    report.transportProvenance?.forgedClaimRejected?.method === "POST",
+    report.transportProvenance?.forgedClaimRejected?.path === diagnosticsRoute,
+    report.transportProvenance?.forgedClaimRejected?.kind === "direct_http",
+    report.transportProvenance?.forgedClaimRejected?.claimMismatch === "method",
+    report.transportProvenance?.forgedClaimRejected?.tauriIpcEventCount === 0,
+    report.transportProvenance?.allPathsRedacted,
+    report.transportProvenance?.sensitiveMaterialExcluded,
     report.logFiles?.legacyDeleted,
     report.logFiles?.expiredDeleted,
     report.logFiles?.countBounded,
@@ -1913,6 +2300,8 @@ function validateFinalContract(report) {
     report.supportBundle?.privacyScanClean,
     report.supportBundle?.identityProjectionExcluded,
     report.supportBundle?.readableRedactedLogExcerpt,
+    report.supportBundle?.safetyPosturePresent,
+    report.supportBundle?.safetyPostureReflectsFinalSafeState,
     report.developerOptions?.firstRound?.immediateCancelEnabled,
     report.developerOptions?.firstRound?.immediateConfirmDisabled,
     report.developerOptions?.firstRound?.backendStayedDisabled,
@@ -1927,6 +2316,12 @@ function validateFinalContract(report) {
     report.developerOptions?.directNegativeControls?.consumedReuseRejected,
     report.developerOptions?.directNegativeControls?.realWaitObserved,
     report.developerOptions?.finalDisabled,
+    report.developerOptions?.finalLogLevelDebug,
+    report.safetyBaseline?.startupPresent,
+    report.safetyBaseline?.normalShutdownPresent,
+    report.safetyBaseline?.startupCount >= 2,
+    report.safetyBaseline?.normalShutdownCount >= 2,
+    report.safetyBaseline?.shutdownCapturedWhileError,
     report.openLogsFolder?.buttonPresent,
     report.openLogsFolder?.tauriCommandRegistered,
     report.openLogsFolder?.invokedExactlyOnce,
@@ -2006,7 +2401,17 @@ function runSelfTest() {
       return true;
     }
   };
-  const validLine = "2026-07-16 12:34:56.789+09:00 [DEBUG] [http] HTTP interaction. | data={\"path\":\"prj_0123456789abcdef\",\"user\":\"usr_fedcba9876543210\"}";
+  const validLine = "2026-07-16 12:34:56.789+09:00 [DEBUG] [http] Direct HTTP interaction. | data={\"component\":\"http\",\"kind\":\"direct_http\",\"method\":\"POST\",\"path\":\"/api/app/diagnostics\"}";
+  const ipcLine = "2026-07-16 12:34:57.789+09:00 [DEBUG] [ipc] Tauri IPC bridge interaction. | data={\"component\":\"ipc\",\"kind\":\"tauri_ipc_bridge\",\"method\":\"POST\",\"path\":\"/api/app/diagnostics\"}";
+  const directEvent = parseLogLine(validLine);
+  const ipcEvent = parseLogLine(ipcLine);
+  const transportBefore = { parsed: [] };
+  const transportAfter = { parsed: [directEvent, ipcEvent] };
+  const ipcSummary = summarizeTransportDelta(transportBefore, transportAfter, {
+    kind: "tauri_ipc_bridge",
+    method: "POST",
+    route: diagnosticsRoute,
+  });
   const selfRaw = ["SELF", "TEST", "PRIVATE", randomBytes(5).toString("hex")].join("_");
   const selfPath = [["Q", ":"].join(""), "probe", "private", "item"].join("\\");
   const selfForbidden = new Set([selfRaw, privateMappingName, privateKeyName]);
@@ -2017,6 +2422,30 @@ function runSelfTest() {
     schema: "vrcforge.packaged_logging_probe.self_test_fixture.v1",
     alias: "usr_0123456789abcdef",
     ok: true,
+  };
+  const baselinePosture = { schema: "vrcforge.safety-posture.v1" };
+  const startupBaseline = {
+    level: "info",
+    scope: "safety",
+    message: "Safety posture captured at startup.",
+    data: { baseline: true, phase: "startup", posture: baselinePosture },
+  };
+  const shutdownBaseline = {
+    level: "info",
+    scope: "safety",
+    message: "Safety posture captured for normal shutdown.",
+    data: { baseline: true, phase: "normal_shutdown", posture: baselinePosture },
+  };
+  const developerDisableBaseline = {
+    level: "info",
+    scope: "security",
+    message: "Advanced safety flags changed.",
+    data: {
+      baseline: true,
+      changedFlags: ["developerOptionsEnabled"],
+      before: { developerOptionsEnabled: true },
+      after: { developerOptionsEnabled: false },
+    },
   };
   const checks = {
     strictPolicyAccepted: strictBuildPolicyFromManifest(strictManifest).strict === true,
@@ -2055,6 +2484,58 @@ function runSelfTest() {
     logParserRejectsLowercaseLevel: parseLogLine(validLine.replace("[DEBUG]", "[debug]")) === null,
     logParserRejectsMalformedJson: parseLogLine(validLine.replace(/\{.*\}$/, "{bad}")) === null,
     logParserRejectsNonObjectData: parseLogLine(validLine.replace(/\{.*\}$/, "[1,2]")) === null,
+    tauriIpcTransportContractAccepted: transportInteractionRows(transportAfter, {
+      kind: "tauri_ipc_bridge",
+      method: "POST",
+      route: diagnosticsRoute,
+    }).length === 1,
+    directHttpTransportContractAccepted: transportInteractionRows(transportAfter, {
+      kind: "direct_http",
+      method: "POST",
+      route: diagnosticsRoute,
+    }).length === 1,
+    mismatchedTransportMessageRejected: transportInteractionRows({
+      parsed: [{ ...ipcEvent, message: "Direct HTTP interaction." }],
+    }, {
+      kind: "tauri_ipc_bridge",
+      method: "POST",
+      route: diagnosticsRoute,
+    }).length === 0,
+    mismatchedTransportComponentRejected: transportInteractionRows({
+      parsed: [{ ...ipcEvent, data: { ...ipcEvent.data, component: "http" } }],
+    }, {
+      kind: "tauri_ipc_bridge",
+      method: "POST",
+      route: diagnosticsRoute,
+    }).length === 0,
+    transportSummaryWhitelistsRequiredFields: ipcSummary.eventCount === 1
+      && ipcSummary.method === "POST"
+      && ipcSummary.path === diagnosticsRoute
+      && ipcSummary.kind === "tauri_ipc_bridge"
+      && Object.keys(ipcSummary).sort().join("|") === "eventCount|kind|method|path",
+    transportSummaryPrivacyAccepted: transportProvenanceIsSafe({ webviewTauriInvoke: ipcSummary }),
+    transportSensitiveMaterialRejected: !transportProvenanceIsSafe({ transportProof: "not-reportable" }),
+    transportHeaderMaterialRejected: !transportProvenanceIsSafe({
+      requestHeaders: { authorization: "not-reportable" },
+    }),
+    startupSafetyBaselineAccepted: safetyBaselineRows({ parsed: [startupBaseline] }, "startup").length === 1,
+    shutdownSafetyBaselineAccepted: safetyBaselineRows({ parsed: [shutdownBaseline] }, "normal_shutdown").length === 1,
+    safetyBaselineMissingEssentialMarkerRejected: safetyBaselineRows({
+      parsed: [{ ...startupBaseline, data: { ...startupBaseline.data, baseline: false } }],
+    }, "startup").length === 0,
+    developerDisableEssentialBaselineAccepted: essentialAdvancedSecurityRows({
+      parsed: [developerDisableBaseline],
+    }).length === 1,
+    developerEnableDirectionRejectedForDisableGate: essentialAdvancedSecurityRows({
+      parsed: [{
+        ...developerDisableBaseline,
+        data: {
+          ...developerDisableBaseline.data,
+          before: { developerOptionsEnabled: false },
+          after: { developerOptionsEnabled: true },
+        },
+      }],
+    }).length === 0,
     privacyScannerDetectsRaw: privacyFindings(`value=${selfRaw}`, selfForbidden, { rejectAbsolutePaths: false }).length > 0,
     privacyScannerAllowsAliases: privacyFindings(
       "usr_0123456789abcdef prj_0123456789abcdef avt_0123456789abcdef net_0123456789abcdef",
@@ -2071,6 +2552,10 @@ function runSelfTest() {
     ).length > 0,
     timing4999Disabled: challengeReady(4_999) === false,
     timing5000Enabled: challengeReady(5_000) === true,
+    transportClaimBindsMethodAndPath: tauriIpcBridgeProof("self-test-token", "GET", diagnosticsRoute)
+      !== tauriIpcBridgeProof("self-test-token", "POST", diagnosticsRoute)
+      && tauriIpcBridgeProof("self-test-token", "GET", diagnosticsRoute)
+        !== tauriIpcBridgeProof("self-test-token", "GET", `${diagnosticsRoute}?view=1`),
     compressionCoreLoadsBeforeFileSystem: powershellCompressionPrelude.indexOf("System.IO.Compression\n")
       < powershellCompressionPrelude.indexOf("System.IO.Compression.FileSystem"),
     scopedPackagePathAccepted: processPathInScope(scopedExe, scopedRoot) === true,
@@ -2106,6 +2591,8 @@ async function main() {
     defaultState: {},
     diagnosticsUi: {},
     logLevels: {},
+    safetyBaseline: {},
+    transportProvenance: {},
     logFiles: {},
     privacy: {},
     identityStability: {},
@@ -2210,9 +2697,9 @@ async function main() {
       || initialRestDiagnostics?.debugLogging !== false
       || initialAdvanced?.developerOptionsEnabled !== false
     ) throw new Error("Isolated diagnostics/Developer Options defaults were incorrect.");
-    const fiveLevelRange = initialUi.rangePresent
+    const fourLevelRange = initialUi.rangePresent
       && initialUi.rangeMin === "0"
-      && initialUi.rangeMax === "4"
+      && initialUi.rangeMax === "3"
       && initialUi.rangeStep === "1"
       && initialUi.rangeValue === "2"
       && initialUi.rangeLevel === "info"
@@ -2221,16 +2708,18 @@ async function main() {
       developerOptionsDisabled: true,
       logLevelInfo: true,
       developerLowLevelHidden: false,
+      traceHiddenWithoutDeveloper: fourLevelRange,
     };
     report.diagnosticsUi = {
       panelPresent: initialUi.panelPresent === true,
-      fiveLevelRange,
+      fourLevelRangeByDefault: fourLevelRange,
+      fiveLevelRangeWithDeveloper: false,
       openButtonPresent: initialUi.openButtonPresent === true,
       exportButtonPresent: initialUi.exportButtonPresent === true,
       developerTogglePresent: initialUi.developerTogglePresent === true,
       baselineSettingsNavCount: Number(initialUi.settingsNavCount || 0),
     };
-    if (!report.diagnosticsUi.panelPresent || !fiveLevelRange
+    if (!report.diagnosticsUi.panelPresent || !fourLevelRange
       || !report.diagnosticsUi.openButtonPresent || !report.diagnosticsUi.exportButtonPresent) {
       throw new Error("Settings General diagnostics DOM contract failed.");
     }
@@ -2281,18 +2770,113 @@ async function main() {
 
     stage = "live-levels";
     const beforeInfoControl = await scanLogDirectory();
-    const infoHttpBefore = httpInteractionCount(beforeInfoControl);
+    const infoInteractionBefore = transportInteractionCount(beforeInfoControl);
     await appApi("/api/app/bootstrap?phase=info-control");
     await sleep(150);
     const afterInfoControl = await scanLogDirectory();
-    const infoHttpAfter = httpInteractionCount(afterInfoControl);
+    const infoInteractionAfter = transportInteractionCount(afterInfoControl);
+
+    await setLogSlider(app.cdp, 1);
+    const warnState = await waitForDiagnosticsLevel(app.cdp, "warn", 1);
+    const beforeWarnRead = await scanLogDirectory();
+    const warnReadCountBefore = transportInteractionRows(beforeWarnRead, {
+      kind: "direct_http",
+      method: "GET",
+      route: "/api/app/bootstrap",
+    }).length;
+    await appApi("/api/app/bootstrap?phase=warn-control");
+    await sleep(150);
+    const afterWarnRead = await scanLogDirectory();
+    const warnReadCountAfter = transportInteractionRows(afterWarnRead, {
+      kind: "direct_http",
+      method: "GET",
+      route: "/api/app/bootstrap",
+    }).length;
+    const warnValidation = await appApiRaw(diagnosticsRoute, {
+      method: "POST",
+      body: { logLevel: "not-a-level" },
+    });
+    if (warnValidation.status !== 422) throw new Error("Warn-level validation control did not return 422.");
+    const warnObserved = await waitForTransportDelta(afterWarnRead, {
+      kind: "direct_http",
+      method: "POST",
+      route: diagnosticsRoute,
+    });
+    const warnRows = transportInteractionRows(warnObserved.scan, {
+      kind: "direct_http",
+      method: "POST",
+      route: diagnosticsRoute,
+    });
+    const warnValidationRecorded = warnObserved.evidence.eventCount >= 1
+      && warnRows.at(-1)?.level === "warn"
+      && Number(warnRows.at(-1)?.data?.status || 0) === 422;
+
     await setLogSlider(app.cdp, 3);
     const debugState = await waitForDiagnosticsLevel(app.cdp, "debug", 3);
-    const afterDebug = await scanLogDirectory();
-    const debugHttpCount = httpInteractionCount(afterDebug);
+    const beforeDebugControl = warnObserved.scan;
+    const debugControl = await appApiRaw(diagnosticsRoute, {
+      method: "POST",
+      body: { logLevel: "debug" },
+    });
+    if (debugControl.status !== 200 || debugControl.payload?.logLevel !== "debug") {
+      throw new Error("Debug-level write control failed.");
+    }
+    const debugObserved = await waitForTransportDelta(beforeDebugControl, {
+      kind: "direct_http",
+      method: "POST",
+      route: diagnosticsRoute,
+    });
+    const debugRows = transportInteractionRows(debugObserved.scan, {
+      kind: "direct_http",
+      method: "POST",
+      route: diagnosticsRoute,
+    });
+    const debugInteractionRecorded = debugObserved.evidence.eventCount >= 1
+      && debugRows.at(-1)?.level === "debug";
+
+    stage = "transport-provenance";
+    report.transportProvenance = await exerciseTransportProvenance(app.cdp);
+
+    const traceWithoutDeveloper = await appApiRaw(diagnosticsRoute, {
+      method: "POST",
+      body: { logLevel: "trace" },
+    });
+    const traceRejectedWithoutDeveloper = traceWithoutDeveloper.status === 409
+      && (await appApi(diagnosticsRoute))?.logLevel === "debug";
+    if (!traceRejectedWithoutDeveloper) {
+      throw new Error("Trace was not rejected while Developer Options were disabled.");
+    }
+
+    stage = "first-launch-trace-gate";
+    const firstTraceBootstrap = await enableDeveloperThroughDirectChallenge(app.cdp);
+    await openGeneralSettings(app.cdp);
+    const firstDeveloperUi = await inspectGeneralDiagnosticsUi(app.cdp);
+    const fiveLevelRangeWithDeveloper = firstDeveloperUi.rangePresent
+      && firstDeveloperUi.rangeMin === "0"
+      && firstDeveloperUi.rangeMax === "4"
+      && firstDeveloperUi.rangeStep === "1"
+      && firstDeveloperUi.rangeValue === "3"
+      && firstDeveloperUi.rangeLevel === "debug"
+      && firstDeveloperUi.ariaValueTextPresent;
+    if (!fiveLevelRangeWithDeveloper) throw new Error("Developer Options did not expose the Trace level.");
+    report.diagnosticsUi.fiveLevelRangeWithDeveloper = true;
     await setLogSlider(app.cdp, 4);
     const traceState = await waitForDiagnosticsLevel(app.cdp, "trace", 4);
     const directTraceAria = traceState.dom.aria;
+    const beforeTraceRead = await scanLogDirectory();
+    await appApi("/api/app/bootstrap?phase=trace-control");
+    const traceReadObserved = await waitForTransportDelta(beforeTraceRead, {
+      kind: "direct_http",
+      method: "GET",
+      route: "/api/app/bootstrap",
+    });
+    const traceReadRows = transportInteractionRows(traceReadObserved.scan, {
+      kind: "direct_http",
+      method: "GET",
+      route: "/api/app/bootstrap",
+    });
+    const traceReadInteractionRecorded = traceReadObserved.evidence.eventCount >= 1
+      && traceReadRows.at(-1)?.level === "trace";
 
     stage = "first-private-inject";
     const firstPrivate = await injectPrivateContext("trace", privateFixture, "first-launch");
@@ -2306,19 +2890,31 @@ async function main() {
     stage = "first-private-rapid-slider";
     await rapidlySetLogSlider(app.cdp, [2, 0, 3, 1, 4]);
     const rapidFinal = await waitForDiagnosticsLevel(app.cdp, "trace", 4);
+    const firstTraceDisable = await disableDeveloperThroughUi(app.cdp);
     report.logLevels = {
       debugReachedViaDom: debugState.status?.logLevel === "debug" && debugState.status?.debugLogging === true,
+      warnReachedViaDom: warnState.status?.logLevel === "warn" && warnState.status?.debugLogging === false,
+      traceRejectedWithoutDeveloper,
       traceReachedViaDom: traceState.status?.logLevel === "trace" && traceState.status?.debugLogging === true,
       rapidChangeCount: 5,
       rapidFinalServerMatches: rapidFinal.status?.logLevel === "trace",
       rapidFinalDomMatches: rapidFinal.dom?.level === "trace" && rapidFinal.dom?.value === "4",
       rapidFinalAriaMatches: rapidFinal.dom?.aria === directTraceAria,
-      infoInteractionSuppressed: infoHttpBefore === infoHttpAfter,
-      debugInteractionRecorded: debugHttpCount > infoHttpAfter,
+      infoInteractionSuppressed: infoInteractionBefore === infoInteractionAfter,
+      warnReadInteractionSuppressed: warnReadCountBefore === warnReadCountAfter,
+      warnValidationRecorded,
+      warnInteractionEventCount: warnObserved.evidence.eventCount,
+      debugInteractionRecorded,
+      debugInteractionEventCount: debugObserved.evidence.eventCount,
+      traceReadInteractionRecorded,
+      traceReadInteractionEventCount: traceReadObserved.evidence.eventCount,
+      traceDowngradedWhenDeveloperDisabled: firstTraceDisable.traceDowngradedToDebug === true,
     };
     if (!report.runtimeBinding.sameBackendImmediateReadback
       || !report.logLevels.rapidFinalServerMatches || !report.logLevels.rapidFinalAriaMatches
-      || !report.logLevels.infoInteractionSuppressed || !report.logLevels.debugInteractionRecorded) {
+      || !report.logLevels.infoInteractionSuppressed || !report.logLevels.warnReadInteractionSuppressed
+      || !report.logLevels.warnValidationRecorded || !report.logLevels.debugInteractionRecorded
+      || !report.logLevels.traceReadInteractionRecorded) {
       throw new Error("Live diagnostics level/readback contract failed.");
     }
 
@@ -2395,11 +2991,51 @@ async function main() {
       tauriInvoke(app.cdp, "fetch_diagnostics", { request: { timeoutMs: 30_000 } }),
       appApi("/api/app/diagnostics"),
     ]);
-    if (restartTauriDiagnostics?.logLevel !== "trace" || restartRestDiagnostics?.logLevel !== "trace") {
+    if (restartTauriDiagnostics?.logLevel !== "debug" || restartRestDiagnostics?.logLevel !== "debug") {
       throw new Error("Diagnostics level was not durable across restart.");
     }
-    const secondPrivate = await injectPrivateContext("trace", privateFixture, "second-launch");
-    const secondStore = await inspectPrivateIdentityStore(privateFixture, secondPrivate.chain);
+    report.runtimeBinding.secondLaunchBackendListenerBound = secondRuntime.backendListenerBound;
+
+    stage = "developer-options";
+    let secondPrivate;
+    let secondStore;
+    const developerOptions = await exerciseDeveloperOptions(
+      app.cdp,
+      Number(initialUi.settingsNavCount || 0),
+      async () => {
+        await openGeneralSettings(app.cdp);
+        const enabledUi = await inspectGeneralDiagnosticsUi(app.cdp);
+        const fiveLevelRange = enabledUi.rangePresent
+          && enabledUi.rangeMin === "0"
+          && enabledUi.rangeMax === "4"
+          && enabledUi.rangeStep === "1"
+          && enabledUi.rangeValue === "3"
+          && enabledUi.rangeLevel === "debug"
+          && enabledUi.ariaValueTextPresent;
+        if (!fiveLevelRange) throw new Error("Trace level was not exposed after modal confirmation.");
+        await setLogSlider(app.cdp, 4);
+        const trace = await waitForDiagnosticsLevel(app.cdp, "trace", 4);
+        secondPrivate = await injectPrivateContext("trace", privateFixture, "second-launch");
+        secondStore = await inspectPrivateIdentityStore(privateFixture, secondPrivate.chain);
+        return {
+          fiveLevelRange,
+          traceReachedViaDom: trace.status?.logLevel === "trace"
+            && trace.dom?.level === "trace"
+            && trace.dom?.value === "4",
+          traceAriaPresent: Boolean(trace.dom?.aria),
+        };
+      },
+    );
+    if (!secondPrivate || !secondStore || developerOptions.enabledEvidence?.traceReachedViaDom !== true) {
+      throw new Error("Second-launch Trace/private identity evidence was incomplete.");
+    }
+    report.developerOptions = {
+      ...developerOptions,
+      firstLaunchTraceBootstrap: firstTraceBootstrap,
+    };
+    report.defaultState.developerLowLevelHidden = report.developerOptions.developerNavHiddenByDefault === true;
+    report.logLevels.secondLaunchTraceReachedViaDom = developerOptions.enabledEvidence.traceReachedViaDom === true;
+    report.logLevels.errorLevelGate = developerOptions.errorLevelGate;
     const stableAcrossRestart = identityChainsEqual(firstPrivate.chain, secondPrivate.chain)
       && firstStore.networkAliases.join("|") === secondStore.networkAliases.join("|");
     if (!stableAcrossRestart) throw new Error("Diagnostic aliases changed across restart.");
@@ -2410,11 +3046,6 @@ async function main() {
       userProjectAvatarChainStable: identityChainsEqual(firstPrivate.chain, secondPrivate.chain),
       networkAliasesStable: firstStore.networkAliases.join("|") === secondStore.networkAliases.join("|"),
     };
-    report.runtimeBinding.secondLaunchBackendListenerBound = secondRuntime.backendListenerBound;
-
-    stage = "developer-options";
-    report.developerOptions = await exerciseDeveloperOptions(app.cdp, Number(initialUi.settingsNavCount || 0));
-    report.defaultState.developerLowLevelHidden = report.developerOptions.developerNavHiddenByDefault === true;
     const developerInstrumentation = await webViewInstrumentationSnapshot(app.cdp);
     const developerEventEvidence = validateEventIsolation(developerInstrumentation);
     report.privacy.eventPrivacyClean = developerEventEvidence.privacyScanClean;
@@ -2439,6 +3070,8 @@ async function main() {
       identityProjectionExcluded: bundleProof.identityProjectionExcluded,
       privateStoreFilesExcluded: bundleProof.privateStoreFilesExcluded,
       readableRedactedLogExcerpt: bundleProof.readableRedactedLogExcerpt,
+      safetyPosturePresent: bundleProof.safetyPosturePresent,
+      safetyPostureReflectsFinalSafeState: bundleProof.safetyPostureReflectsFinalSafeState,
       privacyScanClean: bundleProof.privacyScanClean,
     };
 
@@ -2462,6 +3095,16 @@ async function main() {
     report.logFiles.canonicalNamesOnly = true;
     report.logFiles.utf8AndPhysicalGrammar = finalLogScan.nonblankLines > 0;
 
+    stage = "final-error-shutdown-gate";
+    await setLogSlider(app.cdp, 0);
+    const finalError = await waitForDiagnosticsLevel(app.cdp, "error", 0);
+    report.logLevels.errorActiveAtShutdown = finalError.status?.logLevel === "error"
+      && finalError.dom?.level === "error"
+      && finalError.dom?.value === "0";
+    if (!report.logLevels.errorActiveAtShutdown) {
+      throw new Error("Final Error-level shutdown gate was not active.");
+    }
+
     stage = "second-close";
     app.cdp.close();
     app.cdp = null;
@@ -2469,6 +3112,29 @@ async function main() {
     report.cleanup.secondClosureGraceful = closureSucceeded(secondClosure);
     if (!report.cleanup.secondClosureGraceful) throw new Error("Second packaged launch did not close gracefully.");
     app = undefined;
+
+    stage = "post-shutdown-safety-baseline";
+    const closedLogScan = await scanLogDirectory();
+    const startupBaselines = safetyBaselineRows(closedLogScan, "startup");
+    const shutdownBaselines = safetyBaselineRows(closedLogScan, "normal_shutdown");
+    const finalShutdownPosture = shutdownBaselines.at(-1)?.data?.posture;
+    report.safetyBaseline = {
+      startupCount: startupBaselines.length,
+      normalShutdownCount: shutdownBaselines.length,
+      startupPresent: startupBaselines.length >= 1,
+      normalShutdownPresent: shutdownBaselines.length >= 1,
+      shutdownCapturedWhileError: report.logLevels.errorActiveAtShutdown === true
+        && finalShutdownPosture?.diagnostics?.currentLevel === "error",
+    };
+    if (
+      report.safetyBaseline.startupCount < 2
+      || report.safetyBaseline.normalShutdownCount < 2
+      || report.safetyBaseline.shutdownCapturedWhileError !== true
+    ) throw new Error("Startup/normal-shutdown essential safety baselines were incomplete.");
+    report.logFiles.finalCanonicalFileCount = closedLogScan.fileCount;
+    report.logFiles.finalCanonicalBytes = closedLogScan.totalBytes;
+    report.logFiles.finalNonblankLineCount = closedLogScan.nonblankLines;
+    report.logFiles.utf8AndPhysicalGrammar = closedLogScan.nonblankLines > 0;
 
     stage = "completion-binding";
     const completionGit = await gitBindingSnapshot();
