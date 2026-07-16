@@ -1,4 +1,4 @@
-import { Dispatch, SetStateAction, useEffect, useRef, useState } from "react";
+import { Dispatch, SetStateAction, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AgentApproval,
@@ -67,6 +67,17 @@ export function useRuntimeWorkspace({
   const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const runtimeRefreshSeqRef = useRef(0);
+  const runtimeScopeToken = useMemo(
+    () => Symbol("runtime-workspace-scope"),
+    [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath],
+  );
+  const runtimeScopeRef = useRef({
+    token: runtimeScopeToken,
+    endpoint,
+    runtimeConnected,
+    sessionId,
+    projectRoot: activeRuntimeProjectPath || "",
+  });
   const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
 
   useEffect(() => {
@@ -76,10 +87,21 @@ export function useRuntimeWorkspace({
     }
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Project/session changes must invalidate the visible runtime projection
+    // before the next paint. Otherwise a failed or slow snapshot can leave a
+    // previous project's Save-as-Skill source actionable in the new project.
+    runtimeScopeRef.current = {
+      token: runtimeScopeToken,
+      endpoint,
+      runtimeConnected,
+      sessionId,
+      projectRoot: activeRuntimeProjectPath || "",
+    };
+    runtimeRefreshSeqRef.current += 1;
+    setRuntimeRuns([]);
+    setRuntimeRunsError("");
     if (!runtimeConnected) {
-      setRuntimeRuns([]);
-      setRuntimeRunsError("");
       return;
     }
     void refreshRuntimeRuns(false);
@@ -160,13 +182,34 @@ export function useRuntimeWorkspace({
   }
 
   async function refreshRuntimeRuns(showError = false, target = endpoint) {
-    const refreshSeq = runtimeRefreshSeqRef.current + 1;
-    runtimeRefreshSeqRef.current = refreshSeq;
+    const requestScopeToken = runtimeScopeToken;
+    const requestEndpoint = endpoint;
+    const requestRuntimeConnected = runtimeConnected;
     const requestSessionId = sessionId;
     const requestProjectRoot = activeRuntimeProjectPath || "";
-    const isLatestRefresh = () =>
-      runtimeRefreshSeqRef.current === refreshSeq && requestSessionId === sessionId && requestProjectRoot === (activeRuntimeProjectPath || "");
-    if (!runtimeConnected) {
+    const currentScope = runtimeScopeRef.current;
+    if (
+      currentScope.token !== requestScopeToken
+      || target !== requestEndpoint
+      || currentScope.endpoint !== requestEndpoint
+      || currentScope.runtimeConnected !== requestRuntimeConnected
+      || currentScope.sessionId !== requestSessionId
+      || currentScope.projectRoot !== requestProjectRoot
+    ) {
+      return;
+    }
+    const refreshSeq = runtimeRefreshSeqRef.current + 1;
+    runtimeRefreshSeqRef.current = refreshSeq;
+    const isLatestRefresh = () => {
+      const latestScope = runtimeScopeRef.current;
+      return runtimeRefreshSeqRef.current === refreshSeq
+        && latestScope.token === requestScopeToken
+        && latestScope.endpoint === requestEndpoint
+        && latestScope.runtimeConnected === requestRuntimeConnected
+        && latestScope.sessionId === requestSessionId
+        && latestScope.projectRoot === requestProjectRoot;
+    };
+    if (!requestRuntimeConnected) {
       setRuntimeRuns([]);
       setRuntimeRunsError("");
       setDesktopActions([]);

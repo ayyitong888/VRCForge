@@ -28,6 +28,7 @@ import type {
   PathToSkillCaptureResult,
   SkillPackageEntry,
 } from "../lib/api";
+import type { PathToSkillDraftSeed, PathToSkillOperationSummary } from "../lib/path-to-skill-context";
 import { emptySkillDraft } from "../lib/skill-draft";
 
 type UseSkillsWorkspaceControllerParams = {
@@ -64,11 +65,15 @@ export function useSkillsWorkspaceController({
   const [loadingSkillPackages, setLoadingSkillPackages] = useState(false);
   const [skillPackageMessage, setSkillPackageMessage] = useState("");
   const [skillPackageError, setSkillPackageError] = useState("");
+  const [pathToSkillDraftSeed, setPathToSkillDraftSeed] = useState<PathToSkillDraftSeed | null>(null);
 
   const skills = useMemo(() => skillRegistry?.skills ?? bootstrapSkills, [bootstrapSkills, skillRegistry]);
   const skillCount = skillRegistry?.count ?? skills.length;
 
-  async function openSkills() {
+  async function openSkills(options?: { preserveCapturedPath?: boolean }) {
+    if (!options?.preserveCapturedPath) {
+      setPathToSkillDraftSeed(null);
+    }
     setActiveView("skills");
     setError("");
     try {
@@ -90,6 +95,14 @@ export function useSkillsWorkspaceController({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
+  }
+
+  async function openSkillsWithCapturedPath(summary: PathToSkillOperationSummary) {
+    setPathToSkillDraftSeed((current) => ({
+      revision: (current?.revision ?? 0) + 1,
+      summary,
+    }));
+    await openSkills({ preserveCapturedPath: true });
   }
 
   async function loadSkillPackages(target = endpoint) {
@@ -401,7 +414,9 @@ export function useSkillsWorkspaceController({
     loadingSkillPackages,
     skillPackageMessage,
     skillPackageError,
+    pathToSkillDraftSeed,
     openSkills,
+    openSkillsWithCapturedPath,
     loadSkillPackages,
     preflightVskPackage,
     importVskPackage,

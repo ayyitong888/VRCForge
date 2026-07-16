@@ -88,6 +88,7 @@
     "approvalEvidenceMeta": "承認 {{status}}",
     "checkpointEvidence": "チェックポイント証跡",
     "runEvidence": "実行証跡",
+    "saveOperationAsSkill": "この操作をスキルとして保存",
     "gitDiffEvidence": "Git 差分",
     "gitDiffEvidenceMeta": "{{count}} ファイル、+{{additions}} -{{deletions}}",
     "proofShort": "証跡",
@@ -899,7 +900,8 @@
       "exportPackage": ".vsk を出力",
       "sourceWritten": "匿名化されたスキルソースを書き込みました",
       "packageExported": "匿名化された .vsk パッケージを出力しました",
-      "runtimeUnavailable": "VRCForge ランタイムを利用できません。"
+      "runtimeUnavailable": "VRCForge ランタイムを利用できません。",
+      "prefilledFromRun": "完了した実行から取得"
     },
     "reason": "Reason",
     "disableSafeMode": "Disable Safe Mode",

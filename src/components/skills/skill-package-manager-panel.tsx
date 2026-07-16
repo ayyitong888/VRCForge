@@ -7,6 +7,7 @@ import type {
   SkillPackageEntry,
   SkillPackagePreflight,
 } from "../../lib/api";
+import type { PathToSkillDraftSeed } from "../../lib/path-to-skill-context";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
@@ -21,6 +22,7 @@ export function SkillPackageManagerPanel({
   error,
   governance,
   audit,
+  pathToSkillDraftSeed,
   onRefresh,
   onPreflight,
   onImport,
@@ -41,6 +43,7 @@ export function SkillPackageManagerPanel({
   error: string;
   governance: Record<string, unknown>;
   audit: Array<Record<string, unknown>>;
+  pathToSkillDraftSeed: PathToSkillDraftSeed | null;
   onRefresh: () => void;
   onPreflight: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImport: (packagePath: string) => Promise<unknown>;
@@ -338,7 +341,12 @@ export function SkillPackageManagerPanel({
           </div>
         ) : null}
 
-        <PathToSkillCapturePanel onPreview={onPreviewPathToSkill} onWrite={onWritePathToSkill} />
+        <PathToSkillCapturePanel
+          key={pathToSkillDraftSeed?.revision ?? "manual"}
+          initialSummary={pathToSkillDraftSeed?.summary}
+          onPreview={onPreviewPathToSkill}
+          onWrite={onWritePathToSkill}
+        />
 
         <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">

@@ -2,11 +2,13 @@ import { Eye, FileCheck2, Loader2, PackagePlus } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import i18n from "../../i18n";
 import type { PathToSkillCaptureRequest, PathToSkillCaptureResult } from "../../lib/api";
+import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 
 type PathToSkillCapturePanelProps = {
+  initialSummary?: PathToSkillOperationSummary;
   onPreview: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
   onWrite: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
 };
@@ -20,8 +22,10 @@ const INITIAL_SUMMARY = JSON.stringify(
   2,
 );
 
-export function PathToSkillCapturePanel({ onPreview, onWrite }: PathToSkillCapturePanelProps) {
-  const [summaryText, setSummaryText] = useState(INITIAL_SUMMARY);
+export function PathToSkillCapturePanel({ initialSummary, onPreview, onWrite }: PathToSkillCapturePanelProps) {
+  const [summaryText, setSummaryText] = useState(() =>
+    initialSummary ? JSON.stringify(initialSummary, null, 2) : INITIAL_SUMMARY,
+  );
   const [packageId, setPackageId] = useState("");
   const [skillName, setSkillName] = useState("");
   const [title, setTitle] = useState("");
@@ -163,11 +167,17 @@ export function PathToSkillCapturePanel({ onPreview, onWrite }: PathToSkillCaptu
           <div className="truncate text-sm font-medium">{i18n.t("package.pathToSkill.title")}</div>
           <div className="text-xs text-muted-foreground">{i18n.t("package.pathToSkill.description")}</div>
         </div>
+        {initialSummary ? (
+          <Badge tone="default" data-vrcforge-path-to-skill-prefilled="true">
+            {i18n.t("package.pathToSkill.prefilledFromRun")}
+          </Badge>
+        ) : null}
         {previewIsCurrent ? <Badge tone="ok">{i18n.t("package.pathToSkill.sanitized")}</Badge> : null}
       </div>
 
       <Field label={i18n.t("package.pathToSkill.operationSummary")}>
         <textarea
+          data-vrcforge-path-to-skill-operation-summary
           value={summaryText}
           onChange={(event) => {
             setSummaryText(event.target.value);

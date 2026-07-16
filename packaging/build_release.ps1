@@ -8,7 +8,8 @@ param(
     [string]$UvDownloadUrl = "https://github.com/astral-sh/uv/releases/download/0.9.17/uv-x86_64-pc-windows-msvc.zip",
     [string]$UvDownloadSha256 = "",
     [switch]$AllowDirty,
-    [switch]$AllowUnpushed
+    [switch]$AllowUnpushed,
+    [switch]$AllowVersionMismatch
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +17,30 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $uvDownloadUrl = $UvDownloadUrl
+$releaseOperationMutexName = "Local\VRCForge.Release.BuildPublish.v1"
+
+function Enter-ReleaseOperationMutex {
+    $mutex = New-Object System.Threading.Mutex($false, $releaseOperationMutexName)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+            Write-Warning "Taking ownership of an abandoned VRCForge release-operation mutex."
+        }
+
+        if (-not $acquired) {
+            throw "Another VRCForge build or publish operation is already running."
+        }
+        return $mutex
+    } catch {
+        if (-not $acquired) {
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
 
 function Resolve-DotNetExe {
     $command = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -84,6 +109,20 @@ function Resolve-MakeNsisExe {
     throw "NSIS makensis.exe is required to build VRCForge_Web_Installer_x64.exe and VRCForge_Offline_Installer_x64.exe."
 }
 
+function Get-StreamSha256 {
+    param(
+        [System.IO.Stream]$Stream
+    )
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($Stream)
+        return ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Build-TauriDesktopApp {
     param(
         [string]$DestinationExe
@@ -118,15 +157,29 @@ function Build-TauriDesktopApp {
 
 function Install-UvRuntime {
     param(
-        [string]$DestinationDir
+        [string]$DestinationDir,
+        [bool]$RequireVerifiedDownload
     )
 
     New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
     $uvPath = Join-Path $DestinationDir "uv.exe"
     $uvxPath = Join-Path $DestinationDir "uvx.exe"
-    if ((Test-Path -LiteralPath $uvPath) -and (Test-Path -LiteralPath $uvxPath)) {
+    if (
+        -not $RequireVerifiedDownload -and
+        (Test-Path -LiteralPath $uvPath) -and
+        (Test-Path -LiteralPath $uvxPath)
+    ) {
         Write-Host "Bundled uv runtime already present: $DestinationDir"
-        return
+        return [pscustomobject]@{
+            source = "preseed"
+            downloadUrl = $null
+            archiveSha256 = $null
+            archiveDigestVerified = $false
+            files = @(
+                [pscustomobject]@{ name = "uv.exe"; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $uvPath).Hash.ToLowerInvariant() }
+                [pscustomobject]@{ name = "uvx.exe"; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $uvxPath).Hash.ToLowerInvariant() }
+            )
+        }
     }
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge_uv_" + [System.Guid]::NewGuid().ToString("N"))
@@ -134,54 +187,181 @@ function Install-UvRuntime {
     try {
         $zipPath = Join-Path $tempRoot "uv-x86_64-pc-windows-msvc.zip"
         Write-Host "Downloading uv Windows x64 runtime: $uvDownloadUrl"
-        Invoke-WebRequest -Uri $uvDownloadUrl -OutFile $zipPath
-        if (-not [string]::IsNullOrWhiteSpace($UvDownloadSha256)) {
-            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
-            if ($actualHash -ne $UvDownloadSha256.ToLowerInvariant()) {
-                throw "uv runtime SHA256 mismatch. expected=$UvDownloadSha256 actual=$actualHash"
+        Invoke-WebRequest -UseBasicParsing -Uri $uvDownloadUrl -OutFile $zipPath
+        $verifiedUvPath = Join-Path $tempRoot "verified-uv.exe"
+        $verifiedUvxPath = Join-Path $tempRoot "verified-uvx.exe"
+        $archiveSha256 = ""
+        $archiveDigestVerified = $false
+        $archiveStream = $null
+        $archive = $null
+        try {
+            # Hold the exact downloaded bytes against writes/deletes from digest
+            # verification through entry extraction. Opening the path again after
+            # hashing would leave a replacement race in the release supply chain.
+            $archiveStream = [System.IO.File]::Open(
+                $zipPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::Read
+            )
+            $archiveSha256 = Get-StreamSha256 -Stream $archiveStream
+            $archiveStream.Position = 0
+            if ($UvDownloadSha256 -match "^[0-9a-fA-F]{64}$") {
+                if ($archiveSha256 -ne $UvDownloadSha256.ToLowerInvariant()) {
+                    throw "uv runtime SHA256 mismatch. expected=$UvDownloadSha256 actual=$archiveSha256"
+                }
+                $archiveDigestVerified = $true
+            } else {
+                Write-Warning "UvDownloadSha256 was not provided; uv archive integrity is not pinned."
             }
-        } else {
-            Write-Warning "UvDownloadSha256 was not provided; uv archive integrity is not pinned."
-        }
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $tempRoot -Force
+            if ($RequireVerifiedDownload -and -not $archiveDigestVerified) {
+                throw "Strict release build requires a verified uv archive download."
+            }
 
-        $extractedUv = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter uv.exe | Select-Object -First 1
-        $extractedUvx = Get-ChildItem -LiteralPath $tempRoot -Recurse -Filter uvx.exe | Select-Object -First 1
-        if (-not $extractedUv -or -not $extractedUvx) {
-            throw "Downloaded uv archive did not contain uv.exe and uvx.exe."
+            Add-Type -AssemblyName System.IO.Compression
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [System.IO.Compression.ZipArchive]::new(
+                $archiveStream,
+                [System.IO.Compression.ZipArchiveMode]::Read,
+                $true
+            )
+            $uvEntries = @($archive.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) -and $_.Name -ieq "uv.exe" })
+            $uvxEntries = @($archive.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) -and $_.Name -ieq "uvx.exe" })
+            if ($uvEntries.Count -ne 1 -or $uvxEntries.Count -ne 1) {
+                throw "Downloaded uv archive must contain exactly one uv.exe and exactly one uvx.exe."
+            }
+            foreach ($entryTarget in @(
+                @{ Entry = $uvEntries[0]; Path = $verifiedUvPath },
+                @{ Entry = $uvxEntries[0]; Path = $verifiedUvxPath }
+            )) {
+                $entryStream = $null
+                $outputStream = $null
+                try {
+                    $entryStream = $entryTarget.Entry.Open()
+                    $outputStream = [System.IO.File]::Open(
+                        $entryTarget.Path,
+                        [System.IO.FileMode]::CreateNew,
+                        [System.IO.FileAccess]::Write,
+                        [System.IO.FileShare]::None
+                    )
+                    $entryStream.CopyTo($outputStream)
+                } finally {
+                    if ($null -ne $outputStream) {
+                        $outputStream.Dispose()
+                    }
+                    if ($null -ne $entryStream) {
+                        $entryStream.Dispose()
+                    }
+                }
+            }
+        } finally {
+            if ($null -ne $archive) {
+                $archive.Dispose()
+            }
+            if ($null -ne $archiveStream) {
+                $archiveStream.Dispose()
+            }
         }
 
-        Copy-Item -LiteralPath $extractedUv.FullName -Destination $uvPath -Force
-        Copy-Item -LiteralPath $extractedUvx.FullName -Destination $uvxPath -Force
+        $verifiedUvSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedUvPath).Hash.ToLowerInvariant()
+        $verifiedUvxSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedUvxPath).Hash.ToLowerInvariant()
+
+        if (Test-Path -LiteralPath $DestinationDir) {
+            Remove-Item -LiteralPath $DestinationDir -Recurse -Force -ErrorAction Stop
+        }
+        New-Item -ItemType Directory -Path $DestinationDir -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $verifiedUvPath -Destination $uvPath -ErrorAction Stop
+        Copy-Item -LiteralPath $verifiedUvxPath -Destination $uvxPath -ErrorAction Stop
+        $installedUvEntries = @(Get-ChildItem -LiteralPath $DestinationDir -Force -ErrorAction Stop)
+        $installedUvNames = @($installedUvEntries | ForEach-Object { $_.Name })
+        if (
+            $installedUvEntries.Count -ne 2 -or
+            @($installedUvNames | Sort-Object -Unique).Count -ne 2 -or
+            @(Compare-Object -ReferenceObject @("uv.exe", "uvx.exe") -DifferenceObject $installedUvNames -CaseSensitive).Count -ne 0 -or
+            @($installedUvEntries | Where-Object {
+                $_.PSIsContainer -or ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            }).Count -ne 0
+        ) {
+            throw "Installed uv runtime directory must contain exactly regular uv.exe and uvx.exe files."
+        }
+        $installedUvSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $uvPath).Hash.ToLowerInvariant()
+        $installedUvxSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $uvxPath).Hash.ToLowerInvariant()
+        if ($installedUvSha256 -ne $verifiedUvSha256 -or $installedUvxSha256 -ne $verifiedUvxSha256) {
+            throw "Installed uv runtime digests differ from the verified archive entries."
+        }
         Write-Host "Bundled uv runtime copied to: $DestinationDir"
+        return [pscustomobject]@{
+            source = "download"
+            downloadUrl = $uvDownloadUrl
+            archiveSha256 = $archiveSha256
+            archiveDigestVerified = $archiveDigestVerified
+            files = @(
+                [pscustomobject]@{ name = "uv.exe"; sha256 = $installedUvSha256 }
+                [pscustomobject]@{ name = "uvx.exe"; sha256 = $installedUvxSha256 }
+            )
+        }
     } finally {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Push-Location $repoRoot
+$releaseOperationMutex = $null
+$releaseOperationMutexOwned = $false
+$locationPushed = $false
 try {
+    $releaseOperationMutex = Enter-ReleaseOperationMutex
+    $releaseOperationMutexOwned = $true
+    Push-Location $repoRoot
+    $locationPushed = $true
+
+    $strictReleaseBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)
     if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
     }
+    $sourceVersion = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
+    if ($sourceVersion -ne $Version) {
+        throw "Package version must match the source VERSION file. requested=$Version source=$sourceVersion"
+    }
+    if ($UvDownloadSha256 -notmatch "^[0-9a-fA-F]{64}$") {
+        if ($strictReleaseBuild) {
+            throw "Strict release build requires a pinned 64-hex UvDownloadSha256."
+        }
+        Write-Warning "LOCAL acceptance build: uv download SHA-256 is not pinned; artifacts remain non-publishable."
+    }
 
     git fetch origin --tags --prune | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        if ($strictReleaseBuild) {
+            throw "Strict release build requires a successful git fetch of origin."
+        }
+        Write-Warning "LOCAL acceptance build: git fetch failed; using the cached origin/main ref."
+    }
 
     $status = git status --short
     if ($status -and -not $AllowDirty) {
-        Write-Error "Working tree has uncommitted changes. Commit or stash before packaging.`n$status"
-        exit 1
+        throw "Working tree has uncommitted changes. Commit or stash before packaging.`n$status"
     }
 
     $unpushed = git log origin/main..HEAD --oneline
     if ($unpushed -and -not $AllowUnpushed) {
-        Write-Error "Local HEAD contains commits not on origin/main. Push first before packaging.`n$unpushed"
-        exit 1
+        throw "Local HEAD contains commits not on origin/main. Push first before packaging.`n$unpushed"
+    }
+
+    $headCommit = (git rev-parse HEAD).Trim()
+    $originMainCommit = (git rev-parse origin/main).Trim()
+    if ($strictReleaseBuild -and $headCommit -ne $originMainCommit) {
+        throw "Strict release build requires HEAD to equal origin/main. HEAD=$headCommit origin/main=$originMainCommit"
     }
 
     $remoteVersion = (git show origin/main:VERSION).Trim()
     if ($remoteVersion -ne $Version) {
-        throw "Installer version must match GitHub latest VERSION. local=$Version origin/main=$remoteVersion"
+        if (-not ($AllowUnpushed -and $AllowVersionMismatch)) {
+            throw "Installer version must match GitHub latest VERSION. local=$Version origin/main=$remoteVersion"
+        }
+        Write-Warning (
+            "LOCAL acceptance build only: VERSION ($Version) differs from origin/main ($remoteVersion). " +
+            "Do not publish these artifacts; a strict build still requires the version commit on origin/main."
+        )
     }
 
     $dotnetExe = Resolve-DotNetExe
@@ -229,7 +409,9 @@ try {
     New-Item -ItemType Directory -Force -Path $legacyLauncherPayloadRoot | Out-Null
     Copy-Item -Path (Join-Path $legacyLauncherBuildRoot "*") -Destination $legacyLauncherPayloadRoot -Recurse -Force
     Copy-Item -LiteralPath .\start_dashboard.cmd -Destination (Join-Path $payloadRoot "start_dashboard.cmd") -Force
-    Install-UvRuntime -DestinationDir (Join-Path $payloadRoot "tools\uv")
+    $uvRuntimeProvenance = Install-UvRuntime `
+        -DestinationDir (Join-Path $payloadRoot "tools\uv") `
+        -RequireVerifiedDownload $strictReleaseBuild
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "config"),(Join-Path $payloadRoot "logs"),(Join-Path $payloadRoot "artifacts") | Out-Null
 
     $unityPluginRoot = Join-Path $payloadRoot "unity_plugin"
@@ -300,11 +482,35 @@ try {
         throw "Web NSIS build failed."
     }
 
+    $finalSourceVersion = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
+    $finalHeadCommit = (git rev-parse HEAD).Trim()
+    $finalOriginMainCommit = (git rev-parse origin/main).Trim()
+    $finalStatus = git status --short
+    if ($finalSourceVersion -ne $Version) {
+        throw "Source VERSION changed during packaging. requested=$Version source=$finalSourceVersion"
+    }
+    if ($strictReleaseBuild -and (
+        $finalStatus -or
+        $finalHeadCommit -ne $finalOriginMainCommit -or
+        $finalHeadCommit -ne $headCommit -or
+        $finalOriginMainCommit -ne $originMainCommit
+    )) {
+        throw "Strict release source state changed during packaging; rebuild from a clean HEAD equal to origin/main."
+    }
+
     $manifest = [ordered]@{
         version = $Version
-        commit = (git rev-parse HEAD).Trim()
+        commit = $finalHeadCommit
+        buildPolicy = [ordered]@{
+            mode = if ($strictReleaseBuild) { "strict" } else { "local-acceptance" }
+            releaseEligible = $strictReleaseBuild
+            allowDirty = [bool]$AllowDirty
+            allowUnpushed = [bool]$AllowUnpushed
+            allowVersionMismatch = [bool]$AllowVersionMismatch
+        }
         uvDownloadUrl = $uvDownloadUrl
         uvDownloadSha256 = $UvDownloadSha256
+        uvRuntime = $uvRuntimeProvenance
         artifacts = @(
             @{ name = [System.IO.Path]::GetFileName($UnityPackagePath); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $UnityPackagePath).Hash.ToLowerInvariant() },
             @{ name = [System.IO.Path]::GetFileName($payloadZip); sha256 = $payloadSha256 },
@@ -317,5 +523,17 @@ try {
     Write-Host "Release payload built: $payloadRoot"
     Write-Host "Release artifacts: $releaseRoot"
 } finally {
-    Pop-Location
+    if ($locationPushed) {
+        Pop-Location
+    }
+    if ($releaseOperationMutexOwned) {
+        try {
+            $releaseOperationMutex.ReleaseMutex()
+        } finally {
+            $releaseOperationMutexOwned = $false
+        }
+    }
+    if ($null -ne $releaseOperationMutex) {
+        $releaseOperationMutex.Dispose()
+    }
 }

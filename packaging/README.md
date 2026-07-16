@@ -24,6 +24,15 @@ not the primary release entry point.
 - .NET SDK 8.0+ or NSIS is missing
 - the web installer download URL is not provided
 
+For an unpublished next-version acceptance build, `packaging/build_local.ps1`
+may package an unpushed `VERSION` that differs from `origin/main`. That wrapper
+passes both local-only gates and labels the output unpublished. It does not
+relax `build_release.ps1` or `publish_release.ps1`: releasable artifacts still
+require a clean, pushed HEAD whose `VERSION` matches `origin/main`.
+The generated manifest records `buildPolicy.mode=local-acceptance` and
+`releaseEligible=false`; neither the stable gate nor the publisher accepts it,
+even if the same commit is pushed later. Rebuild strictly after pushing.
+
 The CoplayDev Unity MCP package must be pinned locally before packaging:
 
 ```text
@@ -70,8 +79,8 @@ distribution notes.
 
 ## Commands
 
-`1.2.0` is the current target stable package; `1.1.2` remains the latest
-published stable package until `v1.2.0` is published. The Avatar Encryption /
+`1.3.0` is the current target stable package; `1.2.0` remains the latest
+published stable package until `v1.3.0` is published. The Avatar Encryption /
 Anti-Rip addon remains a connector preview and is not bundled with the stable
 package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
@@ -86,12 +95,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.2.0 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.2.0/VRCForge_Windows_x64_1.2.0.zip `
+  -Version 1.3.0 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.3.0/VRCForge_Windows_x64_1.3.0.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.2.0
+  -Version 1.3.0
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -174,13 +183,17 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.2.0
+python scripts\smoke_stable_readiness_gate.py --version 1.3.0 --latest-stable 1.2.0
 ```
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.2.0` target stable line,
+pointers when they exist in the checkout. For the current `1.3.0` target stable line,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,
 checkpoint, and rollback.
+For `1.3.0` and newer it also requires a manifest-bound packaged Skill
+Ecosystem report (`--skill-ecosystem-smoke`) and a non-skipped `.vsk` Golden
+Path lifecycle. Local-only acceptance reports do not satisfy that strict
+release binding.

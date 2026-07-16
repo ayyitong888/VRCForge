@@ -475,6 +475,7 @@ def build_path_to_skill_source(
 
     context = _CaptureContext(_find_project_root(summary))
     sanitized_summary = context.sanitize(dict(summary), "source")
+    _validate_structured_operation_summary(sanitized_summary, recipe_definition)
     if recipe_definition is None and not _has_captured_operation(sanitized_summary):
         raise PathToSkillValidationError(
             "Path-to-Skill requires at least one non-empty steps or skillPath item for a generic capture."
@@ -744,6 +745,77 @@ def _has_captured_operation(summary: Mapping[str, Any]) -> bool:
     )
 
 
+def _validate_structured_operation_summary(
+    summary: Mapping[str, Any],
+    recipe_definition: PathToSkillRecipeDefinition | None,
+) -> None:
+    if str(summary.get("schema") or "").strip() != "vrcforge.operation_summary.v1":
+        return
+    steps = summary.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise PathToSkillValidationError("Structured operation summaries require at least one step.")
+    known_recipe_tools = {
+        tool
+        for definition in PATH_TO_SKILL_RECIPE_DEFINITIONS.values()
+        for tool in definition.allowed_tools
+    }
+    generic_replayable_tools = known_recipe_tools | {
+        "vrcforge_scan_materials",
+        "vrcforge_plan_shader_tuning",
+        "vrcforge_apply_shader_tuning",
+        "vrcforge_optimization_plan",
+        "vrcforge_preview_add_outfit",
+    }
+    successful_statuses = {
+        "applied",
+        "completed",
+        "executed",
+        "ok",
+        "passed",
+        "previewed",
+    }
+    portable_kinds = {"read", "skill", "tool", "validation", "write"}
+    seen_tools: set[str] = set()
+    allowed_recipe_tools = set(recipe_definition.allowed_tools) if recipe_definition else None
+    for index, step in enumerate(steps):
+        if not isinstance(step, Mapping):
+            raise PathToSkillValidationError(
+                f"Structured operation step {index} must be an object with kind, tool, and status."
+            )
+        if set(step) != {"kind", "tool", "status"}:
+            raise PathToSkillValidationError(
+                f"Structured operation step {index} must contain exactly kind, tool, and status."
+            )
+        kind = str(step.get("kind") or "").strip().lower()
+        tool = str(step.get("tool") or "").strip()
+        status = str(step.get("status") or "").strip().lower()
+        if kind not in portable_kinds:
+            raise PathToSkillValidationError(f"Structured operation step {index} has an invalid operation kind.")
+        if not re.fullmatch(r"vrcforge_[a-z0-9_]+", tool):
+            raise PathToSkillValidationError(f"Structured operation step {index} has an invalid tool id.")
+        if tool in seen_tools:
+            raise PathToSkillValidationError(
+                "Structured operation summaries cannot replay repeated tools without their private call arguments."
+            )
+        if tool in {"vrcforge_agent_desktop_action", "vrcforge_ask_user"} or tool.startswith(
+            "vrcforge_progress_"
+        ):
+            raise PathToSkillValidationError(f"Structured operation step {index} is an internal control, not a skill path.")
+        if status not in successful_statuses:
+            raise PathToSkillValidationError(
+                f"Structured operation step {index} is not a completed reusable operation."
+            )
+        if allowed_recipe_tools is not None and tool not in allowed_recipe_tools:
+            raise PathToSkillValidationError(
+                f"Structured operation step {index} is outside the selected recipe contract."
+            )
+        if allowed_recipe_tools is None and tool not in generic_replayable_tools:
+            raise PathToSkillValidationError(
+                f"Structured operation step {index} has no safe generic replay contract."
+            )
+        seen_tools.add(tool)
+
+
 def _build_workflow_payload(
     *,
     package_id: str,
@@ -866,7 +938,7 @@ def _build_skill_metadata(
         "backupRestore": "requires approval, checkpoint, validation, and rollback verification",
         "allowedTools": _infer_allowed_tools(workflow_id, workflow_payload, recipe_definition),
         "disallowedTools": ["vrcforge_execute_shell", "direct_unity_asset_write"],
-        "entrypointTool": _entrypoint_tool(workflow_id, recipe_definition),
+        "entrypointTool": _entrypoint_tool(workflow_id, workflow_payload, recipe_definition),
         "userInvocable": True,
         "disableModelInvocation": False,
         "argumentHint": "projectPath={{projectPath}} avatarPath={{avatarPath}}",
@@ -952,20 +1024,74 @@ def _infer_allowed_tools(
     text = json.dumps({"workflow": workflow_id, "payload": workflow_payload}, ensure_ascii=False).lower()
     tools = ["vrcforge_health", "vrcforge_unity_status", "vrcforge_request_apply"]
     if "shader" in text or "material" in text:
-        tools.extend(["vrcforge_scan_materials", "vrcforge_plan_shader_tuning", "vrcforge_apply_shader_tuning"])
+        tools.extend(["vrcforge_scan_materials", "vrcforge_plan_shader_tuning"])
     if "optimizer" in text or "optimization" in text or "meshia" in text or "aao" in text or "parameter" in text:
         tools.extend(["vrcforge_optimization_plan", "vrcforge_optimization_validation_delta"])
     if "booth" in text or "outfit" in text or "prefab" in text:
         tools.extend(["vrcforge_inspect_outfit_package", "vrcforge_preview_add_outfit"])
+    # A generic capture can intentionally preserve steps from more than one
+    # predefined recipe. Include every exact captured step tool that is already
+    # classified as safe by one of those recipes; never copy arbitrary or direct
+    # apply tool names from user-controlled JSON into the generated allowlist.
+    known_safe_recipe_tools = {
+        tool
+        for definition in PATH_TO_SKILL_RECIPE_DEFINITIONS.values()
+        for tool in definition.allowed_tools
+    }
+    steps = workflow_payload.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            captured_tool = str(step.get("tool") or "").strip()
+            if captured_tool in known_safe_recipe_tools:
+                tools.append(captured_tool)
     return sorted(dict.fromkeys(tools))
 
 
 def _entrypoint_tool(
     workflow_id: str,
+    workflow_payload: Mapping[str, Any],
     recipe_definition: PathToSkillRecipeDefinition | None = None,
 ) -> str:
     if recipe_definition:
         return recipe_definition.entrypoint_tool
+    known_safe_recipe_tools = {
+        tool
+        for definition in PATH_TO_SKILL_RECIPE_DEFINITIONS.values()
+        for tool in definition.allowed_tools
+        if "apply_request" not in tool and tool != "vrcforge_request_apply"
+    }
+    captured_tools: list[str] = []
+    probe_fallback_tools: list[str] = []
+    steps = workflow_payload.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            tool = str(step.get("tool") or "").strip()
+            if tool:
+                captured_tools.append(tool)
+            if tool in known_safe_recipe_tools:
+                if tool in {"vrcforge_health", "vrcforge_unity_status"}:
+                    probe_fallback_tools.append(tool)
+                    continue
+                # Generic multi-recipe captures retain their original ordered
+                # steps. Start with the first captured tool that is already a
+                # predefined read/plan/validation tool rather than silently
+                # degrading the saved operation to a health check.
+                return tool
+    if "vrcforge_optimization_ttt_atlas_apply_request" in captured_tools:
+        return "vrcforge_optimization_ttt_atlas_plan"
+    captured_tool_text = " ".join(captured_tools).lower()
+    if "shader" in captured_tool_text or "material" in captured_tool_text:
+        return "vrcforge_plan_shader_tuning"
+    if any(fragment in captured_tool_text for fragment in ("optimizer", "optimization", "parameter", "meshia")):
+        return "vrcforge_optimization_plan"
+    if "outfit" in captured_tool_text or "booth" in captured_tool_text:
+        return "vrcforge_preview_add_outfit"
+    if probe_fallback_tools:
+        return probe_fallback_tools[0]
     text = workflow_id.lower()
     if "shader" in text or "material" in text:
         return "vrcforge_plan_shader_tuning"

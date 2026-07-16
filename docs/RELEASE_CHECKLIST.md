@@ -9,10 +9,20 @@ Before publishing a release package:
 * [ ] Mark the version number clearly.
 * [ ] Mark whether this is an official release or a modified build.
 * [ ] Ensure third-party dependencies and their licenses are documented.
-* [ ] Run `python scripts\smoke_stable_readiness_gate.py --version <VERSION>`
+* [ ] Run
+      `python scripts\smoke_stable_readiness_gate.py --version <VERSION> --latest-stable <PUBLISHED_VERSION>`
       and resolve any public-doc or COMPATIBILITY_MATRIX blocker before
       publishing a stable release or stable refresh. This includes the Doctor
-      support bundle flow.
+      support bundle flow and prevents target-version docs from mislabeling an
+      unpublished build as the latest stable release.
+      For an already-published stable refresh, pass `--stable-refresh` and set
+      `--latest-stable` equal to `<VERSION>`; a new release must name a lower
+      explicitly published stable version.
+* [ ] For `1.3.0` and newer, provide a fresh
+      `--skill-ecosystem-smoke <report.json>` artifact from
+      `scripts\diagnose_packaged_skill_ecosystem.mjs`. The strict gate must
+      bind it to the release-manifest commit and portable ZIP SHA-256, and the
+      `.vsk` Golden Path row must pass instead of skip.
 * [ ] For a stable release or stable refresh, add the freshness/liveness guards
       so a stale or writes-skipped artifact cannot carry the gate:
       `--max-artifact-age-hours <N>` blocks any required smoke artifact older

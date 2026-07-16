@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import subprocess
+import zipfile
 from argparse import Namespace
 from pathlib import Path
 from types import ModuleType
@@ -31,6 +34,7 @@ def make_args(tmp_path: Path, **overrides: Any) -> Namespace:
         "outfit_package": "",
         "outfit_target_folder": "Assets/VRCForge/ImportedOutfits/GoldenPath",
         "vsk_package": "",
+        "release_manifest": str(tmp_path / "missing-release-manifest.json"),
         "include_cli": False,
         "include_external_agent": False,
         "include_live_writes": False,
@@ -50,6 +54,255 @@ def make_args(tmp_path: Path, **overrides: Any) -> Namespace:
     }
     values.update(overrides)
     return Namespace(**values)
+
+
+def write_runtime_binding_fixture(
+    tmp_path: Path,
+    *,
+    archive_backend: bytes = b"packaged-backend",
+    installed_backend: bytes | None = None,
+) -> tuple[Path, Path, Path, Path, str]:
+    release_root = tmp_path / "dist" / "release"
+    release_root.mkdir(parents=True, exist_ok=True)
+    program_dir = tmp_path / "dist" / "VRCForge_Windows_x64"
+    backend_exe = program_dir / "backend" / "vrcforge_backend.exe"
+    backend_exe.parent.mkdir(parents=True, exist_ok=True)
+    backend_exe.write_bytes(archive_backend if installed_backend is None else installed_backend)
+    payload_path = release_root / "VRCForge_Windows_x64_1.3.0.zip"
+    with zipfile.ZipFile(payload_path, "w") as archive:
+        archive.writestr("backend/vrcforge_backend.exe", archive_backend)
+    expected_sha = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+    manifest_path = release_root / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": "1.3.0",
+                "commit": "a" * 40,
+                "artifacts": [{"name": payload_path.name, "sha256": expected_sha}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path, payload_path, program_dir, backend_exe, expected_sha
+
+
+def test_release_binding_hashes_manifest_adjacent_payload(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    manifest_path, _payload_path, program_dir, backend_exe, expected_sha = write_runtime_binding_fixture(tmp_path)
+
+    def fake_listener(port: int) -> list[dict[str, Any]]:
+        assert port == 8757
+        return [{"processId": 4242, "executable": str(backend_exe)}]
+
+    binding = module.load_release_binding(
+        manifest_path,
+        "1.3.0",
+        base_url="http://127.0.0.1:8757",
+        runtime_payload={"health": {"portableMode": True, "paths": {"programDir": str(program_dir)}}},
+        listener_query_func=fake_listener,
+        platform_name="win32",
+    )
+
+    assert binding == {
+        "version": "1.3.0",
+        "manifestCommit": "a" * 40,
+        "payloadZipSha256": expected_sha,
+        "artifactLocationSafe": True,
+        "runtimeProvenance": {
+            "ok": True,
+            "portableMode": True,
+            "listenerUnique": True,
+            "executableInsideProgramDir": True,
+            "executableMatchesArchive": True,
+            "executableName": "vrcforge_backend.exe",
+            "hash": hashlib.sha256(b"packaged-backend").hexdigest(),
+        },
+        "payloadMatchesManifest": True,
+    }
+    assert set(binding["runtimeProvenance"]) == {
+        "ok",
+        "portableMode",
+        "listenerUnique",
+        "executableInsideProgramDir",
+        "executableMatchesArchive",
+        "executableName",
+        "hash",
+    }
+
+
+def test_runtime_provenance_rejects_dev_or_external_listener(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    _manifest_path, payload_path, program_dir, backend_exe, _expected_sha = write_runtime_binding_fixture(tmp_path)
+    runtime_payload = {"health": {"portableMode": True, "paths": {"programDir": str(program_dir)}}}
+
+    dev = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload={"health": {"portableMode": False, "paths": {"programDir": str(program_dir)}}},
+        payload_path=payload_path,
+        listener_query_func=lambda _port: [{"processId": 1, "executable": str(backend_exe)}],
+        platform_name="win32",
+    )
+    assert dev["ok"] is False
+    assert dev["portableMode"] is False
+
+    external_exe = tmp_path / "external" / "vrcforge_backend.exe"
+    external_exe.parent.mkdir(parents=True)
+    external_exe.write_bytes(backend_exe.read_bytes())
+    external = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload=runtime_payload,
+        payload_path=payload_path,
+        listener_query_func=lambda _port: [{"processId": 2, "executable": str(external_exe)}],
+        platform_name="win32",
+    )
+    assert external["ok"] is False
+    assert external["listenerUnique"] is True
+    assert external["executableInsideProgramDir"] is False
+    assert external["executableMatchesArchive"] is True
+
+
+def test_runtime_provenance_rejects_backend_hash_mismatch(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    _manifest_path, payload_path, program_dir, backend_exe, _expected_sha = write_runtime_binding_fixture(
+        tmp_path,
+        archive_backend=b"archive-backend",
+        installed_backend=b"different-listener-backend",
+    )
+
+    provenance = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload={"health": {"portableMode": True, "paths": {"programDir": str(program_dir)}}},
+        payload_path=payload_path,
+        listener_query_func=lambda _port: [{"processId": 3, "executable": str(backend_exe)}],
+        platform_name="win32",
+    )
+
+    assert provenance["ok"] is False
+    assert provenance["listenerUnique"] is True
+    assert provenance["executableInsideProgramDir"] is True
+    assert provenance["executableMatchesArchive"] is False
+    assert provenance["hash"] == hashlib.sha256(b"different-listener-backend").hexdigest()
+
+
+def test_runtime_provenance_fails_closed_for_platform_query_and_listener_ambiguity(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    _manifest_path, payload_path, program_dir, backend_exe, _expected_sha = write_runtime_binding_fixture(tmp_path)
+    runtime_payload = {"health": {"portableMode": True, "paths": {"programDir": str(program_dir)}}}
+
+    non_windows = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload=runtime_payload,
+        payload_path=payload_path,
+        listener_query_func=lambda _port: (_ for _ in ()).throw(AssertionError("must not query")),
+        platform_name="linux",
+    )
+    assert non_windows["ok"] is False
+    assert non_windows["listenerUnique"] is False
+
+    remote_base_url = module.build_runtime_provenance(
+        base_url="http://example.com:8757",
+        runtime_payload=runtime_payload,
+        payload_path=payload_path,
+        listener_query_func=lambda _port: (_ for _ in ()).throw(AssertionError("must not query")),
+        platform_name="win32",
+    )
+    assert remote_base_url["ok"] is False
+    assert remote_base_url["listenerUnique"] is False
+
+    query_failure = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload=runtime_payload,
+        payload_path=payload_path,
+        listener_query_func=lambda _port: (_ for _ in ()).throw(RuntimeError("PowerShell failed")),
+        platform_name="win32",
+    )
+    assert query_failure["ok"] is False
+    assert query_failure["listenerUnique"] is False
+
+    ambiguous = module.build_runtime_provenance(
+        base_url="http://127.0.0.1:8757",
+        runtime_payload=runtime_payload,
+        payload_path=payload_path,
+        listener_query_func=lambda _port: [
+            {"processId": 4, "executable": str(backend_exe)},
+            {"processId": 5, "executable": str(backend_exe)},
+        ],
+        platform_name="win32",
+    )
+    assert ambiguous["ok"] is False
+    assert ambiguous["listenerUnique"] is False
+
+
+def test_release_binding_rejects_runtime_or_payload_mismatch(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": "1.3.0",
+                "commit": "b" * 40,
+                "artifacts": [
+                    {
+                        "name": "VRCForge_Windows_x64_1.2.0.zip",
+                        "sha256": "c" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    binding = module.load_release_binding(manifest_path, "1.2.0")
+
+    assert binding["version"] == "1.3.0"
+    assert binding["artifactLocationSafe"] is True
+    assert binding["payloadMatchesManifest"] is False
+
+
+def test_release_binding_rejects_external_or_duplicate_manifest_entries(tmp_path: Path) -> None:
+    module = load_smoke_module()
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    payload_name = "VRCForge_Windows_x64_1.3.0.zip"
+    payload_path = release_root / payload_name
+    payload_path.write_bytes(b"fixed-release-payload")
+    expected_sha = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+    manifest_path = release_root / "release-manifest.json"
+    base = {
+        "version": "1.3.0",
+        "commit": "d" * 40,
+    }
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                **base,
+                "artifacts": [
+                    {"name": payload_name, "path": f"../{payload_name}", "sha256": expected_sha}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    external = module.load_release_binding(manifest_path, "1.3.0")
+    assert external["artifactLocationSafe"] is False
+    assert external["payloadMatchesManifest"] is False
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                **base,
+                "artifacts": [
+                    {"name": payload_name, "sha256": expected_sha},
+                    {"name": payload_name, "sha256": expected_sha},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    duplicate = module.load_release_binding(manifest_path, "1.3.0")
+    assert duplicate["artifactLocationSafe"] is False
+    assert duplicate["payloadMatchesManifest"] is False
 
 
 def fake_read_only_request(
@@ -420,6 +673,16 @@ def test_vsk_package_preflight_skips_import_by_default(tmp_path: Path) -> None:
                     "updateAction": "new",
                 },
             }
+        if (method, path) == ("GET", "/api/app/skill-packages"):
+            assert payload is None
+            return {"ok": True, "installed": []}
+        if (method, path) == ("POST", "/api/app/skill-packages/import"):
+            assert payload == {"packagePath": str(package), "dryRun": True}
+            return {
+                "ok": True,
+                "dryRun": True,
+                "preview": {"dryRun": {"willWrite": False}},
+            }
         return fake_read_only_request(base_url, method, path, token, payload, allow_http_error, timeout)
 
     report = smoke.GoldenPathMatrixSmoke(
@@ -430,6 +693,13 @@ def test_vsk_package_preflight_skips_import_by_default(tmp_path: Path) -> None:
     matrix = paths_by_id(report)
     assert report["ok"] is True
     assert matrix["vsk_import_dry_run_cleanup"]["status"] == "passed"
+    assert matrix["vsk_import_dry_run_cleanup"]["steps"][1] == {
+        "name": "vsk.dry_run",
+        "ok": True,
+        "dryRun": True,
+        "willWrite": False,
+        "registryUnchanged": True,
+    }
     assert matrix["vsk_import_dry_run_cleanup"]["steps"][-1]["name"] == "vsk.import_cleanup"
     assert matrix["vsk_import_dry_run_cleanup"]["steps"][-1]["status"] == "skipped"
 
@@ -461,10 +731,22 @@ def test_vsk_import_mode_disables_and_uninstalls_package(tmp_path: Path) -> None
                     "updateAction": "new",
                 },
             }
+        if (method, path) == ("GET", "/api/app/skill-packages"):
+            return {"ok": True, "installed": []}
         if (method, path) == ("POST", "/api/app/skill-packages/import"):
+            if payload == {"packagePath": str(package), "dryRun": True}:
+                return {
+                    "ok": True,
+                    "dryRun": True,
+                    "preview": {"dryRun": {"willWrite": False}},
+                }
+            assert payload == {"packagePath": str(package)}
             return {
                 "ok": True,
-                "imported": {"registry_entry": {"id": "com.example.helper", "enabled": True}},
+                "imported": {
+                    "changed": True,
+                    "registry_entry": {"id": "com.example.helper", "enabled": True},
+                },
                 "projectedSkill": {"name": "helper"},
             }
         if (method, path) == ("PUT", "/api/app/skill-packages/com.example.helper"):
@@ -493,12 +775,106 @@ def test_vsk_import_mode_disables_and_uninstalls_package(tmp_path: Path) -> None
     assert matrix["vsk_import_dry_run_cleanup"]["status"] == "passed"
     assert [step["name"] for step in matrix["vsk_import_dry_run_cleanup"]["steps"]] == [
         "vsk.preflight",
+        "vsk.dry_run",
         "vsk.import",
         "vsk.disable",
         "vsk.uninstall",
     ]
+    assert matrix["vsk_import_dry_run_cleanup"]["steps"][-1]["absentAfterReadback"] is True
+    assert ("POST", "/api/app/skill-packages/import", {"packagePath": str(package), "dryRun": True}) in calls
     assert ("PUT", "/api/app/skill-packages/com.example.helper", {"enabled": False, "syncProjectedSkill": True}) in calls
     assert ("DELETE", "/api/app/skill-packages/com.example.helper", {"removeProjectedSkill": True}) in calls
+
+
+def test_vsk_import_refuses_to_touch_preexisting_package(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    package = tmp_path / "helper.vsk"
+    package.write_bytes(b"fixture")
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(
+        base_url: str,
+        method: str,
+        path: str,
+        token: str,
+        payload: dict[str, Any] | None,
+        allow_http_error: bool,
+        timeout: float,
+    ) -> dict[str, Any]:
+        calls.append((method, path))
+        if (method, path) == ("POST", "/api/app/skill-packages/preflight"):
+            return {"ok": True, "preview": {"id": "com.example.helper", "name": "Helper"}}
+        if (method, path) == ("GET", "/api/app/skill-packages"):
+            return {"ok": True, "installed": [{"id": "com.example.helper", "enabled": True}]}
+        raise AssertionError(f"Unexpected request: {(method, path)}")
+
+    report = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, vsk_package=str(package), include_vsk_import=True),
+        request_func=fake_request,
+    ).run()
+
+    matrix = paths_by_id(report)
+    row = matrix["vsk_import_dry_run_cleanup"]
+    assert row["status"] == "failed"
+    assert row["steps"][-1]["name"] == "vsk.preexisting_guard"
+    assert not any(method in {"PUT", "DELETE"} for method, _path in calls)
+
+
+def test_vsk_import_disable_failure_still_uninstalls_and_verifies_absence(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    package = tmp_path / "helper.vsk"
+    package.write_bytes(b"fixture")
+    installed = False
+    delete_calls = 0
+
+    def fake_request(
+        base_url: str,
+        method: str,
+        path: str,
+        token: str,
+        payload: dict[str, Any] | None,
+        allow_http_error: bool,
+        timeout: float,
+    ) -> dict[str, Any]:
+        nonlocal installed, delete_calls
+        if (method, path) == ("POST", "/api/app/skill-packages/preflight"):
+            return {"ok": True, "preview": {"id": "com.example.helper", "name": "Helper"}}
+        if (method, path) == ("GET", "/api/app/skill-packages"):
+            items = [{"id": "com.example.helper", "enabled": True}] if installed else []
+            return {"ok": True, "installed": items}
+        if (method, path) == ("POST", "/api/app/skill-packages/import"):
+            if payload and payload.get("dryRun") is True:
+                return {"ok": True, "dryRun": True, "preview": {"dryRun": {"willWrite": False}}}
+            installed = True
+            return {
+                "ok": True,
+                "imported": {
+                    "changed": True,
+                    "registry_entry": {"id": "com.example.helper", "enabled": True},
+                },
+                "projectedSkill": {"name": "helper"},
+            }
+        if (method, path) == ("PUT", "/api/app/skill-packages/com.example.helper"):
+            raise RuntimeError("simulated disable failure")
+        if (method, path) == ("DELETE", "/api/app/skill-packages/com.example.helper"):
+            delete_calls += 1
+            installed = False
+            return {"ok": True, "uninstalled": {"skill_id": "com.example.helper"}}
+        raise AssertionError(f"Unexpected request: {(method, path)}")
+
+    report = smoke.GoldenPathMatrixSmoke(
+        make_args(tmp_path, vsk_package=str(package), include_vsk_import=True),
+        request_func=fake_request,
+    ).run()
+
+    matrix = paths_by_id(report)
+    row = matrix["vsk_import_dry_run_cleanup"]
+    assert row["status"] == "failed"
+    assert delete_calls == 1
+    assert installed is False
+    assert row["steps"][-1]["name"] == "vsk.uninstall"
+    assert row["steps"][-1]["ok"] is True
+    assert row["steps"][-1]["absentAfterReadback"] is True
 
 
 def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: Path) -> None:

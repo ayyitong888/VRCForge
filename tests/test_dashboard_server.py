@@ -8258,6 +8258,7 @@ namespace VRCForge.Editor
     def test_windows_installer_sources_enforce_x64_and_release_gates(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         build_script = (repo_root / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+        local_build_script = (repo_root / "packaging" / "build_local.ps1").read_text(encoding="utf-8")
         publish_script = (repo_root / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
         launcher_project = (repo_root / "launcher" / "VRCForge.Launcher" / "VRCForge.Launcher.csproj").read_text(encoding="utf-8")
         offline_nsis = (repo_root / "installer" / "VRCForge_Offline_Installer_x64.nsi").read_text(encoding="utf-8")
@@ -8266,6 +8267,24 @@ namespace VRCForge.Editor
         self.assertIn("git status --short", build_script)
         self.assertIn("git log origin/main..HEAD --oneline", build_script)
         self.assertIn("git show origin/main:VERSION", build_script)
+        self.assertIn("[switch]$AllowVersionMismatch", build_script)
+        self.assertIn("$AllowUnpushed -and $AllowVersionMismatch", build_script)
+        self.assertIn("AllowVersionMismatch = $true", local_build_script)
+        self.assertNotIn("AllowVersionMismatch", publish_script)
+        self.assertIn('$strictReleaseBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)', build_script)
+        self.assertIn('mode = if ($strictReleaseBuild)', build_script)
+        self.assertIn("releaseEligible = $strictReleaseBuild", build_script)
+        self.assertIn('Package version must match the source VERSION file', build_script)
+        self.assertIn('Strict release build requires a pinned 64-hex UvDownloadSha256', build_script)
+        self.assertIn('Strict release build requires a successful git fetch of origin', build_script)
+        self.assertIn('Strict release build requires HEAD to equal origin/main', build_script)
+        self.assertIn('$finalHeadCommit -ne $headCommit', build_script)
+        self.assertIn('$finalOriginMainCommit -ne $originMainCommit', build_script)
+        self.assertIn('buildPolicy', publish_script)
+        self.assertIn('Local-acceptance artifacts are not publishable', publish_script)
+        self.assertIn('Publishing requires a successful git fetch of origin', publish_script)
+        self.assertIn('Release manifest is missing a pinned uv download SHA-256', publish_script)
+        self.assertIn('Get-StreamSha256 -Stream $guardStream', publish_script)
         self.assertIn("check_third_party_licenses.ps1", build_script)
         self.assertIn("check_coplaydev_mcp_license.ps1", build_script)
         self.assertIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
@@ -8295,9 +8314,11 @@ namespace VRCForge.Editor
         self.assertIn("VRCForge_Windows_x64_$Version.zip", publish_script)
         self.assertIn("VRCForge.unitypackage", publish_script)
         self.assertIn('(?i)(alpha|beta|rc)', publish_script)
-        self.assertIn("targetCommitish", publish_script)
-        self.assertIn("Existing GitHub Release $tag targets", publish_script)
-        self.assertIn('release upload $tag @artifacts --clobber', publish_script)
+        self.assertIn("target_commitish", publish_script)
+        self.assertNotIn("--clobber", publish_script)
+        self.assertIn("Refusing remote asset mutation", publish_script)
+        self.assertIn('git ls-remote --tags origin $directRef $peeledRef', publish_script)
+        self.assertIn('"--verify-tag"', publish_script)
         self.assertIn("win-x64", launcher_project)
         self.assertIn("<Platforms>x64</Platforms>", launcher_project)
         self.assertIn("<DebugType>none</DebugType>", launcher_project)
@@ -8336,6 +8357,110 @@ namespace VRCForge.Editor
         self.assertIn("Pop $0", web_nsis)
         self.assertIn("Call un.ClearUserDataIfRequested", offline_nsis)
         self.assertIn("Call un.ClearUserDataIfRequested", web_nsis)
+
+    def test_release_scripts_lock_uploads_and_bind_strict_uv_provenance(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        build_script = (repo_root / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+        publish_script = (repo_root / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
+
+        mutex_name = "Local\\VRCForge.Release.BuildPublish.v1"
+        for script in (build_script, publish_script):
+            self.assertIn(mutex_name, script)
+            self.assertIn("$mutex.WaitOne(0)", script)
+            self.assertIn("catch [System.Threading.AbandonedMutexException]", script)
+            self.assertIn("Another VRCForge build or publish operation is already running.", script)
+            self.assertIn("$releaseOperationMutex.ReleaseMutex()", script)
+
+        self.assertIn("-not $RequireVerifiedDownload", build_script)
+        self.assertIn("$uvEntries.Count -ne 1 -or $uvxEntries.Count -ne 1", build_script)
+        self.assertIn("$entryStream.CopyTo($outputStream)", build_script)
+        self.assertNotIn("Expand-Archive -LiteralPath $zipPath", build_script)
+        self.assertNotIn("Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath", build_script)
+        self.assertIn("Get-StreamSha256 -Stream $archiveStream", build_script)
+        self.assertIn("[System.IO.FileShare]::Read", build_script)
+        self.assertIn("[System.IO.Compression.ZipArchive]::new", build_script)
+        self.assertIn("Add-Type -AssemblyName System.IO.Compression", build_script)
+        self.assertIn("Remove-Item -LiteralPath $DestinationDir -Recurse -Force", build_script)
+        self.assertNotIn("Remove-Item -LiteralPath $DestinationDir -Recurse -Force -ErrorAction SilentlyContinue", build_script)
+        self.assertIn("Installed uv runtime directory must contain exactly regular uv.exe and uvx.exe files.", build_script)
+        self.assertIn('source = "download"', build_script)
+        self.assertIn("archiveDigestVerified = $archiveDigestVerified", build_script)
+        self.assertIn("uvRuntime = $uvRuntimeProvenance", build_script)
+        self.assertLess(
+            build_script.index("Invoke-WebRequest -UseBasicParsing -Uri $uvDownloadUrl"),
+            build_script.index("Remove-Item -LiteralPath $DestinationDir -Recurse -Force"),
+        )
+
+        self.assertIn('$uvRuntimeSource -ne "download"', publish_script)
+        self.assertIn("$uvRuntimeArchiveDigestVerified -ne $true", publish_script)
+        self.assertIn("$uvRuntimeArchiveSha256.ToLowerInvariant()", publish_script)
+        self.assertIn("Portable payload $expectedEntryPath digest does not match strict uv provenance.", publish_script)
+        self.assertIn("Portable payload tools/uv subtree must contain exactly uv.exe and uvx.exe.", publish_script)
+        self.assertIn("Add-Type -AssemblyName System.IO.Compression", publish_script)
+        self.assertIn("vrcforge_release_publish_", publish_script)
+        self.assertIn("[System.IO.FileShare]::Read", publish_script)
+        self.assertIn("Get-StreamSha256 -Stream $guardStream", publish_script)
+        self.assertNotIn("Get-FileHash -Algorithm SHA256 -LiteralPath $artifact", publish_script)
+        self.assertIn('"repos/{owner}/{repo}/releases/tags/$Tag"', publish_script)
+        self.assertIn('"repos/{owner}/{repo}/releases/$ReleaseId"', publish_script)
+        self.assertNotIn("gh release view", publish_script)
+        self.assertIn('Get-RequiredProperty -InputObject $remoteEntries[0] -Name "digest"', publish_script)
+        self.assertIn("Assert-RemoteTagTarget -Tag $tag -Target $target", publish_script)
+        self.assertIn('"--verify-tag"', publish_script)
+        self.assertIn("Release manifest must contain exactly the four publishable artifact names.", publish_script)
+        self.assertIn("GitHub Release must contain exactly the four manifest-bound assets after upload.", publish_script)
+        self.assertIn('"--draft"', publish_script)
+        self.assertIn("Refusing remote asset mutation", publish_script)
+        self.assertIn("-ExpectedDraft $true", publish_script)
+        self.assertIn("$draftReleaseId = [long]$draftRelease.id", publish_script)
+        self.assertIn(
+            '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false',
+            publish_script,
+        )
+        self.assertIn("Get-GitHubReleaseSnapshot -ReleaseId $draftReleaseId", publish_script)
+        self.assertIn("-ExpectedReleaseId $draftReleaseId", publish_script)
+        self.assertIn("-ExpectedName $releaseTitle", publish_script)
+        self.assertIn("-ExpectedBody $releaseNotes", publish_script)
+        self.assertIn("$remoteTag -cne $Tag", publish_script)
+        self.assertIn("$remoteName -cne $ExpectedName", publish_script)
+        self.assertIn("$remoteBody -cne $ExpectedBody", publish_script)
+        self.assertIn("Sort-Object -Unique -CaseSensitive", publish_script)
+        self.assertIn(
+            "Compare-Object -ReferenceObject $RequiredArtifactNames -DifferenceObject $remoteAssetNames -CaseSensitive",
+            publish_script,
+        )
+        self.assertIn("[string]$_.name -ceq $artifactName", publish_script)
+        self.assertIn("[long]$publishedTagRelease.id -ne $draftReleaseId", publish_script)
+        self.assertNotIn("gh release edit", publish_script)
+        self.assertIn("-ExpectedDraft $false", publish_script)
+        self.assertLess(
+            publish_script.index("Copy-Item -LiteralPath $sourceArtifact -Destination $stagedArtifact"),
+            publish_script.index("Get-StreamSha256 -Stream $guardStream"),
+        )
+        self.assertLess(
+            publish_script.index("Get-StreamSha256 -Stream $guardStream"),
+            publish_script.index("& gh @createArgs"),
+        )
+        self.assertLess(
+            publish_script.index("-ExpectedDraft $true"),
+            publish_script.index(
+                '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false'
+            ),
+        )
+        self.assertLess(
+            publish_script.index(
+                '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false'
+            ),
+            publish_script.index("-ExpectedDraft $false"),
+        )
+        self.assertLess(
+            publish_script.index("-ExpectedDraft $false"),
+            publish_script.index("[long]$publishedTagRelease.id -ne $draftReleaseId"),
+        )
+        self.assertLess(
+            publish_script.index("$guardStream.Dispose()"),
+            publish_script.index("Remove-Item -LiteralPath $stagingRoot -Recurse -Force"),
+        )
 
     def test_cleanup_user_data_root_removes_appdata_and_known_project_transcripts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

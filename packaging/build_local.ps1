@@ -8,9 +8,10 @@ param(
 # Local packaging wrapper: builds the same installers as build_release.ps1
 # without requiring github.com connectivity or a pushed HEAD.
 # It pre-seeds the bundled uv runtime so Install-UvRuntime skips its download,
-# then delegates to build_release.ps1 with -AllowUnpushed (and -AllowDirty
-# unless -StrictDirty is given). Use ONLY for local testing; published
-# releases must go through build_release.ps1 with a pushed HEAD.
+# then delegates to build_release.ps1 with -AllowUnpushed and
+# -AllowVersionMismatch (plus -AllowDirty unless -StrictDirty is given). Use
+# ONLY for local testing; published releases must go through build_release.ps1
+# with a clean, pushed HEAD whose VERSION matches origin/main.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -31,12 +32,13 @@ try {
         $status | ForEach-Object { Write-Host "  $_" }
     }
 
-    # build_release.ps1 still compares local VERSION against the locally cached
-    # origin/main ref. Warn early if that comparison is going to fail.
+    # A local acceptance build may intentionally carry the next target version
+    # before its version commit is pushed. The delegated release script allows
+    # this only when both local-only switches are present.
     $originVersion = (cmd /c "git show origin/main:VERSION 2>nul" | Out-String).Trim()
     if ($originVersion -and $originVersion -ne $Version) {
-        Write-Warning ("Local VERSION ($Version) != cached origin/main VERSION ($originVersion). " +
-            "build_release.ps1 will refuse. Keep VERSION unchanged for local builds, or push the bump first.")
+        Write-Warning ("LOCAL acceptance build: VERSION ($Version) != cached origin/main VERSION ($originVersion). " +
+            "Artifacts remain unpublished test outputs until a clean pushed strict rebuild.")
     }
 
     # Pre-seed the bundled uv runtime so Install-UvRuntime does not need github.com.
@@ -117,6 +119,7 @@ try {
         Version            = $Version
         PayloadDownloadUrl = $PayloadDownloadUrl
         AllowUnpushed      = $true
+        AllowVersionMismatch = $true
     }
     if (-not $StrictDirty) {
         $buildParams.AllowDirty = $true

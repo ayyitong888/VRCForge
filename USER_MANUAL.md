@@ -5,8 +5,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.2.0`. Latest published stable release:
-`1.1.2` (`v1.1.2`) until the 1.2.0 release gate and publication complete.
+Current source / target release: `1.3.0`. Latest published stable release:
+`1.2.0` (`v1.2.0`) until the 1.3.0 release gate and publication complete.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -74,7 +74,7 @@ Paranoid remains preview-only pending additional proof.
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 | Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | Current source line, approval/checkpoint required |
 | External agent connector templates and smoke | Built-in and custom JSON/TOML MCP config installation without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
-| `.vsk` community skill packages | Import/export/verify shareable skill packages | 已可用 / Available |
+| `.vsk` community skill packages | Signed import/preflight/trust, atomic projection/governance, Path-to-Skill capture, SDK scaffold/lock validation, and searchable package/runtime audit | Current source line; packaged acceptance pending |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |

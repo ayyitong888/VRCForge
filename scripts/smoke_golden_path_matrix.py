@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from urllib.parse import urlsplit
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
@@ -22,6 +26,7 @@ SCHEMA = "vrcforge.golden_path_matrix.v1"
 
 RequestFunc = Callable[[str, str, str, str, dict[str, Any] | None, bool, float], dict[str, Any]]
 RunCommandFunc = Callable[..., subprocess.CompletedProcess[str]]
+ListenerQueryFunc = Callable[[int], list[dict[str, Any]]]
 
 
 def main() -> int:
@@ -45,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outfit-package", default="")
     parser.add_argument("--outfit-target-folder", default="Assets/VRCForge/ImportedOutfits/GoldenPath")
     parser.add_argument("--vsk-package", default="")
+    parser.add_argument("--release-manifest", default="dist/release/release-manifest.json")
     parser.add_argument("--include-cli", action="store_true")
     parser.add_argument("--include-external-agent", action="store_true")
     parser.add_argument("--include-live-writes", action="store_true")
@@ -85,6 +91,7 @@ class GoldenPathMatrixSmoke:
         self.artifact_root = Path.cwd() / "artifacts" / "golden-path-matrix"
         self.paths: list[dict[str, Any]] = []
         self.bootstrap_payload: dict[str, Any] = {}
+        self.runtime_version = ""
         self.unity_unavailable_reason = ""
         self.project_root = str(Path(args.project_root).expanduser().resolve()) if args.project_root else ""
         self.avatar_path = str(args.avatar_path or "")
@@ -95,6 +102,8 @@ class GoldenPathMatrixSmoke:
         report: dict[str, Any] = {
             "ok": False,
             "schema": SCHEMA,
+            "version": "",
+            "releaseBinding": {},
             "startedAt": self.started_at,
             "baseUrl": self.base_url,
             "appTokenFile": str(self.app_token_path) if self.app_token_path else "",
@@ -129,6 +138,13 @@ class GoldenPathMatrixSmoke:
         finally:
             report["projectRoot"] = self.project_root
             report["avatarPath"] = self.avatar_path
+            report["version"] = self.runtime_version
+            report["releaseBinding"] = load_release_binding(
+                Path(str(getattr(self.args, "release_manifest", "") or "dist/release/release-manifest.json")),
+                self.runtime_version,
+                base_url=self.base_url,
+                runtime_payload=self.bootstrap_payload,
+            )
             report["finishedAt"] = utc_now()
             report["paths"] = self.paths
             report["summary"] = self.build_summary()
@@ -145,6 +161,7 @@ class GoldenPathMatrixSmoke:
             self.bootstrap_payload = bootstrap
             self.set_project_from_bootstrap(bootstrap)
             bootstrap_version = str(ensure_dict(bootstrap.get("app")).get("version") or bootstrap.get("version") or "").strip()
+            self.runtime_version = bootstrap_version
             steps.append(
                 {
                     "name": "runtime.bootstrap",
@@ -590,10 +607,11 @@ class GoldenPathMatrixSmoke:
 
     def vsk_import_dry_run_cleanup(self) -> None:
         package_path = self.vsk_package
+        title = ".vsk import -> dry-run -> disable/uninstall"
         if not package_path:
             self.add_skipped(
                 "vsk_import_dry_run_cleanup",
-                ".vsk import -> dry-run -> disable/uninstall",
+                title,
                 "No --vsk-package was provided.",
                 required=False,
             )
@@ -605,7 +623,7 @@ class GoldenPathMatrixSmoke:
             steps.append(
                 {
                     "name": "vsk.preflight",
-                    "ok": bool(preflight.get("ok", True)),
+                    "ok": bool(preflight.get("ok") is True and str(preview.get("id") or "").strip()),
                     "id": preview.get("id"),
                     "packageName": preview.get("name"),
                     "version": preview.get("version"),
@@ -616,17 +634,90 @@ class GoldenPathMatrixSmoke:
         except Exception as exc:  # noqa: BLE001
             self.add_path(
                 "vsk_import_dry_run_cleanup",
-                ".vsk import -> dry-run -> disable/uninstall",
+                title,
                 status="failed",
                 mode="safe",
                 required=False,
                 steps=[{"name": "vsk.preflight.error", "ok": False, "error": str(exc)}],
             )
             return
+        if not steps[0]["ok"]:
+            self.add_path(
+                "vsk_import_dry_run_cleanup",
+                title,
+                status="failed",
+                mode="safe",
+                required=bool(self.args.include_vsk_import),
+                steps=steps,
+            )
+            return
+        preview_id = str(preview.get("id") or "").strip()
+        try:
+            installed_before = self.request_app_json("GET", "/api/app/skill-packages", None)
+            installed_before_items = installed_before.get("installed") if isinstance(installed_before.get("installed"), list) else []
+            installed_before_ids = {
+                str(item.get("id") or "").strip()
+                for item in installed_before_items
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+            if self.args.include_vsk_import and preview_id in installed_before_ids:
+                steps.append(
+                    {
+                        "name": "vsk.preexisting_guard",
+                        "ok": False,
+                        "id": preview_id,
+                        "error": "Refusing to overwrite or uninstall a pre-existing skill package.",
+                    }
+                )
+                self.add_path(
+                    "vsk_import_dry_run_cleanup",
+                    title,
+                    status="failed",
+                    mode="local-write",
+                    required=True,
+                    steps=steps,
+                )
+                return
+            dry_run = self.request_app_json(
+                "POST",
+                "/api/app/skill-packages/import",
+                {"packagePath": package_path, "dryRun": True},
+            )
+            dry_preview = ensure_dict(dry_run.get("preview"))
+            dry_policy = ensure_dict(dry_preview.get("dryRun"))
+            installed_after = self.request_app_json("GET", "/api/app/skill-packages", None)
+            registry_unchanged = skill_package_registry_projection(installed_before) == skill_package_registry_projection(
+                installed_after
+            )
+            steps.append(
+                {
+                    "name": "vsk.dry_run",
+                    "ok": bool(
+                        dry_run.get("ok") is True
+                        and dry_run.get("dryRun") is True
+                        and dry_policy.get("willWrite") is False
+                        and registry_unchanged
+                    ),
+                    "dryRun": dry_run.get("dryRun"),
+                    "willWrite": dry_policy.get("willWrite"),
+                    "registryUnchanged": registry_unchanged,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            steps.append({"name": "vsk.dry_run.error", "ok": False, "error": str(exc)})
+            self.add_path(
+                "vsk_import_dry_run_cleanup",
+                title,
+                status="failed",
+                mode="safe",
+                required=bool(self.args.include_vsk_import),
+                steps=steps,
+            )
+            return
         if not self.args.include_vsk_import:
             self.add_path(
                 "vsk_import_dry_run_cleanup",
-                ".vsk import -> dry-run -> disable/uninstall",
+                title,
                 status="passed" if all(step.get("ok") for step in steps) else "failed",
                 mode="safe",
                 required=False,
@@ -641,50 +732,91 @@ class GoldenPathMatrixSmoke:
                 ],
             )
             return
-        imported = self.request_app_json("POST", "/api/app/skill-packages/import", {"packagePath": package_path})
-        import_result = ensure_dict(imported.get("imported"))
-        installed = ensure_dict(import_result.get("registry_entry"))
-        skill_package_id = str(installed.get("id") or preview.get("id") or "")
-        steps.append(
-            {
-                "name": "vsk.import",
-                "ok": bool(imported.get("ok", True)),
-                "changed": import_result.get("changed"),
-                "installed": skill_package_id,
-                "projectedSkill": ensure_dict(imported.get("projectedSkill")).get("name"),
-            }
-        )
-        if not skill_package_id:
-            self.add_path(
-                "vsk_import_dry_run_cleanup",
-                ".vsk import -> dry-run -> disable/uninstall",
-                status="failed",
-                mode="local-write",
-                required=True,
-                steps=[*steps, {"name": "vsk.imported_id", "ok": False, "error": "Import did not return a skill package id."}],
+        cleanup_id = preview_id
+        import_attempted = False
+        try:
+            if not all(step.get("ok") for step in steps):
+                raise RuntimeError("Dry-run validation failed; refusing the real import.")
+            import_attempted = True
+            imported = self.request_app_json("POST", "/api/app/skill-packages/import", {"packagePath": package_path})
+            import_result = ensure_dict(imported.get("imported"))
+            installed = ensure_dict(import_result.get("registry_entry"))
+            skill_package_id = str(installed.get("id") or "").strip()
+            projected_skill = ensure_dict(imported.get("projectedSkill"))
+            if skill_package_id:
+                cleanup_id = skill_package_id
+            steps.append(
+                {
+                    "name": "vsk.import",
+                    "ok": bool(
+                        imported.get("ok") is True
+                        and import_result.get("changed") is True
+                        and skill_package_id == preview_id
+                        and str(projected_skill.get("name") or "").strip()
+                    ),
+                    "changed": import_result.get("changed"),
+                    "installed": skill_package_id,
+                    "projectedSkill": projected_skill.get("name"),
+                }
             )
-            return
-        disabled = self.request_app_json("PUT", f"/api/app/skill-packages/{skill_package_id}", {"enabled": False, "syncProjectedSkill": True})
-        steps.append(
-            {
-                "name": "vsk.disable",
-                "ok": bool(disabled.get("ok")),
-                "enabled": ensure_dict(ensure_dict(disabled.get("state")).get("registry_entry")).get("enabled"),
-                "projectedSkill": disabled.get("projectedSkill"),
-            }
-        )
-        uninstalled = self.request_app_json("DELETE", f"/api/app/skill-packages/{skill_package_id}", {"removeProjectedSkill": True})
-        steps.append(
-            {
-                "name": "vsk.uninstall",
-                "ok": bool(uninstalled.get("ok")),
-                "removed": ensure_dict(uninstalled.get("uninstalled")).get("skill_id"),
-                "projectedSkill": uninstalled.get("projectedSkill"),
-            }
-        )
+            if not steps[-1]["ok"]:
+                raise RuntimeError("Imported package did not match the preflight identity or projected skill contract.")
+            disabled = self.request_app_json(
+                "PUT",
+                f"/api/app/skill-packages/{skill_package_id}",
+                {"enabled": False, "syncProjectedSkill": True},
+            )
+            disabled_entry = ensure_dict(ensure_dict(disabled.get("state")).get("registry_entry"))
+            steps.append(
+                {
+                    "name": "vsk.disable",
+                    "ok": bool(
+                        disabled.get("ok") is True
+                        and str(disabled_entry.get("id") or "").strip() == skill_package_id
+                        and disabled_entry.get("enabled") is False
+                    ),
+                    "enabled": disabled_entry.get("enabled"),
+                    "projectedSkill": disabled.get("projectedSkill"),
+                }
+            )
+            if not steps[-1]["ok"]:
+                raise RuntimeError("Imported package did not enter the disabled state.")
+        except Exception as exc:  # noqa: BLE001
+            steps.append({"name": "vsk.lifecycle.error", "ok": False, "error": str(exc)})
+        finally:
+            if import_attempted:
+                try:
+                    uninstalled = self.request_app_json(
+                        "DELETE",
+                        f"/api/app/skill-packages/{cleanup_id}",
+                        {"removeProjectedSkill": True},
+                    )
+                    installed_final = self.request_app_json("GET", "/api/app/skill-packages", None)
+                    installed_final_items = installed_final.get("installed") if isinstance(installed_final.get("installed"), list) else []
+                    remaining_ids = {
+                        str(item.get("id") or "").strip()
+                        for item in installed_final_items
+                        if isinstance(item, dict)
+                    }
+                    removed_id = str(ensure_dict(uninstalled.get("uninstalled")).get("skill_id") or "").strip()
+                    steps.append(
+                        {
+                            "name": "vsk.uninstall",
+                            "ok": bool(
+                                uninstalled.get("ok") is True
+                                and removed_id == cleanup_id
+                                and cleanup_id not in remaining_ids
+                            ),
+                            "removed": removed_id,
+                            "absentAfterReadback": cleanup_id not in remaining_ids,
+                            "projectedSkill": uninstalled.get("projectedSkill"),
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    steps.append({"name": "vsk.uninstall", "ok": False, "error": str(exc)})
         self.add_path(
             "vsk_import_dry_run_cleanup",
-            ".vsk import -> dry-run -> disable/uninstall",
+            title,
             status="passed" if all(step.get("ok") for step in steps) else "failed",
             mode="local-write",
             required=True,
@@ -941,6 +1073,257 @@ def path_effective_ok(status: str, *, required: bool, strict: bool) -> bool:
     if status in {"skipped", "blocked"}:
         return not required and not strict
     return False
+
+
+def skill_package_registry_projection(payload: dict[str, Any]) -> str:
+    installed = payload.get("installed") if isinstance(payload.get("installed"), list) else []
+    projection = [
+        {
+            "id": str(item.get("id") or ""),
+            "version": str(item.get("version") or ""),
+            "enabled": item.get("enabled"),
+            "packageSha256": str(item.get("package_sha256") or item.get("packageSha256") or ""),
+        }
+        for item in installed
+        if isinstance(item, dict)
+    ]
+    projection.sort(key=lambda item: (item["id"], item["version"], item["packageSha256"]))
+    return json.dumps(projection, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def load_release_binding(
+    manifest_path: Path,
+    runtime_version: str,
+    *,
+    base_url: str = "",
+    runtime_payload: dict[str, Any] | None = None,
+    listener_query_func: ListenerQueryFunc | None = None,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    payload_name = f"VRCForge_Windows_x64_{runtime_version}.zip"
+    payload_path = manifest_path.parent / payload_name
+    runtime_provenance = build_runtime_provenance(
+        base_url=base_url,
+        runtime_payload=runtime_payload or {},
+        payload_path=payload_path,
+        listener_query_func=listener_query_func,
+        platform_name=platform_name,
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {
+            "version": runtime_version,
+            "manifestCommit": "",
+            "payloadZipSha256": "",
+            "payloadMatchesManifest": False,
+            "artifactLocationSafe": False,
+            "runtimeProvenance": runtime_provenance,
+        }
+    manifest_version = str(manifest.get("version") or "")
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
+    matches = [
+        value
+        for value in artifacts
+        if isinstance(value, dict)
+        and Path(str(value.get("name") or value.get("path") or "")).name == payload_name
+    ]
+    item = matches[0] if len(matches) == 1 else {}
+    declared_name = str(item.get("name") or "")
+    declared_path = str(item.get("path") or "")
+    artifact_location_safe = bool(
+        len(matches) == 1
+        and declared_name == payload_name
+        and (not declared_path or declared_path == payload_name)
+    )
+    expected_sha = str(item.get("sha256") or item.get("sha256sum") or "").strip().lower()
+    current_sha = ""
+    if payload_path.is_file():
+        digest = hashlib.sha256()
+        with payload_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        current_sha = digest.hexdigest()
+    return {
+        "version": manifest_version,
+        "manifestCommit": str(manifest.get("commit") or "").strip().lower(),
+        "payloadZipSha256": expected_sha,
+        "artifactLocationSafe": artifact_location_safe,
+        "runtimeProvenance": runtime_provenance,
+        "payloadMatchesManifest": bool(
+            manifest_version == runtime_version
+            and artifact_location_safe
+            and expected_sha
+            and current_sha == expected_sha
+        ),
+    }
+
+
+def build_runtime_provenance(
+    *,
+    base_url: str,
+    runtime_payload: dict[str, Any],
+    payload_path: Path,
+    listener_query_func: ListenerQueryFunc | None = None,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    health = ensure_dict(runtime_payload.get("health")) or ensure_dict(runtime_payload)
+    paths = ensure_dict(health.get("paths"))
+    portable_mode = health.get("portableMode") is True
+    result: dict[str, Any] = {
+        "ok": False,
+        "portableMode": portable_mode,
+        "listenerUnique": False,
+        "executableInsideProgramDir": False,
+        "executableMatchesArchive": False,
+        "executableName": "",
+        "hash": "",
+    }
+    try:
+        if not str(platform_name or sys.platform).lower().startswith("win"):
+            return result
+        program_dir = str(paths.get("programDir") or health.get("programDir") or "").strip()
+        port = listener_port_from_base_url(base_url)
+        if not portable_mode or not program_dir or port is None or not payload_path.is_file():
+            return result
+        listeners = (listener_query_func or query_windows_listener_processes)(port)
+        result["listenerUnique"] = isinstance(listeners, list) and len(listeners) == 1
+        if not result["listenerUnique"]:
+            return result
+        listener = listeners[0] if isinstance(listeners[0], dict) else {}
+        if int(listener.get("processId") or 0) <= 0:
+            return result
+        executable_text = str(listener.get("executable") or "").strip()
+        if not executable_text:
+            return result
+        executable_path = Path(executable_text)
+        result["executableName"] = executable_text.replace("\\", "/").rsplit("/", 1)[-1]
+        expected_path = Path(program_dir) / "backend" / "vrcforge_backend.exe"
+        executable_normalized = normalized_resolved_path(executable_path)
+        expected_normalized = normalized_resolved_path(expected_path)
+        program_dir_normalized = normalized_resolved_path(Path(program_dir))
+        result["executableInsideProgramDir"] = bool(
+            executable_normalized
+            and expected_normalized
+            and program_dir_normalized
+            and executable_normalized == expected_normalized
+            and expected_normalized.startswith(f"{program_dir_normalized}/")
+        )
+        if executable_path.is_file():
+            result["hash"] = sha256_path(executable_path)
+        archive_hash = portable_backend_archive_sha256(payload_path)
+        result["executableMatchesArchive"] = bool(result["hash"] and archive_hash and result["hash"] == archive_hash)
+        result["ok"] = bool(
+            result["portableMode"]
+            and result["listenerUnique"]
+            and result["executableInsideProgramDir"]
+            and result["executableMatchesArchive"]
+            and result["executableName"].casefold() == "vrcforge_backend.exe"
+        )
+    except Exception:  # noqa: BLE001 - provenance must fail closed without suppressing the report.
+        result["ok"] = False
+    return result
+
+
+def listener_port_from_base_url(base_url: str) -> int | None:
+    try:
+        parsed = urlsplit(str(base_url or ""))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        host = parsed.hostname.casefold()
+        if host != "localhost":
+            address = ipaddress.ip_address(host)
+            mapped = getattr(address, "ipv4_mapped", None)
+            if not address.is_loopback and not bool(mapped and mapped.is_loopback):
+                return None
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        return port if 1 <= int(port) <= 65535 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def query_windows_listener_processes(port: int) -> list[dict[str, Any]]:
+    script = "\n".join(
+        (
+            "$ErrorActionPreference = 'Stop'",
+            "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+            f"$connections = @(Get-NetTCPConnection -State Listen -LocalPort {int(port)} -ErrorAction Stop)",
+            "$ownerIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)",
+            "$rows = @()",
+            "foreach ($ownerId in $ownerIds) {",
+            "  $process = Get-Process -Id $ownerId -ErrorAction Stop",
+            "  if ([string]::IsNullOrWhiteSpace([string]$process.Path)) { throw 'Listener executable path unavailable.' }",
+            "  $rows += [pscustomobject]@{ processId = [int]$ownerId; executable = [string]$process.Path }",
+            "}",
+            "$rows | ConvertTo-Json -Compress",
+        )
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15.0,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Windows listener provenance query failed.")
+    raw = (completed.stdout or "").strip()
+    decoded = json.loads(raw) if raw else []
+    rows = decoded if isinstance(decoded, list) else [decoded]
+    listeners: list[dict[str, Any]] = []
+    seen_process_ids: set[int] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("Windows listener provenance query returned an invalid row.")
+        process_id = int(row.get("processId") or 0)
+        executable = str(row.get("executable") or "").strip()
+        if process_id <= 0 or not executable:
+            raise RuntimeError("Windows listener provenance query returned incomplete process data.")
+        if process_id in seen_process_ids:
+            continue
+        seen_process_ids.add(process_id)
+        listeners.append({"processId": process_id, "executable": executable})
+    return listeners
+
+
+def normalized_resolved_path(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve(strict=False)).replace("\\", "/").rstrip("/").casefold()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
+def sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def portable_backend_archive_sha256(payload_path: Path) -> str:
+    try:
+        with zipfile.ZipFile(payload_path) as archive:
+            matches = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.replace("\\", "/").casefold() == "backend/vrcforge_backend.exe"
+            ]
+            if len(matches) != 1:
+                return ""
+            digest = hashlib.sha256()
+            with archive.open(matches[0], "r") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            return digest.hexdigest()
+    except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+        return ""
 
 
 def confirmed_unity_unavailable_from_components(components: dict[str, Any]) -> str:

@@ -95,6 +95,13 @@ RELEASE_ARTIFACTS = (
     "VRCForge_Offline_Installer_x64.exe",
     "VRCForge_Web_Installer_x64.exe",
 )
+RUNTIME_PROVENANCE_BOOLEAN_FIELDS = (
+    "ok",
+    "portableMode",
+    "listenerUnique",
+    "executableInsideProgramDir",
+    "executableMatchesArchive",
+)
 
 
 def main() -> int:
@@ -108,11 +115,14 @@ def main() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check VRCForge public-stable readiness and release evidence gates.")
     parser.add_argument("--version", default=read_text_file(Path("VERSION")).strip() if Path("VERSION").is_file() else "")
+    parser.add_argument("--latest-stable", default="", help="Latest already-published stable version that public target-version docs must name.")
+    parser.add_argument("--stable-refresh", action="store_true", help="Allow --latest-stable to equal --version when refreshing an already-published stable release.")
     parser.add_argument("--compatibility-matrix", default="docs/COMPATIBILITY_MATRIX.md")
     parser.add_argument("--release-manifest", default="dist/release/release-manifest.json")
     parser.add_argument("--packaged-backend-smoke", default="")
     parser.add_argument("--payload-zip-smoke", default="")
     parser.add_argument("--golden-path-matrix", default="")
+    parser.add_argument("--skill-ecosystem-smoke", default="")
     parser.add_argument("--optimizer-request-guard-smoke", default="")
     parser.add_argument("--external-agent-smoke", default="")
     parser.add_argument("--installer-smoke", default="")
@@ -138,10 +148,14 @@ def parse_args() -> argparse.Namespace:
 def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     version = str(args.version or "").strip()
     stale_versions = tuple(str(item) for item in (args.stale_version or []) if str(item).strip())
+    latest_stable = str(getattr(args, "latest_stable", "") or "").strip()
+    stable_refresh = bool(getattr(args, "stable_refresh", False))
     steps: list[dict[str, Any]] = []
 
     steps.append(check_metadata_versions(version))
     steps.extend(check_versioned_public_docs(version, stale_versions))
+    if version_at_least(version, "1.3.0"):
+        steps.append(check_latest_stable_docs(version, latest_stable, allow_equal=stable_refresh))
     steps.append(check_public_doc_terms("public_docs.golden_paths", PUBLIC_GOLDEN_PATH_TERMS, VERSIONED_PUBLIC_DOCS))
     steps.append(check_public_doc_terms("public_docs.privacy_boundary", PRIVACY_TERMS, ("README.md", "USER_MANUAL.md", ".github/ISSUE_TEMPLATE/bug_report.yml")))
     steps.append(check_public_doc_terms("public_docs.avatar_encryption_preview_boundary", AVATAR_ENCRYPTION_BOUNDARY_TERMS, ("README.md", "USER_MANUAL.md", "docs/COMPATIBILITY_MATRIX.md")))
@@ -149,16 +163,41 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     steps.append(check_doc_contains(Path("docs/OPTIMIZATION_STRATEGY.md"), "optimizer_state_machine.public", OPTIMIZER_STATE_TERMS, required=True))
     steps.append(check_doc_contains(Path("docs/RELEASE_CHECKLIST.md"), "release_checklist.stable_gate", ("smoke_stable_readiness_gate.py", "COMPATIBILITY_MATRIX", "support bundle"), required=True))
     release_manifest_path = Path(args.release_manifest)
-    steps.append(check_release_manifest(release_manifest_path, version))
-    manifest_hashes = release_manifest_hashes(release_manifest_path)
+    # Parse the manifest exactly once. The policy verdict, artifact digest map,
+    # and commit binding must describe the same document even if another
+    # process replaces the file while the rest of the gate is running.
+    release_manifest_payload, release_manifest_error = read_json_document(release_manifest_path)
+    steps.append(
+        check_release_manifest(
+            release_manifest_path,
+            version,
+            payload=release_manifest_payload,
+            parse_error=release_manifest_error,
+        )
+    )
+    manifest_hashes = release_manifest_hashes(
+        release_manifest_path,
+        payload=release_manifest_payload,
+        parse_error=release_manifest_error,
+    )
+    manifest_commit = release_manifest_commit(
+        release_manifest_path,
+        payload=release_manifest_payload,
+        parse_error=release_manifest_error,
+    )
 
     # Resolve smoke/proof artifacts once so the same path feeds both the content
     # check and the optional freshness guard below.
     max_age_hours = float(getattr(args, "max_artifact_age_hours", 0.0) or 0.0)
     require_live_writes = bool(getattr(args, "require_live_writes", False))
+    require_skill_ecosystem = version_at_least(version, "1.3.0")
     packaged_backend_path = resolve_evidence_path(args.packaged_backend_smoke, "artifacts/packaged-backend-smoke-*/packaged-bootstrap-summary.json")
     payload_zip_path = resolve_evidence_path(args.payload_zip_smoke, "artifacts/payload-smoke/*/summary.json")
     golden_path_matrix_path = resolve_evidence_path(args.golden_path_matrix, "artifacts/golden-path-matrix/*.json")
+    skill_ecosystem_path = resolve_evidence_path(
+        getattr(args, "skill_ecosystem_smoke", ""),
+        "artifacts/actual-app-skill-ecosystem/*/report.json",
+    )
     optimizer_guard_path = resolve_evidence_path(args.optimizer_request_guard_smoke, "artifacts/optimizer-request-guard-smoke/*.json")
     external_agent_path = resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")
     installer_path = resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")
@@ -166,7 +205,25 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     payload_name = f"VRCForge_Windows_x64_{version}.zip"
     steps.append(check_packaged_backend(packaged_backend_path, version, manifest_hashes.get(payload_name, "")))
     steps.append(check_payload_zip(payload_zip_path, version, manifest_hashes.get(payload_name, "")))
-    steps.append(check_golden_path_matrix(golden_path_matrix_path, require_live_writes=require_live_writes))
+    steps.append(
+        check_golden_path_matrix(
+            golden_path_matrix_path,
+            version,
+            manifest_hashes.get(payload_name, ""),
+            manifest_commit,
+            require_live_writes=require_live_writes,
+            require_vsk=require_skill_ecosystem,
+        )
+    )
+    if require_skill_ecosystem:
+        steps.append(
+            check_skill_ecosystem_smoke(
+                skill_ecosystem_path,
+                version,
+                manifest_hashes.get(payload_name, ""),
+                manifest_commit,
+            )
+        )
     steps.append(check_optimizer_request_guard(optimizer_guard_path))
     steps.append(check_external_agent_smoke(external_agent_path))
     steps.append(
@@ -182,14 +239,17 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     # cannot carry the gate. Run artifacts only — versioned docs and the fixed
     # release manifest are intentionally not age-checked.
     if max_age_hours > 0:
-        for fresh_name, fresh_path in (
+        freshness_artifacts = [
             ("packaged_backend_smoke", packaged_backend_path),
             ("payload_zip_smoke", payload_zip_path),
             ("golden_path_matrix", golden_path_matrix_path),
             ("optimizer_request_guard_smoke", optimizer_guard_path),
             ("external_agent_smoke", external_agent_path),
             ("installer_smoke", installer_path),
-        ):
+        ]
+        if require_skill_ecosystem:
+            freshness_artifacts.append(("skill_ecosystem_smoke", skill_ecosystem_path))
+        for fresh_name, fresh_path in freshness_artifacts:
             steps.append(check_artifact_freshness(f"freshness.{fresh_name}", fresh_path, max_age_hours))
 
     steps.append(check_doc_contains(Path(args.release_evidence), "local_release_evidence.current", (version, "Golden Path Matrix", "Installer install/uninstall"), required=False))
@@ -221,6 +281,9 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             "localEvidenceDocsAreAdvisoryForFreshClones": True,
             "maxArtifactAgeHours": max_age_hours if max_age_hours > 0 else None,
             "requireLiveWrites": require_live_writes,
+            "requireSkillEcosystem": require_skill_ecosystem,
+            "latestPublishedStable": latest_stable,
+            "stableRefresh": stable_refresh,
         },
     }
 
@@ -270,6 +333,43 @@ def check_versioned_public_docs(version: str, stale_versions: tuple[str, ...]) -
     return steps
 
 
+def check_latest_stable_docs(target_version: str, latest_stable: str, *, allow_equal: bool = False) -> dict[str, Any]:
+    patterns = {
+        "README.md": rf"Latest published stable release:\s*`{re.escape(latest_stable)}`",
+        "USER_MANUAL.md": rf"Latest published stable release:\s*`{re.escape(latest_stable)}`",
+        "packaging/README.md": rf"`{re.escape(latest_stable)}` remains the latest\s+published stable package",
+    }
+    target_parts = version_parts(target_version)
+    stable_parts = version_parts(latest_stable)
+    invalid_version = bool(
+        not re.fullmatch(r"\d+\.\d+\.\d+", latest_stable)
+        or stable_parts > target_parts
+        or (stable_parts == target_parts and not allow_equal)
+    )
+    missing_files: list[str] = []
+    mismatched: list[str] = []
+    for item, pattern in patterns.items():
+        path = Path(item)
+        if not path.is_file():
+            missing_files.append(item)
+            continue
+        if invalid_version or re.search(pattern, read_text_file(path), flags=re.IGNORECASE | re.DOTALL) is None:
+            mismatched.append(item)
+    ok = bool(not invalid_version and not missing_files and not mismatched)
+    return {
+        "name": "public_docs.latest_published_stable",
+        "ok": ok,
+        "required": True,
+        "targetVersion": target_version,
+        "latestStable": latest_stable,
+        "allowEqual": allow_equal,
+        "paths": list(patterns),
+        "missingFiles": missing_files,
+        "mismatched": mismatched,
+        "error": "" if ok else "public docs do not identify the explicit latest published stable version",
+    }
+
+
 def check_public_doc_terms(name: str, required_terms: tuple[str, ...], paths: tuple[str, ...]) -> dict[str, Any]:
     existing_paths = [Path(item) for item in paths if Path(item).is_file()]
     combined = "\n".join(read_text_file(path) for path in existing_paths)
@@ -299,25 +399,48 @@ def check_doc_contains(path: Path, name: str, required_terms: tuple[str, ...], r
     }
 
 
-def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
-    payload, parse_error = read_json_document(path)
+def check_release_manifest(
+    path: Path,
+    version: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    parse_error: str | None = None,
+) -> dict[str, Any]:
+    if payload is None or parse_error is None:
+        payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("release_artifacts.manifest", False, True, path, reason=parse_error, category="release")
     artifact_items = normalize_manifest_artifacts(payload)
-    artifacts_by_name = {Path(str(item.get("path") or item.get("name") or "")).name: item for item in artifact_items}
+    artifacts_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in artifact_items:
+        item_name = Path(str(item.get("name") or item.get("path") or "")).name
+        artifacts_by_name.setdefault(item_name, []).append(item)
     required_names = [*RELEASE_ARTIFACTS, f"VRCForge_Windows_x64_{version}.zip"]
+    required_name_set = set(required_names)
     missing: list[str] = []
+    duplicate_entries: list[str] = []
+    unsafe_locations: list[str] = []
     checksum_mismatches: list[str] = []
     invalid_checksums: list[str] = []
+    unexpected_entries = sorted(name for name in artifacts_by_name if name not in required_name_set)
     base_dir = path.parent
     for name in required_names:
-        item = artifacts_by_name.get(name)
-        if not item:
+        matches = artifacts_by_name.get(name, [])
+        if not matches:
             missing.append(f"manifest:{name}")
             continue
-        artifact_path = Path(str(item.get("path") or item.get("name") or name))
-        if not artifact_path.is_absolute():
-            artifact_path = base_dir / artifact_path
+        if len(matches) != 1:
+            duplicate_entries.append(name)
+            continue
+        item = matches[0]
+        declared_name = str(item.get("name") or "")
+        declared_path = str(item.get("path") or "")
+        if declared_name != name or (declared_path and declared_path != name):
+            unsafe_locations.append(name)
+            continue
+        # Release artifacts are always co-located with the manifest. Never
+        # follow an absolute or traversal path declared by the JSON document.
+        artifact_path = base_dir / name
         if not artifact_path.is_file():
             missing.append(str(artifact_path))
             continue
@@ -329,20 +452,88 @@ def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
     manifest_version = str(payload.get("version") or "").strip()
     manifest_commit = str(payload.get("commit") or "").strip().lower()
     head_commit = current_git_commit()
+    origin_main_commit = current_origin_main_commit()
+    require_strict_provenance = version_at_least(version, "1.3.0")
     commit_ok = bool(
         re.fullmatch(r"[0-9a-f]{40}", manifest_commit)
         and (not head_commit or manifest_commit == head_commit)
     )
+    pushed_binding_ok = bool(
+        not require_strict_provenance
+        or (
+            re.fullmatch(r"[0-9a-f]{40}", head_commit)
+            and re.fullmatch(r"[0-9a-f]{40}", origin_main_commit)
+            and manifest_commit == head_commit == origin_main_commit
+        )
+    )
     uv_sha = str(payload.get("uvDownloadSha256") or "").strip().lower()
     uv_sha_ok = bool(re.fullmatch(r"[0-9a-f]{64}", uv_sha))
+    uv_download_url = str(payload.get("uvDownloadUrl") or "").strip()
+    uv_runtime = payload.get("uvRuntime") if isinstance(payload.get("uvRuntime"), dict) else {}
+    uv_runtime_files = uv_runtime.get("files") if isinstance(uv_runtime.get("files"), list) else []
+    uv_files_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in uv_runtime_files:
+        if isinstance(item, dict):
+            uv_files_by_name.setdefault(str(item.get("name") or ""), []).append(item)
+    uv_file_digests_ok = bool(
+        len(uv_runtime_files) == 2
+        and set(uv_files_by_name) == {"uv.exe", "uvx.exe"}
+        and all(
+            len(uv_files_by_name[name]) == 1
+            and re.fullmatch(r"[0-9a-f]{64}", str(uv_files_by_name[name][0].get("sha256") or "").lower())
+            for name in ("uv.exe", "uvx.exe")
+        )
+    )
+    uv_runtime_provenance_ok = bool(
+        uv_runtime.get("source") == "download"
+        and uv_download_url
+        and str(uv_runtime.get("downloadUrl") or "") == uv_download_url
+        and uv_runtime.get("archiveDigestVerified") is True
+        and re.fullmatch(r"[0-9a-f]{64}", str(uv_runtime.get("archiveSha256") or "").lower())
+        and str(uv_runtime.get("archiveSha256") or "").lower() == uv_sha
+        and uv_file_digests_ok
+    )
+    build_policy = payload.get("buildPolicy") if isinstance(payload.get("buildPolicy"), dict) else {}
+    strict_provenance_ok = bool(
+        build_policy.get("mode") == "strict"
+        and build_policy.get("releaseEligible") is True
+        and build_policy.get("allowDirty") is False
+        and build_policy.get("allowUnpushed") is False
+        and build_policy.get("allowVersionMismatch") is False
+    )
     ok = bool(
         manifest_version == version
         and commit_ok
+        and pushed_binding_ok
         and uv_sha_ok
+        and (
+            strict_provenance_ok and uv_runtime_provenance_ok
+            or not require_strict_provenance
+        )
         and not missing
+        and not duplicate_entries
+        and not unsafe_locations
         and not invalid_checksums
         and not checksum_mismatches
+        and (
+            not require_strict_provenance
+            or (
+                isinstance(payload.get("artifacts"), list)
+                and len(payload.get("artifacts")) == len(artifact_items) == len(required_names)
+                and not unexpected_entries
+            )
+        )
     )
+    if duplicate_entries or unsafe_locations or unexpected_entries:
+        reason = "release manifest artifact entries must be unique basenames co-located with the manifest"
+    elif require_strict_provenance and not pushed_binding_ok:
+        reason = "release manifest commit must equal the current pushed HEAD and origin/main"
+    elif require_strict_provenance and not strict_provenance_ok:
+        reason = "release manifest identifies a local-acceptance build; run a clean pushed strict rebuild"
+    elif require_strict_provenance and not uv_runtime_provenance_ok:
+        reason = "release manifest does not bind the bundled uv executables to one verified pinned download"
+    else:
+        reason = "" if ok else "release manifest is missing required artifacts or checksum evidence"
     return evidence_step(
         "release_artifacts.manifest",
         ok,
@@ -350,38 +541,92 @@ def check_release_manifest(path: Path, version: str) -> dict[str, Any]:
         path,
         category="release",
         schema="release-manifest",
-        fields_checked=["version", "commit", "uvDownloadSha256", "artifacts[].name", "artifacts[].sha256"],
+        fields_checked=["version", "commit", "buildPolicy", "uvDownloadUrl", "uvDownloadSha256", "uvRuntime", "artifacts[].name", "artifacts[].path", "artifacts[].sha256"],
         missing=missing,
-        reason="" if ok else "release manifest is missing required artifacts or checksum evidence",
+        reason=reason,
         details={
             "version": manifest_version,
             "expectedVersion": version,
             "commit": manifest_commit,
             "expectedCommit": head_commit,
             "commitMatches": commit_ok,
+            "originMainCommit": origin_main_commit,
+            "pushedBindingOk": pushed_binding_ok,
             "uvDownloadSha256Present": uv_sha_ok,
+            "uvRuntimeProvenanceOk": uv_runtime_provenance_ok,
+            "strictBuildProvenanceRequired": require_strict_provenance,
+            "strictBuildProvenanceOk": strict_provenance_ok,
+            "buildPolicy": build_policy,
+            "duplicateEntries": duplicate_entries,
+            "unsafeLocations": unsafe_locations,
             "invalidChecksums": invalid_checksums,
             "checksumMismatches": checksum_mismatches,
+            "unexpectedEntries": unexpected_entries,
         },
     )
 
 
-def release_manifest_hashes(path: Path) -> dict[str, str]:
-    payload, parse_error = read_json_document(path)
+def release_manifest_hashes(
+    path: Path,
+    *,
+    payload: dict[str, Any] | None = None,
+    parse_error: str | None = None,
+) -> dict[str, str]:
+    if payload is None or parse_error is None:
+        payload, parse_error = read_json_document(path)
     if parse_error:
         return {}
-    return {
-        Path(str(item.get("path") or item.get("name") or "")).name: str(
-            item.get("sha256") or item.get("sha256sum") or ""
-        ).strip().lower()
-        for item in normalize_manifest_artifacts(payload)
-    }
+    hashes: dict[str, str] = {}
+    invalid: set[str] = set()
+    for item in normalize_manifest_artifacts(payload):
+        name = str(item.get("name") or "")
+        declared_path = str(item.get("path") or "")
+        if not name or Path(name).name != name or (declared_path and declared_path != name):
+            invalid.add(Path(name or declared_path).name)
+            continue
+        if name in hashes:
+            invalid.add(name)
+            continue
+        hashes[name] = str(item.get("sha256") or item.get("sha256sum") or "").strip().lower()
+    for name in invalid:
+        hashes.pop(name, None)
+    return hashes
+
+
+def release_manifest_commit(
+    path: Path,
+    *,
+    payload: dict[str, Any] | None = None,
+    parse_error: str | None = None,
+) -> str:
+    if payload is None or parse_error is None:
+        payload, parse_error = read_json_document(path)
+    if parse_error:
+        return ""
+    value = str(payload.get("commit") or "").strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else ""
 
 
 def current_git_commit() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def current_origin_main_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "origin/main"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -458,28 +703,92 @@ def check_payload_zip(path: Path, version: str, expected_payload_sha256: str) ->
     )
 
 
-def check_golden_path_matrix(path: Path, require_live_writes: bool = False) -> dict[str, Any]:
+def check_golden_path_matrix(
+    path: Path,
+    version: str,
+    expected_payload_sha256: str,
+    expected_manifest_commit: str,
+    require_live_writes: bool = False,
+    require_vsk: bool = False,
+) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("golden_path_matrix.safe_default", False, True, path, reason=parse_error, category="golden-path")
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    paths = payload.get("paths") if isinstance(payload.get("paths"), list) else []
+    vsk_path = next(
+        (item for item in paths if isinstance(item, dict) and item.get("id") == "vsk_import_dry_run_cleanup"),
+        {},
+    )
     safe_default = summary.get("safeDefault")
+    failed_count = summary.get("failedCount")
+    failed_count_ok = isinstance(failed_count, int) and not isinstance(failed_count, bool) and failed_count == 0
+    release_binding = payload.get("releaseBinding") if isinstance(payload.get("releaseBinding"), dict) else {}
+    runtime_provenance = (
+        release_binding.get("runtimeProvenance")
+        if isinstance(release_binding.get("runtimeProvenance"), dict)
+        else {}
+    )
     # Default: the packaged safe-default (writes-skipped) artifact is accepted, which
     # is correct for a clean clone with no Unity attached. With --require-live-writes
     # the gate instead demands a run that actually performed live writes
     # (safeDefault is False), so a real apply/rollback path was exercised.
     safe_default_ok = (safe_default is False) if require_live_writes else (safe_default is True)
+    version_ok = str(payload.get("version") or "") == version
+    release_identity_ok = bool(
+        expected_payload_sha256
+        and expected_manifest_commit
+        and release_binding.get("version") == version
+        and str(release_binding.get("manifestCommit") or "").lower() == expected_manifest_commit
+        and str(release_binding.get("payloadZipSha256") or "").lower() == expected_payload_sha256
+        and release_binding.get("payloadMatchesManifest") is True
+    )
+    runtime_provenance_required = version_at_least(version, "1.3.0")
+    runtime_provenance_ok = bool(
+        not runtime_provenance_required
+        or (
+            all(runtime_provenance.get(field) is True for field in RUNTIME_PROVENANCE_BOOLEAN_FIELDS)
+            and str(runtime_provenance.get("executableName") or "").casefold() == "vrcforge_backend.exe"
+            and re.fullmatch(r"[0-9a-f]{64}", str(runtime_provenance.get("hash") or "").lower()) is not None
+        )
+    )
+    release_binding_ok = release_identity_ok and runtime_provenance_ok
+    vsk_step_items = vsk_path.get("steps") if isinstance(vsk_path.get("steps"), list) else []
+    vsk_steps = {
+        str(step.get("name") or "")
+        for step in vsk_step_items
+        if isinstance(step, dict) and step.get("ok") is True
+    }
+    vsk_ok = not require_vsk or (
+        vsk_path.get("status") == "passed"
+        and vsk_path.get("ok") is True
+        and vsk_path.get("required") is True
+        and {"vsk.preflight", "vsk.dry_run", "vsk.import", "vsk.disable", "vsk.uninstall"}.issubset(vsk_steps)
+        and bool(vsk_step_items)
+        and all(isinstance(step, dict) and step.get("ok") is True for step in vsk_step_items)
+    )
     ok = bool(
         payload.get("schema") == "vrcforge.golden_path_matrix.v1"
         and payload.get("ok") is True
+        and version_ok
+        and release_binding_ok
         and summary.get("status") == "passed"
-        and int(summary.get("failedCount") or 0) == 0
+        and failed_count_ok
         and safe_default_ok
+        and vsk_ok
     )
     if ok:
         reason = ""
     elif require_live_writes and safe_default is not False:
         reason = "live-writes mode requires a Golden Path Matrix run with safeDefault=false (real writes proven)"
+    elif not version_ok:
+        reason = "Golden Path Matrix version did not match the requested release version"
+    elif not release_identity_ok:
+        reason = "Golden Path Matrix release binding did not match the current manifest commit and payload hash"
+    elif runtime_provenance_required and not runtime_provenance_ok:
+        reason = "1.3+ requires packaged runtime provenance bound to the portable archive backend"
+    elif require_vsk and not vsk_ok:
+        reason = "1.3+ requires the .vsk import/dry-run/disable/uninstall Golden Path row to pass instead of skip"
     else:
         reason = "packaged safe-default Golden Path Matrix did not pass"
     return evidence_step(
@@ -489,9 +798,361 @@ def check_golden_path_matrix(path: Path, require_live_writes: bool = False) -> d
         path,
         category="golden-path",
         schema=str(payload.get("schema") or ""),
-        fields_checked=["ok", "summary.status", "summary.failedCount", "summary.safeDefault"],
+        fields_checked=["ok", "version", "releaseBinding", "releaseBinding.runtimeProvenance", "summary.status", "summary.failedCount", "summary.safeDefault", "paths.vsk_import_dry_run_cleanup"],
         reason=reason,
-        details={"summary": summary, "requireLiveWrites": require_live_writes},
+        details={
+            "version": payload.get("version"),
+            "expectedVersion": version,
+            "releaseBinding": release_binding,
+            "releaseBindingOk": release_binding_ok,
+            "releaseIdentityOk": release_identity_ok,
+            "runtimeProvenanceRequired": runtime_provenance_required,
+            "runtimeProvenanceOk": runtime_provenance_ok,
+            "summary": summary,
+            "requireLiveWrites": require_live_writes,
+            "requireVsk": require_vsk,
+            "vskStatus": vsk_path.get("status"),
+            "vskOk": vsk_path.get("ok"),
+        },
+    )
+
+
+def check_skill_ecosystem_smoke(
+    path: Path,
+    version: str,
+    expected_payload_sha256: str,
+    expected_manifest_commit: str,
+) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step("skill_ecosystem.packaged_webview", False, True, path, reason=parse_error, category="skills")
+    required_ids = {
+        "community.examples.validation-report-extension",
+        "community.examples.material-preset-pack",
+        "community.examples.outfit-naming-helper",
+        "community.examples.optimizer-report-helper",
+    }
+    packages = payload.get("packages") if isinstance(payload.get("packages"), list) else []
+
+    def exact_int(value: Any, *, minimum: int | None = None) -> int | None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        if minimum is not None and value < minimum:
+            return None
+        return value
+
+    by_id = {
+        str(item.get("id") or ""): item
+        for item in packages
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    package_checks: dict[str, bool] = {}
+    for package_id in sorted(required_ids):
+        item = by_id.get(package_id, {})
+        runtime_status = str(item.get("runtimeStatus") or "")
+        runtime_ok = runtime_status == "executed"
+        if package_id == "community.examples.material-preset-pack":
+            direct_target_calls = exact_int(item.get("directTargetCalls"), minimum=0)
+            runtime_ok = (
+                runtime_status == "loaded"
+                and item.get("requestOnly") is True
+                and item.get("supportFilesVerified") is True
+                and direct_target_calls == 0
+            )
+        package_checks[package_id] = bool(
+            item.get("signatureVerified") is True
+            and item.get("preflightSignatureVerified") is True
+            and item.get("preflightSignerUntrusted") is True
+            and item.get("preflightUntrustedDefaultDisabled") is True
+            and item.get("preflightDryRunNoWrite") is True
+            and item.get("preflightStateUnchanged") is True
+            and item.get("trusted") is True
+            and item.get("imported") is True
+            and item.get("projected") is True
+            and runtime_ok
+            and item.get("runtimeResultVerified") is True
+            and item.get("supportFilesVerified") is True
+            and item.get("entrypointVerified") is True
+            and item.get("runtimeAuditVerified") is True
+            and item.get("cleanupUninstalled") is True
+        )
+    package_set_ok = len(packages) == len(required_ids) and set(by_id) == required_ids
+    path_to_skill = payload.get("pathToSkill") if isinstance(payload.get("pathToSkill"), dict) else {}
+    recipes = path_to_skill.get("recipes") if isinstance(path_to_skill.get("recipes"), dict) else {}
+    governance = payload.get("governance") if isinstance(payload.get("governance"), dict) else {}
+    ui = payload.get("ui") if isinstance(payload.get("ui"), dict) else {}
+    privacy = payload.get("privacy") if isinstance(payload.get("privacy"), dict) else {}
+    cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), dict) else {}
+    runtime_binding = payload.get("runtimeBinding") if isinstance(payload.get("runtimeBinding"), dict) else {}
+    process_boundary = payload.get("processBoundary") if isinstance(payload.get("processBoundary"), dict) else {}
+    fixtures = payload.get("fixtures") if isinstance(payload.get("fixtures"), dict) else {}
+    release_binding = (
+        payload.get("releaseBinding")
+        if isinstance(payload.get("releaseBinding"), dict)
+        else {}
+    )
+    build_policy = (
+        release_binding.get("buildPolicy")
+        if isinstance(release_binding.get("buildPolicy"), dict)
+        else {}
+    )
+    transports = set(str(item) for item in payload.get("transports", []) if str(item))
+    path_to_skill_ok = all(
+        path_to_skill.get(key) is True
+        for key in (
+            "previewViaTauri",
+            "writeViaRest",
+            "writtenRecipeContract",
+            "writtenSourceMatchesResponse",
+            "exportedVsk",
+            "exportedVskPreflight",
+            "exportedVskContentMatches",
+            "positiveTemporaryResidueAbsent",
+            "genericEntrypointPreserved",
+            "negativeTemporaryResidueAbsent",
+            "negativeSensitiveResidueAbsent",
+            "secretRejected",
+            "secretRejectedNoOutput",
+            "existingSourceRejected",
+            "existingPackageRejected",
+            "parentTraversalRejected",
+            "privateUrlRedacted",
+            "confirmationInvalidated",
+            "paidPayloadRejected",
+            "paidPayloadRejectedNoOutput",
+        )
+    ) and all(
+        recipes.get(key) is True
+        for key in (
+            "tttMaterialGroup",
+            "boothImportPreflight",
+            "parameterCompression",
+            "pcQuestUploadPass",
+        )
+    )
+    governance_ok = all(
+        governance.get(key) is True
+        for key in (
+            "disableBlockedExecution",
+            "reenableWorked",
+            "safeModeBlockedRiskyEnable",
+            "safeModeTargetsRestored",
+            "revokeBlockedExecution",
+            "revokedSignerRetrustRejected",
+            "blockDisabledProjection",
+            "uninstallRemovedState",
+        )
+    )
+    ui_ok = all(
+        ui.get(key) is True
+        for key in (
+            "skillsWorkspaceVisible",
+            "pathToSkillVisible",
+            "contextualPathToSkillPrefill",
+            "auditSearchVisible",
+            "auditSignerVisible",
+            "auditFilterExercised",
+            "auditGovernanceFieldsVisible",
+            "auditPaginationExercised",
+            "auditAriaLive",
+        )
+    )
+    privacy_ok = all(
+        privacy.get(key) is True
+        for key in (
+            "privateKeyAbsent",
+            "tokensAbsent",
+            "sourcePathsAbsent",
+            "paidPayloadAbsent",
+            "artifactsFullyScanned",
+            "rawDiagnosticSecretsAbsent",
+            "rawDiagnosticsFullyScanned",
+            "supportBundleClean",
+        )
+    )
+    cleanup_ok = all(
+        cleanup.get(key) is True
+        for key in (
+            "installedPackagesClear",
+            "projectedSkillsClear",
+            "registryEntriesClear",
+            "packageFilesClear",
+            "projectedFilesClear",
+            "processesClear",
+            "trackedTreeClear",
+            "portsClear",
+            "processTrackingComplete",
+            "stagingClear",
+            "filesystemResidueClear",
+            "rejectedOutputsClear",
+            "ephemeralSigningKeyClear",
+            "builderStoreClear",
+        )
+    )
+    runtime_binding_ok = bool(
+        all(
+            runtime_binding.get(key) is True
+            for key in (
+                "authenticatedHealth",
+                "appAuthMissingTokenRejected",
+                "appAuthWrongTokenRejected",
+                "portableMode",
+                "versionMatches",
+                "programDirMatchesExtraction",
+                "isolatedDataPathsVerified",
+                "listenerUnique",
+                "listenerExecutableExact",
+                "backendDigestVerified",
+            )
+        )
+        and str(runtime_binding.get("executableName") or "").casefold() == "vrcforge_backend.exe"
+        and re.fullmatch(r"[0-9a-f]{64}", str(runtime_binding.get("backendSha256") or "").lower()) is not None
+    )
+    process_names = {
+        str(item).casefold()
+        for item in process_boundary.get("processNamesEver", [])
+        if str(item)
+    }
+    tracked_process_count = exact_int(process_boundary.get("trackedProcessCountEver"), minimum=2)
+    descendant_process_count = exact_int(process_boundary.get("descendantProcessCountEver"), minimum=1)
+    tracked_generation_count = exact_int(process_boundary.get("trackedGenerationCountEver"), minimum=2)
+    tracked_unique_pid_count = exact_int(process_boundary.get("trackedUniquePidCountEver"), minimum=2)
+    descendant_generation_count = exact_int(process_boundary.get("descendantGenerationCountEver"), minimum=1)
+    process_boundary_ok = bool(
+        process_boundary.get("rootTracked") is True
+        and tracked_process_count is not None
+        and descendant_process_count is not None
+        and tracked_generation_count is not None
+        and tracked_unique_pid_count is not None
+        and descendant_generation_count is not None
+        and tracked_process_count == tracked_generation_count
+        and descendant_process_count == descendant_generation_count
+        and tracked_generation_count >= tracked_unique_pid_count
+        and descendant_generation_count == tracked_generation_count - 1
+        and "vrcforge_backend.exe" in process_names
+        and process_boundary.get("trackedTreeClear") is True
+        and process_boundary.get("startEventWatcherVerified") is True
+        and process_boundary.get("watcherSettleVerified") is True
+        and (exact_int(process_boundary.get("watcherSettleMs"), minimum=5000) is not None)
+        and process_boundary.get("portQuerySucceeded") is True
+        and exact_int(process_boundary.get("samplingErrorCount"), minimum=0) == 0
+    )
+    fixture_source_ok = bool(
+        fixtures.get("sourceMode") == "immutable-git-object-snapshot"
+        and str(fixtures.get("sourceCommit") or "").lower() == expected_manifest_commit
+        and fixtures.get("sourceDigestVerified") is True
+        and fixtures.get("sourcePackageBytesVerified") is True
+        and re.fullmatch(r"[0-9a-f]{64}", str(fixtures.get("sourceDigest") or "").lower()) is not None
+        and fixtures.get("privateKeyPersisted") is False
+        and fixtures.get("builderStorePersisted") is False
+    )
+    recorded_sha = str(payload.get("payloadZipSha256") or "").strip().lower()
+    recorded_commit = str(payload.get("manifestCommit") or "").strip().lower()
+    strict_release_binding_ok = bool(
+        payload.get("strictReleaseBinding") is True
+        and payload.get("payloadMatchesManifest") is True
+        and payload.get("launchSource")
+        == "manifest-directory-portable-zip-extracted-to-isolated-evidence-root"
+        and release_binding.get("strict") is True
+        and release_binding.get("manifestReleaseEligible") is True
+        and release_binding.get("strictBuildPolicy") is True
+        and release_binding.get("worktreeClean") is True
+        and release_binding.get("worktreeCleanAfterFixtureBuild") is True
+        and release_binding.get("executableLaunchLockVerified") is True
+        and release_binding.get("completionExecutableVerified") is True
+        and release_binding.get("worktreeCleanAtCompletion") is True
+        and release_binding.get("completionHeadMatches") is True
+        and release_binding.get("completionOriginMainMatches") is True
+        and release_binding.get("completionVersionMatches") is True
+        and release_binding.get("headEqualsOriginMain") is True
+        and release_binding.get("manifestEqualsHead") is True
+        and release_binding.get("portableDigestVerified") is True
+        and release_binding.get("extractedExecutableVerified") is True
+        and release_binding.get("extractedBackendVerified") is True
+        and release_binding.get("portableManifestEntryUnique") is True
+        and release_binding.get("portableManifestPathSafe") is True
+        and release_binding.get("embeddedVersion") == version
+        and build_policy
+        == {
+            "mode": "strict",
+            "releaseEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        }
+    )
+    ok = bool(
+        payload.get("schema") == "vrcforge.packaged_skill_ecosystem_probe.v1"
+        and payload.get("ok") is True
+        and strict_release_binding_ok
+        and payload.get("version") == version
+        and payload.get("assertions") == []
+        and package_set_ok
+        and all(package_checks.values())
+        and path_to_skill_ok
+        and governance_ok
+        and ui_ok
+        and privacy_ok
+        and cleanup_ok
+        and runtime_binding_ok
+        and process_boundary_ok
+        and fixture_source_ok
+        and {
+            "packaged-webview-dom",
+            "packaged-webview-tauri-ipc",
+            "authenticated-loopback-rest",
+        }.issubset(transports)
+        and bool(expected_payload_sha256)
+        and recorded_sha == expected_payload_sha256
+        and bool(expected_manifest_commit)
+        and recorded_commit == expected_manifest_commit
+    )
+    return evidence_step(
+        "skill_ecosystem.packaged_webview",
+        ok,
+        True,
+        path,
+        category="skills",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=[
+            "version",
+            "strictReleaseBinding",
+            "launchSource",
+            "payloadMatchesManifest",
+            "releaseBinding",
+            "runtimeBinding",
+            "fixtures",
+            "payloadZipSha256",
+            "transports",
+            "packages",
+            "pathToSkill",
+            "governance",
+            "ui",
+            "privacy",
+            "cleanup",
+            "processBoundary",
+            "assertions",
+        ],
+        reason="" if ok else "packaged Skill Ecosystem lifecycle proof did not pass",
+        details={
+            "expectedPackageIds": sorted(required_ids),
+            "packageChecks": package_checks,
+            "packageSetOk": package_set_ok,
+            "pathToSkillOk": path_to_skill_ok,
+            "governanceOk": governance_ok,
+            "uiOk": ui_ok,
+            "privacyOk": privacy_ok,
+            "cleanupOk": cleanup_ok,
+            "runtimeBindingOk": runtime_binding_ok,
+            "processBoundaryOk": process_boundary_ok,
+            "fixtureSourceOk": fixture_source_ok,
+            "payloadZipSha256": recorded_sha,
+            "expectedPayloadZipSha256": expected_payload_sha256,
+            "manifestCommit": recorded_commit,
+            "expectedManifestCommit": expected_manifest_commit,
+            "strictReleaseBinding": payload.get("strictReleaseBinding"),
+            "strictReleaseBindingOk": strict_release_binding_ok,
+        },
     )
 
 
@@ -719,6 +1380,15 @@ def normalize_manifest_artifacts(manifest: dict[str, Any]) -> list[dict[str, Any
                 result.append({"name": str(name), "path": str(value)})
         return result
     return []
+
+
+def version_parts(value: str) -> tuple[int, int, int]:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", str(value or "").strip())
+    return tuple(int(item) for item in match.groups()) if match else (0, 0, 0)
+
+
+def version_at_least(version: str, minimum: str) -> bool:
+    return version_parts(version) >= version_parts(minimum)
 
 
 def sha256_file(path: Path) -> str:

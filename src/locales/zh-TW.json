@@ -88,6 +88,7 @@
     "approvalEvidenceMeta": "審批 {{status}}",
     "checkpointEvidence": "檢查點證據",
     "runEvidence": "執行證據",
+    "saveOperationAsSkill": "將此操作儲存為技能",
     "gitDiffEvidence": "Git 差異",
     "gitDiffEvidenceMeta": "{{count}} 個檔案，+{{additions}} -{{deletions}}",
     "proofShort": "證據",
@@ -899,7 +900,8 @@
       "exportPackage": "匯出 .vsk",
       "sourceWritten": "已寫入去識別後的技能原始碼",
       "packageExported": "已匯出去識別後的 .vsk 套件",
-      "runtimeUnavailable": "VRCForge 執行階段無法使用。"
+      "runtimeUnavailable": "VRCForge 執行階段無法使用。",
+      "prefilledFromRun": "來自已完成執行"
     },
     "reason": "Reason",
     "disableSafeMode": "Disable Safe Mode",

@@ -424,6 +424,29 @@ def test_generic_request_only_capture_cannot_weaken_required_safety_gates() -> N
     assert captured.workflow["validation"]["requiresRollback"] is True
 
 
+def test_generic_shader_capture_exposes_request_wrapper_not_direct_apply() -> None:
+    captured = build_path_to_skill_source(
+        {
+            "workflow": "captured_shader_tuning",
+            "steps": [
+                {
+                    "kind": "write",
+                    "tool": "vrcforge_apply_shader_tuning",
+                    "status": "completed",
+                }
+            ],
+        },
+        package_id="community.path-to-skill.shader-request-only",
+    )
+
+    assert captured.manifest["agent"]["write_path"] == "request_only"
+    assert "vrcforge_request_apply" in captured.skill_markdown
+    assert "vrcforge_plan_shader_tuning" in captured.skill_markdown
+    assert "vrcforge_apply_shader_tuning" not in captured.skill_markdown
+    assert "entrypoint-tool: vrcforge_plan_shader_tuning" in captured.skill_markdown
+    assert captured.workflow["proofPassed"] is False
+
+
 def test_blocked_preview_has_no_current_write_gates_and_separate_future_apply_gate() -> None:
     captured = build_path_to_skill_source(
         {
@@ -662,6 +685,188 @@ def test_capture_does_not_hide_invalid_manifest_identity() -> None:
         build_path_to_skill_source(
             {"workflow": "valid_workflow"},
             package_id="not-a-reverse-domain-id",
+        )
+
+
+def test_generic_multi_recipe_capture_allows_every_known_safe_step_tool() -> None:
+    captured = build_path_to_skill_source(
+        {
+            "workflow": "captured_runtime_operation",
+            "steps": [
+                {
+                    "kind": "read",
+                    "tool": "vrcforge_inspect_outfit_package",
+                    "status": "executed",
+                },
+                {
+                    "kind": "validation",
+                    "tool": "vrcforge_optimization_upload_gate_audit",
+                    "status": "passed",
+                },
+                {
+                    "kind": "write",
+                    "tool": "vrcforge_apply_shader_tuning",
+                    "status": "applied",
+                },
+            ],
+        },
+        package_id="community.path-to-skill.multi-recipe-capture",
+    )
+
+    assert "  - vrcforge_inspect_outfit_package\n" in captured.skill_markdown
+    assert "  - vrcforge_optimization_upload_gate_audit\n" in captured.skill_markdown
+    assert "  - vrcforge_apply_shader_tuning\n" not in captured.skill_markdown
+    assert "entrypoint-tool: vrcforge_inspect_outfit_package" in captured.skill_markdown
+
+
+def test_generic_outfit_and_material_capture_keeps_both_safe_tools() -> None:
+    captured = build_path_to_skill_source(
+        {
+            "workflow": "captured_runtime_operation",
+            "steps": [
+                {
+                    "kind": "read",
+                    "tool": "vrcforge_inspect_outfit_package",
+                    "status": "executed",
+                },
+                {
+                    "kind": "read",
+                    "tool": "vrcforge_scan_materials",
+                    "status": "completed",
+                },
+            ],
+        },
+        package_id="community.path-to-skill.outfit-material",
+    )
+
+    assert "entrypoint-tool: vrcforge_inspect_outfit_package" in captured.skill_markdown
+    assert "  - vrcforge_inspect_outfit_package\n" in captured.skill_markdown
+    assert "  - vrcforge_scan_materials\n" in captured.skill_markdown
+
+
+def test_completed_runtime_capture_preserves_safe_entrypoint_without_inventing_proof() -> None:
+    captured = build_path_to_skill_source(
+        {
+            "schema": "vrcforge.operation_summary.v1",
+            "workflow": "captured_runtime_operation",
+            "status": "completed",
+            "steps": [
+                {
+                    "kind": "validation",
+                    "tool": "vrcforge_run_validation_report",
+                    "status": "passed",
+                }
+            ],
+        },
+        package_id="community.path-to-skill.completed-runtime",
+    )
+
+    assert captured.workflow["proofPassed"] is False
+    assert "entrypoint-tool: vrcforge_run_validation_report" in captured.skill_markdown
+
+
+def test_generic_entrypoint_skips_leading_health_for_real_captured_operation() -> None:
+    captured = build_path_to_skill_source(
+        {
+            "schema": "vrcforge.operation_summary.v1",
+            "workflow": "captured_runtime_operation",
+            "status": "completed",
+            "steps": [
+                {"kind": "read", "tool": "vrcforge_health", "status": "executed"},
+                {
+                    "kind": "validation",
+                    "tool": "vrcforge_build_test_readiness",
+                    "status": "passed",
+                },
+            ],
+        },
+        package_id="community.path-to-skill.health-readiness",
+    )
+
+    assert "entrypoint-tool: vrcforge_build_test_readiness" in captured.skill_markdown
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "vrcforge_status_missing",
+        "vrcforge_progress_update",
+        "vrcforge_ask_user",
+        "vrcforge_agent_desktop_action",
+        "vrcforge_execute_shell",
+    ],
+)
+def test_structured_operation_summary_rejects_tools_without_safe_replay_contract(tool: str) -> None:
+    with pytest.raises(PathToSkillValidationError):
+        build_path_to_skill_source(
+            {
+                "schema": "vrcforge.operation_summary.v1",
+                "workflow": "captured_runtime_operation",
+                "status": "completed",
+                "steps": [{"kind": "skill", "tool": tool, "status": "executed"}],
+            },
+            package_id="community.path-to-skill.rejected-structured-tool",
+        )
+
+
+def test_structured_operation_summary_rejects_out_of_recipe_and_duplicate_steps() -> None:
+    with pytest.raises(PathToSkillValidationError, match="outside the selected recipe"):
+        build_path_to_skill_source(
+            {
+                "schema": "vrcforge.operation_summary.v1",
+                "workflow": "booth_import_preflight",
+                "recipeType": "booth_import_preflight",
+                "status": "completed",
+                "steps": [
+                    {"kind": "read", "tool": "vrcforge_inspect_outfit_package", "status": "executed"},
+                    {"kind": "read", "tool": "vrcforge_scan_materials", "status": "completed"},
+                ],
+            },
+            package_id="community.path-to-skill.out-of-recipe",
+        )
+
+    with pytest.raises(PathToSkillValidationError, match="cannot replay repeated tools"):
+        build_path_to_skill_source(
+            {
+                "schema": "vrcforge.operation_summary.v1",
+                "workflow": "captured_runtime_operation",
+                "status": "completed",
+                "steps": [
+                    {"kind": "validation", "tool": "vrcforge_run_validation_report", "status": "passed"},
+                    {"kind": "validation", "tool": "vrcforge_run_validation_report", "status": "passed"},
+                ],
+            },
+            package_id="community.path-to-skill.duplicate-tool",
+        )
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        {"tool": "vrcforge_run_validation_report", "status": "passed"},
+        {
+            "kind": "shell",
+            "tool": "vrcforge_run_validation_report",
+            "status": "passed",
+        },
+        {
+            "kind": "validation",
+            "tool": "vrcforge_run_validation_report",
+            "status": "passed",
+            "privateArguments": {"projectPath": "C:/private"},
+        },
+    ],
+)
+def test_structured_operation_summary_requires_exact_portable_step_shape(step: dict[str, object]) -> None:
+    with pytest.raises(PathToSkillValidationError):
+        build_path_to_skill_source(
+            {
+                "schema": "vrcforge.operation_summary.v1",
+                "workflow": "captured_runtime_operation",
+                "status": "completed",
+                "steps": [step],
+            },
+            package_id="community.path-to-skill.invalid-step-shape",
         )
 
 

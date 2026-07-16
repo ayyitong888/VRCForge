@@ -1,7 +1,11 @@
-import { Archive, ChevronDown, ChevronRight, FileText, History, ListChecks } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, History, ListChecks } from "lucide-react";
 import type { ReactNode } from "react";
 import i18n from "../../i18n";
 import type { AgentRuntimeRun, WorkspaceDiffSummary } from "../../lib/api";
+import {
+  buildPathToSkillOperationSummary,
+  type PathToSkillOperationSummary,
+} from "../../lib/path-to-skill-context";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
 
@@ -67,9 +71,16 @@ export function RuntimeInfoRow({
 
 
 
-export function RuntimeRunRow({ run }: { run: AgentRuntimeRun }) {
+export function RuntimeRunRow({
+  run,
+  onSaveAsSkill,
+}: {
+  run: AgentRuntimeRun;
+  onSaveAsSkill?: (summary: PathToSkillOperationSummary) => void;
+}) {
   const status = String(run.status || run.lastEvent || "unknown");
   const title = run.messageSummary || run.targetTool || run.writeTool || run.skillTool || run.event || i18n.t("workspace.runLedgerItem");
+  const capturedSummary = onSaveAsSkill ? buildPathToSkillOperationSummary(run) : null;
   const provider = run.providerLabel || run.provider || "";
   const model = run.model || "";
   const metaParts = [
@@ -88,11 +99,25 @@ export function RuntimeRunRow({ run }: { run: AgentRuntimeRun }) {
         </div>
         <div className="truncate text-muted-foreground">{metaParts.join(" · ") || i18n.t("workspace.runLedgerItem")}</div>
       </div>
-      {run.approvalId || run.checkpointId || (run.approvalIds ?? []).length || (run.checkpointIds ?? []).length ? (
-        <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-          {run.checkpointId || (run.checkpointIds ?? [])[0] ? i18n.t("workspace.proofShort") : i18n.t("workspace.approvalShort")}
-        </span>
-      ) : null}
+      <span className="flex shrink-0 items-center gap-1">
+        {run.approvalId || run.checkpointId || (run.approvalIds ?? []).length || (run.checkpointIds ?? []).length ? (
+          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            {run.checkpointId || (run.checkpointIds ?? [])[0] ? i18n.t("workspace.proofShort") : i18n.t("workspace.approvalShort")}
+          </span>
+        ) : null}
+        {capturedSummary ? (
+          <button
+            type="button"
+            title={i18n.t("workspace.saveOperationAsSkill")}
+            aria-label={i18n.t("workspace.saveOperationAsSkill")}
+            data-vrcforge-save-operation-as-skill
+            className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+            onClick={() => onSaveAsSkill?.(capturedSummary)}
+          >
+            <FilePlus2 className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+      </span>
     </div>
   );
 }

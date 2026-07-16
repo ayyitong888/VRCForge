@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 import type { AgentDesktopAction, AgentGoal, AgentMemory, AgentProgress, AgentRuntimeRun, DesktopBridgeStatus, SubAgentTask, WorkspaceDiffSummary } from "../../lib/api";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
+import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { isAwaitingMergeReview, subAgentProposedNextAction } from "../../lib/subagent-merge";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -61,6 +62,7 @@ export function RightRuntimeSidebar({
   toggleRightRuntimeSection,
   refreshWorkspaceDiff,
   toggleWorkspaceDiffReview,
+  onSaveOperationAsSkill,
   inspectSubAgentTask,
   onCloseSelectedSubAgentPanel,
   onOpenSelectedSubAgentPanel,
@@ -118,6 +120,7 @@ export function RightRuntimeSidebar({
   toggleRightRuntimeSection: (section: string) => void;
   refreshWorkspaceDiff: () => void | Promise<void>;
   toggleWorkspaceDiffReview: () => void;
+  onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
   inspectSubAgentTask: (taskId: string) => void | Promise<void>;
   onCloseSelectedSubAgentPanel: () => void;
   onOpenSelectedSubAgentPanel: () => void;
@@ -293,7 +296,11 @@ export function RightRuntimeSidebar({
             ) : (
               <div className="space-y-0.5">
                 {runtimeRuns.slice(0, 3).map((run, index) => (
-                  <RuntimeRunRow key={run.id || run.turnId || run.clientTurnId || index} run={run} />
+                  <RuntimeRunRow
+                    key={run.id || run.turnId || run.clientTurnId || index}
+                    run={run}
+                    onSaveAsSkill={onSaveOperationAsSkill}
+                  />
                 ))}
                 {runtimeRuns.length > 3 ? (
                   <div className="px-1 pt-1 text-xs text-muted-foreground">{t("workspace.more", { count: formatCount(runtimeRuns.length - 3) })}</div>

@@ -88,6 +88,7 @@
     "approvalEvidenceMeta": "Approval {{status}}",
     "checkpointEvidence": "Checkpoint proof",
     "runEvidence": "Run evidence",
+    "saveOperationAsSkill": "Save operation as a skill",
     "gitDiffEvidence": "Git diff",
     "gitDiffEvidenceMeta": "{{count}} file(s), +{{additions}} -{{deletions}}",
     "proofShort": "proof",
@@ -899,7 +900,8 @@
       "exportPackage": "Export .vsk",
       "sourceWritten": "Sanitized skill source written",
       "packageExported": "Sanitized .vsk package exported",
-      "runtimeUnavailable": "VRCForge runtime is unavailable."
+      "runtimeUnavailable": "VRCForge runtime is unavailable.",
+      "prefilledFromRun": "From completed run"
     },
     "reason": "Reason",
     "disableSafeMode": "Disable Safe Mode",

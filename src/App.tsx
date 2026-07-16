@@ -417,7 +417,9 @@ export default function App() {
     loadingSkillPackages,
     skillPackageMessage,
     skillPackageError,
+    pathToSkillDraftSeed,
     openSkills,
+    openSkillsWithCapturedPath,
     loadSkillPackages,
     preflightVskPackage,
     importVskPackage,
@@ -2749,6 +2751,7 @@ export default function App() {
               packageError={skillPackageError}
               packageGovernance={skillPackageGovernance}
               packageAudit={skillPackageAudit}
+              pathToSkillDraftSeed={pathToSkillDraftSeed}
               onRefreshPackages={() => void loadSkillPackages()}
               onPreflightPackage={preflightVskPackage}
               onImportPackage={importVskPackage}
@@ -3046,6 +3049,7 @@ export default function App() {
               toggleRightRuntimeSection={toggleRightRuntimeSection}
               refreshWorkspaceDiff={refreshWorkspaceDiff}
               toggleWorkspaceDiffReview={toggleWorkspaceDiffReview}
+              onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
               inspectSubAgentTask={inspectSubAgentTask}
               onCloseSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(false)}
               onOpenSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(true)}

@@ -88,6 +88,7 @@
     "approvalEvidenceMeta": "审批 {{status}}",
     "checkpointEvidence": "检查点证据",
     "runEvidence": "运行证据",
+    "saveOperationAsSkill": "将此操作保存为技能",
     "gitDiffEvidence": "Git 差异",
     "gitDiffEvidenceMeta": "{{count}} 个文件，+{{additions}} -{{deletions}}",
     "proofShort": "证据",
@@ -899,7 +900,8 @@
       "exportPackage": "导出 .vsk",
       "sourceWritten": "已写入脱敏后的技能源码",
       "packageExported": "已导出脱敏后的 .vsk 包",
-      "runtimeUnavailable": "VRCForge 运行时不可用。"
+      "runtimeUnavailable": "VRCForge 运行时不可用。",
+      "prefilledFromRun": "来自已完成运行"
     },
     "reason": "Reason",
     "disableSafeMode": "Disable Safe Mode",

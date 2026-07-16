@@ -9,6 +9,7 @@ import type {
   SkillPackageEntry,
   SkillPackagePreflight,
 } from "../../lib/api";
+import type { PathToSkillDraftSeed } from "../../lib/path-to-skill-context";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -80,6 +81,7 @@ export function SkillsWorkspace({
   packageError,
   packageGovernance,
   packageAudit,
+  pathToSkillDraftSeed,
   onRefreshPackages,
   onPreflightPackage,
   onImportPackage,
@@ -112,6 +114,7 @@ export function SkillsWorkspace({
   packageError: string;
   packageGovernance: Record<string, unknown>;
   packageAudit: Array<Record<string, unknown>>;
+  pathToSkillDraftSeed: PathToSkillDraftSeed | null;
   onRefreshPackages: () => void;
   onPreflightPackage: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImportPackage: (packagePath: string) => Promise<unknown>;
@@ -508,6 +511,7 @@ export function SkillsWorkspace({
           error={packageError}
           governance={packageGovernance}
           audit={packageAudit}
+          pathToSkillDraftSeed={pathToSkillDraftSeed}
           onRefresh={onRefreshPackages}
           onPreflight={onPreflightPackage}
           onImport={onImportPackage}
