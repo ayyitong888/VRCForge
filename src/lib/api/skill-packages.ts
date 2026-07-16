@@ -3,6 +3,9 @@ import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 export type SkillPackageEntry = {
   id?: string;
   name?: string;
+  author?: string;
+  author_id?: string;
+  authorId?: string;
   title?: string;
   version?: string;
   source?: string;

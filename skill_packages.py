@@ -1291,6 +1291,10 @@ class SkillPackageService:
                 if (
                     manifest.get("id") != skill_id
                     or manifest.get("version") != version
+                    or (
+                        entry.get("author") is not None
+                        and manifest.get("author") != entry.get("author")
+                    )
                     or lock_sha256 != entry.get("lock_sha256")
                     or risk_level != entry.get("risk_level")
                     or list(manifest["permissions"]) != list(entry.get("permissions") or [])
@@ -1300,6 +1304,7 @@ class SkillPackageService:
                 matches.append(
                     {
                         "packageId": skill_id,
+                        "authorId": manifest["author"],
                         "packageVersion": version,
                         "packageSha256": package_sha256,
                         "lockSha256": lock_sha256,
@@ -1482,6 +1487,11 @@ class SkillPackageService:
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip() or len(name) > 160:
             raise PackageIntegrityError(f"{label} has an invalid name.")
+        author = entry.get("author")
+        if author is not None and (
+            not isinstance(author, str) or not author.strip() or len(author) > 160
+        ):
+            raise PackageIntegrityError(f"{label} has an invalid author identity.")
         try:
             _parse_semver(entry.get("version"), f"{label} version")
         except ManifestValidationError as exc:
@@ -2390,6 +2400,10 @@ class SkillPackageService:
             ):
                 if registry_entry.get(field) != installed_entry.get(field):
                     raise PackageIntegrityError(f"Registry and installed metadata disagree for {skill_id}: {field}.")
+            registry_author = registry_entry.get("author")
+            installed_author = installed_entry.get("author")
+            if registry_author is not None and installed_author is not None and registry_author != installed_author:
+                raise PackageIntegrityError(f"Registry and installed metadata disagree for {skill_id}: author.")
         entry = registry_entry or installed_entry
         return dict(entry) if entry is not None else None
 
@@ -2458,6 +2472,19 @@ class SkillPackageService:
         existing_signed = existing.get("signature_status") == "signed"
         incoming_fingerprint = incoming.signer_fingerprint
         existing_fingerprint = existing.get("signer_fingerprint")
+
+        incoming_author = str(incoming.manifest.get("author") or "").strip()
+        metadata_author = str(existing.get("author") or "").strip()
+        installed_manifest = self._read_current_manifest(
+            str(incoming.manifest["id"]),
+            str(existing.get("version") or ""),
+        )
+        manifest_author = str(installed_manifest.get("author") or "").strip()
+        if metadata_author and manifest_author and metadata_author != manifest_author:
+            raise PackageIntegrityError("Installed author identity metadata does not match its manifest.")
+        existing_author = manifest_author or metadata_author
+        if existing_author and incoming_author != existing_author:
+            raise PackageUpdateError("Author identity does not match the installed skill identity.")
 
         if existing_signed:
             if not incoming_signed:
@@ -2552,6 +2579,7 @@ class SkillPackageService:
             registry_entry = {
                 "id": skill_id,
                 "name": preview.manifest["name"],
+                "author": preview.manifest["author"],
                 "version": version,
                 "enabled": enabled,
                 "signer_fingerprint": preview.signer_fingerprint,
@@ -2581,6 +2609,7 @@ class SkillPackageService:
                 audit_event={
                     "event": "skill_package_imported",
                     "skill_id": skill_id,
+                    "author_id": preview.manifest["author"],
                     "version": version,
                     "source": source or str(preview.package_path),
                     "signature_status": preview.signature_status,

@@ -33,6 +33,8 @@ const fakeUnityCliPath = resolve(evidenceRoot, "fixtures", "fake-unity-cli.ps1")
 const ephemeralSigningKeyPath = resolve(evidenceRoot, "ephemeral-ed25519-private.pem");
 const reportPath = resolve(evidenceRoot, "report.json");
 const processStartEventsPath = resolve(evidenceRoot, "process-start-events.jsonl");
+const zipSlipOutsideName = `vrcforge-${marker.toLowerCase()}-outside.txt`;
+const zipSlipOutsidePath = resolve(process.env.TEMP || evidenceRoot, zipSlipOutsideName);
 const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 const agentGatewayToken = randomBytes(32).toString("base64url");
@@ -46,6 +48,9 @@ const requiredPackageIds = [
   "community.examples.outfit-naming-helper",
   "community.examples.optimizer-report-helper",
 ];
+const apkSemanticPackageId = "community.apk-semantic-probe";
+const apkSemanticSkillName = "apk-semantic-probe";
+const apkSemanticAuthorId = "VRCForge User";
 const requiredPackageSkillNames = new Map([
   ["community.examples.validation-report-extension", "validation-report-extension"],
   ["community.examples.material-preset-pack", "material-preset-pack"],
@@ -219,6 +224,7 @@ let processTrackingTimer;
 let processSnapshotInFlight;
 let processTrackingErrorCount = 0;
 let processStartWatcherVerified = false;
+let processStartWatcherMode = "";
 let processStartWatcherSettleVerified = false;
 let processStartWatcherSettleMs = 0;
 let packageFilesystemBaseline;
@@ -397,6 +403,108 @@ with zipfile.ZipFile(archive_path) as archive:
 print(json.dumps(result, separators=(",", ":")))
 `;
   return runPythonJson(code, [archivePath, JSON.stringify(expectedPayloadNames)]);
+}
+
+async function inspectSignedVskArchive(archivePath) {
+  const code = String.raw`
+import base64
+import hashlib
+import json
+import re
+import stat
+import sys
+import zipfile
+from pathlib import PurePosixPath
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+path = sys.argv[1]
+reserved = {"skill.lock.json", "skill.sig", "author.pub"}
+canonical = lambda value: json.dumps(
+    value,
+    sort_keys=True,
+    separators=(",", ":"),
+    ensure_ascii=False,
+).encode("utf-8")
+result = {"ok": False, "checks": {}}
+try:
+    archive_bytes = open(path, "rb").read()
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        collision_keys = set()
+        safe = True
+        regular = True
+        for info in infos:
+            name = info.filename
+            canonical_name = PurePosixPath(name).as_posix()
+            parts = PurePosixPath(name).parts
+            collision = name.casefold()
+            if (
+                not name
+                or info.is_dir()
+                or "\\" in name
+                or name.startswith("/")
+                or re.match(r"^[A-Za-z]:", name)
+                or canonical_name != name
+                or any(part in {"", ".", ".."} for part in parts)
+                or collision in collision_keys
+            ):
+                safe = False
+            collision_keys.add(collision)
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_IFMT(mode) not in {0, stat.S_IFREG}:
+                regular = False
+        entries = {name: archive.read(name) for name in names}
+    required = {"manifest.json", "skill.lock.json", "skill.sig", "author.pub"}
+    manifest = json.loads(entries["manifest.json"])
+    lock = json.loads(entries["skill.lock.json"])
+    payload = {name: data for name, data in entries.items() if name not in reserved}
+    payload_hashes = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in sorted(payload.items())
+    }
+    public_key = base64.b64decode(entries["author.pub"], validate=True)
+    signature = base64.b64decode(entries["skill.sig"], validate=True)
+    Ed25519PublicKey.from_public_bytes(public_key).verify(signature, entries["skill.lock.json"])
+    checks = {
+        "archivePathSafetyVerified": safe,
+        "archiveEntriesRegular": regular,
+        "archiveEntrySetVerified": set(entries) == set(payload) | reserved and required.issubset(entries),
+        "manifestCanonical": entries["manifest.json"] == canonical(manifest),
+        "lockCanonical": entries["skill.lock.json"] == canonical(lock),
+        "releaseMode": lock.get("package_mode") == "release",
+        "lockExactPayload": lock.get("files") == payload_hashes,
+        "lockIncludesCanonicalManifest": lock.get("files", {}).get("manifest.json")
+            == hashlib.sha256(canonical(manifest)).hexdigest(),
+        "payloadDigestsVerified": all(
+            lock.get("files", {}).get(name) == hashlib.sha256(data).hexdigest()
+            for name, data in payload.items()
+        ),
+        "signatureVerified": True,
+        "privateKeyMaterialAbsent": all(
+            b"-----BEGIN PRIVATE KEY-----" not in data
+            and b"-----BEGIN OPENSSH PRIVATE KEY-----" not in data
+            for data in entries.values()
+        ),
+    }
+    result = {
+        "ok": all(checks.values()),
+        "manifest": manifest,
+        "archiveSha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "lockSha256": hashlib.sha256(entries["skill.lock.json"]).hexdigest(),
+        "payloadSetSha256": hashlib.sha256(canonical(payload_hashes)).hexdigest(),
+        "publicKeyBase64": base64.b64encode(public_key).decode("ascii"),
+        "signerFingerprint": hashlib.sha256(public_key).hexdigest(),
+        "checks": checks,
+    }
+except Exception as exc:
+    result["errorType"] = type(exc).__name__
+print(json.dumps(result, separators=(",", ":")))
+`;
+  return runPythonJson(code, [archivePath], {
+    timeoutMs: 120000,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
 }
 
 async function gitWorktreeIsClean() {
@@ -1355,6 +1463,29 @@ async function releaseExecutableLaunchLock(lock) {
   await processSnapshot();
 }
 
+function executableLaunchLockReadiness(ready, expectedSha256, childExitCode) {
+  const sha256 = String(ready?.sha256 || "").toLowerCase();
+  const expected = String(expectedSha256 || "").toLowerCase();
+  const watcherMode = String(ready?.processStartWatcherMode || "");
+  const settleWindowMs = Number(ready?.settleWindowMs || 0);
+  if (ready?.ok !== true) {
+    return { ok: false, reason: "watcher-failed", sha256, watcherMode, settleWindowMs };
+  }
+  if (!/^[0-9a-f]{64}$/.test(expected) || sha256 !== expected) {
+    return { ok: false, reason: "digest-mismatch", sha256, watcherMode, settleWindowMs };
+  }
+  if (
+    ready?.processStartWatcher !== true
+    || watcherMode !== "wmi-instance-creation-poll-100ms"
+    || !Number.isInteger(settleWindowMs)
+    || settleWindowMs < 5000
+    || childExitCode !== null
+  ) {
+    return { ok: false, reason: "watcher-not-ready", sha256, watcherMode, settleWindowMs };
+  }
+  return { ok: true, reason: "", sha256, watcherMode, settleWindowMs };
+}
+
 async function acquireExecutableLaunchLock(expectedSha256) {
   const readyPath = resolve(evidenceRoot, "executable-launch-lock.ready.json");
   const releasePath = resolve(evidenceRoot, "executable-launch-lock.release");
@@ -1376,14 +1507,13 @@ $sourceIdentifier = "VRCForgeProbeProcessStart_$PID"
 $sequence = 0
 function Write-ProcessStartEvent([object]$eventRecord) {
   $script:sequence += 1
-  $started = $eventRecord.SourceEventArgs.NewEvent
-  $identity = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$started.ProcessID)" -ErrorAction SilentlyContinue
+  $started = $eventRecord.SourceEventArgs.NewEvent.TargetInstance
   $row = [pscustomobject]@{
     sequence = $script:sequence
     processId = [int]$started.ProcessID
     parentProcessId = [int]$started.ParentProcessID
-    processName = [string]$started.ProcessName
-    creationDate = if ($identity) { [string]$identity.CreationDate } else { '' }
+    processName = [string]$started.Name
+    creationDate = [string]$started.CreationDate
     observedAt = [DateTime]::UtcNow.ToString('o')
   }
   [System.IO.File]::AppendAllText(
@@ -1408,7 +1538,13 @@ try {
     } finally {
       $sha.Dispose()
     }
-    $subscription = Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier $sourceIdentifier
+    # Win32_ProcessStartTrace requires elevated WMI trace access on some normal
+    # desktop sessions. The polling creation indication exposes the same
+    # process identity fields without that elevation requirement. Keep the
+    # executable stream open while this watcher is active so the digest-bound
+    # launch target cannot be replaced between verification and spawn.
+    $watcherQuery = "SELECT * FROM __InstanceCreationEvent WITHIN 0.1 WHERE TargetInstance ISA 'Win32_Process'"
+    Register-WmiEvent -Query $watcherQuery -SourceIdentifier $sourceIdentifier | Out-Null
     try {
       [System.IO.File]::WriteAllText($eventsPath, '', [System.Text.UTF8Encoding]::new($false))
       $payload = [pscustomobject]@{
@@ -1416,6 +1552,7 @@ try {
         sha256 = $hash
         helperPid = $PID
         processStartWatcher = $true
+        processStartWatcherMode = 'wmi-instance-creation-poll-100ms'
         settleWindowMs = $settleWindowMs
       }
       [System.IO.File]::WriteAllText($readyPath, ($payload | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
@@ -1436,7 +1573,7 @@ try {
     } finally {
       Unregister-Event -SourceIdentifier $sourceIdentifier -ErrorAction SilentlyContinue
       Get-Event -SourceIdentifier $sourceIdentifier -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
-      if ($subscription) { Remove-Job -Job $subscription -Force -ErrorAction SilentlyContinue }
+      Get-Job -Name $sourceIdentifier -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
     }
   } finally {
     $stream.Dispose()
@@ -1473,23 +1610,27 @@ try {
     sha256: "",
     verified: false,
     processStartWatcher: false,
+    processStartWatcherMode: "",
     settleWindowMs: 0,
     settleVerified: false,
   };
   try {
     const ready = await waitForFileJson(readyPath, child);
-    lock.sha256 = String(ready?.sha256 || "").toLowerCase();
+    const readiness = executableLaunchLockReadiness(ready, expectedSha256, child.exitCode);
+    lock.sha256 = readiness.sha256;
     lock.processStartWatcher = ready?.processStartWatcher === true;
-    lock.settleWindowMs = Number(ready?.settleWindowMs || 0);
-    lock.verified = ready?.ok === true
-      && lock.processStartWatcher
-      && Number.isInteger(lock.settleWindowMs)
-      && lock.settleWindowMs >= 5000
-      && /^[0-9a-f]{64}$/.test(lock.sha256)
-      && lock.sha256 === String(expectedSha256 || "").toLowerCase()
-      && child.exitCode === null;
-    if (!lock.verified) throw new Error("Executable launch lock did not bind the manifest executable digest.");
+    lock.processStartWatcherMode = readiness.watcherMode;
+    lock.settleWindowMs = readiness.settleWindowMs;
+    if (readiness.reason === "watcher-failed") {
+      throw new Error(`Executable launch lock watcher failed before readiness (${String(ready?.errorType || "unknown")}).`);
+    }
+    if (readiness.reason === "digest-mismatch") {
+      throw new Error("Executable launch lock did not bind the manifest executable digest.");
+    }
+    lock.verified = readiness.ok;
+    if (!lock.verified) throw new Error("Executable launch lock process watcher did not remain ready.");
     processStartWatcherVerified = true;
+    processStartWatcherMode = lock.processStartWatcherMode;
     return lock;
   } catch (error) {
     await releaseExecutableLaunchLock(lock).catch(() => {});
@@ -1958,14 +2099,21 @@ async function buildSignedExamplePackages(sourceVersion, fixtureSource) {
   const fixtureSourceRoot = fixtureSource.root;
   const builderStore = resolve(packageFixtureRoot, ".builder-store");
   const builderCode = String.raw`
+import base64
+import io
 import json
 import hashlib
+import shutil
 import subprocess
 import sys
+import warnings
 import zipfile
 from pathlib import Path
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from skill_packages import (
     LOCK_NAME,
+    MANIFEST_NAME,
     PUBLIC_KEY_NAME,
     SIGNATURE_NAME,
     SkillPackageService,
@@ -1979,11 +2127,96 @@ version = sys.argv[4]
 slugs = json.loads(sys.argv[5])
 source_repo = Path(sys.argv[6]).resolve()
 source_commit = sys.argv[7]
+zip_slip_outside_name = sys.argv[8]
+if Path(zip_slip_outside_name).name != zip_slip_outside_name:
+    raise RuntimeError("Zip-slip fixture outside name must be one basename")
 output.mkdir(parents=True, exist_ok=True)
 service = SkillPackageService(output / ".builder-store", vrcforge_version=version)
 pair = service.generate_signing_keypair()
+wrong_pair = service.generate_signing_keypair()
 service.save_signing_keypair(pair, key_path)
 packages = []
+reserved = {LOCK_NAME, SIGNATURE_NAME, PUBLIC_KEY_NAME}
+
+def archive_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def write_archive(path, entries, duplicate_name=None):
+    path = Path(path)
+    with zipfile.ZipFile(path, "w", allowZip64=False) as archive:
+        for name, data in sorted(entries.items()):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = (0o100644 << 16)
+            archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+        if duplicate_name:
+            info = zipfile.ZipInfo(duplicate_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = (0o100644 << 16)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                archive.writestr(
+                    info,
+                    entries[duplicate_name],
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+
+def read_archive(path):
+    with zipfile.ZipFile(path, "r") as archive:
+        return {info.filename: archive.read(info) for info in archive.infolist() if not info.is_dir()}
+
+def verify_signed_archive(path):
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        names = [info.filename for info in infos]
+        if len(names) != len(set(names)):
+            raise RuntimeError(f"Duplicate signed archive entry in {Path(path).name}")
+        entries = {name: archive.read(name) for name in names}
+    if not {MANIFEST_NAME, LOCK_NAME, SIGNATURE_NAME, PUBLIC_KEY_NAME}.issubset(entries):
+        raise RuntimeError(f"Signed archive metadata is incomplete: {Path(path).name}")
+    manifest = json.loads(entries[MANIFEST_NAME])
+    lock = json.loads(entries[LOCK_NAME])
+    payload = {name: data for name, data in entries.items() if name not in reserved}
+    payload_hashes = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in sorted(payload.items())
+    }
+    public_key = base64.b64decode(entries[PUBLIC_KEY_NAME], validate=True)
+    signature = base64.b64decode(entries[SIGNATURE_NAME], validate=True)
+    Ed25519PublicKey.from_public_bytes(public_key).verify(signature, entries[LOCK_NAME])
+    checks = {
+        "archiveEntrySetVerified": set(entries) == set(payload) | reserved,
+        "manifestCanonical": entries[MANIFEST_NAME] == canonical_json_bytes(manifest),
+        "lockCanonical": entries[LOCK_NAME] == canonical_json_bytes(lock),
+        "lockExactPayload": lock.get("files") == payload_hashes,
+        "lockIncludesCanonicalManifest": lock.get("files", {}).get(MANIFEST_NAME)
+            == hashlib.sha256(canonical_json_bytes(manifest)).hexdigest(),
+        "payloadDigestsVerified": all(
+            lock.get("files", {}).get(name) == hashlib.sha256(data).hexdigest()
+            for name, data in payload.items()
+        ),
+        "signatureVerified": True,
+        "privateKeyMaterialAbsent": all(
+            pair.private_key_pem not in data
+            and wrong_pair.private_key_pem not in data
+            and b"-----BEGIN PRIVATE KEY-----" not in data
+            for data in entries.values()
+        ),
+        "publicKeyFingerprintVerified": hashlib.sha256(public_key).hexdigest(),
+    }
+    if not all(value is True for key, value in checks.items() if key != "publicKeyFingerprintVerified"):
+        raise RuntimeError(f"Signed archive coverage verification failed: {Path(path).name}")
+    return {
+        "name": Path(path).name,
+        "archiveSha256": archive_sha256(path),
+        "lockSha256": hashlib.sha256(entries[LOCK_NAME]).hexdigest(),
+        "payloadSetSha256": hashlib.sha256(canonical_json_bytes(payload_hashes)).hexdigest(),
+        "publicKeyBase64": base64.b64encode(public_key).decode("ascii"),
+        "signerFingerprint": hashlib.sha256(public_key).hexdigest(),
+        "manifest": manifest,
+        "checks": checks,
+    }
 
 def expected_payload(slug):
     prefix = f"examples/skill-packages/{slug}/"
@@ -2027,7 +2260,6 @@ def expected_payload(slug):
     return payload
 
 def verify_exported_payload(package_path, expected):
-    reserved = {LOCK_NAME, SIGNATURE_NAME, PUBLIC_KEY_NAME}
     with zipfile.ZipFile(package_path, "r") as archive:
         names = [info.filename for info in archive.infolist() if not info.is_dir()]
         if len(names) != len(set(names)):
@@ -2051,31 +2283,251 @@ def verify_exported_payload(package_path, expected):
         "sourceFileSha256": expected_hashes,
     }
 
-try:
-    for slug in slugs:
-        expected = expected_payload(slug)
-        result = service.export_release(
-            repo / "examples" / "skill-packages" / slug,
-            output / f"{slug}.vsk",
-            key_path,
-            overwrite=False,
-        )
-        packages.append({
-            "slug": slug,
-            "id": result.manifest["id"],
-            "version": result.manifest["version"],
-            "signatureStatus": result.signature_status,
-            "signerFingerprint": result.signer_fingerprint,
-            "lockSha256": result.lock_sha256,
-            "fileCount": result.file_count,
-            **verify_exported_payload(result.package_path, expected),
-        })
-finally:
-    key_path.unlink(missing_ok=True)
-print(json.dumps({"fingerprint": pair.fingerprint, "packages": packages}, separators=(",", ":")))
+for slug in slugs:
+    expected = expected_payload(slug)
+    result = service.export_release(
+        repo / "examples" / "skill-packages" / slug,
+        output / f"{slug}.vsk",
+        pair.private_key_pem,
+        overwrite=False,
+    )
+    packages.append({
+        "slug": slug,
+        "id": result.manifest["id"],
+        "version": result.manifest["version"],
+        "signatureStatus": result.signature_status,
+        "signerFingerprint": result.signer_fingerprint,
+        "lockSha256": result.lock_sha256,
+        "fileCount": result.file_count,
+        **verify_exported_payload(result.package_path, expected),
+    })
+
+matrix_root = output / ".builder-store" / "apk-semantic-source"
+matrix_id = "community.apk-semantic-probe"
+matrix_skill_name = "apk-semantic-probe"
+matrix_author = "VRCForge User"
+
+def matrix_manifest(*, package_id=matrix_id, package_version="1.0.0", author=matrix_author):
+    return {
+        "id": package_id,
+        "name": "APK Semantic VSK Probe",
+        "skill_name": matrix_skill_name,
+        "version": package_version,
+        "author": author,
+        "description": "Ephemeral packaged acceptance fixture for immutable signed VSK updates.",
+        "min_vrcforge_version": version,
+        "permissions": ["read_project"],
+        "entrypoints": {"skill": "SKILL.md"},
+    }
+
+def matrix_skill_text(revision):
+    return (
+        "---\n"
+        f"name: {matrix_skill_name}\n"
+        "title: APK Semantic VSK Probe\n"
+        "description: Read-only packaged update identity fixture.\n"
+        "permission-mode: read_only\n"
+        "risk-level: low\n"
+        "allowed-tools:\n"
+        "  - vrcforge_health\n"
+        "---\n\n"
+        f"Immutable signed package revision {revision}. Read health only; never write.\n"
+    )
+
+def write_matrix_source(manifest, revision):
+    shutil.rmtree(matrix_root, ignore_errors=True)
+    matrix_root.mkdir(parents=True, exist_ok=False)
+    (matrix_root / MANIFEST_NAME).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (matrix_root / "SKILL.md").write_text(matrix_skill_text(revision), encoding="utf-8")
+    return hashlib.sha256(canonical_json_bytes({
+        MANIFEST_NAME: hashlib.sha256(canonical_json_bytes(manifest)).hexdigest(),
+        "SKILL.md": hashlib.sha256(matrix_skill_text(revision).encode("utf-8")).hexdigest(),
+    })).hexdigest()
+
+def export_matrix(name, *, package_version, revision, author=matrix_author, package_id=matrix_id, key_pair=pair):
+    manifest = matrix_manifest(package_id=package_id, package_version=package_version, author=author)
+    source_digest = write_matrix_source(manifest, revision)
+    result = service.export_release(
+        matrix_root,
+        output / name,
+        key_pair.private_key_pem,
+        overwrite=False,
+    )
+    verified = verify_signed_archive(result.package_path)
+    verified["sourceDigest"] = source_digest
+    return verified
+
+fixture_base = export_matrix(
+    "apk-semantic-builder-base-template.vsk",
+    package_version="1.0.0",
+    revision="base-1.0.0",
+)
+update = export_matrix(
+    "apk-semantic-update.vsk",
+    package_version="1.1.0",
+    revision="update-1.1.0",
+)
+wrong_author = export_matrix(
+    "apk-semantic-wrong-author.vsk",
+    package_version="1.2.0",
+    revision="wrong-author-1.2.0",
+    author="Different Packaged Probe Author",
+)
+wrong_signer = export_matrix(
+    "apk-semantic-wrong-signer.vsk",
+    package_version="1.2.0",
+    revision="wrong-signer-1.2.0",
+    key_pair=wrong_pair,
+)
+downgrade = export_matrix(
+    "apk-semantic-downgrade.vsk",
+    package_version="0.9.0",
+    revision="downgrade-0.9.0",
+)
+same_version_different = export_matrix(
+    "apk-semantic-same-version-different.vsk",
+    package_version="1.0.0",
+    revision="different-content-1.0.0",
+)
+different_id = export_matrix(
+    "apk-semantic-distinct-id.vsk",
+    package_version="1.2.0",
+    revision="distinct-package-id-1.2.0",
+    package_id="community.apk-semantic-probe-other",
+)
+
+base_entries = read_archive(output / fixture_base["name"])
+update_entries = read_archive(output / update["name"])
+
+def mutated_archive(name, entries, *, expected_error_token):
+    path = output / name
+    write_archive(path, entries)
+    return {
+        "name": name,
+        "archiveSha256": archive_sha256(path),
+        "expectedErrorToken": expected_error_token,
+    }
+
+payload_tamper_entries = dict(base_entries)
+payload_tamper_entries["SKILL.md"] += b"\nTampered after signing.\n"
+payload_tamper = mutated_archive(
+    "apk-semantic-payload-tamper.vsk",
+    payload_tamper_entries,
+    expected_error_token="SHA-256 mismatch for SKILL.md",
+)
+
+manifest_tamper_entries = dict(base_entries)
+tampered_manifest = json.loads(manifest_tamper_entries[MANIFEST_NAME])
+tampered_manifest["author"] = "Tampered Unsigned Author"
+manifest_tamper_entries[MANIFEST_NAME] = canonical_json_bytes(tampered_manifest)
+manifest_tamper = mutated_archive(
+    "apk-semantic-manifest-tamper.vsk",
+    manifest_tamper_entries,
+    expected_error_token="SHA-256 mismatch for manifest.json",
+)
+
+wrong_public_key_entries = dict(base_entries)
+wrong_public_key_entries[PUBLIC_KEY_NAME] = base64.b64encode(wrong_pair.public_key)
+wrong_public_key = mutated_archive(
+    "apk-semantic-wrong-public-key.vsk",
+    wrong_public_key_entries,
+    expected_error_token="Ed25519 signature verification failed",
+)
+
+invalid_signature_entries = dict(base_entries)
+invalid_signature = bytearray(base64.b64decode(invalid_signature_entries[SIGNATURE_NAME], validate=True))
+invalid_signature[0] ^= 1
+invalid_signature_entries[SIGNATURE_NAME] = base64.b64encode(bytes(invalid_signature))
+invalid_signature_package = mutated_archive(
+    "apk-semantic-invalid-signature.vsk",
+    invalid_signature_entries,
+    expected_error_token="Ed25519 signature verification failed",
+)
+
+zip_slip_entries = dict(base_entries)
+zip_slip_entries[f"../{zip_slip_outside_name}"] = b"must never extract"
+zip_slip = mutated_archive(
+    "apk-semantic-zip-slip.vsk",
+    zip_slip_entries,
+    expected_error_token="Traversal is not allowed",
+)
+
+duplicate_path = output / "apk-semantic-duplicate-path.vsk"
+write_archive(duplicate_path, base_entries, duplicate_name="SKILL.md")
+duplicate = {
+    "name": duplicate_path.name,
+    "archiveSha256": archive_sha256(duplicate_path),
+    "expectedErrorToken": "Duplicate archive member",
+}
+
+signing_key = serialization.load_pem_private_key(pair.private_key_pem, password=None)
+
+def signed_invalid_manifest(name, mutate, expected_error_token):
+    entries = dict(update_entries)
+    manifest = json.loads(entries[MANIFEST_NAME])
+    mutate(manifest)
+    entries[MANIFEST_NAME] = canonical_json_bytes(manifest)
+    lock = json.loads(entries[LOCK_NAME])
+    lock["files"][MANIFEST_NAME] = hashlib.sha256(entries[MANIFEST_NAME]).hexdigest()
+    entries[LOCK_NAME] = canonical_json_bytes(lock)
+    entries[SIGNATURE_NAME] = base64.b64encode(signing_key.sign(entries[LOCK_NAME]))
+    return mutated_archive(name, entries, expected_error_token=expected_error_token)
+
+invalid_semver = signed_invalid_manifest(
+    "apk-semantic-invalid-semver.vsk",
+    lambda manifest: manifest.__setitem__("version", "not-semver"),
+    "version must be a valid semantic version",
+)
+invalid_package_id = signed_invalid_manifest(
+    "apk-semantic-invalid-package-id.vsk",
+    lambda manifest: manifest.__setitem__("id", "Invalid Package ID"),
+    "id must be a lowercase reverse-domain style identifier",
+)
+(output / fixture_base["name"]).unlink(missing_ok=True)
+
+print(json.dumps({
+    "fingerprint": pair.fingerprint,
+    "publicKeyBase64": base64.b64encode(pair.public_key).decode("ascii"),
+    "wrongSignerFingerprint": wrong_pair.fingerprint,
+    "privateKeyFileBacked": True,
+    "privateKeyMaterialReturned": False,
+    "packages": packages,
+    "apkSemantic": {
+        "id": matrix_id,
+        "skillName": matrix_skill_name,
+        "authorId": matrix_author,
+        "baseVersion": "1.0.0",
+        "updateVersion": "1.1.0",
+        "base": {"name": "apk-semantic-packaged-export.vsk"},
+        "update": update,
+        "differentId": different_id,
+        "negatives": {
+            "payloadTamper": payload_tamper,
+            "manifestTamper": manifest_tamper,
+            "wrongPublicKey": wrong_public_key,
+            "invalidSignature": invalid_signature_package,
+            "wrongAuthor": {**wrong_author, "expectedErrorToken": "Author identity"},
+            "wrongSigner": {**wrong_signer, "expectedErrorToken": "Signer fingerprint"},
+            "downgrade": {**downgrade, "expectedErrorToken": "downgrade"},
+            "sameVersionDifferentContent": {
+                **same_version_different,
+                "expectedErrorToken": "published skill version is immutable",
+            },
+            "invalidSemver": invalid_semver,
+            "invalidPackageId": invalid_package_id,
+            "zipSlip": zip_slip,
+            "duplicatePath": duplicate,
+        },
+        "zipSlipOutsideName": zip_slip_outside_name,
+    },
+}, separators=(",", ":")))
 `;
   let built;
   let privateKeyDeleted = false;
+  let privateKeyReady = false;
   let builderStoreDeleted = false;
   const strictFixtureCommit = fixtureSource.mode === "immutable-git-object-snapshot"
     ? fixtureSource.commit
@@ -2095,6 +2547,7 @@ print(json.dumps({"fingerprint": pair.fingerprint, "packages": packages}, separa
         JSON.stringify(exampleSlugs),
         repoRoot,
         strictFixtureCommit,
+        zipSlipOutsideName,
       ],
       {
         timeoutMs: 120000,
@@ -2102,14 +2555,11 @@ print(json.dumps({"fingerprint": pair.fingerprint, "packages": packages}, separa
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
       },
     );
-  } finally {
+  } catch (error) {
     await unlink(ephemeralSigningKeyPath).catch(() => {});
+    throw error;
+  } finally {
     await rm(builderStore, { recursive: true, force: true }).catch(() => {});
-    try {
-      await stat(ephemeralSigningKeyPath);
-    } catch (error) {
-      privateKeyDeleted = error?.code === "ENOENT";
-    }
     builderStoreDeleted = !(await pathExists(builderStore));
   }
   if (!built) throw new Error("Signed example builder did not return a result.");
@@ -2118,8 +2568,10 @@ print(json.dumps({"fingerprint": pair.fingerprint, "packages": packages}, separa
     throw new Error("Fixture source changed during signed package export.");
   }
   const bySlug = new Map((built.packages || []).map((item) => [String(item.slug), item]));
-  if (privateKeyDeleted !== true) {
-    throw new Error("Ephemeral signing private key was not deleted after package creation.");
+  privateKeyReady = await pathExists(ephemeralSigningKeyPath);
+  privateKeyDeleted = !privateKeyReady;
+  if (!privateKeyReady) {
+    throw new Error("Controlled ephemeral signing private key was unavailable for packaged export.");
   }
   if (builderStoreDeleted !== true) {
     throw new Error("Ephemeral signed-package builder store was not deleted after package creation.");
@@ -2133,12 +2585,68 @@ print(json.dumps({"fingerprint": pair.fingerprint, "packages": packages}, separa
   if ([...bySlug.values()].some((item) => item?.sourceVerified !== true)) {
     throw new Error("Signed example package bytes were not proven against their bound source payloads.");
   }
+  const publicKeyBytes = Buffer.from(String(built.publicKeyBase64 || ""), "base64");
+  if (
+    publicKeyBytes.length !== 32
+    || createHash("sha256").update(publicKeyBytes).digest("hex") !== String(built.fingerprint || "").toLowerCase()
+    || built.privateKeyFileBacked !== true
+    || built.privateKeyMaterialReturned !== false
+  ) {
+    throw new Error("Ephemeral Ed25519 author identity metadata was incomplete or private-key handling was unsafe.");
+  }
+  const matrix = built.apkSemantic && typeof built.apkSemantic === "object" ? built.apkSemantic : {};
+  if (
+    matrix.id !== apkSemanticPackageId
+    || matrix.skillName !== apkSemanticSkillName
+    || matrix.authorId !== apkSemanticAuthorId
+    || matrix.baseVersion !== "1.0.0"
+    || matrix.updateVersion !== "1.1.0"
+  ) {
+    throw new Error("APK-semantic VSK fixture identity/version metadata was incomplete.");
+  }
+  const materializeBuiltPath = (item) => {
+    const name = String(item?.name || "");
+    if (!name || basename(name) !== name || !name.toLowerCase().endsWith(".vsk")) {
+      throw new Error("APK-semantic builder returned an unsafe package basename.");
+    }
+    return { ...item, path: resolve(packageFixtureRoot, name) };
+  };
+  const apkSemantic = {
+    ...matrix,
+    publicKeyBase64: String(built.publicKeyBase64 || ""),
+    signerFingerprint: String(built.fingerprint || "").toLowerCase(),
+    wrongSignerFingerprint: String(built.wrongSignerFingerprint || "").toLowerCase(),
+    privateKeyFileBacked: built.privateKeyFileBacked === true,
+    privateKeyMaterialReturned: built.privateKeyMaterialReturned === true,
+    base: materializeBuiltPath(matrix.base),
+    update: materializeBuiltPath(matrix.update),
+    differentId: materializeBuiltPath(matrix.differentId),
+    negatives: Object.fromEntries(Object.entries(matrix.negatives || {}).map(([key, item]) => [
+      key,
+      materializeBuiltPath(item),
+    ])),
+  };
+  const builderMatrixPackageItems = [
+    apkSemantic.update,
+    apkSemantic.differentId,
+    ...Object.values(apkSemantic.negatives),
+  ];
+  if (
+    builderMatrixPackageItems.length !== 14
+    || new Set(builderMatrixPackageItems.map((item) => item.path)).size !== builderMatrixPackageItems.length
+    || !(await Promise.all(builderMatrixPackageItems.map((item) => pathExists(item.path)))).every(Boolean)
+    || await pathExists(apkSemantic.base.path)
+  ) {
+    throw new Error("APK-semantic VSK fixture set was incomplete or contained duplicate output paths.");
+  }
   return {
     fingerprint: String(built.fingerprint || "").toLowerCase(),
     privateKeyDeleted,
+    privateKeyReady,
     builderStoreDeleted,
     sourceDigestVerified: true,
     sourcePackageBytesVerified: true,
+    apkSemantic,
     packages: exampleSlugs.map((slug) => ({
       ...bySlug.get(slug),
       path: resolve(packageFixtureRoot, `${slug}.vsk`),
@@ -2633,6 +3141,648 @@ async function runPackageLifecycle(report, cdp, signed) {
     }
   }
   return records;
+}
+
+function sha256Json(value) {
+  return createHash("sha256").update(Buffer.from(JSON.stringify(value), "utf8")).digest("hex");
+}
+
+async function vskTemporaryDirectories() {
+  const tempRoot = String(process.env.TEMP || "");
+  if (!tempRoot) return [];
+  try {
+    const entries = await readdir(tempRoot, { withFileTypes: true });
+    return entries
+      .filter((item) => item.isDirectory() && item.name.startsWith("vrcforge-vsk-"))
+      .map((item) => item.name)
+      .sort();
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function installedPackageIds(payload) {
+  return (payload?.installed || [])
+    .map((item) => String(item?.id || item?.manifest?.id || ""))
+    .filter(Boolean)
+    .sort();
+}
+
+async function apkSemanticInstalledState(cdp) {
+  const [rest, tauri, skills, packageTree, projectedTree] = await Promise.all([
+    appApi("/api/app/skill-packages"),
+    tauriInvoke(cdp, "fetch_skill_packages", {}),
+    agentApi("/api/agent/skills"),
+    filesystemTreeSnapshot(
+      resolve(userDataRoot, "skill-packages", apkSemanticPackageId),
+      "apk-semantic-package",
+    ),
+    filesystemTreeSnapshot(
+      resolve(userDataRoot, "skills", apkSemanticSkillName),
+      "apk-semantic-projection",
+    ),
+  ]);
+  const restIds = installedPackageIds(rest);
+  const tauriIds = installedPackageIds(tauri);
+  const projected = (skills?.skills || []).some((item) => String(item?.name || "") === apkSemanticSkillName);
+  const registryEntry = rest?.registry?.skills?.[apkSemanticPackageId] || null;
+  let installedDocument = null;
+  try {
+    installedDocument = JSON.parse(await readFile(
+      resolve(userDataRoot, "skill-packages", apkSemanticPackageId, "installed.json"),
+      "utf8",
+    ));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const state = {
+    restInstalled: restIds.includes(apkSemanticPackageId),
+    tauriInstalled: tauriIds.includes(apkSemanticPackageId),
+    projected,
+    registryEntry,
+    installedDocument,
+    packageTree,
+    projectedTree,
+  };
+  return { ...state, digest: sha256Json(state) };
+}
+
+async function readApkSemanticProvenance(cdp, expectedPackage, expectedVersions) {
+  const state = await apkSemanticInstalledState(cdp);
+  const registry = state.registryEntry && typeof state.registryEntry === "object"
+    ? state.registryEntry
+    : {};
+  const installed = state.installedDocument && typeof state.installedDocument === "object"
+    ? state.installedDocument
+    : {};
+  const version = String(registry.version || "");
+  const versionRoot = resolve(
+    userDataRoot,
+    "skill-packages",
+    apkSemanticPackageId,
+    "versions",
+    version,
+  );
+  let manifest = {};
+  let lockBytes = Buffer.alloc(0);
+  let publicKeyBase64 = "";
+  try {
+    [manifest, lockBytes, publicKeyBase64] = await Promise.all([
+      readFile(resolve(versionRoot, "manifest.json"), "utf8").then((text) => JSON.parse(text)),
+      readFile(resolve(versionRoot, "skill.lock.json")),
+      readFile(resolve(versionRoot, "author.pub"), "utf8").then((text) => text.trim()),
+    ]);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const publicKeyBytes = Buffer.from(publicKeyBase64, "base64");
+  const publicKeyFingerprint = publicKeyBytes.length === 32
+    ? createHash("sha256").update(publicKeyBytes).digest("hex")
+    : "";
+  const versions = Array.isArray(installed.versions)
+    ? installed.versions.map(String).sort()
+    : [];
+  const expectedVersion = String(expectedPackage?.manifest?.version || "");
+  const expectedArchiveSha256 = String(expectedPackage?.archiveSha256 || "");
+  const expectedLockSha256 = String(expectedPackage?.lockSha256 || "");
+  const provenance = {
+    verified: false,
+    packageId: apkSemanticPackageId,
+    skillName: apkSemanticSkillName,
+    authorId: String(manifest.author || ""),
+    authorIdSource: "manifest.author",
+    version,
+    versions,
+    versionMonotonicityField: "VSK SemVer (semantic equivalent of Android versionCode for this 1.3.0 gate)",
+    signatureStatus: String(registry.signature_status || ""),
+    publicKeyBase64,
+    signerFingerprintSha256: String(registry.signer_fingerprint || ""),
+    archiveSha256: String(registry.package_sha256 || ""),
+    payloadLockSha256: String(registry.lock_sha256 || ""),
+    publicKeyPersisted: publicKeyBase64 === String(expectedPackage?.publicKeyBase64 || "")
+      && publicKeyFingerprint === String(expectedPackage?.signerFingerprint || ""),
+    packageIdPersisted: manifest.id === apkSemanticPackageId
+      && registry.id === apkSemanticPackageId
+      && installed.id === apkSemanticPackageId,
+    authorIdPersisted: manifest.author === apkSemanticAuthorId
+      && registry.author === apkSemanticAuthorId
+      && installed.author === apkSemanticAuthorId,
+    versionPersisted: version === expectedVersion
+      && manifest.version === expectedVersion
+      && installed.version === expectedVersion,
+    versionsPersisted: JSON.stringify(versions) === JSON.stringify([...expectedVersions].sort()),
+    signatureStatusPersisted: registry.signature_status === "signed"
+      && installed.signature_status === "signed",
+    fingerprintPersisted: registry.signer_fingerprint === expectedPackage?.signerFingerprint
+      && installed.signer_fingerprint === expectedPackage?.signerFingerprint,
+    archiveDigestPersisted: registry.package_sha256 === expectedArchiveSha256
+      && installed.package_sha256 === expectedArchiveSha256,
+    payloadDigestPersisted: registry.lock_sha256 === expectedLockSha256
+      && installed.lock_sha256 === expectedLockSha256
+      && createHash("sha256").update(lockBytes).digest("hex") === expectedLockSha256,
+    restAndTauriPresent: state.restInstalled && state.tauriInstalled,
+    projected: state.projected,
+    stateDigest: state.digest,
+  };
+  provenance.verified = [
+    "publicKeyPersisted",
+    "packageIdPersisted",
+    "authorIdPersisted",
+    "versionPersisted",
+    "versionsPersisted",
+    "signatureStatusPersisted",
+    "fingerprintPersisted",
+    "archiveDigestPersisted",
+    "payloadDigestPersisted",
+    "restAndTauriPresent",
+    "projected",
+  ].every((key) => provenance[key] === true);
+  return provenance;
+}
+
+function responseDetail(response) {
+  return String(response?.payload?.detail || response?.payload?.error || "");
+}
+
+function apkSemanticNegativeEvidenceComplete(item) {
+  return item?.rejected === true
+    && item?.httpStatus === 400
+    && item?.errorCategoryVerified === true
+    && item?.installedStatePreserved === true
+    && item?.temporaryExtractionClear === true
+    && item?.stagingClear === true
+    && item?.zipSlipOutsideAbsent === true;
+}
+
+async function rejectApkSemanticPackage(report, cdp, key, fixture) {
+  const before = await apkSemanticInstalledState(cdp);
+  const tempBefore = await vskTemporaryDirectories();
+  const response = await appApiRaw("/api/app/skill-packages/import", {
+    method: "POST",
+    body: { packagePath: fixture.path, projectToUserSkills: true },
+    timeoutMs: 120000,
+  });
+  const after = await apkSemanticInstalledState(cdp);
+  const tempAfter = await vskTemporaryDirectories();
+  const errorCategoryVerified = responseDetail(response)
+    .toLowerCase()
+    .includes(String(fixture.expectedErrorToken || "").toLowerCase());
+  const result = {
+    rejected: response.ok === false && response.status === 400,
+    httpStatus: Number(response.status || 0),
+    errorCategoryVerified,
+    installedStatePreserved: before.digest === after.digest,
+    temporaryExtractionClear: JSON.stringify(tempAfter) === JSON.stringify(tempBefore),
+    stagingClear: await stagingDirectoriesClear(),
+    zipSlipOutsideAbsent: key !== "zipSlip" || !(await pathExists(zipSlipOutsidePath)),
+  };
+  if (
+    !result.rejected
+    || !result.errorCategoryVerified
+    || !result.installedStatePreserved
+    || !result.temporaryExtractionClear
+    || !result.stagingClear
+    || !result.zipSlipOutsideAbsent
+  ) {
+    addAssertion(report, `APK-semantic negative package gate failed: ${key}`);
+  }
+  return result;
+}
+
+async function createPackagedExportBase(cdp, signed) {
+  const fixture = signed.apkSemantic;
+  const userSkillRoot = resolve(userDataRoot, "skills", apkSemanticSkillName);
+  const controlledKeyBoundary = normalizedPath(ephemeralSigningKeyPath)
+    .startsWith(`${normalizedPath(evidenceRoot)}/`);
+  if (!controlledKeyBoundary || !signed.privateKeyReady || !(await pathExists(ephemeralSigningKeyPath))) {
+    throw new Error("Controlled ephemeral signing key was not ready inside the isolated evidence boundary.");
+  }
+  if (await pathExists(userSkillRoot)) {
+    throw new Error("APK-semantic packaged-export user Skill target already existed.");
+  }
+  if (await pathExists(fixture.base.path)) {
+    throw new Error("APK-semantic packaged-export .vsk target already existed.");
+  }
+
+  const summary = {
+    schema: "vrcforge.operation_summary.v1",
+    source: { kind: "runtime_run" },
+    workflow: "captured_runtime_operation",
+    status: "completed",
+    steps: [
+      { kind: "validation", tool: "vrcforge_build_test_readiness", status: "executed" },
+    ],
+    evidence: { approvalRecorded: false, checkpointRecorded: false },
+    validation: { requiresApproval: false, requiresCheckpoint: false, requiresRollback: false },
+    projectPath: "{{projectPath}}",
+  };
+  let written;
+  let exported;
+  let sourceSeen = false;
+  let deleted;
+  let operationError;
+  let sourceCleanupError;
+  try {
+    written = await tauriInvoke(cdp, "write_path_to_skill", {
+      request: {
+        body: {
+          summary,
+          packageId: apkSemanticPackageId,
+          skillName: apkSemanticSkillName,
+          outputPath: userSkillRoot,
+          writeSource: true,
+          useTempOutput: false,
+          exportVsk: false,
+        },
+        timeoutMs: 120000,
+      },
+    });
+    const skills = await agentApi("/api/agent/skills");
+    sourceSeen = (skills?.skills || []).some((item) =>
+      String(item?.name || "") === apkSemanticSkillName
+      && String(item?.source || "") === "user");
+    if (
+      written?.ok !== true
+      || written?.dryRun !== false
+      || written?.manifest?.skill_name !== apkSemanticSkillName
+      || !sourceSeen
+    ) {
+      throw new Error("Packaged Tauri Path-to-Skill did not create the exportable user Skill.");
+    }
+    exported = await tauriInvoke(cdp, "export_skill_package", {
+      request: {
+        body: {
+          skillName: apkSemanticSkillName,
+          outputPath: fixture.base.path,
+          release: true,
+          privateKeyPath: ephemeralSigningKeyPath,
+        },
+        timeoutMs: 120000,
+      },
+    });
+  } catch (error) {
+    operationError = error;
+  } finally {
+    await unlink(ephemeralSigningKeyPath).catch(() => {});
+    signed.privateKeyDeleted = !(await pathExists(ephemeralSigningKeyPath).catch(() => true));
+    signed.privateKeyReady = false;
+    if (written?.ok === true) {
+      try {
+        deleted = await tauriInvoke(cdp, "delete_skill", {
+          request: { id: apkSemanticSkillName, body: {}, timeoutMs: 60000 },
+        });
+      } catch (error) {
+        sourceCleanupError = error;
+      }
+    }
+  }
+  if (operationError || sourceCleanupError || !signed.privateKeyDeleted) {
+    await rm(userSkillRoot, { recursive: true, force: true }).catch(() => {});
+    await unlink(fixture.base.path).catch(() => {});
+    throw new AggregateError(
+      [operationError, sourceCleanupError].filter(Boolean),
+      "Packaged signed Skill export or immediate sensitive cleanup failed.",
+    );
+  }
+
+  let inspected;
+  try {
+    inspected = await inspectSignedVskArchive(fixture.base.path);
+  } catch (error) {
+    await unlink(fixture.base.path).catch(() => {});
+    throw error;
+  }
+  Object.assign(fixture.base, inspected);
+  const response = exported?.exported || {};
+  const responseExcludedSensitiveInput = !JSON.stringify(exported || {}).includes(ephemeralSigningKeyPath)
+    && !JSON.stringify(exported || {}).includes("-----BEGIN PRIVATE KEY-----");
+  const evidence = {
+    userSkillCreatedViaTauri: written?.ok === true && sourceSeen,
+    userSkillDeletedViaTauri: deleted?.ok === true
+      && String(deleted?.deleted || "") === apkSemanticSkillName
+      && !(await pathExists(userSkillRoot)),
+    exportedViaTauri: exported?.ok === true && Boolean(exported?.exported),
+    releaseExportRequested: true,
+    responseSignatureStatusSigned: response?.signature_status === "signed",
+    responseSignerFingerprintMatches: response?.signer_fingerprint === fixture.signerFingerprint,
+    responseLockDigestMatches: response?.lock_sha256 === inspected.lockSha256,
+    responseManifestIdentityMatches: response?.manifest?.id === apkSemanticPackageId
+      && response?.manifest?.author === apkSemanticAuthorId
+      && response?.manifest?.version === "1.0.0",
+    outputCreated: await pathExists(fixture.base.path),
+    archiveIndependentlyVerified: inspected?.ok === true,
+    archivePublicKeyMatchesGenerated: inspected?.publicKeyBase64 === fixture.publicKeyBase64
+      && inspected?.signerFingerprint === fixture.signerFingerprint,
+    controlledTemporaryKeyUsed: fixture.privateKeyFileBacked === true && controlledKeyBoundary,
+    privateKeyDeletedImmediatelyAfterExport: signed.privateKeyDeleted === true,
+    privateKeyInputExcludedFromResponse: responseExcludedSensitiveInput,
+  };
+  if (Object.values(evidence).some((value) => value !== true)) {
+    await unlink(fixture.base.path).catch(() => {});
+    throw new Error("Packaged Tauri signed Skill export evidence was incomplete.");
+  }
+  return evidence;
+}
+
+function apkSemanticFixtureItems(signed) {
+  const fixture = signed?.apkSemantic;
+  if (!fixture) return [];
+  return [
+    fixture.base,
+    fixture.update,
+    fixture.differentId,
+    ...Object.values(fixture.negatives || {}),
+  ].filter((item) => item?.path);
+}
+
+async function cleanupApkSemanticFixtureArchives(signed) {
+  const items = apkSemanticFixtureItems(signed);
+  await Promise.all(items.map((item) => unlink(item.path).catch(() => {})));
+  return (await Promise.all(items.map((item) => pathExists(item.path)))).every((exists) => !exists);
+}
+
+async function runApkSemanticLifecycle(report, cdp, signed, packagedExport) {
+  const fixture = signed.apkSemantic;
+  const matrix = {
+    semanticModel: "Android APK-style immutable signed update semantics mapped to VRCForge .vsk",
+    packageExtension: ".vsk",
+    packageId: apkSemanticPackageId,
+    skillName: apkSemanticSkillName,
+    packagedExport,
+    fixtureBuilder: {
+      role: "same-signer update plus adversarial negative fixtures only",
+      generatedUpdate: await pathExists(fixture.update.path),
+      generatedNegativeCount: Object.keys(fixture.negatives).length,
+      didNotSupplyInstalledBase: true,
+      signerFingerprintMatchesPackagedExport: fixture.update?.signerFingerprint === fixture.signerFingerprint,
+    },
+    authorIdentity: {
+      authorId: apkSemanticAuthorId,
+      authorIdSource: "manifest.author",
+      cryptographicIdentity: "author.pub Ed25519 public key plus SHA-256 fingerprint",
+      publicKeyBase64: fixture.publicKeyBase64,
+      signerFingerprintSha256: fixture.signerFingerprint,
+      publicKeyMatchesFingerprint: createHash("sha256")
+        .update(Buffer.from(fixture.publicKeyBase64, "base64"))
+        .digest("hex") === fixture.signerFingerprint,
+      signerContinuityModel: "one pinned Ed25519 signer; no certificate-rotation lineage claimed",
+    },
+    archive: {
+      signedPayloadIdentityImmutable: true,
+      signatureAlgorithm: "Ed25519",
+      signatureCoverage: "canonical skill.lock.json, not raw ZIP container bytes",
+      zipContainerMetadataCoverage: "strictly safety-validated but not covered by the Ed25519 signature",
+      apkV2WholeArchiveEquivalence: "not claimed; APK v2+ also invalidates ZIP metadata changes",
+      signatureCoversCanonicalLock: fixture.base?.checks?.signatureVerified === true
+        && fixture.update?.checks?.signatureVerified === true,
+      lockCoversCanonicalManifest: fixture.base?.checks?.lockIncludesCanonicalManifest === true
+        && fixture.update?.checks?.lockIncludesCanonicalManifest === true,
+      lockCoversAllPayloadDigests: fixture.base?.checks?.lockExactPayload === true
+        && fixture.base?.checks?.payloadDigestsVerified === true
+        && fixture.update?.checks?.lockExactPayload === true
+        && fixture.update?.checks?.payloadDigestsVerified === true,
+      canonicalManifestVerified: fixture.base?.checks?.manifestCanonical === true
+        && fixture.update?.checks?.manifestCanonical === true,
+      canonicalLockVerified: fixture.base?.checks?.lockCanonical === true
+        && fixture.update?.checks?.lockCanonical === true,
+      privateKeyMaterialAbsent: fixture.base?.checks?.privateKeyMaterialAbsent === true
+        && fixture.update?.checks?.privateKeyMaterialAbsent === true,
+      baseArchiveSha256: String(fixture.base?.archiveSha256 || ""),
+      basePayloadSetSha256: String(fixture.base?.payloadSetSha256 || ""),
+      updateArchiveSha256: String(fixture.update?.archiveSha256 || ""),
+      updatePayloadSetSha256: String(fixture.update?.payloadSetSha256 || ""),
+    },
+    preInstallVerification: {},
+    installProvenance: {},
+    versionMonotonicity: {
+      androidVersionCodeEquivalent: "VSK SemVer monotonic comparison (no versionCode field exists)",
+      baseVersion: "1.0.0",
+      updateVersion: "1.1.0",
+      semverMonotonic: true,
+    },
+    signedUpdate: {},
+    packageIdContinuity: {},
+    negativeRejections: {},
+    failedUpdateAtomicity: {},
+    uninstall: {},
+    privateKeyBoundary: {
+      generatedEphemerally: true,
+      storageMode: "controlled temporary PKCS8 PEM path used only by packaged Tauri release export",
+      controlledTemporaryKeyUsed: packagedExport.controlledTemporaryKeyUsed === true,
+      privateKeyDeletedImmediatelyAfterExport: packagedExport.privateKeyDeletedImmediatelyAfterExport === true,
+      privateKeyPersistedAfterExport: !signed.privateKeyDeleted,
+      privateKeyMaterialReturnedToProbe: fixture.privateKeyMaterialReturned === true,
+      controlledKeyPathAbsent: !(await pathExists(ephemeralSigningKeyPath)),
+      vskArchivesExcludePrivateKeyMaterial: fixture.base?.checks?.privateKeyMaterialAbsent === true
+        && fixture.update?.checks?.privateKeyMaterialAbsent === true,
+      fixtureArchivesDeleted: false,
+      persistentRuntimeScanClear: false,
+      supportBundleScanClear: false,
+      reportScanClear: false,
+    },
+    boundaries: {
+      apkCertificateRotationLineage: "not implemented and not claimed for 1.3.0",
+      updateIdentityRule: "same manifest.id selects update; a different valid id is a distinct package, not an update",
+      authorIdentityRule: "manifest.author is the authorId; author.pub fingerprint is the pinned cryptographic identity",
+    },
+  };
+  report.apkSemanticMatrix = matrix;
+  try {
+    if (await pathExists(zipSlipOutsidePath)) {
+      throw new Error("APK-semantic zip-slip outside sentinel already existed before validation.");
+    }
+    const beforePreflight = await apkSemanticInstalledState(cdp);
+    const tempBefore = await vskTemporaryDirectories();
+    const basePreflight = await appApi("/api/app/skill-packages/preflight", {
+      method: "POST",
+      body: { packagePath: fixture.base.path },
+      timeoutMs: 120000,
+    });
+    const basePreview = packagePreview(basePreflight);
+    const afterPreflight = await apkSemanticInstalledState(cdp);
+    const tempAfter = await vskTemporaryDirectories();
+    matrix.preInstallVerification = {
+      accepted: basePreflight?.ok === true,
+      packageIdVerified: packageIdFromPreview(basePreview) === apkSemanticPackageId,
+      authorIdVerified: basePreview?.manifest?.author === apkSemanticAuthorId,
+      semverVerified: basePreview?.manifest?.version === "1.0.0",
+      signatureVerified: basePreview?.signature_status === "signed"
+        && basePreview?.signer_fingerprint === fixture.signerFingerprint
+        && basePreview?.governance?.signatureVerified === true,
+      archiveDigestVerified: basePreview?.package_sha256 === fixture.base.archiveSha256,
+      payloadDigestVerified: basePreview?.lock_sha256 === fixture.base.lockSha256,
+      updateActionNew: basePreview?.update_action === "new",
+      dryRunNoWrite: basePreview?.dryRun?.willWrite === false,
+      stateUnchanged: beforePreflight.digest === afterPreflight.digest,
+      temporaryExtractionClear: JSON.stringify(tempAfter) === JSON.stringify(tempBefore),
+      pathSafetyVerified: false,
+      duplicatePathRejected: false,
+      invalidPackageIdRejected: false,
+    };
+
+    const baseImport = await tauriInvoke(cdp, "import_skill_package", {
+      request: {
+        body: { packagePath: fixture.base.path, projectToUserSkills: true },
+        timeoutMs: 120000,
+      },
+    });
+    const baseImportPreview = packagePreview(baseImport);
+    const baseProvenance = await readApkSemanticProvenance(cdp, fixture.base, ["1.0.0"]);
+    matrix.installProvenance = {
+      installed: baseImport?.ok === true && Boolean(baseImport?.imported),
+      projected: String(baseImport?.projectedSkill?.name || "") === apkSemanticSkillName,
+      installActionNew: baseImportPreview?.update_action === "new",
+      ...baseProvenance,
+    };
+    if (!matrix.installProvenance.installed || !matrix.installProvenance.verified) {
+      addAssertion(report, "APK-semantic base VSK install/provenance gate failed");
+    }
+
+    for (const [key, negative] of Object.entries(fixture.negatives)) {
+      matrix.negativeRejections[key] = await rejectApkSemanticPackage(report, cdp, key, negative);
+    }
+    matrix.preInstallVerification.pathSafetyVerified = matrix.negativeRejections.zipSlip?.rejected === true
+      && matrix.negativeRejections.zipSlip?.zipSlipOutsideAbsent === true;
+    matrix.preInstallVerification.duplicatePathRejected = matrix.negativeRejections.duplicatePath?.rejected === true;
+    matrix.preInstallVerification.invalidPackageIdRejected = matrix.negativeRejections.invalidPackageId?.rejected === true;
+
+    const beforeDistinctId = await apkSemanticInstalledState(cdp);
+    const distinctPreflight = await appApi("/api/app/skill-packages/preflight", {
+      method: "POST",
+      body: { packagePath: fixture.differentId.path },
+      timeoutMs: 120000,
+    });
+    const distinctPreview = packagePreview(distinctPreflight);
+    const afterDistinctId = await apkSemanticInstalledState(cdp);
+    matrix.packageIdContinuity = {
+      updateLookupUsesExactManifestId: true,
+      differentValidId: String(distinctPreview?.manifest?.id || ""),
+      differentValidIdTreatedAsDistinctPackage: distinctPreview?.update_action === "new",
+      differentValidIdNotClaimedAsUpdate: distinctPreview?.update_action !== "update",
+      differentValidIdNotImported: true,
+      installedPackagePreserved: beforeDistinctId.digest === afterDistinctId.digest,
+    };
+
+    const negativeResults = Object.values(matrix.negativeRejections);
+    matrix.failedUpdateAtomicity = {
+      rejectionCount: negativeResults.length,
+      allRejected: negativeResults.every((item) => item.rejected === true),
+      allErrorCategoriesVerified: negativeResults.every((item) => item.errorCategoryVerified === true),
+      oldInstallPreservedAfterEveryFailure: negativeResults.every((item) => item.installedStatePreserved === true),
+      temporaryExtractionClearAfterEveryFailure: negativeResults.every((item) => item.temporaryExtractionClear === true),
+      stagingClearAfterEveryFailure: negativeResults.every((item) => item.stagingClear === true),
+      zipSlipNeverEscaped: matrix.negativeRejections.zipSlip?.zipSlipOutsideAbsent === true,
+    };
+
+    const beforeUpdatePreflight = await apkSemanticInstalledState(cdp);
+    const updatePreflight = await appApi("/api/app/skill-packages/preflight", {
+      method: "POST",
+      body: { packagePath: fixture.update.path },
+      timeoutMs: 120000,
+    });
+    const updatePreview = packagePreview(updatePreflight);
+    const afterUpdatePreflight = await apkSemanticInstalledState(cdp);
+    const updateImport = await appApi("/api/app/skill-packages/import", {
+      method: "POST",
+      body: { packagePath: fixture.update.path, projectToUserSkills: true },
+      timeoutMs: 120000,
+    });
+    const updateImportPreview = packagePreview(updateImport);
+    const updateProvenance = await readApkSemanticProvenance(
+      cdp,
+      fixture.update,
+      ["1.0.0", "1.1.0"],
+    );
+    matrix.versionMonotonicity.updateAction = String(updatePreview?.update_action || "");
+    matrix.versionMonotonicity.preflightRecognizedMonotonicUpdate = updatePreview?.update_action === "update";
+    matrix.signedUpdate = {
+      samePackageId: updatePreview?.manifest?.id === apkSemanticPackageId,
+      sameAuthorId: updatePreview?.manifest?.author === apkSemanticAuthorId,
+      samePublicKeyFingerprint: updatePreview?.signer_fingerprint === fixture.signerFingerprint,
+      signatureVerified: updatePreview?.signature_status === "signed"
+        && updatePreview?.governance?.signatureVerified === true,
+      preflightNoWrite: beforeUpdatePreflight.digest === afterUpdatePreflight.digest,
+      updateAction: String(updatePreview?.update_action || ""),
+      imported: updateImport?.ok === true && Boolean(updateImport?.imported),
+      importActionUpdate: updateImportPreview?.update_action === "update",
+      priorVersionRetainedUntilUninstall: updateProvenance.versions.includes("1.0.0"),
+      ...updateProvenance,
+    };
+    if (!matrix.signedUpdate.imported || !matrix.signedUpdate.verified) {
+      addAssertion(report, "APK-semantic same-author/same-key signed update/provenance gate failed");
+    }
+
+    const uninstall = await appApi(
+      `/api/app/skill-packages/${encodeURIComponent(apkSemanticPackageId)}`,
+      {
+        method: "DELETE",
+        body: { removeProjectedSkill: true },
+        timeoutMs: 120000,
+      },
+    );
+    const removedVersions = (uninstall?.uninstalled?.removed_versions || [])
+      .map(String)
+      .sort();
+    const afterUninstall = await apkSemanticInstalledState(cdp);
+    matrix.uninstall = {
+      accepted: uninstall?.ok === true && Boolean(uninstall?.uninstalled),
+      removedVersions,
+      bothVersionsRemoved: JSON.stringify(removedVersions) === JSON.stringify(["1.0.0", "1.1.0"]),
+      restClear: afterUninstall.restInstalled === false,
+      tauriClear: afterUninstall.tauriInstalled === false,
+      registryClear: afterUninstall.registryEntry === null,
+      installedMetadataClear: afterUninstall.installedDocument === null,
+      projectionClear: afterUninstall.projected === false,
+      packageFilesystemClear: afterUninstall.packageTree.length === 1
+        && afterUninstall.packageTree[0]?.type === "missing",
+      projectedFilesystemClear: afterUninstall.projectedTree.length === 1
+        && afterUninstall.projectedTree[0]?.type === "missing",
+      stagingClear: await stagingDirectoriesClear(),
+    };
+  } finally {
+    matrix.privateKeyBoundary.fixtureArchivesDeleted = await cleanupApkSemanticFixtureArchives(signed);
+    report.cleanup.apkSemanticFixtureArchivesClear = matrix.privateKeyBoundary.fixtureArchivesDeleted;
+  }
+  for (const [groupName, group] of Object.entries({
+    packagedExport: Object.fromEntries(
+      Object.entries(matrix.packagedExport).filter(([, value]) => typeof value === "boolean"),
+    ),
+    fixtureBuilder: Object.fromEntries(
+      Object.entries(matrix.fixtureBuilder).filter(([, value]) => typeof value === "boolean"),
+    ),
+    authorIdentity: Object.fromEntries(
+      Object.entries(matrix.authorIdentity).filter(([, value]) => typeof value === "boolean"),
+    ),
+    archive: Object.fromEntries(Object.entries(matrix.archive).filter(([, value]) => typeof value === "boolean")),
+    preInstallVerification: matrix.preInstallVerification,
+    installProvenance: Object.fromEntries(
+      Object.entries(matrix.installProvenance).filter(([, value]) => typeof value === "boolean"),
+    ),
+    versionMonotonicity: Object.fromEntries(
+      Object.entries(matrix.versionMonotonicity).filter(([, value]) => typeof value === "boolean"),
+    ),
+    signedUpdate: Object.fromEntries(
+      Object.entries(matrix.signedUpdate).filter(([, value]) => typeof value === "boolean"),
+    ),
+    packageIdContinuity: Object.fromEntries(
+      Object.entries(matrix.packageIdContinuity).filter(([, value]) => typeof value === "boolean"),
+    ),
+    failedUpdateAtomicity: Object.fromEntries(
+      Object.entries(matrix.failedUpdateAtomicity).filter(([, value]) => typeof value === "boolean"),
+    ),
+    uninstall: Object.fromEntries(Object.entries(matrix.uninstall).filter(([, value]) => typeof value === "boolean")),
+  })) {
+    for (const [key, value] of Object.entries(group)) {
+      if (value !== true) addAssertion(report, `apkSemanticMatrix ${groupName} gate failed: ${key}`);
+    }
+  }
+  if (matrix.privateKeyBoundary.privateKeyPersistedAfterExport !== false) {
+    addAssertion(report, "APK-semantic private signing key persisted after packaged export");
+  }
+  if (matrix.privateKeyBoundary.privateKeyMaterialReturnedToProbe !== false) {
+    addAssertion(report, "APK-semantic private signing key material escaped the in-memory builder");
+  }
 }
 
 async function assertRuntimeStatus(report, skillName, expected, label) {
@@ -3653,6 +4803,7 @@ print(json.dumps(result, separators=(",", ":")))
         agentApprovalToken,
         negativeTestSecret,
         privateUrlSentinel,
+        ephemeralSigningKeyPath,
       ]),
       VRCFORGE_PROBE_PRIVATE_ROOTS: JSON.stringify([
         repoRoot,
@@ -3710,7 +4861,9 @@ spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 exact_secrets = [item for item in json.loads(os.environ.get("VRCFORGE_PROBE_EXACT_SECRETS", "[]")) if item]
 private_roots = [item for item in json.loads(os.environ.get("VRCFORGE_PROBE_PRIVATE_ROOTS", "[]")) if item]
 paid_marker = os.environ.get("VRCFORGE_PROBE_PAID_MARKER", "")
+ephemeral_key_path = os.environ.get("VRCFORGE_PROBE_EPHEMERAL_KEY_PATH", "")
 private_findings = []
+ephemeral_key_path_findings = []
 token_findings = []
 source_findings = []
 paid_findings = []
@@ -3736,6 +4889,10 @@ def scan(label, data):
             break
     normalized = text.replace("\\\\", "\\")
     normalized_folded = re.sub(r"[\\/]+", "/", normalized).casefold()
+    if ephemeral_key_path:
+        normalized_key_path = re.sub(r"[\\/]+", "/", ephemeral_key_path).casefold()
+        if normalized_key_path in normalized_folded:
+            ephemeral_key_path_findings.append(label)
     private_root_leak = any(
         re.sub(r"[\\/]+", "/", root).rstrip("/").casefold() in normalized_folded
         for root in private_roots
@@ -3834,6 +4991,7 @@ for raw in spec:
 
 print(json.dumps({
     "privateKeyFindings": sorted(set(private_findings)),
+    "ephemeralKeyPathFindings": sorted(set(ephemeral_key_path_findings)),
     "tokenFindings": sorted(set(token_findings)),
     "sourcePathFindings": sorted(set(source_findings)),
     "paidPayloadFindings": sorted(set(paid_findings)),
@@ -3850,6 +5008,7 @@ print(json.dumps({
           agentApprovalToken,
           negativeTestSecret,
           privateUrlSentinel,
+          ephemeralSigningKeyPath,
         ]),
         VRCFORGE_PROBE_PRIVATE_ROOTS: JSON.stringify([
           repoRoot,
@@ -3860,6 +5019,7 @@ print(json.dumps({
           pathToSkillRoot,
         ]),
         VRCFORGE_PROBE_PAID_MARKER: paidPayloadSentinel,
+        VRCFORGE_PROBE_EPHEMERAL_KEY_PATH: ephemeralSigningKeyPath,
       },
     });
   } finally {
@@ -3974,6 +5134,7 @@ function applyProcessBoundaryReport(report, snapshot) {
     processNamesEver: [...trackedProcessNamesEver].sort(),
     samplingErrorCount: processTrackingErrorCount,
     startEventWatcherVerified: processStartWatcherVerified,
+    startEventWatcherMode: processStartWatcherMode,
     watcherSettleVerified: processStartWatcherSettleVerified,
     watcherSettleMs: processStartWatcherSettleMs,
     portQuerySucceeded: snapshot?.portQuerySucceeded === true,
@@ -3985,13 +5146,15 @@ async function attemptFailureApiCleanup(report, cdp) {
   const cleanup = report.failureCleanup;
   cleanup.attempted = true;
   try {
+    const cleanupPackageIds = [...requiredPackageIds, apkSemanticPackageId];
     const before = await appApi("/api/app/skill-packages", { timeoutMs: 15000 });
     cleanup.apiReachable = true;
     const requiredInstalled = (before?.installed || []).filter((item) =>
-      requiredPackageIds.includes(String(item.id || item.manifest?.id || "")));
+      cleanupPackageIds.includes(String(item.id || item.manifest?.id || "")));
     const installedIds = new Set(requiredInstalled
       .map((item) => String(item.id || item.manifest?.id || "")));
     const targetSkillNames = new Set(requiredPackageSkillNames.values());
+    targetSkillNames.add(apkSemanticSkillName);
     for (const item of requiredInstalled) {
       const skillName = String(item.skillName || item.manifest?.skill_name || item.manifest?.skillName || "");
       if (skillName) targetSkillNames.add(skillName);
@@ -4021,19 +5184,19 @@ async function attemptFailureApiCleanup(report, cdp) {
     const remainingRegistry = restAfter?.registry?.skills && typeof restAfter.registry.skills === "object"
       ? restAfter.registry.skills
       : {};
-    cleanup.restClear = requiredPackageIds.every((id) => !remainingRest.has(id));
+    cleanup.restClear = cleanupPackageIds.every((id) => !remainingRest.has(id));
     cleanup.projectedClear = [...targetSkillNames].every((name) => !remainingSkills.has(name));
-    cleanup.registryClear = requiredPackageIds.every((id) => !Object.hasOwn(remainingRegistry, id));
-    cleanup.packageFilesClear = (await Promise.all(requiredPackageIds.map((id) =>
+    cleanup.registryClear = cleanupPackageIds.every((id) => !Object.hasOwn(remainingRegistry, id));
+    cleanup.packageFilesClear = (await Promise.all(cleanupPackageIds.map((id) =>
       pathExists(resolve(userDataRoot, "skill-packages", id))))).every((exists) => !exists);
-    cleanup.projectedFilesClear = (await Promise.all([...requiredPackageSkillNames.values()].map((name) =>
+    cleanup.projectedFilesClear = (await Promise.all([...requiredPackageSkillNames.values(), apkSemanticSkillName].map((name) =>
       pathExists(resolve(userDataRoot, "skills", name))))).every((exists) => !exists);
     cleanup.tauriClear = false;
     if (cdp) {
       const tauriAfter = await tauriInvoke(cdp, "fetch_skill_packages", {});
       const remainingTauri = new Set((tauriAfter?.installed || [])
         .map((item) => String(item.id || item.manifest?.id || "")));
-      cleanup.tauriClear = requiredPackageIds.every((id) => !remainingTauri.has(id));
+      cleanup.tauriClear = cleanupPackageIds.every((id) => !remainingTauri.has(id));
     }
     cleanup.stagingClear = await stagingDirectoriesClear();
     cleanup.apiComplete = cleanup.restClear
@@ -4140,6 +5303,7 @@ function sanitizeReportText(value) {
     [paidPayloadSentinel, "<redacted-paid-payload-sentinel>"],
     [negativeTestSecret, "<redacted-negative-test-secret>"],
     [privateUrlSentinel, "<redacted-private-url-sentinel>"],
+    [ephemeralSigningKeyPath, "<redacted-ephemeral-signing-key-path>"],
     [repoRoot, "<repo>"],
     [repoRoot.replaceAll("\\", "/"), "<repo>"],
     [evidenceRoot, "<evidence>"],
@@ -4173,6 +5337,7 @@ function validateFinalContract(report) {
     || report.releaseBinding?.extractedBackendVerified !== true
     || report.releaseBinding?.executableLaunchLockVerified !== true
     || report.releaseBinding?.completionExecutableVerified !== true
+    || report.releaseBinding?.executableLaunchLockWatcherMode !== "wmi-instance-creation-poll-100ms"
   ) {
     addAssertion(report, "manifest portable ZIP selection or exact executable/backend digest binding failed");
   }
@@ -4271,6 +5436,121 @@ function validateFinalContract(report) {
       addAssertion(report, `${item.id} final runtime status was not executed`);
     }
   }
+  const matrix = report.apkSemanticMatrix || {};
+  const matrixRequiredTruePaths = [
+    "packagedExport.userSkillCreatedViaTauri",
+    "packagedExport.userSkillDeletedViaTauri",
+    "packagedExport.exportedViaTauri",
+    "packagedExport.releaseExportRequested",
+    "packagedExport.responseSignatureStatusSigned",
+    "packagedExport.responseSignerFingerprintMatches",
+    "packagedExport.responseLockDigestMatches",
+    "packagedExport.responseManifestIdentityMatches",
+    "packagedExport.outputCreated",
+    "packagedExport.archiveIndependentlyVerified",
+    "packagedExport.archivePublicKeyMatchesGenerated",
+    "packagedExport.controlledTemporaryKeyUsed",
+    "packagedExport.privateKeyDeletedImmediatelyAfterExport",
+    "packagedExport.privateKeyInputExcludedFromResponse",
+    "fixtureBuilder.generatedUpdate",
+    "fixtureBuilder.didNotSupplyInstalledBase",
+    "fixtureBuilder.signerFingerprintMatchesPackagedExport",
+    "authorIdentity.publicKeyMatchesFingerprint",
+    "archive.signedPayloadIdentityImmutable",
+    "archive.signatureCoversCanonicalLock",
+    "archive.lockCoversCanonicalManifest",
+    "archive.lockCoversAllPayloadDigests",
+    "archive.canonicalManifestVerified",
+    "archive.canonicalLockVerified",
+    "archive.privateKeyMaterialAbsent",
+    "preInstallVerification.accepted",
+    "preInstallVerification.packageIdVerified",
+    "preInstallVerification.authorIdVerified",
+    "preInstallVerification.semverVerified",
+    "preInstallVerification.signatureVerified",
+    "preInstallVerification.archiveDigestVerified",
+    "preInstallVerification.payloadDigestVerified",
+    "preInstallVerification.updateActionNew",
+    "preInstallVerification.dryRunNoWrite",
+    "preInstallVerification.stateUnchanged",
+    "preInstallVerification.temporaryExtractionClear",
+    "preInstallVerification.pathSafetyVerified",
+    "preInstallVerification.duplicatePathRejected",
+    "preInstallVerification.invalidPackageIdRejected",
+    "installProvenance.installed",
+    "installProvenance.projected",
+    "installProvenance.installActionNew",
+    "installProvenance.verified",
+    "versionMonotonicity.semverMonotonic",
+    "versionMonotonicity.preflightRecognizedMonotonicUpdate",
+    "signedUpdate.samePackageId",
+    "signedUpdate.sameAuthorId",
+    "signedUpdate.samePublicKeyFingerprint",
+    "signedUpdate.signatureVerified",
+    "signedUpdate.preflightNoWrite",
+    "signedUpdate.imported",
+    "signedUpdate.importActionUpdate",
+    "signedUpdate.priorVersionRetainedUntilUninstall",
+    "signedUpdate.verified",
+    "packageIdContinuity.updateLookupUsesExactManifestId",
+    "packageIdContinuity.differentValidIdTreatedAsDistinctPackage",
+    "packageIdContinuity.differentValidIdNotClaimedAsUpdate",
+    "packageIdContinuity.differentValidIdNotImported",
+    "packageIdContinuity.installedPackagePreserved",
+    "failedUpdateAtomicity.allRejected",
+    "failedUpdateAtomicity.allErrorCategoriesVerified",
+    "failedUpdateAtomicity.oldInstallPreservedAfterEveryFailure",
+    "failedUpdateAtomicity.temporaryExtractionClearAfterEveryFailure",
+    "failedUpdateAtomicity.stagingClearAfterEveryFailure",
+    "failedUpdateAtomicity.zipSlipNeverEscaped",
+    "uninstall.accepted",
+    "uninstall.bothVersionsRemoved",
+    "uninstall.restClear",
+    "uninstall.tauriClear",
+    "uninstall.registryClear",
+    "uninstall.installedMetadataClear",
+    "uninstall.projectionClear",
+    "uninstall.packageFilesystemClear",
+    "uninstall.projectedFilesystemClear",
+    "uninstall.stagingClear",
+    "privateKeyBoundary.generatedEphemerally",
+    "privateKeyBoundary.controlledTemporaryKeyUsed",
+    "privateKeyBoundary.privateKeyDeletedImmediatelyAfterExport",
+    "privateKeyBoundary.controlledKeyPathAbsent",
+    "privateKeyBoundary.vskArchivesExcludePrivateKeyMaterial",
+    "privateKeyBoundary.fixtureArchivesDeleted",
+    "privateKeyBoundary.persistentRuntimeScanClear",
+    "privateKeyBoundary.supportBundleScanClear",
+    "privateKeyBoundary.reportScanClear",
+  ];
+  for (const path of matrixRequiredTruePaths) {
+    const value = path.split(".").reduce((current, key) => current?.[key], matrix);
+    if (value !== true) addAssertion(report, `apkSemanticMatrix final gate failed: ${path}`);
+  }
+  if (
+    matrix.semanticModel !== "Android APK-style immutable signed update semantics mapped to VRCForge .vsk"
+    || matrix.packageExtension !== ".vsk"
+    || matrix.packageId !== apkSemanticPackageId
+    || matrix.authorIdentity?.authorId !== apkSemanticAuthorId
+    || matrix.authorIdentity?.authorIdSource !== "manifest.author"
+    || matrix.archive?.signatureCoverage !== "canonical skill.lock.json, not raw ZIP container bytes"
+    || matrix.archive?.apkV2WholeArchiveEquivalence !== "not claimed; APK v2+ also invalidates ZIP metadata changes"
+    || matrix.versionMonotonicity?.androidVersionCodeEquivalent
+      !== "VSK SemVer monotonic comparison (no versionCode field exists)"
+    || matrix.fixtureBuilder?.role !== "same-signer update plus adversarial negative fixtures only"
+    || Number(matrix.fixtureBuilder?.generatedNegativeCount || 0) !== 12
+    || matrix.privateKeyBoundary?.storageMode
+      !== "controlled temporary PKCS8 PEM path used only by packaged Tauri release export"
+    || matrix.privateKeyBoundary?.privateKeyPersistedAfterExport !== false
+    || matrix.privateKeyBoundary?.privateKeyMaterialReturnedToProbe !== false
+    || matrix.boundaries?.apkCertificateRotationLineage !== "not implemented and not claimed for 1.3.0"
+    || Number(matrix.failedUpdateAtomicity?.rejectionCount || 0) !== 12
+    || Object.keys(matrix.negativeRejections || {}).length !== 12
+    || Object.values(matrix.negativeRejections || {}).some((item) =>
+      !apkSemanticNegativeEvidenceComplete(item))
+  ) {
+    addAssertion(report, "APK-semantic VSK identity/signature/update boundary evidence was incomplete");
+  }
   for (const [groupName, group] of Object.entries({
     pathToSkill: Object.fromEntries(
       Object.entries(report.pathToSkill).filter(([key]) => key !== "recipes"),
@@ -4304,6 +5584,7 @@ function validateFinalContract(report) {
     || Number(report.processBoundary?.trackedGenerationCountEver || 0)
       < Number(report.processBoundary?.trackedUniquePidCountEver || 0)
     || report.processBoundary?.startEventWatcherVerified !== true
+    || report.processBoundary?.startEventWatcherMode !== "wmi-instance-creation-poll-100ms"
     || report.processBoundary?.watcherSettleVerified !== true
     || !Number.isInteger(report.processBoundary?.watcherSettleMs)
     || report.processBoundary.watcherSettleMs < 5000
@@ -4517,6 +5798,23 @@ function runSelfTest() {
       cleanupUsesReusedDescendantGeneration,
     };
   })();
+  const lockDigest = "d".repeat(64);
+  const nonElevatedWatcherReady = {
+    ok: true,
+    sha256: lockDigest,
+    processStartWatcher: true,
+    processStartWatcherMode: "wmi-instance-creation-poll-100ms",
+    settleWindowMs: 5000,
+  };
+  const completeNegativeEvidence = {
+    rejected: true,
+    httpStatus: 400,
+    errorCategoryVerified: true,
+    installedStatePreserved: true,
+    temporaryExtractionClear: true,
+    stagingClear: true,
+    zipSlipOutsideAbsent: true,
+  };
   const checks = {
     strictPolicyAccepted: strictBuildPolicyFromManifest(strictPolicy).strict === true,
     missingPolicyRejected: strictBuildPolicyFromManifest({}).strict === false,
@@ -4616,6 +5914,25 @@ function runSelfTest() {
     reusedDescendantPidTracksNewGeneration: processIdentityChecks.reusedDescendantPidTracksNewGeneration,
     reusedDescendantPidBlocksClear: processIdentityChecks.reusedDescendantPidBlocksClear,
     cleanupUsesReusedDescendantGeneration: processIdentityChecks.cleanupUsesReusedDescendantGeneration,
+    nonElevatedProcessWatcherAccepted:
+      executableLaunchLockReadiness(nonElevatedWatcherReady, lockDigest, null).ok === true,
+    executableDigestMismatchRejected:
+      executableLaunchLockReadiness(nonElevatedWatcherReady, "e".repeat(64), null).reason === "digest-mismatch",
+    elevatedTraceWatcherModeNotAccepted:
+      executableLaunchLockReadiness({
+        ...nonElevatedWatcherReady,
+        processStartWatcherMode: "win32-process-start-trace",
+      }, lockDigest, null).reason === "watcher-not-ready",
+    watcherAccessFailureNotMisclassifiedAsDigestMismatch:
+      executableLaunchLockReadiness({ ok: false, errorType: "ManagementException" }, lockDigest, null).reason
+        === "watcher-failed",
+    completeApkSemanticNegativeEvidenceAccepted:
+      apkSemanticNegativeEvidenceComplete(completeNegativeEvidence) === true,
+    incompleteApkSemanticNegativeEvidenceRejected:
+      apkSemanticNegativeEvidenceComplete({
+        ...completeNegativeEvidence,
+        installedStatePreserved: false,
+      }) === false,
   };
   const failed = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name);
   console.log(JSON.stringify({
@@ -4657,6 +5974,7 @@ async function main() {
       sourcePackageBytesVerified: false,
     },
     packages: [],
+    apkSemanticMatrix: {},
     pathToSkill: {
       previewViaTauri: false,
       writeViaRest: false,
@@ -4731,6 +6049,7 @@ async function main() {
       rejectedOutputsClear: false,
       ephemeralSigningKeyClear: false,
       builderStoreClear: false,
+      apkSemanticFixtureArchivesClear: false,
     },
     failureCleanup: {
       attempted: false,
@@ -4766,6 +6085,7 @@ async function main() {
   let app;
   let records = [];
   let signed;
+  let packagedExport;
   let supportBundlePath = "";
   let failureDetected = false;
   let finalSnapshot;
@@ -4798,6 +6118,7 @@ async function main() {
       embeddedVersion: releaseBinding.embeddedVersion,
       worktreeCleanAfterFixtureBuild: false,
       executableLaunchLockVerified: false,
+      executableLaunchLockWatcherMode: "",
       completionExecutableVerified: false,
       worktreeCleanAtCompletion: false,
       completionHeadMatches: false,
@@ -4831,6 +6152,9 @@ async function main() {
     app = await launchPackagedApp(releaseBinding);
     report.releaseBinding.executableLaunchLockVerified = app.executableLock?.verified === true
       && app.executableLock?.sha256 === releaseBinding.innerExeSha256;
+    report.releaseBinding.executableLaunchLockWatcherMode = String(
+      app.executableLock?.processStartWatcherMode || "",
+    );
     report.runtimeBinding = await assertRuntimeBinding(sourceVersion, releaseBinding);
     report.phases.launch = {
       rendererReady: app.renderer?.ok === true,
@@ -4839,7 +6163,12 @@ async function main() {
         .filter((value) => typeof value === "boolean")
         .every(Boolean),
     };
+    packagedExport = await createPackagedExportBase(app.cdp, signed);
+    report.apkSemanticMatrix = { packagedExport };
+    report.fixtures.privateKeyPersisted = !signed.privateKeyDeleted;
     records = await runPackageLifecycle(report, app.cdp, signed);
+    await runApkSemanticLifecycle(report, app.cdp, signed, packagedExport);
+    report.fixtures.privateKeyPersisted = !signed.privateKeyDeleted;
     await runGovernanceLifecycle(report, app.cdp, records, signed.fingerprint);
     await runPathToSkillLifecycle(report, app.cdp);
     await runUiAcceptance(report, app.cdp, signed.fingerprint, records);
@@ -4858,28 +6187,46 @@ async function main() {
       resolve(userDataRoot, "logs"),
       resolve(userDataRoot, "artifacts", "dashboard", "agent_gateway"),
     ]);
+    const persistentPrivateKeyScan = await scanSharedArtifactPrivacy([userDataRoot]);
     report.privacy.privateKeyAbsent = signed.privateKeyDeleted === true
       && signed.builderStoreDeleted === true
-      && privacyScan.privateKeyFindings.length === 0;
+      && privacyScan.privateKeyFindings.length === 0
+      && privacyScan.ephemeralKeyPathFindings.length === 0;
     report.privacy.tokensAbsent = privacyScan.tokenFindings.length === 0;
     report.privacy.sourcePathsAbsent = privacyScan.sourcePathFindings.length === 0;
     report.privacy.paidPayloadAbsent = privacyScan.paidPayloadFindings.length === 0;
     report.privacy.artifactsFullyScanned = privacyScan.unscannedFindings.length === 0;
     report.privacy.rawDiagnosticSecretsAbsent = rawDiagnosticScan.privateKeyFindings.length === 0
+      && rawDiagnosticScan.ephemeralKeyPathFindings.length === 0
       && rawDiagnosticScan.tokenFindings.length === 0
       && rawDiagnosticScan.paidPayloadFindings.length === 0;
     report.privacy.rawDiagnosticsFullyScanned = rawDiagnosticScan.unscannedFindings.length === 0;
+    if (report.apkSemanticMatrix?.privateKeyBoundary) {
+      report.apkSemanticMatrix.privateKeyBoundary.controlledKeyPathAbsent = signed.privateKeyDeleted === true
+        && !(await pathExists(ephemeralSigningKeyPath));
+      report.apkSemanticMatrix.privateKeyBoundary.persistentRuntimeScanClear = persistentPrivateKeyScan.privateKeyFindings.length === 0
+        && persistentPrivateKeyScan.ephemeralKeyPathFindings.length === 0
+        && persistentPrivateKeyScan.unscannedFindings.length === 0;
+      report.apkSemanticMatrix.privateKeyBoundary.supportBundleScanClear = report.privacy.supportBundleClean === true;
+      report.apkSemanticMatrix.privateKeyBoundary.reportScanClear = !JSON.stringify(report).includes("-----BEGIN PRIVATE KEY-----")
+        && !JSON.stringify(report).includes(ephemeralSigningKeyPath);
+    }
     report.privacy.scan = {
       privateKeyFindingCount: privacyScan.privateKeyFindings.length,
+      ephemeralKeyPathFindingCount: privacyScan.ephemeralKeyPathFindings.length,
       tokenFindingCount: privacyScan.tokenFindings.length,
       sourcePathFindingCount: privacyScan.sourcePathFindings.length,
       paidPayloadFindingCount: privacyScan.paidPayloadFindings.length,
       unscannedFindingCount: privacyScan.unscannedFindings.length,
       rawDiagnosticPrivateKeyFindingCount: rawDiagnosticScan.privateKeyFindings.length,
+      rawDiagnosticEphemeralKeyPathFindingCount: rawDiagnosticScan.ephemeralKeyPathFindings.length,
       rawDiagnosticTokenFindingCount: rawDiagnosticScan.tokenFindings.length,
       rawDiagnosticSourcePathFindingCount: rawDiagnosticScan.sourcePathFindings.length,
       rawDiagnosticPaidPayloadFindingCount: rawDiagnosticScan.paidPayloadFindings.length,
       rawDiagnosticUnscannedFindingCount: rawDiagnosticScan.unscannedFindings.length,
+      persistentPrivateKeyFindingCount: persistentPrivateKeyScan.privateKeyFindings.length,
+      persistentEphemeralKeyPathFindingCount: persistentPrivateKeyScan.ephemeralKeyPathFindings.length,
+      persistentPrivateKeyUnscannedFindingCount: persistentPrivateKeyScan.unscannedFindings.length,
     };
     delete report.internalPaths;
 
@@ -4972,6 +6319,11 @@ async function main() {
     }
     await unlink(ephemeralSigningKeyPath).catch(() => {});
     report.cleanup.ephemeralSigningKeyClear = !(await pathExists(ephemeralSigningKeyPath).catch(() => true));
+    report.fixtures.privateKeyPersisted = !report.cleanup.ephemeralSigningKeyClear;
+    if (signed) {
+      report.cleanup.apkSemanticFixtureArchivesClear = await cleanupApkSemanticFixtureArchives(signed)
+        .catch(() => false);
+    }
     report.cleanup.builderStoreClear = !(await pathExists(resolve(packageFixtureRoot, ".builder-store")).catch(() => true));
     if (report.assertions.length > 0) failureDetected = true;
     if (failureDetected) {

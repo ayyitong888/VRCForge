@@ -114,6 +114,7 @@ def test_signed_package_runtime_audit_includes_locked_identity_and_signer_contex
     ]
     expected_context = {
         "packageId": "community.tests.runtime-audit",
+        "authorId": "VRCForge Tests",
         "packageVersion": "1.2.3",
         "packageSha256": installed.preview.package_sha256,
         "lockSha256": installed.preview.lock_sha256,

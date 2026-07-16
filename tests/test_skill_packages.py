@@ -29,6 +29,7 @@ def make_skill_source(
     *,
     skill_id: str = "com.example.avatar-helper",
     version: str = "1.0.0",
+    author: str = "Example Author",
     content: str = "Inspect the avatar and produce a safe plan.",
     permissions: list[str] | None = None,
 ) -> Path:
@@ -40,7 +41,7 @@ def make_skill_source(
         "id": skill_id,
         "name": "Avatar Helper",
         "version": version,
-        "author": "Example Author",
+        "author": author,
         "description": "A package-service acceptance fixture.",
         "min_vrcforge_version": "0.3.0",
         "permissions": permissions or ["read_project", "unity_scan_scene"],
@@ -143,6 +144,7 @@ def test_signed_release_roundtrip_filters_assets_and_installs_atomically(tmp_pat
     registry = json.loads((store / "registry.json").read_text(encoding="utf-8"))
     entry = registry["skills"]["com.example.avatar-helper"]
     assert entry["version"] == "1.0.0"
+    assert entry["author"] == "Example Author"
     assert entry["signature_status"] == "signed"
     assert entry["signer_fingerprint"] == key_pair.fingerprint
     assert entry["source"] == "unit-test"
@@ -494,6 +496,22 @@ def test_same_signer_updates_different_signer_and_unsigned_takeover_are_blocked(
     with pytest.raises(PackageUpdateError, match="cannot overwrite"):
         service.preflight_import(unsigned_package)
 
+    renamed_author_source = make_skill_source(
+        tmp_path,
+        version="1.2.0",
+        author="Different Author Identity",
+        content="same signer but wrong author identity",
+    )
+    renamed_author_package = export_release(
+        service,
+        renamed_author_source,
+        tmp_path / "renamed-author.vsk",
+        key_a.private_key_pem,
+    )
+    with pytest.raises(PackageUpdateError, match="Author identity"):
+        service.preflight_import(renamed_author_package)
+    assert service.load_registry()["skills"]["com.example.avatar-helper"]["version"] == "1.1.0"
+
 
 def test_unsigned_install_can_be_pinned_by_first_signed_update(tmp_path: Path) -> None:
     service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
@@ -512,6 +530,37 @@ def test_unsigned_install_can_be_pinned_by_first_signed_update(tmp_path: Path) -
     unsigned = service.export_dev(source_12, tmp_path / "unsigned-again.vsk").package_path
     with pytest.raises(PackageUpdateError, match="cannot overwrite"):
         service.install(unsigned)
+
+
+def test_signed_update_recovers_legacy_author_identity_from_locked_manifest(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="0.5.1")
+    key = service.generate_signing_keypair()
+    package_1 = export_release(
+        service,
+        make_skill_source(tmp_path, version="1.0.0", author="Stable Author ID"),
+        tmp_path / "legacy-author-one.vsk",
+        key.private_key_pem,
+    )
+    service.install(package_1)
+
+    registry_path = tmp_path / "store" / "registry.json"
+    installed_path = tmp_path / "store" / "com.example.avatar-helper" / "installed.json"
+    for metadata_path in (registry_path, installed_path):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        entry = metadata["skills"]["com.example.avatar-helper"] if metadata_path == registry_path else metadata
+        entry.pop("author", None)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    package_2 = export_release(
+        service,
+        make_skill_source(tmp_path, version="1.1.0", author="Stable Author ID"),
+        tmp_path / "legacy-author-two.vsk",
+        key.private_key_pem,
+    )
+    result = service.install(package_2)
+
+    assert result.registry_entry["author"] == "Stable Author ID"
+    assert service.load_registry()["skills"]["com.example.avatar-helper"]["version"] == "1.1.0"
 
 
 def test_downgrade_requires_dev_override_and_same_signer(tmp_path: Path) -> None:
