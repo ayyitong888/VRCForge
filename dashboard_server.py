@@ -60,6 +60,7 @@ from backend_owner_lease import BackendOwnerLease
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
     DiagnosticLogManager,
+    format_log_line as format_diagnostic_log_line,
     install_standard_stream_capture,
     parse_log_line as parse_diagnostic_log_line,
     parse_log_timestamp as parse_diagnostic_log_timestamp,
@@ -4980,7 +4981,13 @@ def write_support_bundle_text_member(bundle: zipfile.ZipFile, name: str, lines: 
     safe_lines: list[str] = []
     for line in lines:
         try:
-            safe_lines.append(DIAGNOSTIC_PRIVACY.redact_text(line, context=current_diagnostic_identity_context()))
+            parsed = parse_diagnostic_log_line(line)
+            if parsed is None:
+                continue
+            redacted = DIAGNOSTIC_PRIVACY.redact(parsed, context=current_diagnostic_identity_context())
+            if not isinstance(redacted, dict):
+                continue
+            safe_lines.append(format_diagnostic_log_line(redacted))
         except Exception:  # noqa: BLE001 - never fall back to an unredacted diagnostic line.
             continue
     bundle.writestr(name, ("\n".join(safe_lines) + "\n") if safe_lines else "")

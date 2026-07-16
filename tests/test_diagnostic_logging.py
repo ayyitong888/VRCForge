@@ -645,6 +645,20 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             {"projectPath": project, "blueprintId": blueprint},
             context={"projectPath": project, "avatarName": "Bundle Avatar", "blueprintId": blueprint},
         )
+        manager.emit(
+            "debug",
+            "http",
+            "HTTP interaction.",
+            {
+                "query": {
+                    "api_key": secret,
+                    "authorization": f"Bearer {secret}",
+                    "projectPath": project,
+                    "blueprintId": blueprint,
+                }
+            },
+            context={"projectPath": project, "avatarName": "Bundle Avatar", "blueprintId": blueprint},
+        )
         identity_aliases_before = {
             row["alias"]
             for row in json.loads(privacy.mapping_path.read_text(encoding="utf-8"))["records"]
@@ -677,6 +691,7 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             names = set(bundle.namelist())
             content = "\n".join(bundle.read(name).decode("utf-8") for name in names)
             diagnostics = json.loads(bundle.read("diagnostics.json"))
+            diagnostic_log = bundle.read("diagnostic-log.txt").decode("utf-8")
         assert "diagnostic-log.txt" in names
         assert "dashboard-log.json" not in names
         assert "interaction-log.json" not in names
@@ -690,6 +705,12 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
         assert "diagnostic-identities.json" not in content
         assert "vrcforge.diagnostic-identities.v1" not in content
         assert any(alias in content for alias in identity_aliases_before)
+        parsed_log_lines = [parse_log_line(line) for line in diagnostic_log.splitlines() if line.strip()]
+        assert parsed_log_lines
+        assert all(line is not None for line in parsed_log_lines)
+        http_line = next(line for line in parsed_log_lines if line and line["scope"] == "http")
+        assert http_line["data"]["query"]["api_key"] == "[REDACTED]"
+        assert http_line["data"]["query"]["authorization"] == "[REDACTED]"
         identity_aliases_after = {
             row["alias"]
             for row in json.loads(privacy.mapping_path.read_text(encoding="utf-8"))["records"]

@@ -1126,46 +1126,41 @@ async function inspectGeneralDiagnosticsUi(cdp) {
 }
 
 async function installWebViewInstrumentation(cdp) {
-  const result = await evalValue(cdp, `(() => {
+  const result = await evalValue(cdp, `(async () => {
     const internal = window.__TAURI_INTERNALS__;
-    if (!internal || typeof internal.invoke !== "function" || typeof internal.runCallback !== "function") {
-      return { ok: false };
+    if (!internal || typeof internal.invoke !== "function" || typeof internal.transformCallback !== "function") {
+      return { ok: false, reason: "missing-internals" };
     }
     if (window.__VRCFORGE_LOGGING_PROBE__) return { ok: true, reused: true };
     const state = { logEvents: [], challengeIds: [] };
     const originalInvoke = internal.invoke;
-    const originalRunCallback = internal.runCallback;
-    internal.invoke = async function(...callArgs) {
-      const [command, args] = callArgs;
-      const value = await originalInvoke.apply(internal, callArgs);
+    const handler = internal.transformCallback((event) => {
       try {
-        const candidate = value?.challengeId ||
-          args?.request?.challengeId ||
-          args?.request?.developerChallengeId ||
-          args?.request?.body?.developerChallengeId;
-        if (candidate && !state.challengeIds.includes(String(candidate))) {
-          state.challengeIds.push(String(candidate));
-        }
-      } catch { /* Probe observation must not affect product behavior. */ }
-      return value;
-    };
-    internal.runCallback = function(id, payload) {
-      try {
-        const encoded = JSON.stringify(payload);
-        if (encoded.includes('"vrcforge-backend-event"') && encoded.includes('"type":"log"')) {
-          state.logEvents.push(payload);
+        if (event?.payload?.type === "log") {
+          state.logEvents.push(event);
           if (state.logEvents.length > 1_000) state.logEvents.shift();
         }
       } catch { /* Probe observation must not affect product behavior. */ }
-      return originalRunCallback.call(internal, id, payload);
-    };
+    });
+    let eventId;
+    try {
+      eventId = await originalInvoke.call(internal, "plugin:event|listen", {
+        event: "vrcforge-backend-event",
+        target: { kind: "Any" },
+        handler,
+      });
+    } catch {
+      return { ok: false, reason: "event-listen" };
+    }
+    state.eventId = eventId;
+    state.handler = handler;
     window.__VRCFORGE_LOGGING_PROBE__ = state;
     return {
-      ok: internal.invoke !== originalInvoke && internal.runCallback !== originalRunCallback,
+      ok: Number.isFinite(Number(eventId)),
+      reason: "event-id",
       reused: false,
     };
   })()`);
-  if (!result?.ok) throw new Error("Packaged WebView event instrumentation could not be installed.");
   return result;
 }
 
@@ -1824,20 +1819,19 @@ async function invokeOpenLogsFolderOnce(cdp) {
   };
 }
 
-function validateEventEvidence(snapshot, requiredAliases = []) {
+function validateEventIsolation(snapshot) {
   const events = Array.isArray(snapshot?.logEvents) ? snapshot.logEvents : [];
   const serialized = JSON.stringify(events);
   if (
-    events.length === 0
+    events.length !== 0
     || privacyFindings(serialized).length > 0
-    || !requiredAliases.every((alias) => serialized.includes(alias))
   ) {
-    throw new Error("Packaged backend log-event privacy evidence failed.");
+    throw new Error("Packaged backend log events crossed the WebView privacy boundary.");
   }
   return {
     capturedLogEventCount: events.length,
     privacyScanClean: true,
-    requiredAliasesObserved: true,
+    logEventsExcludedFromWebView: true,
     privateStoreFilesExcluded: !serialized.includes(privateMappingName) && !serialized.includes(privateKeyName),
   };
 }
@@ -1908,6 +1902,7 @@ function validateFinalContract(report) {
     report.privacy?.rawValuesAbsentFromLogs,
     report.privacy?.allAliasKindsObserved,
     report.privacy?.eventPrivacyClean,
+    report.privacy?.logEventsExcludedFromWebView,
     report.identityStability?.stableAcrossRestart,
     report.privateStore?.rawIdentityMappingPresent,
     report.privateStore?.secretsExcludedFromMapping,
@@ -2178,8 +2173,9 @@ async function main() {
     }
     fixtures = await preseedLogRetentionFixtures(privateFixture);
 
-    stage = "first-launch";
+    stage = "first-launch-process";
     app = await launchPackagedApp();
+    stage = "first-launch-runtime-binding";
     const firstRuntime = await verifyRuntimeBinding(binding);
     const firstBackendKey = processIdentityKey(firstRuntime.backendIdentity);
     report.runtimeBinding = {
@@ -2190,14 +2186,23 @@ async function main() {
       backendListenerBound: firstRuntime.backendListenerBound,
       sameBackendImmediateReadback: false,
     };
+    stage = "first-launch-open-settings";
     await openGeneralSettings(app.cdp);
-    await installWebViewInstrumentation(app.cdp);
+    stage = "first-launch-instrumentation";
+    const firstInstrumentationInstall = await installWebViewInstrumentation(app.cdp);
+    if (!firstInstrumentationInstall?.ok) {
+      stage = `first-launch-instrumentation-${firstInstrumentationInstall?.reason || "unknown"}`;
+      throw new Error("Packaged WebView event instrumentation could not be installed.");
+    }
+    stage = "first-launch-ui-inspection";
     const initialUi = await inspectGeneralDiagnosticsUi(app.cdp);
+    stage = "first-launch-default-readback";
     const [initialTauriDiagnostics, initialRestDiagnostics, initialAdvanced] = await Promise.all([
       tauriInvoke(app.cdp, "fetch_diagnostics", { request: { timeoutMs: 30_000 } }),
       appApi("/api/app/diagnostics"),
       advancedSettingsState(),
     ]);
+    stage = "first-launch-default-contract";
     if (
       initialTauriDiagnostics?.logLevel !== "info"
       || initialRestDiagnostics?.logLevel !== "info"
@@ -2289,14 +2294,16 @@ async function main() {
     const traceState = await waitForDiagnosticsLevel(app.cdp, "trace", 4);
     const directTraceAria = traceState.dom.aria;
 
-    stage = "first-privacy-chain";
+    stage = "first-private-inject";
     const firstPrivate = await injectPrivateContext("trace", privateFixture, "first-launch");
+    stage = "first-private-runtime-binding";
     const liveSnapshot = await processSnapshot({ track: true });
     const liveBackend = liveSnapshot.portOwners.find((owner) =>
       liveSnapshot.ports.some((port) => Number(port?.LocalPort || 0) === 8_757
         && Number(port?.OwningProcess || 0) === owner.pid));
     report.runtimeBinding.sameBackendImmediateReadback = Boolean(liveBackend)
       && processIdentityKey(liveBackend) === firstBackendKey;
+    stage = "first-private-rapid-slider";
     await rapidlySetLogSlider(app.cdp, [2, 0, 3, 1, 4]);
     const rapidFinal = await waitForDiagnosticsLevel(app.cdp, "trace", 4);
     report.logLevels = {
@@ -2315,11 +2322,14 @@ async function main() {
       throw new Error("Live diagnostics level/readback contract failed.");
     }
 
+    stage = "first-private-store";
     const firstStore = await inspectPrivateIdentityStore(privateFixture, firstPrivate.chain);
+    stage = "first-private-observable-projection";
     const privateStoreProjectionExcluded = await assertPrivateStoreProjectionAbsent(
       app.cdp,
       firstPrivate.diagnostics,
     );
+    stage = "first-private-log-scan";
     const firstLogScan = await scanLogDirectory();
     const requiredAliases = [
       firstPrivate.chain.userAlias,
@@ -2327,11 +2337,14 @@ async function main() {
       firstPrivate.chain.avatarAlias,
       ...firstStore.networkAliases,
     ];
+    stage = "first-private-log-aliases";
     if (!requiredAliases.every((alias) => firstLogScan.aliases.includes(alias))) {
       throw new Error("Canonical logs omitted a required redacted identity alias.");
     }
+    stage = "first-private-event-snapshot";
     const firstInstrumentation = await webViewInstrumentationSnapshot(app.cdp);
-    const firstEventEvidence = validateEventEvidence(firstInstrumentation, requiredAliases);
+    stage = "first-private-event-validation";
+    const firstEventEvidence = validateEventIsolation(firstInstrumentation);
     report.privacy = {
       queryEncodingVerified: firstPrivate.queryEncodingVerified,
       diagnosticsPostIdentityReadback: true,
@@ -2344,6 +2357,7 @@ async function main() {
         network: firstStore.networkAliases,
       },
       eventPrivacyClean: firstEventEvidence.privacyScanClean,
+      logEventsExcludedFromWebView: firstEventEvidence.logEventsExcludedFromWebView,
       firstLaunchEventCount: firstEventEvidence.capturedLogEventCount,
     };
     report.privateStore = {
@@ -2372,7 +2386,11 @@ async function main() {
     app = await launchPackagedApp();
     const secondRuntime = await verifyRuntimeBinding(binding);
     await openGeneralSettings(app.cdp);
-    await installWebViewInstrumentation(app.cdp);
+    const secondInstrumentationInstall = await installWebViewInstrumentation(app.cdp);
+    if (!secondInstrumentationInstall?.ok) {
+      stage = `second-launch-instrumentation-${secondInstrumentationInstall?.reason || "unknown"}`;
+      throw new Error("Packaged WebView event instrumentation could not be installed.");
+    }
     const [restartTauriDiagnostics, restartRestDiagnostics] = await Promise.all([
       tauriInvoke(app.cdp, "fetch_diagnostics", { request: { timeoutMs: 30_000 } }),
       appApi("/api/app/diagnostics"),
@@ -2398,8 +2416,9 @@ async function main() {
     report.developerOptions = await exerciseDeveloperOptions(app.cdp, Number(initialUi.settingsNavCount || 0));
     report.defaultState.developerLowLevelHidden = report.developerOptions.developerNavHiddenByDefault === true;
     const developerInstrumentation = await webViewInstrumentationSnapshot(app.cdp);
-    const developerEventEvidence = validateEventEvidence(developerInstrumentation, requiredAliases);
+    const developerEventEvidence = validateEventIsolation(developerInstrumentation);
     report.privacy.eventPrivacyClean = developerEventEvidence.privacyScanClean;
+    report.privacy.logEventsExcludedFromWebView = developerEventEvidence.logEventsExcludedFromWebView;
     report.privacy.secondLaunchEventCount = developerEventEvidence.capturedLogEventCount;
 
     stage = "support-bundle";
@@ -2433,8 +2452,9 @@ async function main() {
       throw new Error("Final canonical log scan omitted required aliases.");
     }
     const finalInstrumentation = await webViewInstrumentationSnapshot(app.cdp);
-    const finalEventEvidence = validateEventEvidence(finalInstrumentation, requiredAliases);
+    const finalEventEvidence = validateEventIsolation(finalInstrumentation);
     report.privacy.eventPrivacyClean = finalEventEvidence.privacyScanClean;
+    report.privacy.logEventsExcludedFromWebView = finalEventEvidence.logEventsExcludedFromWebView;
     report.privacy.finalEventCount = finalEventEvidence.capturedLogEventCount;
     report.logFiles.finalCanonicalFileCount = finalLogScan.fileCount;
     report.logFiles.finalCanonicalBytes = finalLogScan.totalBytes;
