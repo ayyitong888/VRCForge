@@ -43,6 +43,11 @@ pub(crate) const BACKEND_START_BACKGROUND_WAIT_SECONDS: u64 = 18;
 pub(crate) const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
 pub(crate) const BACKEND_SESSION_VERIFY_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const BACKEND_SESSION_VERIFY_CACHE_TTL: Duration = Duration::from_secs(15);
+pub(crate) const BACKEND_GRACEFUL_SHUTDOWN_METHOD: &str = "POST";
+pub(crate) const BACKEND_GRACEFUL_SHUTDOWN_PATH: &str = "/api/app/runtime/shutdown";
+pub(crate) const BACKEND_GRACEFUL_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(crate) const BACKEND_GRACEFUL_EXIT_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const BACKEND_FORCE_EXIT_WAIT: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -50,6 +55,7 @@ static BACKEND_SESSION_VERIFIED_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLo
 
 pub(crate) struct BackendState {
     pub(crate) child: Mutex<Option<Child>>,
+    pub(crate) app_session_token: Mutex<Option<String>>,
     #[cfg(windows)]
     pub(crate) job: Mutex<Option<BackendJob>>,
     pub(crate) event_bridge_started: Mutex<bool>,
@@ -60,6 +66,7 @@ impl BackendState {
     pub(crate) fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            app_session_token: Mutex::new(None),
             #[cfg(windows)]
             job: Mutex::new(None),
             event_bridge_started: Mutex::new(false),
@@ -333,25 +340,32 @@ pub(crate) fn start_backend_in_background(
         }
     };
 
+    let state = app_handle.state::<BackendState>();
     {
-        let state = app_handle.state::<BackendState>();
-        let mut guard = state
+        // Keep the child lock until all managed-only shutdown state is
+        // installed. Shutdown takes this lock first, so it cannot observe a
+        // child without the matching token and Windows Job Object.
+        let mut child_guard = state
             .child
             .lock()
             .map_err(|_| "backend state lock poisoned".to_string())?;
-        *guard = Some(child);
-    }
-    #[cfg(windows)]
-    {
-        let state = app_handle.state::<BackendState>();
-        let mut guard = state
+        let mut token_guard = state
+            .app_session_token
+            .lock()
+            .map_err(|_| "backend session-token state lock poisoned".to_string())?;
+        #[cfg(windows)]
+        let mut job_guard = state
             .job
             .lock()
             .map_err(|_| "backend job state lock poisoned".to_string())?;
-        *guard = Some(backend_job);
+        *token_guard = Some(app_session_token.clone());
+        #[cfg(windows)]
+        {
+            *job_guard = Some(backend_job);
+        }
+        *child_guard = Some(child);
     }
 
-    let state = app_handle.state::<BackendState>();
     start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token.clone())?;
     let ready = wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
 
@@ -744,28 +758,87 @@ pub(crate) fn wait_for_backend(timeout: Duration) -> bool {
     false
 }
 
+pub(crate) fn send_backend_graceful_shutdown_request_to(endpoint: &str, token: &str) -> bool {
+    let transport_proof = tauri_ipc_bridge_proof(
+        token,
+        BACKEND_GRACEFUL_SHUTDOWN_METHOD,
+        BACKEND_GRACEFUL_SHUTDOWN_PATH,
+    );
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_millis(350))
+        .timeout(BACKEND_GRACEFUL_REQUEST_TIMEOUT)
+        .redirects(0)
+        .build();
+    let response = agent
+        .post(&format!(
+            "{}{BACKEND_GRACEFUL_SHUTDOWN_PATH}",
+            endpoint.trim_end_matches('/')
+        ))
+        .set("Accept", "application/json")
+        .set("Origin", "tauri://localhost")
+        .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+        .set("X-VRCForge-Transport-Proof", &transport_proof)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call();
+    match response {
+        Ok(response) if (200..300).contains(&response.status()) => response.into_string().is_ok(),
+        _ => false,
+    }
+}
+
+pub(crate) fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub(crate) fn force_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    if child.kill().is_err() {
+        return matches!(child.try_wait(), Ok(Some(_)));
+    }
+    wait_for_child_exit(child, timeout)
+}
+
 pub(crate) fn stop_managed_backend_child(state: &BackendState) {
     let Ok(mut guard) = state.child.lock() else {
         return;
     };
     let child = guard.take();
     drop(guard);
+    let app_session_token = state
+        .app_session_token
+        .lock()
+        .ok()
+        .and_then(|mut token_guard| token_guard.take());
     #[cfg(windows)]
-    if let Ok(mut job_guard) = state.job.lock() {
-        drop(job_guard.take());
-    }
+    let _backend_job = state
+        .job
+        .lock()
+        .ok()
+        .and_then(|mut job_guard| job_guard.take());
+    clear_backend_session_verify_cache();
     let Some(mut child) = child else {
         return;
     };
-    let _ = child.kill();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
-            Err(_) => return,
-        }
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
     }
+    let graceful_requested = app_session_token
+        .as_deref()
+        .is_some_and(|token| send_backend_graceful_shutdown_request_to(BACKEND_ENDPOINT, token));
+    if graceful_requested && wait_for_child_exit(&mut child, BACKEND_GRACEFUL_EXIT_WAIT) {
+        return;
+    }
+    let _ = force_child_exit(&mut child, BACKEND_FORCE_EXIT_WAIT);
 }
 
 pub(crate) fn shutdown_managed_backend(app: &tauri::AppHandle) {

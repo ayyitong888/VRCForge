@@ -9570,14 +9570,14 @@ namespace VRCForge.Editor
             patch("dashboard_server.parse_args", return_value=args),
             patch("dashboard_server.backend_bind_target_occupied", return_value=True),
             patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
-            patch("dashboard_server.uvicorn.run") as uvicorn_run,
+            patch("dashboard_server.run_owned_uvicorn_server") as run_server,
             patch("builtins.print"),
         ):
             result = dashboard_server.main()
 
         self.assertEqual(result, 1)
         lease.acquire.assert_not_called()
-        uvicorn_run.assert_not_called()
+        run_server.assert_not_called()
 
     def test_backend_bind_target_probe_detects_a_live_listener(self) -> None:
         listener = dashboard_server.socket.socket(dashboard_server.socket.AF_INET, dashboard_server.socket.SOCK_STREAM)
@@ -9599,7 +9599,7 @@ namespace VRCForge.Editor
             patch("dashboard_server.parse_args", return_value=args),
             patch("dashboard_server.backend_bind_target_occupied", return_value=False),
             patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
-            patch("dashboard_server.uvicorn.run") as uvicorn_run,
+            patch("dashboard_server.run_owned_uvicorn_server") as run_server,
             patch("builtins.print"),
         ):
             result = dashboard_server.main()
@@ -9607,7 +9607,7 @@ namespace VRCForge.Editor
         self.assertEqual(result, 1)
         lease.acquire.assert_called_once_with()
         lease.release.assert_not_called()
-        uvicorn_run.assert_not_called()
+        run_server.assert_not_called()
 
     def test_backend_main_keeps_process_owner_with_active_daemon_after_uvicorn_returns(self) -> None:
         args = dashboard_server.parse_args([])
@@ -9621,19 +9621,13 @@ namespace VRCForge.Editor
                 patch("dashboard_server.parse_args", return_value=args),
                 patch("dashboard_server.backend_bind_target_occupied", return_value=False),
                 patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
-                patch("dashboard_server.uvicorn.run") as uvicorn_run,
+                patch("dashboard_server.run_owned_uvicorn_server") as run_server,
             ):
                 result = dashboard_server.main()
 
             self.assertEqual(result, 0)
             self.assertTrue(worker.is_alive())
-            uvicorn_run.assert_called_once_with(
-                dashboard_server.app,
-                host=args.host,
-                port=args.port,
-                log_level="info",
-                access_log=False,
-            )
+            run_server.assert_called_once_with(args.host, args.port)
             lease.release.assert_not_called()
         finally:
             stop_worker.set()

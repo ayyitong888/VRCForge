@@ -252,20 +252,25 @@ mod tests {
     use super::{
         advanced_settings_update_body, app_session_challenge_signature,
         app_session_challenge_signature_matches, developer_options_challenge_path,
-        diagnostics_update_body, extract_challenge_signature, hmac_sha256_hex,
+        diagnostics_update_body, extract_challenge_signature, force_child_exit, hmac_sha256_hex,
         percent_encode_query_component, prepare_runtime_files, provider_config_body,
         resolve_logs_folder, runtime_session_verification_error, sanitize_backend_event,
-        sanitize_text_for_webview, sanitize_webview_response, tauri_ipc_bridge_proof,
-        try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open, webview2_args_with_accessibility, webview_error_message,
-        DesktopAdvancedSettingsUpdateRequest, DesktopDiagnosticsUpdateRequest,
-        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        sanitize_text_for_webview, sanitize_webview_response,
+        send_backend_graceful_shutdown_request_to, stop_managed_backend_child,
+        tauri_ipc_bridge_proof, try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
+        webview_error_message, BackendState, DesktopAdvancedSettingsUpdateRequest,
+        DesktopDiagnosticsUpdateRequest, BACKEND_GRACEFUL_SHUTDOWN_METHOD,
+        BACKEND_GRACEFUL_SHUTDOWN_PATH, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
     };
     use std::{
         env, fs,
+        io::{Read, Write},
+        net::TcpListener,
         path::{Path, PathBuf},
-        process,
-        time::{SystemTime, UNIX_EPOCH},
+        process::{self, Command},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     fn test_dir(label: &str) -> PathBuf {
@@ -385,6 +390,112 @@ mod tests {
             proof,
             tauri_ipc_bridge_proof("session-token", "POST", "/api/app/diagnostics?view=2")
         );
+    }
+
+    #[test]
+    fn graceful_shutdown_request_uses_exact_authenticated_ipc_contract() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let endpoint = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("test listener address should resolve")
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("shutdown request should connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test read timeout should apply");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream
+                    .read(&mut chunk)
+                    .expect("request headers should be readable");
+                assert!(count > 0, "request ended before its headers were complete");
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let body = br#"{"ok":true}"#;
+            write!(
+                stream,
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("test response headers should be writable");
+            stream
+                .write_all(body)
+                .expect("test response body should be writable");
+            String::from_utf8(request).expect("request should be UTF-8 HTTP")
+        });
+
+        let token = "shutdown-test-session-token";
+        assert!(send_backend_graceful_shutdown_request_to(&endpoint, token));
+        let request = server.join().expect("test server should finish");
+        let lower = request.to_ascii_lowercase();
+        let proof = tauri_ipc_bridge_proof(
+            token,
+            BACKEND_GRACEFUL_SHUTDOWN_METHOD,
+            BACKEND_GRACEFUL_SHUTDOWN_PATH,
+        );
+        assert!(request.starts_with(&format!(
+            "{} {} HTTP/1.1\r\n",
+            BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH
+        )));
+        assert!(lower.contains("origin: tauri://localhost\r\n"));
+        assert!(lower.contains("x-vrcforge-transport: tauri-ipc-bridge\r\n"));
+        assert!(lower.contains(&format!("x-vrcforge-transport-proof: {proof}\r\n")));
+        assert!(lower.contains(&format!("authorization: bearer {token}\r\n")));
+    }
+
+    #[test]
+    fn empty_managed_backend_shutdown_is_idempotent() {
+        let state = BackendState::new();
+
+        stop_managed_backend_child(&state);
+        stop_managed_backend_child(&state);
+
+        assert!(state
+            .child
+            .lock()
+            .expect("child lock should remain valid")
+            .is_none());
+        assert!(state
+            .app_session_token
+            .lock()
+            .expect("token lock should remain valid")
+            .is_none());
+        #[cfg(windows)]
+        assert!(state
+            .job
+            .lock()
+            .expect("job lock should remain valid")
+            .is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_child_wait_and_force_fallback_are_bounded() {
+        let mut graceful = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("short-lived child should start");
+        assert!(wait_for_child_exit(&mut graceful, Duration::from_secs(2)));
+
+        let mut stubborn = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Threading.Thread]::Sleep(5000)",
+            ])
+            .spawn()
+            .expect("long-lived child should start");
+        assert!(!wait_for_child_exit(
+            &mut stubborn,
+            Duration::from_millis(10)
+        ));
+        assert!(force_child_exit(&mut stubborn, Duration::from_secs(2)));
+        assert!(matches!(stubborn.try_wait(), Ok(Some(_))));
     }
 
     #[test]

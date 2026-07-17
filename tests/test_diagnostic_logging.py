@@ -10,7 +10,8 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -60,6 +61,92 @@ def make_manager(
         max_file_bytes=max_file_bytes,
     )
     return privacy, manager
+
+
+def test_internal_runtime_shutdown_requires_exact_ipc_proof_and_runs_after_response() -> None:
+    token = "shutdown-test-session-token"
+    server = SimpleNamespace(should_exit=False)
+    proof = hmac.new(
+        token.encode("utf-8"),
+        (
+            "vrcforge.tauri-ipc-bridge.v1\n"
+            f"POST\n{dashboard_server.APP_INTERNAL_SHUTDOWN_PATH}"
+        ).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    direct_headers = {
+        "Authorization": f"Bearer {token}",
+        "Origin": "tauri://localhost",
+    }
+    ipc_headers = {
+        **direct_headers,
+        "X-VRCForge-Transport": "tauri-ipc-bridge",
+        "X-VRCForge-Transport-Proof": proof,
+    }
+
+    dashboard_server.register_owned_uvicorn_server(server)
+    try:
+        with (
+            patch.object(dashboard_server, "APP_AUTH_REQUIRED", False),
+            patch.object(dashboard_server, "APP_SESSION_TOKEN", token),
+            TestClient(dashboard_server.app) as client,
+        ):
+            proof_without_bearer = client.post(
+                dashboard_server.APP_INTERNAL_SHUTDOWN_PATH,
+                headers={key: value for key, value in ipc_headers.items() if key != "Authorization"},
+            )
+            assert proof_without_bearer.status_code == 401
+            assert server.should_exit is False
+
+            direct = client.post(dashboard_server.APP_INTERNAL_SHUTDOWN_PATH, headers=direct_headers)
+            assert direct.status_code == 403
+            assert server.should_exit is False
+
+            accepted = client.post(dashboard_server.APP_INTERNAL_SHUTDOWN_PATH, headers=ipc_headers)
+            assert accepted.status_code == 202
+            assert accepted.json() == {
+                "ok": True,
+                "schema": "vrcforge.runtime_shutdown.v1",
+                "scheduled": True,
+            }
+            # TestClient waits for response background tasks. Reaching this
+            # assertion therefore proves the response was produced first.
+            assert server.should_exit is True
+    finally:
+        dashboard_server.clear_owned_uvicorn_server(server)
+
+
+def test_owned_uvicorn_server_lifecycle_clears_global_after_return_and_error() -> None:
+    config = object()
+    returned_server = Mock()
+    returned_server.run.side_effect = lambda: (
+        dashboard_server.current_owned_uvicorn_server() is returned_server
+    ) or pytest.fail("owned server was not registered while running")
+
+    with (
+        patch.object(dashboard_server.uvicorn, "Config", return_value=config) as config_factory,
+        patch.object(dashboard_server.uvicorn, "Server", return_value=returned_server),
+    ):
+        dashboard_server.run_owned_uvicorn_server("127.0.0.1", 18757)
+
+    config_factory.assert_called_once_with(
+        app=dashboard_server.app,
+        host="127.0.0.1",
+        port=18757,
+        log_level="info",
+        access_log=False,
+    )
+    assert dashboard_server.current_owned_uvicorn_server() is None
+
+    failed_server = Mock()
+    failed_server.run.side_effect = RuntimeError("test server failure")
+    with (
+        patch.object(dashboard_server.uvicorn, "Config", return_value=config),
+        patch.object(dashboard_server.uvicorn, "Server", return_value=failed_server),
+        pytest.raises(RuntimeError, match="test server failure"),
+    ):
+        dashboard_server.run_owned_uvicorn_server("127.0.0.1", 18758)
+    assert dashboard_server.current_owned_uvicorn_server() is None
 
 
 def test_timestamp_filename_exclusive_suffix_and_readable_single_line_utf8() -> None:

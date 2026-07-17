@@ -32,7 +32,7 @@ from threading import Lock, Thread
 from typing import Any, Callable, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -257,6 +257,7 @@ def app_auth_disabled_for_test_process() -> bool:
 APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
+APP_INTERNAL_SHUTDOWN_PATH = "/api/app/runtime/shutdown"
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
@@ -1435,6 +1436,8 @@ app.mount("/artifacts", StaticFiles(directory=str(DASHBOARD_ARTIFACTS_DIR)), nam
 app.mount("/runtime-artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="runtime_artifacts")
 
 EVENT_BUS = DashboardEventBus()
+UVICORN_SERVER_LOCK = Lock()
+CURRENT_UVICORN_SERVER: uvicorn.Server | None = None
 DIAGNOSTIC_PRIVACY = DiagnosticPrivacy(CONFIG_DIR)
 DIAGNOSTIC_LOGGER = DiagnosticLogManager(LOG_DIR, DIAGNOSTICS_CONFIG_PATH, DIAGNOSTIC_PRIVACY)
 DEVELOPER_OPTIONS_GUARD = DeveloperOptionsGuard()
@@ -1791,6 +1794,31 @@ def read_app_session_challenge(request: Request, nonce: str = "") -> dict[str, A
         "ok": True,
         "schema": "vrcforge.app_session_challenge.v1",
         "signature": app_session_challenge_signature(nonce_value),
+    }
+
+
+@app.post(APP_INTERNAL_SHUTDOWN_PATH, status_code=202)
+def request_internal_runtime_shutdown(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    supplied_token = extract_bearer_token(request)
+    if (
+        not APP_SESSION_TOKEN
+        or not supplied_token
+        or not hmac.compare_digest(supplied_token, APP_SESSION_TOKEN)
+    ):
+        raise HTTPException(status_code=401, detail="App session token is missing or invalid.")
+    if request_transport_component(request) != "ipc":
+        raise HTTPException(status_code=403, detail="Runtime shutdown requires a valid Tauri bridge request proof.")
+    server = current_owned_uvicorn_server()
+    if server is None:
+        raise HTTPException(status_code=503, detail="The managed runtime server is unavailable.")
+    # Starlette executes response background tasks only after the response body
+    # has been sent, so the shell can receive the acknowledgement before the
+    # owned server begins its normal shutdown lifecycle.
+    background_tasks.add_task(signal_owned_uvicorn_server_exit, server)
+    return {
+        "ok": True,
+        "schema": "vrcforge.runtime_shutdown.v1",
+        "scheduled": True,
     }
 
 
@@ -5093,6 +5121,44 @@ def request_transport_component(request: Request) -> Literal["ipc", "http"]:
     message = f"vrcforge.tauri-ipc-bridge.v1\n{request.method.upper()}\n{raw_target}".encode("utf-8")
     expected = hmac.new(APP_SESSION_TOKEN.encode("utf-8"), message, hashlib.sha256).hexdigest()
     return "ipc" if hmac.compare_digest(proof.lower(), expected) else "http"
+
+
+def current_owned_uvicorn_server() -> uvicorn.Server | None:
+    with UVICORN_SERVER_LOCK:
+        return CURRENT_UVICORN_SERVER
+
+
+def register_owned_uvicorn_server(server: uvicorn.Server) -> None:
+    global CURRENT_UVICORN_SERVER
+    with UVICORN_SERVER_LOCK:
+        if CURRENT_UVICORN_SERVER is not None:
+            raise RuntimeError("A VRCForge uvicorn server is already registered.")
+        CURRENT_UVICORN_SERVER = server
+
+
+def clear_owned_uvicorn_server(server: uvicorn.Server) -> None:
+    global CURRENT_UVICORN_SERVER
+    with UVICORN_SERVER_LOCK:
+        if CURRENT_UVICORN_SERVER is server:
+            CURRENT_UVICORN_SERVER = None
+
+
+def signal_owned_uvicorn_server_exit(server: uvicorn.Server) -> bool:
+    with UVICORN_SERVER_LOCK:
+        if CURRENT_UVICORN_SERVER is not server:
+            return False
+        server.should_exit = True
+        return True
+
+
+def run_owned_uvicorn_server(host: str, port: int) -> None:
+    config = uvicorn.Config(app=app, host=host, port=port, log_level="info", access_log=False)
+    server = uvicorn.Server(config)
+    register_owned_uvicorn_server(server)
+    try:
+        server.run()
+    finally:
+        clear_owned_uvicorn_server(server)
 
 
 def record_debug_interaction(entry: dict[str, Any], *, component: str = "http") -> None:
@@ -20404,7 +20470,7 @@ def main() -> int:
         return 1
     if getattr(sys, "frozen", False):
         install_standard_stream_capture(DIAGNOSTIC_LOGGER)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
+    run_owned_uvicorn_server(args.host, args.port)
     return 0
 
 
