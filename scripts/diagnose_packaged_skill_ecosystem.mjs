@@ -1125,7 +1125,7 @@ function observedStartDirectlyFollowsTracked(candidate, liveTrackedByPid) {
 
 function updateTrackedProcessTree(allProcesses) {
   const processes = allProcesses.map(processIdentity).filter((item) =>
-    item.pid > 0 && isDmtfCreationDate(item.creationDate));
+    item.pid > 0 && isDmtfCreationDate(item.creationDate) && Boolean(item.path));
   const byPid = new Map(processes.map((item) => [item.pid, item]));
   if (trackedRootPid > 0 && !trackedRootObserved) {
     const root = byPid.get(trackedRootPid);
@@ -1150,7 +1150,12 @@ function updateTrackedProcessTree(allProcesses) {
     }
   }
   let added = true;
+  let remainingPasses = processes.length + 1;
   while (added) {
+    if (remainingPasses <= 0) {
+      throw new Error("Tracked process-tree projection did not converge.");
+    }
+    remainingPasses -= 1;
     added = false;
     for (const candidate of processes) {
       if (
@@ -5097,7 +5102,9 @@ async function exercisePathToSkillUi(report, cdp) {
 }
 
 async function runUiAcceptance(report, cdp, signerFingerprint, records) {
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:start`);
   const contextualRuntime = await invokeContextualReadinessRuntime();
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:done`);
   const contextualReadiness = contextualRuntime?.result;
   if (
     contextualRuntime?.ok !== true
@@ -5107,8 +5114,12 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
   ) {
     addAssertion(report, "contextual Path-to-Skill readiness runtime did not execute successfully");
   }
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-prefill:start`);
   await exerciseContextualPathToSkillUi(report, cdp);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-prefill:done`);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.skills-workspace:start`);
   const opened = await openSkillsWorkspace(cdp);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.skills-workspace:done`);
   report.ui.skillsWorkspaceVisible = opened?.ok === true;
   if (!report.ui.skillsWorkspaceVisible) {
     addAssertion(report, "packaged Skills workspace did not render");
@@ -5116,8 +5127,11 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
   }
   const uniquePackageQuery = records.find((item) => item.slug === "outfit-naming-helper")?.id
     || "community.examples.outfit-naming-helper";
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.audit-data:start`);
   const auditPayload = await appApi("/api/app/skill-packages");
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.audit-data:done`);
   const expectedImportedGovernanceRows = expectedImportedAuditGovernanceRows(auditPayload);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.audit:start`);
   await exerciseAuditUi(
     report,
     cdp,
@@ -5125,7 +5139,10 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
     uniquePackageQuery,
     expectedImportedGovernanceRows,
   );
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.audit:done`);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.path-to-skill:start`);
   await exercisePathToSkillUi(report, cdp);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.path-to-skill:done`);
   for (const key of [
     "pathToSkillVisible",
     "contextualPathToSkillPrefill",
@@ -6493,6 +6510,54 @@ async function runSelfTest() {
       { ...reusedDescendant, creationDate: "2026-07-17T00:00:00Z" },
       reusedDescendant,
     );
+    trackedProcessIdentities.clear();
+    observedProcessStartEvents.clear();
+    observedProcessStartEventsBySequence.clear();
+    trackedRootObserved = false;
+    trackedRootIdentityKey = "";
+    trackedRootPid = 400;
+    const pathlessRoot = {
+      ...root,
+      pid: trackedRootPid,
+      creationDate: dmtf(12),
+      startEventSequence: 40,
+    };
+    const pathlessChild = {
+      ...oldDescendant,
+      pid: 401,
+      parentPid: trackedRootPid,
+      path: "",
+      creationDate: dmtf(13),
+      startEventSequence: 0,
+    };
+    const pathlessRootStart = {
+      pid: pathlessRoot.pid,
+      parentPid: pathlessRoot.parentPid,
+      name: pathlessRoot.name,
+      creationDate: pathlessRoot.creationDate,
+      sequence: pathlessRoot.startEventSequence,
+    };
+    const pathlessChildStart = {
+      pid: pathlessChild.pid,
+      parentPid: pathlessChild.parentPid,
+      name: pathlessChild.name,
+      creationDate: pathlessChild.creationDate,
+      sequence: 41,
+    };
+    storeTrackedProcessIdentity(pathlessRoot, { isRoot: true });
+    for (const event of [pathlessRootStart, pathlessChildStart]) {
+      observedProcessStartEvents.set(event.pid, event);
+      observedProcessStartEventsBySequence.set(event.sequence, event);
+    }
+    const pathlessLive = updateTrackedProcessTree([pathlessRoot, pathlessChild]);
+    const pathlessDescendantSkippedWithoutSpin = pathlessLive.length === 1
+      && pathlessLive.some((item) => processIdentityMatches(item, pathlessRoot))
+      && trackedIdentitiesForPid(pathlessChild.pid).length === 0;
+    const resolvedPathChild = { ...pathlessChild, path: "C:/probe/resolved-child.exe" };
+    const resolvedPathLive = updateTrackedProcessTree([pathlessRoot, resolvedPathChild]);
+    const pathlessDescendantBindsAfterPathResolves = resolvedPathLive.some((item) =>
+      processIdentityMatches(item, { ...resolvedPathChild, startEventSequence: pathlessChildStart.sequence }))
+      && trackedIdentitiesForPid(resolvedPathChild.pid).length === 1;
     return {
       historicalParentGenerationPreserved,
       unrelatedReusedParentGenerationRejected,
@@ -6502,6 +6567,8 @@ async function runSelfTest() {
       cleanupUsesReusedDescendantGeneration,
       missingExecutablePathIdentityRejected,
       nonDmtfGenerationRejected,
+      pathlessDescendantSkippedWithoutSpin,
+      pathlessDescendantBindsAfterPathResolves,
     };
   })();
   const lockDigest = "d".repeat(64);
@@ -6687,6 +6754,8 @@ async function runSelfTest() {
     cleanupUsesReusedDescendantGeneration: processIdentityChecks.cleanupUsesReusedDescendantGeneration,
     missingExecutablePathIdentityRejected: processIdentityChecks.missingExecutablePathIdentityRejected,
     nonDmtfGenerationRejected: processIdentityChecks.nonDmtfGenerationRejected,
+    pathlessDescendantSkippedWithoutSpin: processIdentityChecks.pathlessDescendantSkippedWithoutSpin,
+    pathlessDescendantBindsAfterPathResolves: processIdentityChecks.pathlessDescendantBindsAfterPathResolves,
     nonElevatedProcessWatcherAccepted:
       executableLaunchLockReadiness(nonElevatedWatcherReady, lockDigest, null).ok === true,
     executableDigestMismatchRejected:
