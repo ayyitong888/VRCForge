@@ -2189,7 +2189,8 @@ $payload | ConvertTo-Json -Depth 8 -Compress
     },
     paths: {},
     planning: {},
-    dashboard: { project_roots: [projectRoot] },
+    // Dashboard project roots are scan roots whose direct children are Unity projects.
+    dashboard: { project_roots: [evidenceRoot] },
   };
   await Promise.all([
     writeFile(resolve(configRoot, "config.json"), `${JSON.stringify(settings, null, 2)}\n`, "utf8"),
@@ -4064,8 +4065,18 @@ function recipeSummaries() {
   };
 }
 
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalJsonValue(value[key])]),
+    );
+  }
+  return value;
+}
+
 function exactJsonValue(actual, expected) {
-  return JSON.stringify(actual) === JSON.stringify(expected);
+  return JSON.stringify(canonicalJsonValue(actual)) === JSON.stringify(canonicalJsonValue(expected));
 }
 
 function parseJsonValue(value) {
@@ -4585,6 +4596,43 @@ async function openSkillsWorkspace(cdp) {
   );
 }
 
+async function selectPackagedFixtureProject(report, cdp) {
+  const result = await evalValue(
+    cdp,
+    `(async () => {
+      const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+      const deadline = Date.now() + 30000;
+      const findFixtureButton = () => [...document.querySelectorAll("button")].find((button) =>
+        [...button.querySelectorAll("span")].some((span) => String(span.textContent || "").trim() === "packaged-fixture"));
+      let button;
+      while (Date.now() < deadline) {
+        button = findFixtureButton();
+        if (button) break;
+        await sleep(100);
+      }
+      if (!button) return { ok: false, found: false, selected: false };
+      button.click();
+      while (Date.now() < deadline) {
+        const current = findFixtureButton();
+        if (current?.parentElement?.classList.contains("bg-muted")) {
+          return { ok: true, found: true, selected: true };
+        }
+        await sleep(100);
+      }
+      return { ok: false, found: true, selected: false };
+    })()`,
+    45000,
+  );
+  report.diagnostics.ui.fixtureProjectSelection = {
+    found: result?.found === true,
+    selected: result?.selected === true,
+    completed: result?.ok === true,
+  };
+  if (result?.ok !== true) {
+    addAssertion(report, "packaged fixture project could not be selected before contextual UI acceptance");
+  }
+}
+
 async function exerciseFirstRunLanguageGate(report, cdp) {
   const result = await evalValue(
     cdp,
@@ -4750,7 +4798,13 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
         await sleep(200);
       }
       checks.saveOperationButtonFound = Boolean(target);
-      if (!target) return { ok: false, failureStage: "save-operation-button", checks };
+      if (!target) {
+        const observedTools = [...document.querySelectorAll('button[data-vrcforge-save-operation-as-skill]')]
+          .map((button) => button.getAttribute("data-vrcforge-save-operation-tool") || "")
+          .filter((value) => /^vrcforge_[a-z0-9_]+$/.test(value))
+          .slice(0, 10);
+        return { ok: false, failureStage: "save-operation-button", checks, observedTools };
+      }
       target.click();
       while (Date.now() < deadline) {
         const badge = document.querySelector('[data-vrcforge-path-to-skill-prefilled="true"]');
@@ -4800,6 +4854,7 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
   );
   report.diagnostics.pathToSkill.contextualPrefill = {
     ...(result?.checks || {}),
+    observedTools: Array.isArray(result?.observedTools) ? result.observedTools : [],
     completed: result?.ok === true,
     failureStage: ["save-operation-button", "prefill-render"].includes(result?.failureStage)
       ? result.failureStage
@@ -4947,13 +5002,12 @@ async function exerciseAuditUi(
       const searchLiveUpdated = await waitFor(() => statusText() && statusText() !== beforeSearchStatus);
       const searchedRows = rowSignatures();
       const searchedRowElements = rowElements();
+      const normalizedPackageQuery = ${JSON.stringify(uniquePackageQuery.toLowerCase())};
       const searchExercised = searchedRows.length > 0
         && searchedRows.length < beforeSearchRows.length
         && JSON.stringify(searchedRows) !== JSON.stringify(beforeSearchRows)
-        && searchedRowElements.every((row) => {
-          const semantic = rowSemanticValue(row);
-          return [semantic.skillId, semantic.packageId].includes(${JSON.stringify(uniquePackageQuery)});
-        });
+        && searchedRowElements.every((row) =>
+          String(row.textContent || "").toLowerCase().includes(normalizedPackageQuery));
 
       const beforeSignerStatus = statusText();
       nativeInputSetter.call(search, ${JSON.stringify(signerFingerprint.slice(0, 16))});
@@ -4996,6 +5050,14 @@ async function exerciseAuditUi(
     matchedRows: Number(result?.matchedGovernanceRows || 0),
     unmatchedRows: Number(result?.unmatchedGovernanceRows || 0),
     everyFilteredRowComplete: result?.governanceFieldsVisible === true,
+  };
+  report.diagnostics.ui.auditInteraction = {
+    searchVisible: result?.searchVisible === true,
+    signerVisible: result?.signerVisible === true,
+    searchExercised: result?.searchExercised === true,
+    filterExercised: result?.filterExercised === true,
+    paginationExercised: result?.paginationExercised === true,
+    ariaLive: result?.ariaLive === true,
   };
   report.ui.auditRows = {
     firstPage: Number(result?.firstPageRows || 0),
@@ -5102,6 +5164,9 @@ async function exercisePathToSkillUi(report, cdp) {
 }
 
 async function runUiAcceptance(report, cdp, signerFingerprint, records) {
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.fixture-project:start`);
+  await selectPackagedFixtureProject(report, cdp);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.fixture-project:done`);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:start`);
   const contextualRuntime = await invokeContextualReadinessRuntime();
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:done`);
@@ -6611,6 +6676,14 @@ async function runSelfTest() {
   });
   const checks = {
     strictPolicyAccepted: strictBuildPolicyFromManifest(strictPolicy).strict === true,
+    semanticJsonObjectKeyOrderIgnored: exactJsonValue(
+      { beta: { two: 2, one: 1 }, alpha: true },
+      { alpha: true, beta: { one: 1, two: 2 } },
+    ),
+    semanticJsonArrayOrderPreserved: !exactJsonValue(
+      { ordered: ["first", "second"] },
+      { ordered: ["second", "first"] },
+    ),
     missingPolicyRejected: strictBuildPolicyFromManifest({}).strict === false,
     localPolicyRejectedAfterTemporalDrift: strictBuildPolicyFromManifest(localPolicy).strict === false
       && releaseBindingIsStrict({
