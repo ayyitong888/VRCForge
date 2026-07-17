@@ -109,7 +109,7 @@ from shader_adapter_registry import (
     shader_adapter_definition,
     shader_family_label,
 )
-from skill_packages import SkillPackageError, SkillPackageService
+from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_tasks import SubAgentTaskRegistry
@@ -3973,6 +3973,127 @@ def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
     return skill, storage_path
 
 
+def _read_user_skill_export_file(
+    service: SkillPackageService,
+    root: Path,
+    relative: str,
+    *,
+    label: str,
+) -> tuple[Path, PurePosixPath, bytes]:
+    resolved, relative_path = _resolve_skill_projection_source(root, relative, label=label)
+    normalized = relative_path.as_posix()
+    exclusion = service._source_file_exclusion_reason(resolved, normalized)  # noqa: SLF001 - selected export files use package policy.
+    if exclusion:
+        raise SkillPackageError(f"{label} is not exportable ({exclusion}): {normalized}.")
+    metadata = resolved.stat(follow_symlinks=False)
+    if metadata.st_size > service.max_file_size:
+        raise SkillPackageError(f"{label} exceeds the package file-size limit: {normalized}.")
+    with resolved.open("rb") as stream:
+        data = stream.read(service.max_file_size + 1)
+    if len(data) > service.max_file_size:
+        raise SkillPackageError(f"{label} exceeds the package file-size limit: {normalized}.")
+    if service._contains_sensitive_content(data):  # noqa: SLF001 - selected export files use package policy.
+        raise SkillPackageError(f"{label} contains secret or binary material: {normalized}.")
+    return resolved, relative_path, data
+
+
+def _copy_manifest_user_skill_export_source(
+    skill_file: Path,
+    source: Path,
+    service: SkillPackageService,
+) -> bool:
+    root = skill_file.parent
+    manifest_path = root / "manifest.json"
+    if not os.path.lexists(manifest_path):
+        return False
+
+    _manifest_resolved, _manifest_relative, manifest_bytes = _read_user_skill_export_file(
+        service,
+        root,
+        "manifest.json",
+        label="user skill manifest",
+    )
+    manifest_value = _load_json_bytes(manifest_bytes, "manifest.json")
+    manifest = service.validate_manifest(manifest_value, package_root=root)
+    entrypoints = manifest["entrypoints"]
+    skill_relative = entrypoints.get("skill")
+    if not skill_relative:
+        raise SkillPackageError("User skill manifest must declare the loaded SKILL.md as its skill entrypoint.")
+
+    loaded_relative = skill_file.relative_to(root).as_posix()
+    loaded_resolved, _loaded_path = _resolve_skill_projection_source(
+        root,
+        loaded_relative,
+        label="loaded user SKILL.md",
+    )
+    manifest_skill_resolved, _manifest_skill_path = _resolve_skill_projection_source(
+        root,
+        skill_relative,
+        label="skill entrypoint",
+    )
+    if not os.path.samefile(loaded_resolved, manifest_skill_resolved):
+        raise SkillPackageError("User skill manifest skill entrypoint does not resolve to the loaded SKILL.md.")
+
+    selected: dict[str, bytes] = {"manifest.json": manifest_bytes}
+    entrypoint_paths: dict[str, str] = {}
+    collision_keys = {"manifest.json"}
+    for name, relative in entrypoints.items():
+        resolved, relative_path, data = _read_user_skill_export_file(
+            service,
+            root,
+            relative,
+            label=f"user skill entrypoint {name}",
+        )
+        normalized = relative_path.as_posix()
+        collision_key = normalized.casefold()
+        if collision_key in collision_keys:
+            raise SkillPackageError(f"User skill manifest contains a colliding entrypoint path: {normalized}.")
+        collision_keys.add(collision_key)
+        entrypoint_paths[name] = normalized
+        selected[normalized] = data
+        if name == "skill" and not os.path.samefile(resolved, loaded_resolved):
+            raise SkillPackageError("User skill manifest skill entrypoint does not resolve to the loaded SKILL.md.")
+
+    non_skill_entrypoints = {
+        relative for name, relative in entrypoint_paths.items() if name != "skill"
+    }
+    service._validate_payload_limits(selected)  # noqa: SLF001 - selected export payload uses package limits.
+    for relative, data in selected.items():
+        destination = source.joinpath(*PurePosixPath(relative).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    try:
+        staged_skill = parse_skill_markdown(source.joinpath(*PurePosixPath(skill_relative).parts))
+    except Exception as exc:  # noqa: BLE001 - the staged bytes must remain a loadable user skill.
+        raise SkillPackageError("The selected SKILL.md cannot be parsed for export.") from exc
+    raw_support_files = staged_skill.get("supportFiles")
+    if isinstance(raw_support_files, list):
+        declared_support = raw_support_files
+    elif raw_support_files:
+        declared_support = [raw_support_files]
+    else:
+        declared_support = []
+    support_collision_keys: set[str] = set()
+    for raw_relative in declared_support:
+        relative = str(raw_relative or "").strip()
+        _resolved, relative_path = _resolve_skill_projection_source(
+            root,
+            relative,
+            label="SKILL.md support file",
+        )
+        normalized = relative_path.as_posix()
+        collision_key = normalized.casefold()
+        if collision_key in support_collision_keys:
+            raise SkillPackageError(f"SKILL.md contains a colliding support-file path: {normalized}.")
+        support_collision_keys.add(collision_key)
+        if normalized not in non_skill_entrypoints:
+            raise SkillPackageError(
+                f"Runtime support files must also be declared as non-skill manifest entrypoints: {normalized}"
+            )
+
+    return True
+
+
 def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     skill_name = str(params.get("skillName") or params.get("skill_name") or "").strip()
     output_text = str(params.get("outputPath") or params.get("output_path") or "").strip()
@@ -3983,21 +4104,22 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     service = skill_package_service()
     with tempfile.TemporaryDirectory(prefix="vrcforge-skill-export-") as temp_dir:
         source = Path(temp_dir)
-        shutil.copy2(skill_file, source / "SKILL.md")
-        package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
-        package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
-        manifest = {
-            "id": package_id,
-            "name": str(skill.get("title") or skill.get("name") or skill_name)[:160],
-            "skill_name": str(skill.get("name") or skill_name),
-            "version": "1.0.0",
-            "author": "VRCForge User",
-            "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
-            "min_vrcforge_version": app.version,
-            "permissions": ["read_project"],
-            "entrypoints": {"skill": "SKILL.md"},
-        }
-        (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not _copy_manifest_user_skill_export_source(skill_file, source, service):
+            shutil.copy2(skill_file, source / "SKILL.md")
+            package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
+            package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
+            manifest = {
+                "id": package_id,
+                "name": str(skill.get("title") or skill.get("name") or skill_name)[:160],
+                "skill_name": str(skill.get("name") or skill_name),
+                "version": "1.0.0",
+                "author": "VRCForge User",
+                "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
+                "min_vrcforge_version": app.version,
+                "permissions": ["read_project"],
+                "entrypoints": {"skill": "SKILL.md"},
+            }
+            (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         if params.get("release"):
             private_key = params.get("privateKeyPem") or params.get("private_key_pem") or params.get("privateKeyPath") or params.get("private_key_path")
             exported = service.export_release(source, output_path, private_key)

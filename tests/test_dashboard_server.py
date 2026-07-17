@@ -24,7 +24,7 @@ from agent_gateway import (
     native_shell_argv,
     resolve_powershell_executable,
 )
-from skill_packages import SkillPackageService
+from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
@@ -4539,6 +4539,230 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(uninstalled.json()["uninstalled"]["skill_id"], "community.avatar-review")
             self.assertEqual(packages_after_uninstall, [])
             self.assertFalse(any(skill["name"] == "avatar-review" for skill in skills_after_uninstall))
+
+    def test_user_path_to_skill_export_preserves_manifest_and_workflow_then_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "roundtrip-profile"
+            captured = dashboard_server.build_path_to_skill_source(
+                {"status": "passed", "workflow": "optimizer_conservative_profile", "steps": ["inspect"]},
+                package_id="community.path-to-skill.roundtrip-profile",
+                skill_name="roundtrip-profile",
+                title="Roundtrip Profile",
+                version="2.3.4",
+                author="Roundtrip Author",
+            )
+            captured.write_to(skill_dir)
+            workflow_bytes = (skill_dir / "workflows" / "captured-path.json").read_bytes()
+            (skill_dir / "private-notes.txt").write_text("must not be exported", encoding="utf-8")
+            package_path = root / "roundtrip-profile.vsk"
+
+            with TestClient(dashboard_server.app) as client:
+                exported = client.post(
+                    "/api/app/skill-packages/export",
+                    json={"skillName": "roundtrip-profile", "outputPath": str(package_path)},
+                )
+                imported = client.post(
+                    "/api/app/skill-packages/import",
+                    json={"packagePath": str(package_path)},
+                )
+
+            self.assertEqual(exported.status_code, 200, exported.text)
+            with zipfile.ZipFile(package_path, "r") as archive:
+                names = set(archive.namelist())
+                self.assertEqual(archive.read("workflows/captured-path.json"), workflow_bytes)
+            self.assertNotIn("private-notes.txt", names)
+            preview = SkillPackageService(root / "inspect", vrcforge_version="1.3.0").inspect_package(package_path)
+            for field in ("id", "author", "version", "permissions", "agent"):
+                self.assertEqual(preview.manifest[field], captured.manifest[field])
+            self.assertEqual(preview.manifest["entrypoints"], captured.manifest["entrypoints"])
+            self.assertEqual(imported.status_code, 200, imported.text)
+            self.assertEqual(imported.json()["projectedSkill"]["supportFiles"], ["workflows/captured-path.json"])
+            self.assertEqual(
+                (dashboard_server.AGENT_GATEWAY.user_skills_dir / "roundtrip-profile" / "workflows" / "captured-path.json").read_bytes(),
+                workflow_bytes,
+            )
+
+    def test_legacy_user_skill_export_still_synthesizes_minimal_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "legacy-export"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: legacy-export\ntitle: Legacy Export\n---\nRead project state.\n",
+                encoding="utf-8",
+            )
+            package_path = root / "legacy-export.vsk"
+
+            result = dashboard_server.export_skill_package_sync(
+                {"skillName": "legacy-export", "outputPath": str(package_path)}
+            )
+
+            self.assertTrue(result["ok"])
+            preview = SkillPackageService(root / "inspect", vrcforge_version="1.3.0").inspect_package(package_path)
+            self.assertEqual(preview.manifest["id"], "community.legacy-export")
+            self.assertEqual(preview.manifest["version"], "1.0.0")
+            self.assertEqual(preview.manifest["entrypoints"], {"skill": "SKILL.md"})
+
+    def test_manifest_user_skill_export_rejects_unsafe_support_without_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            temp_parent = root / "export-temp"
+            temp_parent.mkdir()
+            real_temporary_directory = tempfile.TemporaryDirectory
+
+            def write_skill(
+                name: str,
+                *,
+                support_files: list[str],
+                entrypoints: dict[str, str],
+                files: dict[str, bytes] | None = None,
+                manifest_bytes: bytes | None = None,
+            ) -> Path:
+                skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / name
+                skill_dir.mkdir(parents=True)
+                support_yaml = "".join(f"  - {value}\n" for value in support_files)
+                (skill_dir / "SKILL.md").write_text(
+                    f"---\nname: {name}\nsupport-files:\n{support_yaml}---\nRead project state.\n",
+                    encoding="utf-8",
+                )
+                if manifest_bytes is None:
+                    manifest = {
+                        "id": f"community.{name}",
+                        "name": name,
+                        "skill_name": name,
+                        "version": "1.0.0",
+                        "author": "Unit Test",
+                        "description": "Unsafe export fixture.",
+                        "min_vrcforge_version": "1.3.0",
+                        "permissions": ["read_project"],
+                        "entrypoints": entrypoints,
+                    }
+                    manifest_bytes = json.dumps(manifest).encode("utf-8")
+                (skill_dir / "manifest.json").write_bytes(manifest_bytes)
+                for relative, data in (files or {}).items():
+                    destination = skill_dir.joinpath(*relative.split("/"))
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                return skill_dir
+
+            cases = [
+                (
+                    "undeclared-support",
+                    ["workflows/captured.json"],
+                    {"skill": "SKILL.md"},
+                    {"workflows/captured.json": b"{}\n"},
+                    None,
+                ),
+                (
+                    "missing-support",
+                    ["workflows/captured.json"],
+                    {"skill": "SKILL.md", "workflow": "workflows/captured.json"},
+                    {},
+                    None,
+                ),
+                (
+                    "escape-support",
+                    ["../outside.json"],
+                    {"skill": "SKILL.md"},
+                    {},
+                    None,
+                ),
+                (
+                    "backslash-support",
+                    ["workflows\\captured.json"],
+                    {"skill": "SKILL.md"},
+                    {},
+                    None,
+                ),
+                (
+                    "collision-support",
+                    ["workflows/captured.json", "workflows/captured.json"],
+                    {"skill": "SKILL.md", "workflow": "workflows/captured.json"},
+                    {"workflows/captured.json": b"{}\n"},
+                    None,
+                ),
+                (
+                    "alternate-skill-entrypoint",
+                    [],
+                    {"skill": "OTHER-SKILL.md"},
+                    {"OTHER-SKILL.md": b"---\nname: other-skill\n---\nNot the loaded skill.\n"},
+                    None,
+                ),
+                (
+                    "entrypoint-case-collision",
+                    ["workflows/captured.json"],
+                    {
+                        "skill": "SKILL.md",
+                        "workflow": "workflows/captured.json",
+                        "workflow_alias": "WORKFLOWS/CAPTURED.JSON",
+                    },
+                    {"workflows/captured.json": b"{}\n"},
+                    None,
+                ),
+                (
+                    "invalid-manifest",
+                    [],
+                    {"skill": "SKILL.md"},
+                    {},
+                    b"{not-json",
+                ),
+            ]
+            for name, support_files, entrypoints, files, manifest_bytes in cases:
+                with self.subTest(name=name):
+                    write_skill(
+                        name,
+                        support_files=support_files,
+                        entrypoints=entrypoints,
+                        files=files,
+                        manifest_bytes=manifest_bytes,
+                    )
+                    output = root / f"{name}.vsk"
+                    with patch(
+                        "dashboard_server.tempfile.TemporaryDirectory",
+                        side_effect=lambda *args, **kwargs: real_temporary_directory(
+                            *args, dir=temp_parent, **kwargs
+                        ),
+                    ):
+                        with self.assertRaises(SkillPackageError):
+                            dashboard_server.export_skill_package_sync(
+                                {"skillName": name, "outputPath": str(output)}
+                            )
+                    self.assertFalse(output.exists())
+                    self.assertEqual(list(temp_parent.iterdir()), [])
+
+            linked_skill = write_skill(
+                "linked-support",
+                support_files=["workflows/captured.json"],
+                entrypoints={"skill": "SKILL.md", "workflow": "workflows/captured.json"},
+                files={"workflows/captured.json": b"{}\n"},
+            )
+            for unsafe_name in ("captured.json", "workflows"):
+                with self.subTest(link_or_junction=unsafe_name):
+                    output = root / f"linked-{unsafe_name}.vsk"
+                    original_link_check = dashboard_server._skill_projection_path_is_link_like
+
+                    def simulated_link_check(path: Path, *, target: str = unsafe_name) -> bool:
+                        return path.name == target or original_link_check(path)
+
+                    with (
+                        patch(
+                            "dashboard_server.tempfile.TemporaryDirectory",
+                            side_effect=lambda *args, **kwargs: real_temporary_directory(
+                                *args, dir=temp_parent, **kwargs
+                            ),
+                        ),
+                        patch(
+                            "dashboard_server._skill_projection_path_is_link_like",
+                            side_effect=simulated_link_check,
+                        ),
+                    ):
+                        with self.assertRaises(SkillPackageError):
+                            dashboard_server.export_skill_package_sync(
+                                {"skillName": linked_skill.name, "outputPath": str(output)}
+                            )
+                    self.assertFalse(output.exists())
+                    self.assertEqual(list(temp_parent.iterdir()), [])
 
     def test_skill_package_safe_mode_import_dry_run_and_projection_disable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
