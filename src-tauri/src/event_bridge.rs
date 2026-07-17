@@ -173,7 +173,8 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
 pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
     matches!(
         event_type,
-        "agentApprovals"
+        "advancedSettings"
+            | "agentApprovals"
             | "agentDesktopActions"
             | "agentGoals"
             | "agentMemory"

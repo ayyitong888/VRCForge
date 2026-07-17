@@ -536,6 +536,19 @@ mod tests {
             Some(serde_json::json!({"type": "agentRuntimeRuns", "timestamp": 1.0}))
         );
 
+        let advanced_settings = sanitize_backend_event(serde_json::json!({
+            "type": "advancedSettings",
+            "payload": {
+                "developerOptionsEnabled": true,
+                "secret": "should-not-reach-webview"
+            },
+            "timestamp": 2.0
+        }));
+        assert_eq!(
+            advanced_settings,
+            Some(serde_json::json!({"type": "advancedSettings", "timestamp": 2.0}))
+        );
+
         let delta = sanitize_backend_event(serde_json::json!({
             "type": "agentRuntimeDelta",
             "sessionId": "sess-1",
