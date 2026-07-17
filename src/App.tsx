@@ -18,7 +18,7 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import i18n, { setLocale } from "./i18n";
+import i18n, { setLocale, type LocaleCode } from "./i18n";
 import {
   FormEvent,
   PointerEvent as ReactPointerEvent,
@@ -42,6 +42,12 @@ import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { AppSidebar } from "./components/sidebar/app-sidebar";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
+import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
+import {
+  persistOnboardingLanguageGateCompletion,
+  readOnboardingStoredState,
+  resolveOnboardingLaunchState,
+} from "./components/onboarding/onboarding-language-gate-state";
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
@@ -197,6 +203,10 @@ export default function App() {
   const { t } = useTranslation();
   const initialChatState = useMemo(() => createMarkdownSmokeChatState(), []);
   const smokeMode = isMarkdownSmokeMode();
+  const initialOnboardingState = useMemo(
+    () => resolveOnboardingLaunchState(readOnboardingStoredState(), smokeMode),
+    [smokeMode],
+  );
   const initialSubAgentTask = useMemo(() => createSubAgentContextSmokeTask(), []);
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
@@ -239,16 +249,10 @@ export default function App() {
     }
   });
   const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-    if (isMarkdownSmokeMode()) {
-      return false;
-    }
-    try {
-      return window.localStorage.getItem(ONBOARDING_FLAG_KEY) !== "true";
-    } catch {
-      return false;
-    }
-  });
+  const [showOnboarding, setShowOnboarding] = useState(initialOnboardingState.showOnboarding);
+  const [showOnboardingLanguageGate, setShowOnboardingLanguageGate] = useState(
+    initialOnboardingState.showLanguageGate,
+  );
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingMinimized, setOnboardingMinimized] = useState(false);
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(() =>
@@ -1223,6 +1227,12 @@ export default function App() {
     setComputerUseEnabled(settings.computerUseEnabled);
     setComputerUseEverEnabled(settings.computerUseEverEnabled);
   }, [bootstrap?.advancedSettings]);
+
+  useEffect(() => {
+    if (initialOnboardingState.migrateLanguageGateCompletion) {
+      persistOnboardingLanguageGateCompletion();
+    }
+  }, [initialOnboardingState.migrateLanguageGateCompletion]);
 
   useEffect(() => {
     if (!showOnboarding || !onboardingMinimized) {
@@ -2528,6 +2538,7 @@ export default function App() {
       // Keep onboarding close usable even if local storage is blocked.
     }
     setShowOnboarding(false);
+    setShowOnboardingLanguageGate(false);
     setOnboardingMinimized(false);
   }
 
@@ -2540,7 +2551,18 @@ export default function App() {
     setActiveView("chat");
     setOnboardingStep(0);
     setOnboardingMinimized(false);
+    setShowOnboardingLanguageGate(false);
     setShowOnboarding(true);
+  }
+
+  async function completeOnboardingLanguageGate(locale: LocaleCode) {
+    try {
+      await setLocale(locale);
+    } catch {
+      return;
+    }
+    persistOnboardingLanguageGateCompletion();
+    setShowOnboardingLanguageGate(false);
   }
 
   async function openDoctor() {
@@ -3076,14 +3098,21 @@ export default function App() {
         onCancel={stopInteractiveActivity}
       />
 
+      <OnboardingLanguageGate
+        open={showOnboarding && showOnboardingLanguageGate}
+        currentLanguage={i18n.language}
+        onContinue={(locale) => void completeOnboardingLanguageGate(locale)}
+      />
+
       <OnboardingOverlay
-        open={showOnboarding}
+        open={showOnboarding && !showOnboardingLanguageGate}
         minimized={onboardingMinimized}
         stepIndex={onboardingStep}
         runtimeConnected={runtimeConnected}
         apiKeyPresent={Boolean(apiConfig?.apiKeyPresent)}
         hasProjects={projectItems.length > 0}
         loadingRuntime={loading}
+        currentLanguage={i18n.language}
         onRetryRuntime={() => void startRuntime()}
         onOpenSettings={() => {
           setOnboardingMinimized(true);
@@ -3098,6 +3127,7 @@ export default function App() {
         onFinish={finishOnboarding}
         onPreviousStep={() => setOnboardingStep((value) => Math.max(0, value - 1))}
         onNextStep={() => setOnboardingStep((value) => value + 1)}
+        onLocaleChange={(locale) => void setLocale(locale)}
       />
 
       <ProjectPickerModal
