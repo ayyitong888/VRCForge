@@ -26,12 +26,13 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
   const rows = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
   return (
-    <div className="grid gap-2 border-t border-border pt-3">
+    <div data-vrcforge-skill-audit="true" className="grid gap-2 border-t border-border pt-3">
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(180px,0.45fr)]">
         <label className="relative min-w-0">
           <span className="sr-only">{i18n.t("package.auditView.searchLabel")}</span>
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <input
+            data-vrcforge-skill-audit-search
             aria-label={i18n.t("package.auditView.searchLabel")}
             value={query}
             onChange={(event) => {
@@ -45,6 +46,7 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
         <label className="min-w-0">
           <span className="sr-only">{i18n.t("package.auditView.eventFilterLabel")}</span>
           <select
+            data-vrcforge-skill-audit-event-filter
             aria-label={i18n.t("package.auditView.eventFilterLabel")}
             value={eventFilter}
             onChange={(event) => {
@@ -66,10 +68,21 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
           {rows.map((item, index) => {
             const event = String(item.event || i18n.t("package.audit"));
             const timestamp = String(item.timestamp || "");
+            const skillId = auditValue(item, "skill_id", "skillId");
+            const packageId = auditValue(item, "package_id", "packageId");
+            const version = auditValue(item, "package_version", "packageVersion", "version");
             const context = auditContext(item);
             const governance = auditGovernanceFields(item);
             return (
-              <div key={`${timestamp}-${event}-${currentPage}-${index}`} className="grid min-w-0 gap-2 rounded-md border border-border/70 bg-card px-3 py-2 text-xs">
+              <div
+                key={`${timestamp}-${event}-${currentPage}-${index}`}
+                data-vrcforge-skill-audit-row
+                data-vrcforge-skill-audit-event={event}
+                data-vrcforge-skill-audit-skill-id={skillId}
+                data-vrcforge-skill-audit-package-id={packageId}
+                data-vrcforge-skill-audit-version={version}
+                className="grid min-w-0 gap-2 rounded-md border border-border/70 bg-card px-3 py-2 text-xs"
+              >
                 <div className="grid min-w-0 gap-1 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_auto]">
                   <span className="truncate font-mono" title={event}>{event}</span>
                   <span className="truncate text-muted-foreground" title={context}>{context || "-"}</span>
@@ -78,8 +91,14 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
                 {governance.length ? (
                   <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
                     {governance.map(({ key, label, value }) => (
-                      <span key={key} className="min-w-0 break-all" title={`${label}: ${value}`}>
-                        <span className="font-medium text-foreground/80">{label}:</span> {value}
+                      <span
+                        key={key}
+                        data-vrcforge-skill-audit-field={key}
+                        className="min-w-0 break-all"
+                        title={`${label}: ${value}`}
+                      >
+                        <span className="font-medium text-foreground/80">{label}:</span>{" "}
+                        <span data-vrcforge-skill-audit-field-value>{value}</span>
                       </span>
                     ))}
                   </div>
@@ -95,7 +114,7 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
       )}
 
       <div className="flex items-center justify-between gap-2">
-        <span className="sr-only" role="status" aria-live="polite">
+        <span data-vrcforge-skill-audit-status className="sr-only" role="status" aria-live="polite">
           {i18n.t("package.auditView.count", { count: filtered.length })}{" "}
           {i18n.t("package.auditView.page", { current: currentPage + 1, total: pageCount })}
         </span>
@@ -115,6 +134,7 @@ export function SkillPackageAuditList({ audit }: { audit: Array<Record<string, u
             {i18n.t("package.auditView.page", { current: currentPage + 1, total: pageCount })}
           </span>
           <Button
+            data-vrcforge-skill-audit-next
             type="button"
             variant="ghost"
             className="h-8 px-2"

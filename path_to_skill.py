@@ -1278,7 +1278,9 @@ def _is_private_url(value: str) -> bool:
         return True
     if (
         hostname == "localhost"
-        or hostname.endswith((".localhost", ".local", ".internal", ".private", ".lan", ".home.arpa"))
+        or hostname.endswith(
+            (".localhost", ".local", ".internal", ".private", ".lan", ".home.arpa", ".invalid", ".test")
+        )
         or "." not in hostname
     ):
         return True

@@ -216,7 +216,13 @@ export function AppSidebar({
         <SidebarNavButton icon={<Shield className="h-4 w-4 shrink-0" />} label={t("sidebar.doctor")} active={activeView === "doctor"} onClick={onOpenDoctor} />
         <SidebarNavButton icon={<Gauge className="h-4 w-4 shrink-0" />} label={t("sidebar.optimization")} active={activeView === "optimization"} onClick={onOpenOptimization} />
         <SidebarNavButton icon={<Shield className="h-4 w-4 shrink-0" />} label={t("encryption.protection")} active={activeView === "protection"} onClick={onOpenProtection} />
-        <SidebarNavButton icon={<Wrench className="h-4 w-4 shrink-0" />} label={t("sidebar.skills")} active={activeView === "skills"} onClick={onOpenSkills} />
+        <SidebarNavButton
+          icon={<Wrench className="h-4 w-4 shrink-0" />}
+          label={t("sidebar.skills")}
+          semanticId="skills"
+          active={activeView === "skills"}
+          onClick={onOpenSkills}
+        />
         <SidebarNavButton icon={<History className="h-4 w-4 shrink-0" />} label={t("checkpoint.checkpoints")} active={activeView === "checkpoints"} onClick={onOpenCheckpoints} />
       </nav>
 
@@ -344,17 +350,20 @@ export function AppSidebar({
 function SidebarNavButton({
   icon,
   label,
+  semanticId,
   active = false,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
+  semanticId?: string;
   active?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
+      data-vrcforge-sidebar-nav={semanticId}
       aria-label={label}
       title={label}
       className={cn(

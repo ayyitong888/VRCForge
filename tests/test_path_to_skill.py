@@ -572,6 +572,36 @@ def test_file_and_private_urls_are_redacted_to_required_variables(private_locati
     assert "SecretOutfit" not in serialized
 
 
+@pytest.mark.parametrize(
+    "private_location",
+    [
+        "https://private-assets.invalid/downloads/SecretOutfit.zip",
+        "https://creator-cache.test/private/SecretOutfit.zip",
+    ],
+)
+def test_reserved_private_url_in_standard_package_field_is_redacted(private_location: str) -> None:
+    captured = build_path_to_skill_source(
+        {
+            "workflow": "booth_import_preflight",
+            "recipeType": "booth_import_preflight",
+            "packagePath": private_location,
+            "steps": ["inspect"],
+        },
+        package_id="community.path-to-skill.reserved-private-url",
+    )
+    serialized = json.dumps(captured.source_files, ensure_ascii=False)
+
+    assert captured.workflow["sourceSummary"]["packagePath"] == "{{packagePath}}"
+    assert captured.workflow["variables"]["packagePath"]["required"] is True
+    assert {
+        "field": "source.packagePath",
+        "variable": "packagePath",
+        "reason": "private URL or file location redacted",
+    } in captured.workflow["remapping"]["fields"]
+    assert private_location not in serialized
+    assert "SecretOutfit" not in serialized
+
+
 def test_public_https_url_is_preserved() -> None:
     public_url = "https://vpm.poiyomi.com/vpm.json"
     captured = build_path_to_skill_source(

@@ -111,6 +111,7 @@ export function RuntimeRunRow({
             title={i18n.t("workspace.saveOperationAsSkill")}
             aria-label={i18n.t("workspace.saveOperationAsSkill")}
             data-vrcforge-save-operation-as-skill
+            data-vrcforge-save-operation-tool={run.skillTool || run.writeTool || run.targetTool || ""}
             className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
             onClick={() => onSaveAsSkill?.(capturedSummary)}
           >

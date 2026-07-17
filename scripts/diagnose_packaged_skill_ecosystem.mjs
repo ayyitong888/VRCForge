@@ -278,6 +278,22 @@ function escapePowerShellLiteral(value) {
   return String(value).replaceAll("'", "''");
 }
 
+const powershellDmtfCreationDateHelper = String.raw`
+function Convert-VrcForgeCreationDateToDmtf([object]$Value) {
+  if ($null -eq $Value) { return '' }
+  if ($Value -is [DateTime]) {
+    return [System.Management.ManagementDateTimeConverter]::ToDmtfDateTime([DateTime]$Value)
+  }
+  $text = [string]$Value
+  if ($text -match '^\d{14}\.\d{6}[+-]\d{3}$') { return $text }
+  try {
+    return [System.Management.ManagementDateTimeConverter]::ToDmtfDateTime([DateTime]$Value)
+  } catch {
+    return ''
+  }
+}
+`;
+
 function runProcess(command, args, options = {}) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, args, {
@@ -942,11 +958,19 @@ function processIdentity(raw) {
   };
 }
 
+function isDmtfCreationDate(value) {
+  return /^\d{14}\.\d{6}[+-]\d{3}$/.test(String(value || ""));
+}
+
 function processIdentityMatches(candidate, recorded) {
-  return candidate.pid === recorded.pid
+  return isDmtfCreationDate(candidate.creationDate)
+    && isDmtfCreationDate(recorded.creationDate)
+    && candidate.pid === recorded.pid
     && candidate.creationDate === recorded.creationDate
     && candidate.name.toLowerCase() === recorded.name.toLowerCase()
-    && (!recorded.path || !candidate.path || normalizedPath(candidate.path) === normalizedPath(recorded.path));
+    && Boolean(candidate.path)
+    && Boolean(recorded.path)
+    && normalizedPath(candidate.path) === normalizedPath(recorded.path);
 }
 
 function processGenerationKey(identity) {
@@ -967,6 +991,9 @@ function matchingTrackedIdentity(candidate) {
 
 function storeTrackedProcessIdentity(identity, { previousKey = "", isRoot = false } = {}) {
   const normalized = processIdentity(identity);
+  if (!isDmtfCreationDate(normalized.creationDate)) {
+    throw new Error("Tracked process identity did not contain a canonical DMTF creation date.");
+  }
   const key = processGenerationKey(normalized);
   if (previousKey && previousKey !== key) trackedProcessIdentities.delete(previousKey);
   trackedProcessIdentities.set(key, normalized);
@@ -1014,6 +1041,9 @@ async function refreshObservedProcessStartEvents() {
       sequence,
       creationDate: String(event.creationDate || ""),
     };
+    if (!isDmtfCreationDate(normalizedEvent.creationDate)) {
+      throw new Error("Process-start watcher returned a non-DMTF creation date.");
+    }
     const existingSequence = observedProcessStartEventsBySequence.get(sequence);
     if (existingSequence && JSON.stringify(existingSequence) !== JSON.stringify(normalizedEvent)) {
       throw new Error("Process-start watcher reused an event sequence for different identities.");
@@ -1094,7 +1124,8 @@ function observedStartDirectlyFollowsTracked(candidate, liveTrackedByPid) {
 }
 
 function updateTrackedProcessTree(allProcesses) {
-  const processes = allProcesses.map(processIdentity).filter((item) => item.pid > 0 && item.creationDate);
+  const processes = allProcesses.map(processIdentity).filter((item) =>
+    item.pid > 0 && isDmtfCreationDate(item.creationDate));
   const byPid = new Map(processes.map((item) => [item.pid, item]));
   if (trackedRootPid > 0 && !trackedRootObserved) {
     const root = byPid.get(trackedRootPid);
@@ -1144,13 +1175,14 @@ function updateTrackedProcessTree(allProcesses) {
 
 async function collectProcessSnapshot() {
   const raw = await runPowerShell(`
+    ${powershellDmtfCreationDateHelper}
     $all = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
       [pscustomobject]@{
         pid = [int]$_.ProcessId
         parentPid = [int]$_.ParentProcessId
         name = [string]$_.Name
         path = [string]$_.ExecutablePath
-        creationDate = [string]$_.CreationDate
+        creationDate = Convert-VrcForgeCreationDateToDmtf $_.CreationDate
       }
     })
     $ports = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
@@ -1284,6 +1316,7 @@ async function forceCloseLaunch(launch) {
   if (!trackedRootObserved) {
     const escapedExe = escapePowerShellLiteral(exe);
     const rootRaw = await runPowerShell(`
+      ${powershellDmtfCreationDateHelper}
       $expected = [IO.Path]::GetFullPath('${escapedExe}')
       $current = Get-CimInstance Win32_Process -Filter "ProcessId = ${rootPid}" -ErrorAction SilentlyContinue
       if ($current -and ([string]$current.ExecutablePath).Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
@@ -1292,7 +1325,7 @@ async function forceCloseLaunch(launch) {
           parentPid = [int]$current.ParentProcessId
           name = [string]$current.Name
           path = [string]$current.ExecutablePath
-          creationDate = [string]$current.CreationDate
+          creationDate = Convert-VrcForgeCreationDateToDmtf $current.CreationDate
         } | ConvertTo-Json -Compress
       }
     `).catch(() => "");
@@ -1322,12 +1355,14 @@ async function forceCloseLaunch(launch) {
   }
   const encodedCandidates = Buffer.from(JSON.stringify(candidates), "utf8").toString("base64");
   await runPowerShell(`
+    ${powershellDmtfCreationDateHelper}
     $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedCandidates}'))
     $candidates = @($json | ConvertFrom-Json)
     foreach ($candidate in @($candidates | Sort-Object @{ Expression = { if ($_.isRoot) { 1 } else { 0 } } })) {
       $current = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$candidate.pid)" -ErrorAction SilentlyContinue
       if (-not $current) { continue }
-      $sameCreation = ([string]$current.CreationDate).Equals([string]$candidate.creationDate, [StringComparison]::Ordinal)
+      $currentCreationDate = Convert-VrcForgeCreationDateToDmtf $current.CreationDate
+      $sameCreation = ([string]$currentCreationDate).Equals([string]$candidate.creationDate, [StringComparison]::Ordinal)
       $samePath = ([string]$current.ExecutablePath).Equals([string]$candidate.path, [StringComparison]::OrdinalIgnoreCase)
       if ($sameCreation -and $samePath) {
         Stop-Process -Id ([int]$candidate.pid) -Force -ErrorAction SilentlyContinue
@@ -1355,12 +1390,14 @@ async function closePackagedApp(launch) {
   }
   const escapedRootCreationDate = escapePowerShellLiteral(rootIdentity.creationDate);
   const requestedRaw = await runPowerShell(`
+    ${powershellDmtfCreationDateHelper}
     $exe = [IO.Path]::GetFullPath('${escapedExe}')
     $expectedCreationDate = '${escapedRootCreationDate}'
     $current = Get-CimInstance Win32_Process -Filter "ProcessId = ${rootPid}" -ErrorAction SilentlyContinue
     $identityMatched = $false
     if ($current) {
-      $sameCreation = ([string]$current.CreationDate).Equals($expectedCreationDate, [StringComparison]::Ordinal)
+      $currentCreationDate = Convert-VrcForgeCreationDateToDmtf $current.CreationDate
+      $sameCreation = ([string]$currentCreationDate).Equals($expectedCreationDate, [StringComparison]::Ordinal)
       $samePath = ([string]$current.ExecutablePath).Equals($exe, [StringComparison]::OrdinalIgnoreCase)
       $identityMatched = [bool]($sameCreation -and $samePath)
     }
@@ -1496,6 +1533,7 @@ async function acquireExecutableLaunchLock(expectedSha256) {
   ]);
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
+${powershellDmtfCreationDateHelper}
 $readyPath = [string]$env:VRCFORGE_PROBE_LOCK_READY
 $releasePath = [string]$env:VRCFORGE_PROBE_LOCK_RELEASE
 $targetPath = [string]$env:VRCFORGE_PROBE_LOCK_TARGET
@@ -1513,7 +1551,7 @@ function Write-ProcessStartEvent([object]$eventRecord) {
     processId = [int]$started.ProcessID
     parentProcessId = [int]$started.ParentProcessID
     processName = [string]$started.Name
-    creationDate = [string]$started.CreationDate
+    creationDate = Convert-VrcForgeCreationDateToDmtf $started.CreationDate
     observedAt = [DateTime]::UtcNow.ToString('o')
   }
   [System.IO.File]::AppendAllText(
@@ -3945,6 +3983,10 @@ function exactJsonValue(actual, expected) {
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
+function parseJsonValue(value) {
+  try { return JSON.parse(String(value)); } catch { return null; }
+}
+
 function decodeFrontmatterScalar(raw) {
   const value = String(raw || "").trim();
   if (value.startsWith('"') && value.endsWith('"')) {
@@ -3954,11 +3996,24 @@ function decodeFrontmatterScalar(raw) {
   return value;
 }
 
-function skillMarkdownMetadataMatches(markdown, manifest, expectation) {
+function skillMarkdownMetadataDiagnostics(markdown, manifest, expectation) {
   const lines = String(markdown || "").replaceAll("\r\n", "\n").split("\n");
-  if (lines[0] !== "---") return false;
+  const diagnostics = {
+    frontmatterOpened: lines[0] === "---",
+    frontmatterClosed: false,
+    name: false,
+    permissionMode: false,
+    riskLevel: false,
+    entrypointTool: false,
+    userInvocable: false,
+    modelInvocationEnabled: false,
+    allowedTools: false,
+    disallowedTools: false,
+  };
+  if (!diagnostics.frontmatterOpened) return { ...diagnostics, matched: false };
   const closing = lines.indexOf("---", 1);
-  if (closing < 0) return false;
+  diagnostics.frontmatterClosed = closing >= 0;
+  if (!diagnostics.frontmatterClosed) return { ...diagnostics, matched: false };
   const frontmatter = lines.slice(1, closing);
   const scalar = (key) => {
     const prefix = `${key}:`;
@@ -3976,17 +4031,21 @@ function skillMarkdownMetadataMatches(markdown, manifest, expectation) {
     }
     return values;
   };
-  return scalar("name") === manifest?.skill_name
-    && scalar("permission-mode") === expectation.permissionMode
-    && scalar("risk-level") === expectation.riskLevel
-    && scalar("entrypoint-tool") === expectation.entrypointTool
-    && scalar("user-invocable") === "true"
-    && scalar("disable-model-invocation") === "false"
-    && exactJsonValue(list("allowed-tools"), expectation.allowedTools)
-    && exactJsonValue(
-      list("disallowed-tools"),
-      ["vrcforge_execute_shell", "direct_unity_asset_write"],
-    );
+  diagnostics.name = scalar("name") === manifest?.skill_name;
+  diagnostics.permissionMode = scalar("permission-mode") === expectation.permissionMode;
+  diagnostics.riskLevel = scalar("risk-level") === expectation.riskLevel;
+  diagnostics.entrypointTool = scalar("entrypoint-tool") === expectation.entrypointTool;
+  diagnostics.userInvocable = scalar("user-invocable") === "true";
+  diagnostics.modelInvocationEnabled = scalar("disable-model-invocation") === "false";
+  diagnostics.allowedTools = exactJsonValue(list("allowed-tools"), expectation.allowedTools);
+  diagnostics.disallowedTools = exactJsonValue(
+    list("disallowed-tools"),
+    ["vrcforge_execute_shell", "direct_unity_asset_write"],
+  );
+  return {
+    ...diagnostics,
+    matched: Object.values(diagnostics).every(Boolean),
+  };
 }
 
 function serializedValueExcludes(value, forbiddenFragments) {
@@ -3995,7 +4054,7 @@ function serializedValueExcludes(value, forbiddenFragments) {
     && forbiddenFragments.every((fragment) => !serialized.includes(fragment));
 }
 
-function capturedRecipeHasNoPrivatePaths(preview, summary) {
+function capturedRecipePrivatePathDiagnostics(preview, summary) {
   const serialized = JSON.stringify({ workflow: preview?.workflow, sourceFiles: preview?.sourceFiles || {} });
   const explicitPrivatePaths = [
     projectRoot,
@@ -4010,54 +4069,78 @@ function capturedRecipeHasNoPrivatePaths(preview, summary) {
     const raw = String(value);
     return !serialized.includes(raw) && !serialized.includes(raw.replaceAll("\\", "/"));
   });
-  return explicitPathAbsent
-    && !/[A-Za-z]:(?:\\\\|\/)/.test(serialized)
-    && !serialized.includes("/Users/")
-    && !serialized.includes("/home/");
+  const diagnostics = {
+    explicitPrivatePathsAbsent: explicitPathAbsent,
+    windowsAbsolutePathsAbsent: !/[A-Za-z]:(?:\\\\|\/)/.test(serialized),
+    macUserPathsAbsent: !serialized.includes("/Users/"),
+    unixHomePathsAbsent: !serialized.includes("/home/"),
+  };
+  return {
+    ...diagnostics,
+    matched: Object.values(diagnostics).every(Boolean),
+  };
 }
 
-function recipePreviewMatchesExpectation(preview, recipeType, summary, expectedDryRun = true) {
+function recipePreviewDiagnostics(preview, recipeType, summary, expectedDryRun = true) {
   const expectation = recipeExpectations[recipeType];
   const workflow = preview?.workflow || {};
   const recipe = workflow?.recipe || {};
   const required = new Set(workflow?.remapping?.required || []);
   const remappingFields = Array.isArray(workflow?.remapping?.fields) ? workflow.remapping.fields : [];
-  const variablesBound = expectation.requiredVariables.every((variable) =>
+  const variableBindings = Object.fromEntries(expectation.requiredVariables.map((variable) => [variable,
     workflow?.variables?.[variable]?.placeholder === `{{${variable}}}`
     && workflow?.variables?.[variable]?.required === true
     && required.has(variable)
-    && remappingFields.some((item) => item?.variable === variable && String(item?.field || "").startsWith("source.")));
-  const sourcePlaceholders = workflow?.sourceSummary?.projectPath === "{{projectPath}}"
-    && (recipeType !== "booth_import_preflight" || workflow?.sourceSummary?.packagePath === "{{packagePath}}");
+    && remappingFields.some((item) => item?.variable === variable && String(item?.field || "").startsWith("source.")),
+  ]));
+  const variablesBound = Object.values(variableBindings).every(Boolean);
+  const projectSourcePlaceholder = workflow?.sourceSummary?.projectPath === "{{projectPath}}";
+  const packageSourcePlaceholder = recipeType !== "booth_import_preflight"
+    || workflow?.sourceSummary?.packagePath === "{{packagePath}}";
   const futureGateMatches = expectation.futureApplyGate
     ? exactJsonValue(recipe?.futureApplyGate, expectation.futureApplyGate)
     : !Object.hasOwn(recipe, "futureApplyGate");
-  const securityMetadataMatches = recipe?.permissionMode === expectation.permissionMode
-    && recipe?.riskLevel === expectation.riskLevel
-    && recipe?.argumentHint === expectation.argumentHint
-    && exactJsonValue(recipe?.detectorRules, expectation.detectorRules)
-    && exactJsonValue(recipe?.requiredEvidence, expectation.requiredEvidence)
-    && exactJsonValue(recipe?.permissions, expectation.permissions)
-    && exactJsonValue(preview?.manifest?.permissions, expectation.permissions)
-    && preview?.manifest?.agent?.schema === "vrcforge.path_to_skill.v1"
-    && preview?.manifest?.agent?.dry_run_required === true
-    && skillMarkdownMetadataMatches(preview?.skillMarkdown, preview?.manifest, expectation);
-  return preview?.ok === true
-    && preview?.schema === "vrcforge.path_to_skill.capture_result.v1"
-    && preview?.dryRun === expectedDryRun
-    && recipe?.type === recipeType
-    && recipe?.shape === expectation.shape
-    && recipe?.writePath === expectation.writePath
-    && recipe?.entrypointTool === expectation.entrypointTool
-    && exactJsonValue(recipe?.allowedTools, expectation.allowedTools)
-    && exactJsonValue(recipe?.validationDefaults, expectation.validation)
-    && exactJsonValue(workflow?.validation, expectation.validation)
-    && preview?.manifest?.agent?.write_path === expectation.writePath
-    && securityMetadataMatches
-    && variablesBound
-    && sourcePlaceholders
-    && futureGateMatches
-    && capturedRecipeHasNoPrivatePaths(preview, summary);
+  const skillMarkdown = skillMarkdownMetadataDiagnostics(preview?.skillMarkdown, preview?.manifest, expectation);
+  const privatePaths = capturedRecipePrivatePathDiagnostics(preview, summary);
+  const checks = {
+    responseOk: preview?.ok === true,
+    schema: preview?.schema === "vrcforge.path_to_skill.capture_result.v1",
+    dryRun: preview?.dryRun === expectedDryRun,
+    recipeType: recipe?.type === recipeType,
+    shape: recipe?.shape === expectation.shape,
+    writePath: recipe?.writePath === expectation.writePath,
+    entrypointTool: recipe?.entrypointTool === expectation.entrypointTool,
+    allowedTools: exactJsonValue(recipe?.allowedTools, expectation.allowedTools),
+    recipeValidationDefaults: exactJsonValue(recipe?.validationDefaults, expectation.validation),
+    workflowValidation: exactJsonValue(workflow?.validation, expectation.validation),
+    manifestWritePath: preview?.manifest?.agent?.write_path === expectation.writePath,
+    permissionMode: recipe?.permissionMode === expectation.permissionMode,
+    riskLevel: recipe?.riskLevel === expectation.riskLevel,
+    argumentHint: recipe?.argumentHint === expectation.argumentHint,
+    detectorRules: exactJsonValue(recipe?.detectorRules, expectation.detectorRules),
+    requiredEvidence: exactJsonValue(recipe?.requiredEvidence, expectation.requiredEvidence),
+    recipePermissions: exactJsonValue(recipe?.permissions, expectation.permissions),
+    manifestPermissions: exactJsonValue(preview?.manifest?.permissions, expectation.permissions),
+    manifestAgentSchema: preview?.manifest?.agent?.schema === "vrcforge.path_to_skill.v1",
+    manifestDryRunRequired: preview?.manifest?.agent?.dry_run_required === true,
+    skillMarkdown: skillMarkdown.matched,
+    variablesBound,
+    projectSourcePlaceholder,
+    packageSourcePlaceholder,
+    futureApplyGate: futureGateMatches,
+    privatePaths: privatePaths.matched,
+  };
+  return {
+    matched: Object.values(checks).every(Boolean),
+    checks,
+    variableBindings,
+    skillMarkdown,
+    privatePaths,
+  };
+}
+
+function recipePreviewMatchesExpectation(preview, recipeType, summary, expectedDryRun = true) {
+  return recipePreviewDiagnostics(preview, recipeType, summary, expectedDryRun).matched;
 }
 
 async function runPathToSkillLifecycle(report, cdp) {
@@ -4073,7 +4156,9 @@ async function runPathToSkillLifecycle(report, cdp) {
         timeoutMs: 120000,
       },
     });
-    const passed = recipePreviewMatchesExpectation(preview, recipeType, summary);
+    const diagnostics = recipePreviewDiagnostics(preview, recipeType, summary);
+    const passed = diagnostics.matched;
+    report.diagnostics.pathToSkill.recipePreviews[recipeReportKeys[recipeType]] = diagnostics;
     report.pathToSkill.recipes[recipeReportKeys[recipeType]] = passed;
     if (!passed) addAssertion(report, `Path-to-Skill recipe preview failed for ${recipeType}`);
   }
@@ -4145,12 +4230,20 @@ async function runPathToSkillLifecycle(report, cdp) {
     { path: "source/workflows", type: "directory" },
     { path: "source/workflows/captured-path.json", type: "file" },
   ].sort((left, right) => left.path.localeCompare(right.path));
-  report.pathToSkill.writtenSourceMatchesResponse = exactJsonValue(responseSourceNames, capturedFiles)
-    && exactJsonValue(sourceTreeShape, expectedSourceTreeShape)
-    && capturedFiles.every((relative) => diskSourceTexts[relative] === String(responseSourceFiles[relative] || ""))
-    && responseSourceFiles["SKILL.md"] === written?.skillMarkdown
-    && exactJsonValue(JSON.parse(responseSourceFiles["manifest.json"]), written?.manifest)
-    && exactJsonValue(JSON.parse(responseSourceFiles["workflows/captured-path.json"]), written?.workflow);
+  const writtenSourceDiagnostics = {
+    responseFileNamesExact: exactJsonValue(responseSourceNames, capturedFiles),
+    diskTreeShapeExact: exactJsonValue(sourceTreeShape, expectedSourceTreeShape),
+    diskBytesMatchResponse: capturedFiles.every((relative) =>
+      diskSourceTexts[relative] === String(responseSourceFiles[relative] || "")),
+    skillMarkdownMatchesResponse: responseSourceFiles["SKILL.md"] === written?.skillMarkdown,
+    manifestMatchesResponse: exactJsonValue(parseJsonValue(responseSourceFiles["manifest.json"]), written?.manifest),
+    workflowMatchesResponse: exactJsonValue(
+      parseJsonValue(responseSourceFiles["workflows/captured-path.json"]),
+      written?.workflow,
+    ),
+  };
+  report.diagnostics.pathToSkill.writtenSource = writtenSourceDiagnostics;
+  report.pathToSkill.writtenSourceMatchesResponse = Object.values(writtenSourceDiagnostics).every(Boolean);
   report.pathToSkill.writtenRecipeContract = recipePreviewMatchesExpectation(
     written,
     "booth_import_preflight",
@@ -4282,21 +4375,28 @@ async function runPathToSkillLifecycle(report, cdp) {
         workflow: "booth_import_preflight",
         recipeType: "booth_import_preflight",
         projectPath: projectRoot,
-        privatePackagePath: privateUrlSentinel,
+        packagePath: privateUrlSentinel,
         steps: ["inspect"],
       },
       packageId: "community.probe.private-url-redaction",
     },
   });
-  report.pathToSkill.privateUrlRedacted = privateUrlPreview?.ok === true
-    && privateUrlPreview?.dryRun === true
-    && privateUrlPreview?.workflow?.sourceSummary?.privatePackagePath === "{{privatePackagePath}}"
-    && privateUrlPreview?.workflow?.variables?.privatePackagePath?.placeholder === "{{privatePackagePath}}"
-    && privateUrlPreview?.workflow?.variables?.privatePackagePath?.required === true
-    && (privateUrlPreview?.workflow?.remapping?.required || []).includes("privatePackagePath")
-    && (privateUrlPreview?.workflow?.remapping?.fields || []).some((item) =>
-      item?.field === "source.privatePackagePath" && item?.variable === "privatePackagePath")
-    && serializedValueExcludes(privateUrlPreview, [privateUrlSentinel, "SecretOutfit"]);
+  const privateUrlDiagnostics = {
+    responseOk: privateUrlPreview?.ok === true,
+    dryRun: privateUrlPreview?.dryRun === true,
+    sourcePlaceholder:
+      privateUrlPreview?.workflow?.sourceSummary?.packagePath === "{{packagePath}}",
+    variablePlaceholder:
+      privateUrlPreview?.workflow?.variables?.packagePath?.placeholder === "{{packagePath}}",
+    variableRequired: privateUrlPreview?.workflow?.variables?.packagePath?.required === true,
+    remappingRequired:
+      (privateUrlPreview?.workflow?.remapping?.required || []).includes("packagePath"),
+    remappingField: (privateUrlPreview?.workflow?.remapping?.fields || []).some((item) =>
+      item?.field === "source.packagePath" && item?.variable === "packagePath"),
+    privateValueAbsent: serializedValueExcludes(privateUrlPreview, [privateUrlSentinel, "SecretOutfit"]),
+  };
+  report.diagnostics.pathToSkill.privateUrl = privateUrlDiagnostics;
+  report.pathToSkill.privateUrlRedacted = Object.values(privateUrlDiagnostics).every(Boolean);
 
   const secretSource = resolve(pathToSkillRoot, "secret-negative-source");
   const secretPackage = resolve(pathToSkillRoot, "secret-negative.vsk");
@@ -4380,20 +4480,12 @@ async function openSkillsWorkspace(cdp) {
     `(async () => {
       const ready = () => Boolean(
         document.querySelector("textarea[data-vrcforge-path-to-skill-operation-summary]")
-        && document.querySelector('[role="status"][aria-live="polite"]')?.closest("div.grid.gap-2.border-t")
+        && document.querySelector('[data-vrcforge-skill-audit="true"]')
       );
       if (!ready()) {
-      /* Legacy mojibake label literals retained only as inert text below.
-      const labels = ["Skills", "能力库", "技能", "スキル"];
-      */
-      const labels = ["Skills", "\u80fd\u529b\u5e93", "\u80fd\u529b\u5eab", "\u30b9\u30ad\u30eb\u4e00\u89a7"];
-      const buttons = [...document.querySelectorAll("button")];
-      const target = buttons.find((button) => {
-        const text = String(button.innerText || button.getAttribute("aria-label") || "").trim();
-        return labels.some((label) => text === label || text.includes(label));
-      });
-      if (!target) return { ok: false, reason: "skills navigation button missing" };
-      target.click();
+        const target = document.querySelector('button[data-vrcforge-sidebar-nav="skills"]');
+        if (!target) return { ok: false, reason: "skills navigation button missing" };
+        target.click();
       }
       const deadline = Date.now() + 45000;
       while (Date.now() < deadline) {
@@ -4406,6 +4498,129 @@ async function openSkillsWorkspace(cdp) {
     })()`,
     60000,
   );
+}
+
+async function exerciseFirstRunLanguageGate(report, cdp) {
+  const result = await evalValue(
+    cdp,
+    `(async () => {
+      const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+      const deadline = Date.now() + 30000;
+      let dialog;
+      while (Date.now() < deadline) {
+        dialog = document.querySelector('[data-vrcforge-onboarding-language-gate="true"]');
+        if (dialog) break;
+        await sleep(50);
+      }
+      const checks = {
+        dialogVisible: Boolean(dialog),
+        optionCountExact: false,
+        optionSemanticsValid: false,
+        exactlyOneDefaultSelected: false,
+        continueButtonAvailable: false,
+        gateDismissed: false,
+        onboardingVisibleAfterContinue: false,
+        selectedLanguageApplied: false,
+        selectedLanguagePersisted: false,
+        completionFlagPersisted: false,
+        onboardingSkipControlFound: false,
+        onboardingDismissedForAcceptance: false,
+      };
+      if (!dialog) return { ok: false, failureStage: "language-dialog", checks, optionCount: 0 };
+      const expectedLocaleCodes = ["en-US", "zh-CN", "zh-TW", "ja-JP"];
+      const options = [...dialog.querySelectorAll('button[data-vrcforge-onboarding-language-option]')];
+      const optionLocaleCodes = options.map((option) =>
+        option.getAttribute("data-vrcforge-onboarding-language-option") || "");
+      checks.optionCountExact = options.length === 4;
+      checks.optionSemanticsValid = JSON.stringify([...optionLocaleCodes].sort())
+        === JSON.stringify([...expectedLocaleCodes].sort()) && options.every((option) => {
+          const pressed = option.getAttribute("aria-pressed");
+          const state = option.getAttribute("data-state");
+          const localeCode = option.getAttribute("data-vrcforge-onboarding-language-option");
+          return expectedLocaleCodes.includes(localeCode)
+            && ["true", "false"].includes(pressed)
+            && ["selected", "idle"].includes(state)
+            && (pressed === "true") === (state === "selected");
+        });
+      const selectedIndexes = options.flatMap((option, index) =>
+        option.getAttribute("aria-pressed") === "true" ? [index] : []);
+      checks.exactlyOneDefaultSelected = selectedIndexes.length === 1;
+      const selectedCode = selectedIndexes.length === 1
+        ? options[selectedIndexes[0]].getAttribute("data-vrcforge-onboarding-language-option")
+        : "";
+      const continueButton = dialog.querySelector('button[data-vrcforge-onboarding-language-continue]');
+      checks.continueButtonAvailable = Boolean(continueButton && !continueButton.disabled);
+      if (
+        !checks.optionCountExact
+        || !checks.optionSemanticsValid
+        || !checks.exactlyOneDefaultSelected
+        || !checks.continueButtonAvailable
+      ) {
+        return { ok: false, failureStage: "language-semantics", checks, optionCount: options.length };
+      }
+      continueButton.click();
+      const continueDeadline = Date.now() + 30000;
+      let onboarding;
+      while (Date.now() < continueDeadline) {
+        const languageDialog = document.querySelector('[data-vrcforge-onboarding-language-gate="true"]');
+        onboarding = document.querySelector('[data-vrcforge-onboarding="true"]');
+        if (!languageDialog && onboarding) break;
+        await sleep(50);
+      }
+      checks.gateDismissed = !document.querySelector('[data-vrcforge-onboarding-language-gate="true"]');
+      checks.onboardingVisibleAfterContinue = Boolean(onboarding);
+      const onboardingLanguage = onboarding?.querySelector('select[data-vrcforge-onboarding-language]');
+      checks.selectedLanguageApplied = Boolean(
+        onboardingLanguage
+        && onboardingLanguage.options.length === options.length
+        && onboardingLanguage.value === selectedCode,
+      );
+      try {
+        checks.selectedLanguagePersisted = localStorage.getItem("vrcforge-locale") === selectedCode;
+        checks.completionFlagPersisted = localStorage.getItem("vrcforge_onboarding_language_gate_completed") === "true";
+      } catch { /* Persistence checks remain false. */ }
+      const skipControl = onboarding?.querySelector('button[data-vrcforge-onboarding-skip]');
+      checks.onboardingSkipControlFound = Boolean(skipControl && !skipControl.disabled);
+      if (checks.onboardingSkipControlFound) {
+        skipControl.click();
+        const dismissDeadline = Date.now() + 5000;
+        while (Date.now() < dismissDeadline && document.querySelector('[data-vrcforge-onboarding="true"]')) {
+          await sleep(50);
+        }
+        checks.onboardingDismissedForAcceptance = !document.querySelector('[data-vrcforge-onboarding="true"]');
+      }
+      return {
+        ok: checks.dialogVisible
+          && checks.optionCountExact
+          && checks.optionSemanticsValid
+          && checks.exactlyOneDefaultSelected
+          && checks.continueButtonAvailable
+          && checks.gateDismissed
+          && checks.onboardingVisibleAfterContinue
+          && checks.selectedLanguageApplied
+          && checks.selectedLanguagePersisted
+          && checks.completionFlagPersisted
+          && checks.onboardingSkipControlFound
+          && checks.onboardingDismissedForAcceptance,
+        checks,
+        optionCount: options.length,
+      };
+    })()`,
+  );
+  const checks = result?.checks || {};
+  report.ui.firstRunLanguageGateVisible = checks.dialogVisible === true;
+  report.ui.firstRunLanguageDefaultLegal = checks.optionCountExact === true
+    && checks.optionSemanticsValid === true
+    && checks.exactlyOneDefaultSelected === true;
+  report.ui.firstRunLanguageContinueApplied = result?.ok === true;
+  report.diagnostics.ui.firstRunLanguageGate = {
+    ...checks,
+    optionCount: Number(result?.optionCount || 0),
+    completed: result?.ok === true,
+    failureStage: ["language-dialog", "language-semantics"].includes(result?.failureStage)
+      ? result.failureStage
+      : result?.ok === true ? "" : "language-completion",
+  };
 }
 
 async function invokeContextualReadinessRuntime() {
@@ -4431,22 +4646,36 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
     `(async () => {
       const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
       const deadline = Date.now() + 60000;
+      const checks = {
+        saveOperationButtonFound: false,
+        prefillBadgeFound: false,
+        operationTextareaFound: false,
+        summaryJsonParsed: false,
+        portableShape: false,
+        privatePathsAbsent: false,
+        structuredSummary: false,
+      };
       let target;
       while (Date.now() < deadline) {
-        target = [...document.querySelectorAll("button[data-vrcforge-save-operation-as-skill]")]
-          .find((button) => button.closest("div.grid")?.innerText?.includes("Contextual Path-to-Skill readiness capture"));
+        target = document.querySelector(
+          'button[data-vrcforge-save-operation-as-skill][data-vrcforge-save-operation-tool="vrcforge_build_test_readiness"]',
+        );
         if (target) break;
         await sleep(200);
       }
-      if (!target) return { ok: false, reason: "contextual save-operation button missing" };
+      checks.saveOperationButtonFound = Boolean(target);
+      if (!target) return { ok: false, failureStage: "save-operation-button", checks };
       target.click();
       while (Date.now() < deadline) {
         const badge = document.querySelector('[data-vrcforge-path-to-skill-prefilled="true"]');
         const textarea = document.querySelector("textarea[data-vrcforge-path-to-skill-operation-summary]");
         if (badge && textarea) {
+          checks.prefillBadgeFound = true;
+          checks.operationTextareaFound = true;
           const text = String(textarea.value || "");
           let summary;
           try { summary = JSON.parse(text); } catch { summary = null; }
+          checks.summaryJsonParsed = Boolean(summary);
           const exactKeys = (value, expected) => Boolean(value)
             && typeof value === "object"
             && !Array.isArray(value)
@@ -4461,24 +4690,34 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
             && Array.isArray(summary?.steps)
             && summary.steps.length > 0
             && summary.steps.every((step) => exactKeys(step, ["kind", "tool", "status"]));
-          const portable = portableShape
-            && !/[A-Za-z]:[\\\\/]/.test(text)
+          checks.portableShape = portableShape;
+          const privatePathsAbsent = !/[A-Za-z]:[\\\\/]/.test(text)
             && !text.includes(${JSON.stringify(projectRoot)})
             && !text.includes(${JSON.stringify(evidenceRoot)})
             && !text.includes(${JSON.stringify(repoRoot)});
+          checks.privatePathsAbsent = privatePathsAbsent;
+          const portable = portableShape && privatePathsAbsent;
           const structured = summary?.schema === "vrcforge.operation_summary.v1"
             && summary?.source?.kind === "runtime_run"
             && summary?.workflow === "captured_runtime_operation"
             && summary?.projectPath === "{{projectPath}}"
             && Array.isArray(summary?.steps)
             && summary.steps.some((step) => step?.tool === "vrcforge_build_test_readiness" && ["executed", "completed"].includes(step?.status));
-          return { ok: structured && portable, prefilled: true, structured, portable };
+          checks.structuredSummary = structured;
+          return { ok: structured && portable, prefilled: true, structured, portable, checks };
         }
         await sleep(150);
       }
-      return { ok: false, reason: "contextual Path-to-Skill prefill did not render" };
+      return { ok: false, failureStage: "prefill-render", checks };
     })()`,
   );
+  report.diagnostics.pathToSkill.contextualPrefill = {
+    ...(result?.checks || {}),
+    completed: result?.ok === true,
+    failureStage: ["save-operation-button", "prefill-render"].includes(result?.failureStage)
+      ? result.failureStage
+      : "",
+  };
   report.ui.contextualPathToSkillPrefill = result?.ok === true
     && result?.prefilled === true
     && result?.structured === true
@@ -4488,7 +4727,32 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
   }
 }
 
-async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuery) {
+function expectedImportedAuditGovernanceRows(payload) {
+  const audit = Array.isArray(payload?.audit) ? payload.audit : [];
+  return [...audit]
+    .reverse()
+    .filter((item) => String(getField(item, "event") || "") === "skill_package_imported")
+    .slice(0, 10)
+    .map((item) => {
+      const skillId = String(getField(item, "skill_id", "skillId") || "").trim();
+      const packageId = String(getField(item, "package_id", "packageId") || "").trim();
+      return {
+        identityValues: [skillId, packageId && packageId !== skillId ? packageId : ""].filter(Boolean),
+        version: String(getField(item, "package_version", "packageVersion", "version") || "").trim(),
+        signatureStatus: String(getField(item, "signature_status", "signatureStatus") || "").trim(),
+        riskLevel: String(getField(item, "risk_level", "riskLevel") || "").trim(),
+        signerFingerprint: String(getField(item, "signer_fingerprint", "signerFingerprint") || "").trim(),
+      };
+    });
+}
+
+async function exerciseAuditUi(
+  report,
+  cdp,
+  signerFingerprint,
+  uniquePackageQuery,
+  expectedImportedGovernanceRows,
+) {
   const result = await evalValue(
     cdp,
     `(async () => {
@@ -4501,23 +4765,33 @@ async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuer
         }
         return false;
       };
-      const select = [...document.querySelectorAll("select[aria-label]")]
-        .find((item) => item.parentElement?.parentElement?.querySelector("input[aria-label]"));
+      const root = document.querySelector('[data-vrcforge-skill-audit="true"]');
+      const select = root?.querySelector('select[data-vrcforge-skill-audit-event-filter]');
+      const search = root?.querySelector('input[data-vrcforge-skill-audit-search]');
+      const status = root?.querySelector('[data-vrcforge-skill-audit-status]');
       if (!select) return { ok: false, reason: "audit filter missing" };
-      const root = select.closest("div.grid.gap-2.border-t") || select.parentElement?.parentElement?.parentElement;
-      const search = root?.querySelector("input[aria-label]");
-      const status = root?.querySelector('[role="status"][aria-live="polite"]');
       if (!root || !search || !status) return { ok: false, reason: "audit search/live region missing" };
-      const eventTitles = () => [...root.querySelectorAll("span[title]")]
-        .map((item) => item.getAttribute("title") || "")
-        .filter((value) => value.startsWith("skill_package_"));
-      const rowSignatures = () => [...root.querySelectorAll("span[title]")]
-        .filter((item) => String(item.getAttribute("title") || "").startsWith("skill_package_"))
-        .map((item) => String(item.closest("div.grid.min-w-0.gap-2")?.innerText || item.parentElement?.innerText || "").trim());
+      const rowElements = () => [...root.querySelectorAll('[data-vrcforge-skill-audit-row]')];
+      const eventValues = () => rowElements()
+        .map((row) => row.getAttribute("data-vrcforge-skill-audit-event") || "")
+        .filter(Boolean);
+      const fieldValue = (row, key) => {
+        const field = [...row.querySelectorAll('[data-vrcforge-skill-audit-field]')]
+          .find((item) => item.getAttribute("data-vrcforge-skill-audit-field") === key);
+        return String(field?.querySelector('[data-vrcforge-skill-audit-field-value]')?.textContent || "").trim();
+      };
+      const rowSemanticValue = (row) => ({
+        event: row.getAttribute("data-vrcforge-skill-audit-event") || "",
+        skillId: row.getAttribute("data-vrcforge-skill-audit-skill-id") || "",
+        packageId: row.getAttribute("data-vrcforge-skill-audit-package-id") || "",
+        version: row.getAttribute("data-vrcforge-skill-audit-version") || "",
+        signatureStatus: fieldValue(row, "signatureStatus"),
+        riskLevel: fieldValue(row, "riskLevel"),
+        signerFingerprint: fieldValue(row, "signerFingerprint"),
+      });
+      const rowSignatures = () => rowElements().map((row) => JSON.stringify(rowSemanticValue(row)));
       const statusText = () => String(status.textContent || "").trim();
-      const navButtons = [...root.querySelectorAll("button[aria-label]")].filter((button) =>
-        button.closest("div.flex.items-center.gap-2"));
-      const next = navButtons.at(-1);
+      const next = root.querySelector('button[data-vrcforge-skill-audit-next]');
       const pageOne = rowSignatures();
       const initialStatus = statusText();
       const paginationAvailable = pageOne.length === 10 && next && !next.disabled;
@@ -4538,19 +4812,46 @@ async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuer
       }
       const filterLiveUpdated = Boolean(importOption)
         && await waitFor(() => statusText() && statusText() !== beforeFilterStatus);
-      const filteredTitles = eventTitles();
+      const filteredTitles = eventValues();
       const filteredRows = rowSignatures();
+      const filteredRowElements = rowElements();
       const filterExercised = Boolean(importOption)
         && filteredTitles.length > 0
         && filteredTitles.every((value) => value === "skill_package_imported")
-        && JSON.stringify(filteredRows) !== JSON.stringify(pageOne)
-        && filteredRows.length < pageOne.length;
-      const governanceFieldsVisible = filteredRows.length >= 4
-        && filteredRows.every((value) => /\\bsigned\\b/i.test(value) && /\\bmedium\\b/i.test(value));
+        && JSON.stringify(filteredRows) !== JSON.stringify(pageOne);
+      const expectedGovernanceRows = ${JSON.stringify(expectedImportedGovernanceRows)};
+      const expectedGovernanceComplete = expectedGovernanceRows.length >= 4
+        && expectedGovernanceRows.every((item) =>
+          Array.isArray(item.identityValues)
+          && item.identityValues.length > 0
+          && Boolean(item.version)
+          && Boolean(item.signatureStatus)
+          && Boolean(item.riskLevel)
+          && Boolean(item.signerFingerprint));
+      const unmatchedExpectedRows = expectedGovernanceRows.map((item) => ({ ...item }));
+      let matchedGovernanceRows = 0;
+      for (const row of filteredRowElements) {
+        const semantic = rowSemanticValue(row);
+        const rowIdentities = new Set([semantic.skillId, semantic.packageId].filter(Boolean));
+        const expectedIndex = unmatchedExpectedRows.findIndex((item) =>
+          item.identityValues.every((value) => rowIdentities.has(String(value)))
+          && semantic.version === item.version
+          && semantic.signatureStatus === item.signatureStatus
+          && semantic.riskLevel === item.riskLevel
+          && semantic.signerFingerprint === item.signerFingerprint);
+        if (expectedIndex >= 0) {
+          unmatchedExpectedRows.splice(expectedIndex, 1);
+          matchedGovernanceRows += 1;
+        }
+      }
+      const governanceFieldsVisible = expectedGovernanceComplete
+        && filteredRows.length === expectedGovernanceRows.length
+        && matchedGovernanceRows === filteredRows.length
+        && unmatchedExpectedRows.length === 0;
 
       nativeSelectSetter.call(select, "");
       select.dispatchEvent(new Event("change", { bubbles: true }));
-      await waitFor(() => eventTitles().some((value) => value !== "skill_package_imported"));
+      await waitFor(() => eventValues().some((value) => value !== "skill_package_imported"));
       const nativeInputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
       const beforeSearchRows = rowSignatures();
       const beforeSearchStatus = statusText();
@@ -4558,16 +4859,22 @@ async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuer
       search.dispatchEvent(new Event("input", { bubbles: true }));
       const searchLiveUpdated = await waitFor(() => statusText() && statusText() !== beforeSearchStatus);
       const searchedRows = rowSignatures();
+      const searchedRowElements = rowElements();
       const searchExercised = searchedRows.length > 0
         && searchedRows.length < beforeSearchRows.length
         && JSON.stringify(searchedRows) !== JSON.stringify(beforeSearchRows)
-        && searchedRows.every((value) => value.toLowerCase().includes(${JSON.stringify(uniquePackageQuery.toLowerCase())}));
+        && searchedRowElements.every((row) => {
+          const semantic = rowSemanticValue(row);
+          return [semantic.skillId, semantic.packageId].includes(${JSON.stringify(uniquePackageQuery)});
+        });
 
       const beforeSignerStatus = statusText();
       nativeInputSetter.call(search, ${JSON.stringify(signerFingerprint.slice(0, 16))});
       search.dispatchEvent(new Event("input", { bubbles: true }));
-      await waitFor(() => statusText() !== beforeSignerStatus || root.innerText.toLowerCase().includes(${JSON.stringify(signerFingerprint.slice(0, 16))}));
-      const signerVisible = root.innerText.toLowerCase().includes(${JSON.stringify(signerFingerprint.slice(0, 16))});
+      await waitFor(() => statusText() !== beforeSignerStatus || rowElements().some((row) =>
+        fieldValue(row, "signerFingerprint").startsWith(${JSON.stringify(signerFingerprint.slice(0, 16))})));
+      const signerVisible = rowElements().length > 0 && rowElements().every((row) =>
+        fieldValue(row, "signerFingerprint").startsWith(${JSON.stringify(signerFingerprint.slice(0, 16))}));
       nativeInputSetter.call(search, "");
       search.dispatchEvent(new Event("input", { bubbles: true }));
       return {
@@ -4583,6 +4890,9 @@ async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuer
         secondPageRows: pageTwo.length,
         filteredRows: filteredRows.length,
         searchedRows: searchedRows.length,
+        expectedGovernanceRows: expectedGovernanceRows.length,
+        matchedGovernanceRows,
+        unmatchedGovernanceRows: unmatchedExpectedRows.length,
       };
     })()`,
   );
@@ -4592,6 +4902,13 @@ async function exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuer
   report.ui.auditGovernanceFieldsVisible = result?.governanceFieldsVisible === true;
   report.ui.auditPaginationExercised = result?.paginationExercised === true;
   report.ui.auditAriaLive = result?.ariaLive === true;
+  report.diagnostics.ui.auditGovernance = {
+    filteredRows: Number(result?.filteredRows || 0),
+    expectedRows: Number(result?.expectedGovernanceRows || 0),
+    matchedRows: Number(result?.matchedGovernanceRows || 0),
+    unmatchedRows: Number(result?.unmatchedGovernanceRows || 0),
+    everyFilteredRowComplete: result?.governanceFieldsVisible === true,
+  };
   report.ui.auditRows = {
     firstPage: Number(result?.firstPageRows || 0),
     secondPage: Number(result?.secondPageRows || 0),
@@ -4605,50 +4922,91 @@ async function exercisePathToSkillUi(report, cdp) {
     cdp,
     `(async () => {
       const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+      const checks = {
+        operationTextareaFound: false,
+        panelFound: false,
+        contextualSummaryPreserved: false,
+        previewButtonFound: false,
+        confirmationRendered: false,
+        confirmationSelected: false,
+        identityFieldFound: false,
+        confirmationInvalidated: false,
+      };
       const textarea = document.querySelector("textarea[data-vrcforge-path-to-skill-operation-summary]");
-      if (!textarea) return { ok: false, reason: "Path-to-Skill textarea missing" };
-      const panel = textarea.closest("div.grid.gap-3.rounded-lg") || textarea.parentElement?.parentElement;
+      checks.operationTextareaFound = Boolean(textarea);
+      if (!textarea) return { ok: false, failureStage: "operation-textarea", checks };
+      const panel = textarea.closest('[data-vrcforge-path-to-skill-panel="true"]');
+      checks.panelFound = Boolean(panel);
+      if (!panel) return { ok: false, failureStage: "capture-panel", checks };
       let contextualSummary;
       try { contextualSummary = JSON.parse(String(textarea.value || "")); } catch { contextualSummary = null; }
-      if (
+      checks.contextualSummaryPreserved = Boolean(
         contextualSummary?.source?.kind !== "runtime_run"
-        || contextualSummary?.workflow !== "captured_runtime_operation"
-      ) {
-        return { ok: false, reason: "contextual operation summary was replaced before preview" };
+        ? false
+        : contextualSummary?.workflow === "captured_runtime_operation"
+      );
+      if (!checks.contextualSummaryPreserved) {
+        return { ok: false, failureStage: "contextual-summary", checks };
       }
-      const previewButton = [...panel.querySelectorAll("button")].find((button) => !button.disabled);
-      if (!previewButton) return { ok: false, reason: "Path-to-Skill preview button missing" };
+      const previewButton = panel.querySelector('button[data-vrcforge-path-to-skill-preview]');
+      checks.previewButtonFound = Boolean(previewButton);
+      if (!previewButton) return { ok: false, failureStage: "preview-button", checks };
       previewButton.click();
       const deadline = Date.now() + 45000;
       let checkbox;
       while (Date.now() < deadline) {
-        checkbox = panel.querySelector('input[type="checkbox"]');
+        checkbox = panel.querySelector('input[data-vrcforge-path-to-skill-confirmation]');
         if (checkbox) break;
         await sleep(150);
       }
-      if (!checkbox) return { ok: false, reason: "Path-to-Skill preview did not render confirmation" };
+      checks.confirmationRendered = Boolean(checkbox);
+      if (!checkbox) return { ok: false, failureStage: "confirmation-render", checks };
       checkbox.click();
-      await sleep(100);
+      const confirmationDeadline = Date.now() + 5000;
+      while (Date.now() < confirmationDeadline && checkbox.checked !== true) await sleep(50);
       const confirmedBeforeChange = checkbox.checked === true;
-      const identity = panel.querySelector('input[placeholder="community.path-to-skill.example"]');
-      if (!identity) return { ok: false, reason: "Path-to-Skill identity field missing" };
+      checks.confirmationSelected = confirmedBeforeChange;
+      const identity = panel.querySelector('input[data-vrcforge-path-to-skill-package-id]');
+      checks.identityFieldFound = Boolean(identity);
+      if (!identity) return { ok: false, failureStage: "identity-field", checks };
       const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
       inputSetter.call(identity, "community.probe.changed-after-preview");
       identity.dispatchEvent(new Event("input", { bubbles: true }));
-      await sleep(150);
-      const currentCheckbox = panel.querySelector('input[type="checkbox"]');
+      identity.dispatchEvent(new Event("change", { bubbles: true }));
+      const invalidationDeadline = Date.now() + 5000;
+      let currentCheckbox = panel.querySelector('input[data-vrcforge-path-to-skill-confirmation]');
+      while (Date.now() < invalidationDeadline && currentCheckbox?.checked === true) {
+        await sleep(50);
+        currentCheckbox = panel.querySelector('input[data-vrcforge-path-to-skill-confirmation]');
+      }
       const confirmationInvalidated = confirmedBeforeChange
         && (!currentCheckbox || currentCheckbox.checked === false);
+      checks.confirmationInvalidated = confirmationInvalidated;
       return {
-        ok: true,
+        ok: confirmationInvalidated,
+        failureStage: confirmationInvalidated ? "" : "confirmation-invalidation",
         confirmationInvalidated,
         panelVisible: true,
         previewViaTauriUi: true,
+        checks,
       };
     })()`,
   );
   report.ui.pathToSkillVisible = result?.panelVisible === true;
   report.pathToSkill.confirmationInvalidated = result?.confirmationInvalidated === true;
+  report.diagnostics.pathToSkill.confirmationInvalidation = {
+    ...(result?.checks || {}),
+    completed: result?.ok === true,
+    failureStage: [
+      "operation-textarea",
+      "capture-panel",
+      "contextual-summary",
+      "preview-button",
+      "confirmation-render",
+      "identity-field",
+      "confirmation-invalidation",
+    ].includes(result?.failureStage) ? result.failureStage : "",
+  };
   if (!report.pathToSkill.confirmationInvalidated) {
     addAssertion(report, "Path-to-Skill UI did not invalidate confirmation after preview input changed");
   }
@@ -4674,7 +5032,15 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
   }
   const uniquePackageQuery = records.find((item) => item.slug === "outfit-naming-helper")?.id
     || "community.examples.outfit-naming-helper";
-  await exerciseAuditUi(report, cdp, signerFingerprint, uniquePackageQuery);
+  const auditPayload = await appApi("/api/app/skill-packages");
+  const expectedImportedGovernanceRows = expectedImportedAuditGovernanceRows(auditPayload);
+  await exerciseAuditUi(
+    report,
+    cdp,
+    signerFingerprint,
+    uniquePackageQuery,
+    expectedImportedGovernanceRows,
+  );
   await exercisePathToSkillUi(report, cdp);
   for (const key of [
     "pathToSkillVisible",
@@ -5027,6 +5393,122 @@ print(json.dumps({
   }
 }
 
+function privacyUnscannedCategoryCounts(findings) {
+  const counts = {
+    missing: 0,
+    fileRead: 0,
+    invalidArchive: 0,
+    archiveLimit: 0,
+    unsafeArchiveName: 0,
+    duplicateArchiveName: 0,
+    symlink: 0,
+    oversized: 0,
+    other: 0,
+  };
+  for (const raw of findings || []) {
+    const value = String(raw || "");
+    if (value.endsWith(":missing")) counts.missing += 1;
+    else if (value.endsWith(":file-read") || value.endsWith(":archive-read")) counts.fileRead += 1;
+    else if (value.endsWith(":invalid-archive")) counts.invalidArchive += 1;
+    else if (
+      value.endsWith(":archive-depth")
+      || value.endsWith(":archive-entry-count")
+      || value.endsWith(":archive-uncompressed-size")
+    ) counts.archiveLimit += 1;
+    else if (value.endsWith(":unsafe-name")) counts.unsafeArchiveName += 1;
+    else if (value.endsWith(":duplicate-name")) counts.duplicateArchiveName += 1;
+    else if (value.endsWith(":symlink")) counts.symlink += 1;
+    else if (!value.includes(":") || /\/member-\d+$/.test(value)) counts.oversized += 1;
+    else counts.other += 1;
+  }
+  return counts;
+}
+
+function runtimeStateSourcePathFindingsAreClassified(scan) {
+  const expectedStateFiles = new Set([
+    "agent_gateway/approvals.jsonl",
+    "agent_gateway/runtime-runs.jsonl",
+  ]);
+  return (scan?.sourcePathFindings || []).every((label) => expectedStateFiles.has(String(label)));
+}
+
+function applyPostShutdownPrivacyScans(
+  report,
+  signed,
+  artifactScan,
+  diagnosticLogScan,
+  runtimeStateScan,
+  persistentRuntimeScan,
+  controlledKeyPathAbsent,
+) {
+  report.privacy.privateKeyAbsent = signed.privateKeyDeleted === true
+    && signed.builderStoreDeleted === true
+    && artifactScan.privateKeyFindings.length === 0
+    && artifactScan.ephemeralKeyPathFindings.length === 0
+    && persistentRuntimeScan.privateKeyFindings.length === 0
+    && persistentRuntimeScan.ephemeralKeyPathFindings.length === 0;
+  report.privacy.tokensAbsent = artifactScan.tokenFindings.length === 0;
+  report.privacy.sourcePathsAbsent = artifactScan.sourcePathFindings.length === 0;
+  report.privacy.paidPayloadAbsent = artifactScan.paidPayloadFindings.length === 0;
+  report.privacy.artifactsFullyScanned = artifactScan.unscannedFindings.length === 0;
+  report.privacy.rawDiagnosticSecretsAbsent = diagnosticLogScan.privateKeyFindings.length === 0
+    && diagnosticLogScan.ephemeralKeyPathFindings.length === 0
+    && diagnosticLogScan.tokenFindings.length === 0
+    && diagnosticLogScan.paidPayloadFindings.length === 0;
+  report.privacy.rawDiagnosticSourcePathsAbsent = diagnosticLogScan.sourcePathFindings.length === 0;
+  report.privacy.rawDiagnosticsFullyScanned = diagnosticLogScan.unscannedFindings.length === 0;
+  report.privacy.runtimeStateSecretsAbsent = runtimeStateScan.privateKeyFindings.length === 0
+    && runtimeStateScan.ephemeralKeyPathFindings.length === 0
+    && runtimeStateScan.tokenFindings.length === 0
+    && runtimeStateScan.paidPayloadFindings.length === 0;
+  report.privacy.runtimeStateFullyScanned = runtimeStateScan.unscannedFindings.length === 0;
+  report.privacy.runtimeStateSourcePathsClassified = runtimeStateSourcePathFindingsAreClassified(runtimeStateScan);
+  if (report.apkSemanticMatrix?.privateKeyBoundary) {
+    report.apkSemanticMatrix.privateKeyBoundary.controlledKeyPathAbsent = signed.privateKeyDeleted === true
+      && controlledKeyPathAbsent === true;
+    report.apkSemanticMatrix.privateKeyBoundary.persistentRuntimeScanClear =
+      persistentRuntimeScan.privateKeyFindings.length === 0
+      && persistentRuntimeScan.ephemeralKeyPathFindings.length === 0
+      && persistentRuntimeScan.unscannedFindings.length === 0;
+    report.apkSemanticMatrix.privateKeyBoundary.supportBundleScanClear = report.privacy.supportBundleClean === true;
+    report.apkSemanticMatrix.privateKeyBoundary.reportScanClear = !JSON.stringify(report).includes("-----BEGIN PRIVATE KEY-----")
+      && !JSON.stringify(report).includes(ephemeralSigningKeyPath);
+  }
+  report.privacy.scan = {
+    privateKeyFindingCount: artifactScan.privateKeyFindings.length,
+    ephemeralKeyPathFindingCount: artifactScan.ephemeralKeyPathFindings.length,
+    tokenFindingCount: artifactScan.tokenFindings.length,
+    sourcePathFindingCount: artifactScan.sourcePathFindings.length,
+    paidPayloadFindingCount: artifactScan.paidPayloadFindings.length,
+    unscannedFindingCount: artifactScan.unscannedFindings.length,
+    diagnosticLogPrivateKeyFindingCount: diagnosticLogScan.privateKeyFindings.length,
+    diagnosticLogEphemeralKeyPathFindingCount: diagnosticLogScan.ephemeralKeyPathFindings.length,
+    diagnosticLogTokenFindingCount: diagnosticLogScan.tokenFindings.length,
+    diagnosticLogSourcePathFindingCount: diagnosticLogScan.sourcePathFindings.length,
+    diagnosticLogPaidPayloadFindingCount: diagnosticLogScan.paidPayloadFindings.length,
+    diagnosticLogUnscannedFindingCount: diagnosticLogScan.unscannedFindings.length,
+    runtimeStatePrivateKeyFindingCount: runtimeStateScan.privateKeyFindings.length,
+    runtimeStateEphemeralKeyPathFindingCount: runtimeStateScan.ephemeralKeyPathFindings.length,
+    runtimeStateTokenFindingCount: runtimeStateScan.tokenFindings.length,
+    runtimeStateSourcePathFindingCount: runtimeStateScan.sourcePathFindings.length,
+    runtimeStatePaidPayloadFindingCount: runtimeStateScan.paidPayloadFindings.length,
+    runtimeStateUnscannedFindingCount: runtimeStateScan.unscannedFindings.length,
+    persistentPrivateKeyFindingCount: persistentRuntimeScan.privateKeyFindings.length,
+    persistentEphemeralKeyPathFindingCount: persistentRuntimeScan.ephemeralKeyPathFindings.length,
+    persistentPrivateKeyUnscannedFindingCount: persistentRuntimeScan.unscannedFindings.length,
+  };
+  report.diagnostics.privacy = {
+    scanPhase: "post-graceful-shutdown",
+    artifactUnscannedCategories: privacyUnscannedCategoryCounts(artifactScan.unscannedFindings),
+    diagnosticLogUnscannedCategories: privacyUnscannedCategoryCounts(diagnosticLogScan.unscannedFindings),
+    runtimeStateUnscannedCategories: privacyUnscannedCategoryCounts(runtimeStateScan.unscannedFindings),
+    persistentRuntimeUnscannedCategories: privacyUnscannedCategoryCounts(
+      persistentRuntimeScan.unscannedFindings,
+    ),
+    runtimeStateSourcePathsClassified: report.privacy.runtimeStateSourcePathsClassified,
+  };
+}
+
 async function stagingDirectoriesClear() {
   const candidates = [
     resolve(userDataRoot, "skill-packages", ".staging"),
@@ -5125,6 +5607,8 @@ function applyProcessBoundaryReport(report, snapshot) {
     && snapshot?.portQuerySucceeded === true
     && processTrackingErrorCount === 0;
   report.processBoundary = {
+    identityBinding: "pid+path+dmtf-creation+start-event-generation",
+    creationDateFormat: "dmtf",
     rootTracked: trackedRootObserved,
     trackedProcessCountEver: trackedGenerationCountEver,
     descendantProcessCountEver: descendantGenerationCountEver,
@@ -5575,7 +6059,9 @@ function validateFinalContract(report) {
     if (!transports.has(transport)) addAssertion(report, `required transport was not recorded: ${transport}`);
   }
   if (
-    report.processBoundary?.rootTracked !== true
+    report.processBoundary?.identityBinding !== "pid+path+dmtf-creation+start-event-generation"
+    || report.processBoundary?.creationDateFormat !== "dmtf"
+    || report.processBoundary?.rootTracked !== true
     || Number(report.processBoundary?.trackedProcessCountEver || 0) < 2
     || Number(report.processBoundary?.descendantProcessCountEver || 0) < 1
     || Number(report.processBoundary?.trackedGenerationCountEver || 0) < 2
@@ -5640,6 +6126,7 @@ function runSelfTest() {
     }
   };
   const processIdentityChecks = (() => {
+    const dmtf = (sequence) => `20260717000000.${String(sequence).padStart(6, "0")}+540`;
     trackedProcessIdentities.clear();
     observedProcessStartEvents.clear();
     observedProcessStartEventsBySequence.clear();
@@ -5650,7 +6137,7 @@ function runSelfTest() {
       parentPid: 1,
       name: "vrcforge_backend.exe",
       path: "C:/probe/backend.exe",
-      creationDate: "parent-generation-1",
+      creationDate: dmtf(1),
       startEventSequence: 10,
     };
     const parentStart = { pid: 100, parentPid: 1, name: parent.name, creationDate: parent.creationDate, sequence: 10 };
@@ -5659,11 +6146,11 @@ function runSelfTest() {
       parentPid: 100,
       name: "child.exe",
       path: "C:/other/child.exe",
-      creationDate: "child-generation-1",
+      creationDate: dmtf(2),
       startEventSequence: 0,
     };
     const childStart = { pid: 101, parentPid: 100, name: child.name, creationDate: child.creationDate, sequence: 11 };
-    const reusedParent = { pid: 100, parentPid: 2, name: "unrelated.exe", creationDate: "parent-generation-2", sequence: 12 };
+    const reusedParent = { pid: 100, parentPid: 2, name: "unrelated.exe", creationDate: dmtf(3), sequence: 12 };
     storeTrackedProcessIdentity(parent);
     observedProcessStartEvents.set(child.pid, childStart);
     observedProcessStartEvents.set(parent.pid, reusedParent);
@@ -5678,21 +6165,21 @@ function runSelfTest() {
     const oldTrackedParent = {
       ...parent,
       pid: 150,
-      creationDate: "tracked-parent-generation-1",
+      creationDate: dmtf(4),
       startEventSequence: 10,
     };
     const unrelatedReusedParent = {
       pid: oldTrackedParent.pid,
       parentPid: 2,
       name: "unrelated.exe",
-      creationDate: "unrelated-parent-generation-2",
+      creationDate: dmtf(5),
       sequence: 12,
     };
     const unrelatedChild = {
       ...child,
       pid: 151,
       parentPid: oldTrackedParent.pid,
-      creationDate: "unrelated-child-generation-1",
+      creationDate: dmtf(6),
     };
     const oldTrackedStart = {
       pid: oldTrackedParent.pid,
@@ -5721,8 +6208,8 @@ function runSelfTest() {
     trackedProcessIdentities.clear();
     observedProcessStartEvents.clear();
     observedProcessStartEventsBySequence.clear();
-    const liveParent = { ...parent, pid: 200, creationDate: "live-parent", startEventSequence: 20 };
-    const staleChild = { ...child, pid: 201, parentPid: 200, creationDate: "stale-child" };
+    const liveParent = { ...parent, pid: 200, creationDate: dmtf(7), startEventSequence: 20 };
+    const staleChild = { ...child, pid: 201, parentPid: 200, creationDate: dmtf(8) };
     const liveParentStart = { pid: 200, parentPid: 1, name: liveParent.name, creationDate: liveParent.creationDate, sequence: 20 };
     const staleChildStart = { pid: 201, parentPid: 200, name: staleChild.name, creationDate: staleChild.creationDate, sequence: 19 };
     storeTrackedProcessIdentity(liveParent);
@@ -5745,7 +6232,7 @@ function runSelfTest() {
       parentPid: 1,
       name: "VRCForge.exe",
       path: exe,
-      creationDate: "root-generation",
+      creationDate: dmtf(9),
       startEventSequence: 30,
     };
     const oldDescendant = {
@@ -5753,12 +6240,12 @@ function runSelfTest() {
       parentPid: trackedRootPid,
       name: "worker.exe",
       path: "C:/probe/worker.exe",
-      creationDate: "descendant-generation-1",
+      creationDate: dmtf(10),
       startEventSequence: 31,
     };
     const reusedDescendant = {
       ...oldDescendant,
-      creationDate: "descendant-generation-2",
+      creationDate: dmtf(11),
       startEventSequence: 32,
     };
     const rootStart = { pid: root.pid, parentPid: root.parentPid, name: root.name, creationDate: root.creationDate, sequence: 30 };
@@ -5789,6 +6276,14 @@ function runSelfTest() {
       && item.creationDate === reusedDescendant.creationDate
       && item.startEventSequence === reusedDescendant.startEventSequence
       && item.isRoot === false);
+    const missingExecutablePathIdentityRejected = !processIdentityMatches(
+      { ...reusedDescendant, path: "" },
+      reusedDescendant,
+    );
+    const nonDmtfGenerationRejected = !processIdentityMatches(
+      { ...reusedDescendant, creationDate: "2026-07-17T00:00:00Z" },
+      reusedDescendant,
+    );
     return {
       historicalParentGenerationPreserved,
       unrelatedReusedParentGenerationRejected,
@@ -5796,6 +6291,8 @@ function runSelfTest() {
       reusedDescendantPidTracksNewGeneration,
       reusedDescendantPidBlocksClear,
       cleanupUsesReusedDescendantGeneration,
+      missingExecutablePathIdentityRejected,
+      nonDmtfGenerationRejected,
     };
   })();
   const lockDigest = "d".repeat(64);
@@ -5815,6 +6312,27 @@ function runSelfTest() {
     stagingClear: true,
     zipSlipOutsideAbsent: true,
   };
+  const semanticAuditRows = expectedImportedAuditGovernanceRows({
+    audit: [
+      {
+        event: "skill_package_imported",
+        skill_id: "community.example.first",
+        version: "1.0.0",
+        signature_status: "attested-value",
+        risk_level: "custom-risk-value",
+        signer_fingerprint: "a".repeat(64),
+      },
+      { event: "skill_package_enabled", skill_id: "community.example.ignored" },
+      {
+        event: "skill_package_imported",
+        skillId: "community.example.second",
+        packageVersion: "2.0.0",
+        signatureStatus: "verified-value",
+        riskLevel: "policy-tier-value",
+        signerFingerprint: "b".repeat(64),
+      },
+    ],
+  });
   const checks = {
     strictPolicyAccepted: strictBuildPolicyFromManifest(strictPolicy).strict === true,
     missingPolicyRejected: strictBuildPolicyFromManifest({}).strict === false,
@@ -5902,18 +6420,64 @@ function runSelfTest() {
     ]),
     completeResponseSecretRejected: serializedValueExcludes(
       {
-        workflow: { sourceSummary: { privatePackagePath: "{{privatePackagePath}}" } },
+        workflow: { sourceSummary: { packagePath: "{{packagePath}}" } },
         sourceFiles: {},
         diagnostic: privateUrlSentinel,
       },
       [privateUrlSentinel],
     ) === false,
+    auditGovernanceDerivedFromSemanticPayload: exactJsonValue(semanticAuditRows, [
+      {
+        identityValues: ["community.example.second"],
+        version: "2.0.0",
+        signatureStatus: "verified-value",
+        riskLevel: "policy-tier-value",
+        signerFingerprint: "b".repeat(64),
+      },
+      {
+        identityValues: ["community.example.first"],
+        version: "1.0.0",
+        signatureStatus: "attested-value",
+        riskLevel: "custom-risk-value",
+        signerFingerprint: "a".repeat(64),
+      },
+    ]),
+    privacyUnscannedCategoriesRemainSummaryOnly: exactJsonValue(
+      privacyUnscannedCategoryCounts([
+        "logs/current.log:file-read",
+        "agent_gateway/backend-owner.lock:file-read",
+        "archive/member-1:unsafe-name",
+        "missing-root:missing",
+      ]),
+      {
+        missing: 1,
+        fileRead: 2,
+        invalidArchive: 0,
+        archiveLimit: 0,
+        unsafeArchiveName: 1,
+        duplicateArchiveName: 0,
+        symlink: 0,
+        oversized: 0,
+        other: 0,
+      },
+    ),
+    expectedRuntimeStatePathLabelsClassified: runtimeStateSourcePathFindingsAreClassified({
+      sourcePathFindings: [
+        "agent_gateway/approvals.jsonl",
+        "agent_gateway/runtime-runs.jsonl",
+      ],
+    }) === true,
+    unexpectedRuntimeStatePathLabelRejected: runtimeStateSourcePathFindingsAreClassified({
+      sourcePathFindings: ["agent_gateway/desktop-bridges.jsonl"],
+    }) === false,
     historicalParentGenerationPreserved: processIdentityChecks.historicalParentGenerationPreserved,
     unrelatedReusedParentGenerationRejected: processIdentityChecks.unrelatedReusedParentGenerationRejected,
     reusedLiveParentDoesNotClaimOlderChild: processIdentityChecks.reusedLiveParentDoesNotClaimOlderChild,
     reusedDescendantPidTracksNewGeneration: processIdentityChecks.reusedDescendantPidTracksNewGeneration,
     reusedDescendantPidBlocksClear: processIdentityChecks.reusedDescendantPidBlocksClear,
     cleanupUsesReusedDescendantGeneration: processIdentityChecks.cleanupUsesReusedDescendantGeneration,
+    missingExecutablePathIdentityRejected: processIdentityChecks.missingExecutablePathIdentityRejected,
+    nonDmtfGenerationRejected: processIdentityChecks.nonDmtfGenerationRejected,
     nonElevatedProcessWatcherAccepted:
       executableLaunchLockReadiness(nonElevatedWatcherReady, lockDigest, null).ok === true,
     executableDigestMismatchRejected:
@@ -5975,6 +6539,20 @@ async function main() {
     },
     packages: [],
     apkSemanticMatrix: {},
+    diagnostics: {
+      pathToSkill: {
+        recipePreviews: {},
+        writtenSource: {},
+        privateUrl: {},
+        contextualPrefill: {},
+        confirmationInvalidation: {},
+      },
+      ui: {
+        firstRunLanguageGate: {},
+        auditGovernance: {},
+      },
+      privacy: {},
+    },
     pathToSkill: {
       previewViaTauri: false,
       writeViaRest: false,
@@ -6014,6 +6592,9 @@ async function main() {
       uninstallRemovedState: false,
     },
     ui: {
+      firstRunLanguageGateVisible: false,
+      firstRunLanguageDefaultLegal: false,
+      firstRunLanguageContinueApplied: false,
       skillsWorkspaceVisible: false,
       pathToSkillVisible: false,
       contextualPathToSkillPrefill: false,
@@ -6031,7 +6612,11 @@ async function main() {
       paidPayloadAbsent: false,
       artifactsFullyScanned: false,
       rawDiagnosticSecretsAbsent: false,
+      rawDiagnosticSourcePathsAbsent: false,
       rawDiagnosticsFullyScanned: false,
+      runtimeStateSecretsAbsent: false,
+      runtimeStateFullyScanned: false,
+      runtimeStateSourcePathsClassified: false,
       supportBundleClean: false,
     },
     cleanup: {
@@ -6071,6 +6656,8 @@ async function main() {
       verifiedClear: false,
     },
     processBoundary: {
+      identityBinding: "pid+path+dmtf-creation+start-event-generation",
+      creationDateFormat: "dmtf",
       rootTracked: false,
       trackedProcessCountEver: 0,
       descendantProcessCountEver: 0,
@@ -6087,6 +6674,7 @@ async function main() {
   let signed;
   let packagedExport;
   let supportBundlePath = "";
+  let artifactPrivacyScan;
   let failureDetected = false;
   let finalSnapshot;
   try {
@@ -6163,6 +6751,7 @@ async function main() {
         .filter((value) => typeof value === "boolean")
         .every(Boolean),
     };
+    await exerciseFirstRunLanguageGate(report, app.cdp);
     packagedExport = await createPackagedExportBase(app.cdp, signed);
     report.apkSemanticMatrix = { packagedExport };
     report.fixtures.privateKeyPersisted = !signed.privateKeyDeleted;
@@ -6182,52 +6771,7 @@ async function main() {
       pathToSkillRoot,
       supportBundlePath,
     ];
-    const privacyScan = await scanSharedArtifactPrivacy(privacyTargets);
-    const rawDiagnosticScan = await scanSharedArtifactPrivacy([
-      resolve(userDataRoot, "logs"),
-      resolve(userDataRoot, "artifacts", "dashboard", "agent_gateway"),
-    ]);
-    const persistentPrivateKeyScan = await scanSharedArtifactPrivacy([userDataRoot]);
-    report.privacy.privateKeyAbsent = signed.privateKeyDeleted === true
-      && signed.builderStoreDeleted === true
-      && privacyScan.privateKeyFindings.length === 0
-      && privacyScan.ephemeralKeyPathFindings.length === 0;
-    report.privacy.tokensAbsent = privacyScan.tokenFindings.length === 0;
-    report.privacy.sourcePathsAbsent = privacyScan.sourcePathFindings.length === 0;
-    report.privacy.paidPayloadAbsent = privacyScan.paidPayloadFindings.length === 0;
-    report.privacy.artifactsFullyScanned = privacyScan.unscannedFindings.length === 0;
-    report.privacy.rawDiagnosticSecretsAbsent = rawDiagnosticScan.privateKeyFindings.length === 0
-      && rawDiagnosticScan.ephemeralKeyPathFindings.length === 0
-      && rawDiagnosticScan.tokenFindings.length === 0
-      && rawDiagnosticScan.paidPayloadFindings.length === 0;
-    report.privacy.rawDiagnosticsFullyScanned = rawDiagnosticScan.unscannedFindings.length === 0;
-    if (report.apkSemanticMatrix?.privateKeyBoundary) {
-      report.apkSemanticMatrix.privateKeyBoundary.controlledKeyPathAbsent = signed.privateKeyDeleted === true
-        && !(await pathExists(ephemeralSigningKeyPath));
-      report.apkSemanticMatrix.privateKeyBoundary.persistentRuntimeScanClear = persistentPrivateKeyScan.privateKeyFindings.length === 0
-        && persistentPrivateKeyScan.ephemeralKeyPathFindings.length === 0
-        && persistentPrivateKeyScan.unscannedFindings.length === 0;
-      report.apkSemanticMatrix.privateKeyBoundary.supportBundleScanClear = report.privacy.supportBundleClean === true;
-      report.apkSemanticMatrix.privateKeyBoundary.reportScanClear = !JSON.stringify(report).includes("-----BEGIN PRIVATE KEY-----")
-        && !JSON.stringify(report).includes(ephemeralSigningKeyPath);
-    }
-    report.privacy.scan = {
-      privateKeyFindingCount: privacyScan.privateKeyFindings.length,
-      ephemeralKeyPathFindingCount: privacyScan.ephemeralKeyPathFindings.length,
-      tokenFindingCount: privacyScan.tokenFindings.length,
-      sourcePathFindingCount: privacyScan.sourcePathFindings.length,
-      paidPayloadFindingCount: privacyScan.paidPayloadFindings.length,
-      unscannedFindingCount: privacyScan.unscannedFindings.length,
-      rawDiagnosticPrivateKeyFindingCount: rawDiagnosticScan.privateKeyFindings.length,
-      rawDiagnosticEphemeralKeyPathFindingCount: rawDiagnosticScan.ephemeralKeyPathFindings.length,
-      rawDiagnosticTokenFindingCount: rawDiagnosticScan.tokenFindings.length,
-      rawDiagnosticSourcePathFindingCount: rawDiagnosticScan.sourcePathFindings.length,
-      rawDiagnosticPaidPayloadFindingCount: rawDiagnosticScan.paidPayloadFindings.length,
-      rawDiagnosticUnscannedFindingCount: rawDiagnosticScan.unscannedFindings.length,
-      persistentPrivateKeyFindingCount: persistentPrivateKeyScan.privateKeyFindings.length,
-      persistentEphemeralKeyPathFindingCount: persistentPrivateKeyScan.ephemeralKeyPathFindings.length,
-      persistentPrivateKeyUnscannedFindingCount: persistentPrivateKeyScan.unscannedFindings.length,
-    };
+    artifactPrivacyScan = await scanSharedArtifactPrivacy(privacyTargets);
     delete report.internalPaths;
 
     if (report.assertions.length > 0) {
@@ -6253,6 +6797,20 @@ async function main() {
     await unlink(ephemeralSigningKeyPath).catch(() => {});
     report.cleanup.ephemeralSigningKeyClear = !(await pathExists(ephemeralSigningKeyPath));
     report.cleanup.builderStoreClear = !(await pathExists(resolve(packageFixtureRoot, ".builder-store")));
+    const diagnosticLogScan = await scanSharedArtifactPrivacy([resolve(userDataRoot, "logs")]);
+    const runtimeStateScan = await scanSharedArtifactPrivacy([
+      resolve(userDataRoot, "artifacts", "dashboard", "agent_gateway"),
+    ]);
+    const persistentRuntimeScan = await scanSharedArtifactPrivacy([userDataRoot]);
+    applyPostShutdownPrivacyScans(
+      report,
+      signed,
+      artifactPrivacyScan,
+      diagnosticLogScan,
+      runtimeStateScan,
+      persistentRuntimeScan,
+      report.cleanup.ephemeralSigningKeyClear,
+    );
     const completionBinding = await currentGitBindingSnapshot();
     report.releaseBinding.worktreeCleanAtCompletion = completionBinding.worktreeClean;
     report.releaseBinding.completionHeadMatches = completionBinding.head === releaseBinding.headCommit;

@@ -160,7 +160,7 @@ export function PathToSkillCapturePanel({ initialSummary, onPreview, onWrite }: 
   const exportedPath = String(exported?.package_path || exported?.packagePath || "");
 
   return (
-    <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+    <div data-vrcforge-path-to-skill-panel="true" className="grid gap-3 rounded-lg border border-border bg-background p-3">
       <div className="flex min-w-0 items-center gap-2">
         <FileCheck2 className="h-4 w-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
@@ -192,6 +192,7 @@ export function PathToSkillCapturePanel({ initialSummary, onPreview, onWrite }: 
       <div className="grid gap-3 md:grid-cols-3">
         <Field label={i18n.t("package.packageId")}>
           <input
+            data-vrcforge-path-to-skill-package-id
             value={packageId}
             onChange={(event) => {
               setPackageId(event.target.value);
@@ -225,6 +226,7 @@ export function PathToSkillCapturePanel({ initialSummary, onPreview, onWrite }: 
 
       <div className="flex justify-end">
         <Button
+          data-vrcforge-path-to-skill-preview
           type="button"
           variant="outline"
           disabled={Boolean(busyAction) || Boolean(summaryRequirementError)}
@@ -272,6 +274,7 @@ export function PathToSkillCapturePanel({ initialSummary, onPreview, onWrite }: 
         <>
           <label className="flex min-w-0 items-start gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
             <input
+              data-vrcforge-path-to-skill-confirmation
               type="checkbox"
               className="mt-0.5"
               checked={confirmationIsCurrent}
