@@ -1700,12 +1700,35 @@ async function waitForJson(url, timeoutMs = 45000) {
   throw lastError || new Error(`Timed out waiting for ${url}`);
 }
 
-function connectCdp(webSocketDebuggerUrl) {
-  const ws = new WebSocket(webSocketDebuggerUrl);
+const defaultCdpRequestTimeoutMs = 240000;
+
+function connectCdp(
+  webSocketDebuggerUrl,
+  {
+    requestTimeoutMs = defaultCdpRequestTimeoutMs,
+    openTimeoutMs = 15000,
+    WebSocketImpl = WebSocket,
+  } = {},
+) {
+  const ws = new WebSocketImpl(webSocketDebuggerUrl);
   let nextId = 1;
   const pending = new Map();
+  let terminalError = null;
+  let openedSettled = false;
+  const rejectPending = (error) => {
+    terminalError ||= error;
+    for (const request of pending.values()) request.reject(terminalError);
+    pending.clear();
+  };
   ws.addEventListener("message", (event) => {
-    const payload = JSON.parse(String(event.data));
+    let payload;
+    try {
+      payload = JSON.parse(String(event.data));
+    } catch {
+      rejectPending(new Error("CDP WebSocket returned an invalid JSON message."));
+      try { ws.close(); } catch { /* The invalid transport may already be closed. */ }
+      return;
+    }
     if (!payload.id || !pending.has(payload.id)) return;
     const request = pending.get(payload.id);
     pending.delete(payload.id);
@@ -1713,28 +1736,84 @@ function connectCdp(webSocketDebuggerUrl) {
     else request.resolve(payload.result);
   });
   const opened = new Promise((resolveOpen, rejectOpen) => {
-    ws.addEventListener("open", resolveOpen, { once: true });
-    ws.addEventListener("error", rejectOpen, { once: true });
+    const openTimer = setTimeout(() => {
+      if (openedSettled) return;
+      openedSettled = true;
+      const error = new Error(`CDP WebSocket open timed out after ${openTimeoutMs} ms.`);
+      rejectOpen(error);
+      rejectPending(error);
+      try { ws.close(); } catch { /* A failed handshake may not be closable. */ }
+    }, openTimeoutMs);
+    ws.addEventListener("open", () => {
+      clearTimeout(openTimer);
+      openedSettled = true;
+      resolveOpen();
+    }, { once: true });
+    ws.addEventListener("error", () => {
+      clearTimeout(openTimer);
+      const error = new Error("CDP WebSocket connection failed.");
+      if (!openedSettled) {
+        openedSettled = true;
+        rejectOpen(error);
+      }
+      rejectPending(error);
+    });
+    ws.addEventListener("close", () => {
+      clearTimeout(openTimer);
+      const error = new Error("CDP WebSocket connection closed.");
+      if (!openedSettled) {
+        openedSettled = true;
+        rejectOpen(error);
+      }
+      rejectPending(error);
+    });
   });
   return {
     opened,
-    close: () => ws.close(),
-    send(method, params = {}) {
+    close: () => {
+      rejectPending(new Error("CDP client closed."));
+      ws.close();
+    },
+    send(method, params = {}, timeoutMs = requestTimeoutMs) {
+      if (terminalError) return Promise.reject(terminalError);
+      if (ws.readyState !== 1) return Promise.reject(new Error("CDP WebSocket is not open."));
       const id = nextId++;
-      ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolveSend, rejectSend) => {
-        pending.set(id, { resolve: resolveSend, reject: rejectSend });
+        const boundedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? Math.floor(timeoutMs)
+          : requestTimeoutMs;
+        const timer = setTimeout(() => {
+          if (!pending.delete(id)) return;
+          rejectSend(new Error(`CDP request timed out after ${boundedTimeoutMs} ms: ${method}`));
+        }, boundedTimeoutMs);
+        pending.set(id, {
+          resolve: (value) => {
+            clearTimeout(timer);
+            resolveSend(value);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            rejectSend(error);
+          },
+        });
+        try {
+          ws.send(JSON.stringify({ id, method, params }));
+        } catch (error) {
+          const request = pending.get(id);
+          pending.delete(id);
+          request?.reject(error);
+        }
       });
     },
   };
 }
 
-async function evalValue(cdp, expression) {
+async function evalValue(cdp, expression, timeoutMs = defaultCdpRequestTimeoutMs) {
   const result = await cdp.send("Runtime.evaluate", {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  });
+  }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(
       result.exceptionDetails.exception?.description
@@ -1750,7 +1829,8 @@ async function waitForEval(cdp, expression, timeoutMs = 45000) {
   let last;
   while (Date.now() < deadline) {
     try {
-      last = await evalValue(cdp, expression);
+      const remainingMs = Math.max(1000, deadline - Date.now());
+      last = await evalValue(cdp, expression, remainingMs);
       if (last === true || last?.ok) return last;
     } catch (error) {
       last = String(error);
@@ -1804,8 +1884,8 @@ async function launchPackagedApp(releaseBinding) {
     const cdp = connectCdp(page.webSocketDebuggerUrl);
     launch.cdp = cdp;
     await cdp.opened;
-    await cdp.send("Runtime.enable");
-    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable", {}, 15000);
+    await cdp.send("Page.enable", {}, 15000);
     const renderer = await waitForEval(
       cdp,
       `(() => ({
@@ -4606,6 +4686,7 @@ async function exerciseFirstRunLanguageGate(report, cdp) {
         optionCount: options.length,
       };
     })()`,
+    90000,
   );
   const checks = result?.checks || {};
   report.ui.firstRunLanguageGateVisible = checks.dialogVisible === true;
@@ -4710,6 +4791,7 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
       }
       return { ok: false, failureStage: "prefill-render", checks };
     })()`,
+    90000,
   );
   report.diagnostics.pathToSkill.contextualPrefill = {
     ...(result?.checks || {}),
@@ -4895,6 +4977,7 @@ async function exerciseAuditUi(
         unmatchedGovernanceRows: unmatchedExpectedRows.length,
       };
     })()`,
+    60000,
   );
   report.ui.auditSearchVisible = result?.searchVisible === true && result?.searchExercised === true;
   report.ui.auditSignerVisible = result?.signerVisible === true;
@@ -4991,6 +5074,7 @@ async function exercisePathToSkillUi(report, cdp) {
         checks,
       };
     })()`,
+    90000,
   );
   report.ui.pathToSkillVisible = result?.panelVisible === true;
   report.pathToSkill.confirmationInvalidated = result?.confirmationInvalidated === true;
@@ -6087,7 +6171,132 @@ async function writeSanitizedReport(report) {
   await writeFile(reportPath, serialized, "utf8");
 }
 
-function runSelfTest() {
+async function cdpClientSelfTest() {
+  class FakeWebSocket {
+    static latest;
+
+    constructor(url) {
+      this.readyState = 0;
+      this.listeners = new Map();
+      this.lastRequestId = 0;
+      FakeWebSocket.latest = this;
+      if (String(url).includes("never-open")) return;
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.emit("open", {});
+      });
+    }
+
+    addEventListener(type, callback, options = {}) {
+      const listeners = this.listeners.get(type) || [];
+      listeners.push({ callback, once: options?.once === true });
+      this.listeners.set(type, listeners);
+    }
+
+    emit(type, event) {
+      const listeners = [...(this.listeners.get(type) || [])];
+      this.listeners.set(type, listeners.filter((listener) => !listener.once));
+      for (const listener of listeners) listener.callback(event);
+    }
+
+    send(raw) {
+      const request = JSON.parse(String(raw));
+      this.lastRequestId = request.id;
+      if (request.method === "sync-response") {
+        this.emit("message", {
+          data: JSON.stringify({ id: request.id, result: { acknowledged: true } }),
+        });
+      }
+    }
+
+    close() {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.emit("close", {});
+    }
+  }
+
+  const client = connectCdp("ws://self-test.invalid", {
+    requestTimeoutMs: 100,
+    WebSocketImpl: FakeWebSocket,
+  });
+  await client.opened;
+  const synchronous = await client.send("sync-response", {}, 100);
+  let missingResponseTimedOut = false;
+  try {
+    await client.send("no-response", {}, 20);
+  } catch (error) {
+    missingResponseTimedOut = String(error?.message || error).includes("CDP request timed out");
+  }
+  FakeWebSocket.latest.emit("message", {
+    data: JSON.stringify({ id: FakeWebSocket.latest.lastRequestId, result: { arrivedLate: true } }),
+  });
+  const responseAfterLateMessage = await client.send("sync-response", {}, 100);
+  const pending = client.send("pending-when-closed", {}, 1000);
+  FakeWebSocket.latest.close();
+  let pendingRejectedOnClose = false;
+  try {
+    await pending;
+  } catch (error) {
+    pendingRejectedOnClose = String(error?.message || error).includes("connection closed");
+  }
+  let sendAfterCloseRejected = false;
+  try {
+    await client.send("after-close", {}, 100);
+  } catch (error) {
+    sendAfterCloseRejected = String(error?.message || error).includes("connection closed");
+  }
+  const errorClient = connectCdp("ws://remote-error.invalid", {
+    requestTimeoutMs: 100,
+    WebSocketImpl: FakeWebSocket,
+  });
+  await errorClient.opened;
+  const pendingAtError = errorClient.send("pending-at-error", {}, 1000);
+  FakeWebSocket.latest.emit("error", {});
+  let pendingRejectedOnError = false;
+  try {
+    await pendingAtError;
+  } catch (error) {
+    pendingRejectedOnError = String(error?.message || error).includes("connection failed");
+  }
+  const invalidClient = connectCdp("ws://invalid-message.invalid", {
+    requestTimeoutMs: 100,
+    WebSocketImpl: FakeWebSocket,
+  });
+  await invalidClient.opened;
+  const pendingAtInvalidMessage = invalidClient.send("pending-at-invalid-message", {}, 1000);
+  FakeWebSocket.latest.emit("message", { data: "{" });
+  let invalidMessageRejected = false;
+  try {
+    await pendingAtInvalidMessage;
+  } catch (error) {
+    invalidMessageRejected = String(error?.message || error).includes("invalid JSON message");
+  }
+  const unopenedClient = connectCdp("ws://never-open.invalid", {
+    requestTimeoutMs: 100,
+    openTimeoutMs: 20,
+    WebSocketImpl: FakeWebSocket,
+  });
+  let openTimedOut = false;
+  try {
+    await unopenedClient.opened;
+  } catch (error) {
+    openTimedOut = String(error?.message || error).includes("open timed out");
+  }
+  return {
+    synchronousResponseAccepted: synchronous?.acknowledged === true,
+    missingResponseTimedOut,
+    lateResponseIgnored: responseAfterLateMessage?.acknowledged === true,
+    pendingRejectedOnClose,
+    sendAfterCloseRejected,
+    pendingRejectedOnError,
+    invalidMessageRejected,
+    openTimedOut,
+  };
+}
+
+async function runSelfTest() {
+  const cdpChecks = await cdpClientSelfTest();
   const commit = "a".repeat(40);
   const strictPolicy = {
     buildPolicy: {
@@ -6497,6 +6706,14 @@ function runSelfTest() {
         ...completeNegativeEvidence,
         installedStatePreserved: false,
       }) === false,
+    cdpSynchronousResponseAccepted: cdpChecks.synchronousResponseAccepted,
+    cdpMissingResponseTimedOut: cdpChecks.missingResponseTimedOut,
+    cdpLateResponseIgnored: cdpChecks.lateResponseIgnored,
+    cdpPendingRejectedOnClose: cdpChecks.pendingRejectedOnClose,
+    cdpSendAfterCloseRejected: cdpChecks.sendAfterCloseRejected,
+    cdpPendingRejectedOnError: cdpChecks.pendingRejectedOnError,
+    cdpInvalidMessageRejected: cdpChecks.invalidMessageRejected,
+    cdpOpenTimedOut: cdpChecks.openTimedOut,
   };
   const failed = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name);
   console.log(JSON.stringify({
@@ -6901,7 +7118,7 @@ async function main() {
 }
 
 if (selfTest) {
-  runSelfTest();
+  await runSelfTest();
 } else {
   main().catch(async (error) => {
     await mkdir(dirname(reportPath), { recursive: true });
