@@ -975,7 +975,7 @@ async function main() {
     report.phases.attachmentSeed = await seedAndActivateProbeChat(cdp, attachmentChat, "attachment continuity");
     report.phases.attachmentCompactSend = await uiSend(cdp, "/compact");
     if (!report.phases.attachmentCompactSend?.ok) assertion(report, `attachment continuity /compact could not start: ${report.phases.attachmentCompactSend?.reason || "unknown"}`);
-    await provider.waitFor("compaction", "attachment-continuity-0", 120000, "standalone").catch((error) => assertion(report, `attachment continuity manual compaction did not reach the provider: ${String(error)}`));
+    await provider.waitFor("compaction", attachmentFileName, 120000, "standalone").catch((error) => assertion(report, `attachment continuity manual compaction did not reach the provider: ${String(error)}`));
     const compactedAttachmentChat = await waitForValue(
       async () => (await api("/api/app/chats")).chats?.find((chat) => chat.id === attachmentChat.id),
       (chat) => chat?.compaction?.status === "applied" && (chat?.items || []).some((item) => item.type === "compact"),
