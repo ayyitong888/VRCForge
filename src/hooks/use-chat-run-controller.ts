@@ -4,6 +4,8 @@ import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import type { ChatAttachment, ChatThread, ConversationItem } from "../lib/chat-types";
 import { stripTransientConversationItems } from "../lib/chat-thread";
 import {
+  collectCompactedAttachmentReferences,
+  mergeCompactedAttachmentReferences,
   persistAttachmentReference,
   resolveAttachmentPayloadReferences,
   resolveHistoricalAttachmentPayloads,
@@ -295,6 +297,7 @@ export function useChatRunController({
             baseItems,
             chat?.attachmentPayloads,
             turn.text,
+            chat?.compactedAttachmentRefs,
           ).attachments;
       const requestAttachments = deduplicateRequestAttachments([...currentAttachments, ...historicalAttachments]);
       const messageForModel = appendAttachmentSummary(turn.text, requestAttachments, t);
@@ -418,8 +421,21 @@ export function useChatRunController({
           };
           const projection = projectRuntimeCompactionItems(durableItems, summarizedItemIds, compactItem);
           if (projection.replacedCount > 0 || summarizedItemIds.size === 0) {
+            const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
+            const compactedAttachmentRefs = mergeCompactedAttachmentReferences(
+              current.compactedAttachmentRefs,
+              collectCompactedAttachmentReferences(
+                durableItems.filter((item) => summarizedItemIds.has(item.id)),
+                attachmentPayloads,
+              ),
+            );
             durableItems = projection.replacedCount > 0 ? projection.items : [compactItem, ...durableItems];
             midTurnCompactionApplied = true;
+            current = {
+              ...current,
+              attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+              compactedAttachmentRefs,
+            };
             compaction = {
               generation,
               status: "applied",

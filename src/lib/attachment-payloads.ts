@@ -1,4 +1,9 @@
-import type { ChatAttachment, ChatAttachmentPayload, ConversationItem } from "./chat-types";
+import type {
+  ChatAttachment,
+  ChatAttachmentPayload,
+  CompactedAttachmentReference,
+  ConversationItem,
+} from "./chat-types";
 
 export type AttachmentPayloadVault = Record<string, ChatAttachmentPayload>;
 
@@ -157,10 +162,98 @@ export function normalizeAttachmentPayloadVault(value: unknown): AttachmentPaylo
   return Object.keys(normalized).length ? normalized : undefined;
 }
 
-/** Keep only payloads still referenced by durable user messages. */
+/**
+ * Keep only body-free references that can later rehydrate the vault payload.
+ * This is deliberately separate from message attachments: compacted history
+ * must not regain a body, nor leak a body into the compacted summary.
+ */
+export function normalizeCompactedAttachmentReferences(value: unknown): CompactedAttachmentReference[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized: CompactedAttachmentReference[] = [];
+  const seen = new Set<string>();
+  for (const rawReference of value) {
+    if (!rawReference || typeof rawReference !== "object" || Array.isArray(rawReference)) {
+      continue;
+    }
+    const reference = rawReference as Partial<CompactedAttachmentReference>;
+    if (
+      typeof reference.id !== "string" || !reference.id
+      || typeof reference.name !== "string"
+      || typeof reference.type !== "string"
+      || typeof reference.size !== "number" || !Number.isSafeInteger(reference.size) || reference.size < 0
+      || (reference.payloadKind !== "text" && reference.payloadKind !== "data_url")
+      || typeof reference.payloadHash !== "string" || !PAYLOAD_HASH_PATTERN.test(reference.payloadHash)
+    ) {
+      continue;
+    }
+    const normalizedReference: CompactedAttachmentReference = {
+      id: reference.id,
+      name: reference.name,
+      size: reference.size,
+      type: reference.type,
+      payloadKind: reference.payloadKind,
+      payloadHash: reference.payloadHash,
+      ...(reference.truncated === true ? { truncated: true } : {}),
+    };
+    const identity = compactedAttachmentReferenceIdentity(normalizedReference);
+    if (seen.has(identity)) {
+      continue;
+    }
+    seen.add(identity);
+    normalized.push(normalizedReference);
+  }
+  return normalized.length ? normalized : undefined;
+}
+
+/**
+ * Capture attachments from dialogue that is about to be replaced.  Inline
+ * payloads are first moved into the existing per-chat vault; the returned
+ * references never contain text or data URLs.
+ */
+export function collectCompactedAttachmentReferences(
+  items: readonly ConversationItem[],
+  vault: AttachmentPayloadVault,
+): CompactedAttachmentReference[] | undefined {
+  const references: CompactedAttachmentReference[] = [];
+  for (const item of items) {
+    if (item.type !== "user") {
+      continue;
+    }
+    for (const attachment of item.attachments || []) {
+      const persisted = persistAttachmentReference(attachment, vault);
+      const reference = toCompactedAttachmentReference(persisted);
+      if (reference) {
+        references.push(reference);
+      }
+    }
+  }
+  return mergeCompactedAttachmentReferences(references);
+}
+
+export function mergeCompactedAttachmentReferences(
+  ...referenceLists: Array<readonly CompactedAttachmentReference[] | undefined>
+): CompactedAttachmentReference[] | undefined {
+  const merged: CompactedAttachmentReference[] = [];
+  const seen = new Set<string>();
+  for (const references of referenceLists) {
+    for (const reference of references || []) {
+      const normalized = toCompactedAttachmentReference(reference);
+      if (normalized && !seen.has(compactedAttachmentReferenceIdentity(normalized))) {
+        seen.add(compactedAttachmentReferenceIdentity(normalized));
+        merged.push(normalized);
+      }
+    }
+  }
+  return merged.length ? merged : undefined;
+}
+
+/** Keep only payloads referenced by durable user messages or compacted refs. */
 export function referencedAttachmentPayloadVault(
   items: readonly ConversationItem[],
   vault: AttachmentPayloadVault,
+  compactedAttachmentRefs: readonly CompactedAttachmentReference[] | undefined = undefined,
 ): AttachmentPayloadVault | undefined {
   const referenced = new Set<string>();
   for (const item of items) {
@@ -171,6 +264,11 @@ export function referencedAttachmentPayloadVault(
       if (attachment.payloadHash) {
         referenced.add(attachment.payloadHash);
       }
+    }
+  }
+  for (const reference of compactedAttachmentRefs || []) {
+    if (PAYLOAD_HASH_PATTERN.test(reference.payloadHash)) {
+      referenced.add(reference.payloadHash);
     }
   }
   const selected: AttachmentPayloadVault = {};
@@ -187,8 +285,9 @@ export function resolveHistoricalAttachmentPayloads(
   items: readonly ConversationItem[],
   vault: AttachmentPayloadVault | undefined,
   prompt: string,
+  compactedAttachmentRefs: readonly CompactedAttachmentReference[] | undefined = undefined,
 ): HistoricalAttachmentResolution {
-  const candidates = historicalPayloadAttachments(items);
+  const candidates = historicalPayloadAttachments(items, compactedAttachmentRefs);
   if (!candidates.length) {
     return { attachments: [] };
   }
@@ -294,7 +393,10 @@ function restoreAttachmentPayload(attachment: ChatAttachment, vault: AttachmentP
   };
 }
 
-function historicalPayloadAttachments(items: readonly ConversationItem[]): Array<{ attachment: ChatAttachment }> {
+function historicalPayloadAttachments(
+  items: readonly ConversationItem[],
+  compactedAttachmentRefs: readonly CompactedAttachmentReference[] | undefined = undefined,
+): Array<{ attachment: ChatAttachment }> {
   const candidates: Array<{ attachment: ChatAttachment }> = [];
   const seen = new Set<string>();
   for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
@@ -307,14 +409,56 @@ function historicalPayloadAttachments(items: readonly ConversationItem[]): Array
         || attachment.payloadKind === "data_url"
         || typeof attachment.text === "string"
         || typeof attachment.dataUrl === "string";
-      const identity = attachment.payloadHash || attachment.id;
+      const identity = historicalAttachmentIdentity(attachment);
       if (hasPayload && !seen.has(identity)) {
         seen.add(identity);
         candidates.push({ attachment });
       }
     }
   }
+  for (let index = (compactedAttachmentRefs?.length || 0) - 1; index >= 0; index -= 1) {
+    const attachment = compactedAttachmentRefs![index];
+    const identity = historicalAttachmentIdentity(attachment);
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      candidates.push({ attachment });
+    }
+  }
   return candidates;
+}
+
+function toCompactedAttachmentReference(attachment: ChatAttachment): CompactedAttachmentReference | null {
+  if (
+    typeof attachment.id !== "string" || !attachment.id
+    || typeof attachment.name !== "string"
+    || typeof attachment.type !== "string"
+    || typeof attachment.size !== "number" || !Number.isSafeInteger(attachment.size) || attachment.size < 0
+    || (attachment.payloadKind !== "text" && attachment.payloadKind !== "data_url")
+    || typeof attachment.payloadHash !== "string" || !PAYLOAD_HASH_PATTERN.test(attachment.payloadHash)
+  ) {
+    return null;
+  }
+  return {
+    id: attachment.id,
+    name: attachment.name,
+    size: attachment.size,
+    type: attachment.type,
+    payloadKind: attachment.payloadKind,
+    payloadHash: attachment.payloadHash,
+    ...(attachment.truncated === true ? { truncated: true } : {}),
+  };
+}
+
+function compactedAttachmentReferenceIdentity(
+  reference: Pick<CompactedAttachmentReference, "payloadHash" | "name" | "type" | "size">,
+): string {
+  return `${reference.payloadHash}\u0000${reference.name}\u0000${reference.type}\u0000${reference.size}`;
+}
+
+function historicalAttachmentIdentity(attachment: ChatAttachment): string {
+  return attachment.payloadHash
+    ? `${attachment.payloadHash}\u0000${attachment.name}\u0000${attachment.type}\u0000${attachment.size}`
+    : attachment.id;
 }
 
 function looksLikeAttachmentFollowup(prompt: string): boolean {

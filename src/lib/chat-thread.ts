@@ -1,6 +1,7 @@
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import {
+  normalizeCompactedAttachmentReferences,
   persistAttachmentReference,
   referencedAttachmentPayloadVault,
   type AttachmentPayloadVault,
@@ -81,10 +82,12 @@ export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
         }
         return { ...item, attachments: item.attachments.map((attachment) => persistAttachmentReference(attachment, vault)) };
       });
-      const attachmentPayloads = referencedAttachmentPayloadVault(referencedItems, vault);
+      const compactedAttachmentRefs = normalizeCompactedAttachmentReferences(chat.compactedAttachmentRefs);
+      const attachmentPayloads = referencedAttachmentPayloadVault(referencedItems, vault, compactedAttachmentRefs);
       return {
         ...chat,
         attachmentPayloads,
+        compactedAttachmentRefs,
         items: referencedItems,
       };
     })

@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 
@@ -17,6 +17,13 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const allowUnpushed = process.argv.includes("--allow-unpushed");
 const cdpPort = Number(process.env.VRCFORGE_CONTEXT_PROBE_CDP_PORT || "9354");
 const marker = `CONTEXT_COMPACTION_PROBE_${Date.now()}`;
+// This value is deliberately never written to the report.  It lets the probe
+// prove that a later follow-up received the original attachment body rather
+// than relying on the old visible reply or attachment metadata.
+const attachmentBodyMarker = `ATTACHMENT_BODY_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+const attachmentFileName = "continuity-probe.txt";
+const attachmentBody = `first attachment line\nsecond attachment line\n${attachmentBodyMarker}`;
+const attachmentPayloadHash = createHash("sha256").update(attachmentBody, "utf8").digest("hex");
 const evidenceRoot = resolve(repoRoot, "artifacts", "actual-app-context-compaction", marker);
 const packageRoot = resolve(evidenceRoot, "package");
 const exe = resolve(packageRoot, "VRCForge.exe");
@@ -60,6 +67,56 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const assertion = (report, message) => {
   if (!report.assertions.includes(message)) report.assertions.push(message);
 };
+
+// A probe failure may include an API/CDP error that embeds a persisted chat.
+// Keep attachment proof useful without ever writing its body into release
+// evidence (including an error report).
+function redactAttachmentProbeBody(value) {
+  if (typeof value === "string") {
+    return value
+      .replaceAll(attachmentBody, "[REDACTED_ATTACHMENT_BODY]")
+      .replaceAll(attachmentBodyMarker, "[REDACTED_ATTACHMENT_BODY]");
+  }
+  if (Array.isArray(value)) return value.map(redactAttachmentProbeBody);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactAttachmentProbeBody(entry)]));
+  }
+  return value;
+}
+
+async function scanFilesForAttachmentBody(root) {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    return {
+      found: false,
+      readErrorCount: error?.code === "ENOENT" ? 0 : 1,
+    };
+  }
+  let readErrorCount = 0;
+  for (const entry of entries) {
+    const path = resolve(root, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await scanFilesForAttachmentBody(path);
+      readErrorCount += nested.readErrorCount;
+      if (nested.found) return { found: true, readErrorCount };
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    try {
+      const contents = await readFile(path, "utf8");
+      if (contents.includes(attachmentBodyMarker) || contents.includes(attachmentBody)) {
+        return { found: true, readErrorCount };
+      }
+    } catch {
+      // The isolated log tree is text-only. A read error makes the privacy
+      // proof incomplete instead of silently passing it.
+      readErrorCount += 1;
+    }
+  }
+  return { found: false, readErrorCount };
+}
 const psLiteral = (value) => String(value).replaceAll("'", "''");
 
 function powershell(script) {
@@ -354,11 +411,74 @@ function probeChat(kind, usageRatio = 0.86, options = {}) {
     ],
   };
 }
+
+function attachmentContinuityChat() {
+  const chat = probeChat("attachment-continuity", 0.86);
+  const now = new Date().toISOString();
+  const attachment = {
+    id: `${marker}-attachment`,
+    name: attachmentFileName,
+    size: Buffer.byteLength(attachmentBody, "utf8"),
+    type: "text/plain",
+    payloadKind: "text",
+    payloadHash: attachmentPayloadHash,
+  };
+  // This is the exact durable shape produced by the normal UI persistence
+  // path: the item carries only metadata/hash, while the body has one
+  // content-addressed home in the owning chat vault.
+  chat.attachmentPayloads = {
+    [attachmentPayloadHash]: {
+      payloadHash: attachmentPayloadHash,
+      payloadKind: "text",
+      text: attachmentBody,
+    },
+  };
+  chat.items = [
+    { id: "attachment-u1", type: "user", text: `${marker} inspect ${attachmentFileName}`, attachments: [attachment], createdAt: now },
+    {
+      id: "attachment-a1", type: "agent", createdAt: now,
+      response: {
+        ok: true, sessionId: chat.sessionId, turnId: `${marker}-attachment-seed`,
+        plan: { summary: `${marker} initial attachment receipt`, reply: `${marker} initial attachment receipt` },
+        contextUsage: { provider: "deepseek", model: "deepseek-v4-pro", exact: true, inputTokens: 860000, lastInputTokens: 860000, peakInputTokens: 860000 },
+      },
+    },
+    { id: "attachment-u2", type: "user", text: `${marker} retain the current plan without re-attaching a file`, createdAt: now },
+    {
+      id: "attachment-a2", type: "agent", createdAt: now,
+      response: {
+        ok: true, sessionId: chat.sessionId, turnId: `${marker}-attachment-latest`,
+        plan: { summary: `${marker} current plan retained`, reply: `${marker} current plan retained` },
+        contextUsage: { provider: "deepseek", model: "deepseek-v4-pro", exact: true, inputTokens: 860000, lastInputTokens: 860000, peakInputTokens: 860000 },
+      },
+    },
+  ];
+  return chat;
+}
+
+function attachmentDurabilitySnapshot(chat) {
+  const refs = Array.isArray(chat?.compactedAttachmentRefs) ? chat.compactedAttachmentRefs : [];
+  const matchingRef = refs.find((reference) => reference?.payloadHash === attachmentPayloadHash);
+  const vaultEntry = chat?.attachmentPayloads?.[attachmentPayloadHash];
+  const durableItems = Array.isArray(chat?.items) ? chat.items : [];
+  const itemJson = JSON.stringify(durableItems);
+  const refJson = JSON.stringify(refs);
+  return {
+    originalTurnRemoved: !durableItems.some((item) => item?.id === "attachment-u1"),
+    compactedReferencePresent: Boolean(matchingRef),
+    compactedReferenceBodyFree: Boolean(matchingRef) && matchingRef.text === undefined && matchingRef.dataUrl === undefined,
+    vaultPayloadPresent: vaultEntry?.payloadHash === attachmentPayloadHash && vaultEntry?.payloadKind === "text" && vaultEntry?.text === attachmentBody,
+    durableItemsBodyFree: !itemJson.includes(attachmentBody),
+    compactedRefsBodyFree: !refJson.includes(attachmentBody),
+  };
+}
 async function saveProbeChats(cdp, chats) {
   const ipc = await invoke(cdp, "save_chats", { body: { chats }, timeoutMs: 60000 });
   if (!ipc?.ok || ipc?.value?.ok !== true) throw new Error(`Tauri save_chats failed: ${JSON.stringify(ipc)}`);
   const rest = await api("/api/app/chats");
-  if (!Array.isArray(rest.chats) || !rest.chats.some((chat) => chat.id === chats[0].id)) throw new Error("REST did not read the chat saved through real Tauri IPC.");
+  if (!Array.isArray(rest.chats) || !chats.every((expected) => rest.chats.some((chat) => chat.id === expected.id))) {
+    throw new Error("REST did not read every chat saved through real Tauri IPC.");
+  }
   return { ipc, restCount: rest.count };
 }
 function stableJson(value) {
@@ -517,6 +637,17 @@ function createLoopbackProvider() {
       });
       return respondOpenAi(response, body, content, 12000);
     }
+    const isAttachmentFollowup = prompt.includes(attachmentFileName) && /third attachment line|third line/i.test(prompt);
+    if (isAttachmentFollowup) {
+      record.kind = "attachment-followup";
+      notify(record);
+      return respondOpenAi(
+        response,
+        body,
+        JSON.stringify({ action: "reply", summary: "attachment follow-up received", reply: "The attachment follow-up was received." }),
+        estimateProviderInputTokens(body.messages || []),
+      );
+    }
     const turnKey = [`${marker} prefire observation`, `${marker} pre-turn continuation`, `${marker} mid-turn continuation`, `${marker}-cancel`]
       .find((value) => prompt.includes(value)) || "other";
     const previousCalls = turnCounts.get(turnKey) || 0;
@@ -623,6 +754,7 @@ async function staticContract(report) {
   const files = [
     "src/hooks/use-context-compaction-controller.ts", "src/hooks/use-chat-run-controller.ts", "src/lib/chat-compaction-state.ts",
     "src/lib/context-compaction.ts", "context_compaction.py", "agent_gateway.py", "dashboard_server.py", "src-tauri/src/commands.rs",
+    "src/lib/attachment-payloads.ts", "src/lib/chat-thread.ts",
   ];
   const source = Object.fromEntries(await Promise.all(files.map(async (path) => [path, await readFile(resolve(repoRoot, path), "utf8")] )));
   const required = [
@@ -630,6 +762,9 @@ async function staticContract(report) {
     ["restart normalization", source[files[2]], "normalizeRestoredCompaction"], ["75/85/90/95 policy", source[files[3]], "CONTEXT_COMPACTION_PREFIRE_RATIO"],
     ["structured compaction backend", source[files[4]], "COMPACTION_SCHEMA"], ["post-tool runtime boundary", source[files[5]], "_maybe_compact_runtime_history"],
     ["Tauri compact command", source[files[7]], "compact_agent_history"], ["backend compact route", source[files[6]], "/api/app/agent/compact"],
+    ["compacted attachment reference capture", source[files[8]], "collectCompactedAttachmentReferences"],
+    ["compacted attachment vault retention", source[files[8]], "referencedAttachmentPayloadVault"],
+    ["durable compacted attachment persistence", source[files[9]], "compactedAttachmentRefs"],
   ];
   report.staticContracts = required.map(([name, text, needle]) => ({ name, present: text.includes(needle) }));
   for (const item of report.staticContracts.filter((item) => !item.present)) assertion(report, `missing required static contract: ${item.name}`);
@@ -833,12 +968,48 @@ async function main() {
     report.phases.cancelRecovery = { status: recoveredCancelChat?.compaction?.status || "", itemCount: recoveredCancelChat?.items?.length || 0 };
     if (recoveredCancelChat?.compaction?.status !== "applied") assertion(report, "compaction controller remained wedged after a visible cancellation");
 
+    // Attachment continuity: compact away the original attachment turn, retain
+    // only its body-free reference plus content-addressed vault entry, restart,
+    // then make a real UI follow-up that must restore the body to the provider.
+    const attachmentChat = attachmentContinuityChat();
+    report.phases.attachmentSeed = await seedAndActivateProbeChat(cdp, attachmentChat, "attachment continuity");
+    report.phases.attachmentCompactSend = await uiSend(cdp, "/compact");
+    if (!report.phases.attachmentCompactSend?.ok) assertion(report, `attachment continuity /compact could not start: ${report.phases.attachmentCompactSend?.reason || "unknown"}`);
+    await provider.waitFor("compaction", "attachment-continuity-0", 120000, "standalone").catch((error) => assertion(report, `attachment continuity manual compaction did not reach the provider: ${String(error)}`));
+    const compactedAttachmentChat = await waitForValue(
+      async () => (await api("/api/app/chats")).chats?.find((chat) => chat.id === attachmentChat.id),
+      (chat) => chat?.compaction?.status === "applied" && (chat?.items || []).some((item) => item.type === "compact"),
+      "attachment continuity compaction persistence",
+    );
+    const beforeRestartAttachment = attachmentDurabilitySnapshot(compactedAttachmentChat);
+    report.phases.attachmentCompaction = {
+      applied: compactedAttachmentChat?.compaction?.status === "applied",
+      ...beforeRestartAttachment,
+    };
+    if (
+      !report.phases.attachmentCompaction.applied
+      || !beforeRestartAttachment.originalTurnRemoved
+      || !beforeRestartAttachment.compactedReferencePresent
+      || !beforeRestartAttachment.compactedReferenceBodyFree
+      || !beforeRestartAttachment.vaultPayloadPresent
+      || !beforeRestartAttachment.durableItemsBodyFree
+      || !beforeRestartAttachment.compactedRefsBodyFree
+    ) assertion(report, "compaction did not retain a body-free attachment reference and content-addressed vault payload");
+
     // Restart recovery: write an interrupted state through the app's normal
     // transcript IPC, restart, then require it to normalize without deleting
     // the original durable items.
     const interrupted = probeChat("restart", 0.86);
     interrupted.compaction = { status: "compacting", generation: `${marker}-interrupted`, sourceDigest: marker, startedAt: new Date().toISOString(), beforeTokens: 8600, contextLimit: 10000 };
-    report.phases.restartSeed = await seedAndActivateProbeChat(cdp, interrupted, "restart");
+    // Keep the already-compacted attachment chat in the same persisted batch;
+    // save_chats is a whole-transcript replacement API.
+    // Flush and discard any pending whole-chat renderer write before replacing
+    // the transcript batch. Otherwise a stale debounce can erase the compacted
+    // vault immediately after the direct IPC save.
+    await reload(cdp);
+    report.phases.restartSeed = await saveProbeChats(cdp, [compactedAttachmentChat, interrupted]);
+    await reload(cdp);
+    report.phases.restartActivation = await activateProbeChat(cdp, interrupted.title);
     report.phases.firstClose = await requestClose(child);
     if (!report.phases.firstClose.graceful) assertion(report, "first packaged restart close did not release tracked processes/ports");
     launchInfo.cdp.close();
@@ -854,6 +1025,45 @@ async function main() {
     if (!chat || chat.compaction?.status !== "failed" || !chat.items?.some((item) => item.id === "restart-u1") || !chat.items?.some((item) => item.id === "restart-a1")) {
       assertion(report, "restart recovery did not preserve original history while normalizing interrupted compaction");
     }
+
+    const attachmentAfterRestart = (await api("/api/app/chats")).chats?.find((item) => item.id === attachmentChat.id);
+    const afterRestartAttachment = attachmentDurabilitySnapshot(attachmentAfterRestart);
+    report.phases.attachmentRestart = afterRestartAttachment;
+    if (
+      !afterRestartAttachment.compactedReferencePresent
+      || !afterRestartAttachment.compactedReferenceBodyFree
+      || !afterRestartAttachment.vaultPayloadPresent
+      || !afterRestartAttachment.durableItemsBodyFree
+      || !afterRestartAttachment.compactedRefsBodyFree
+    ) assertion(report, "restart did not preserve the compacted attachment reference and vault payload without reintroducing its body into transcript items");
+
+    report.phases.attachmentFollowupActivation = await activateProbeChat(launchInfo.cdp, attachmentChat.title);
+    const attachmentItemIdsBeforeFollowup = new Set((attachmentAfterRestart?.items || []).map((item) => item.id));
+    const attachmentFollowupText = `Please inspect ${attachmentFileName}; what is the third attachment line?`;
+    report.phases.attachmentFollowupSend = await uiSend(launchInfo.cdp, attachmentFollowupText);
+    if (!report.phases.attachmentFollowupSend?.ok) assertion(report, `attachment follow-up composer path could not start: ${report.phases.attachmentFollowupSend?.reason || "unknown"}`);
+    const attachmentFollowup = await provider.waitFor("attachment-followup", attachmentFileName, 120000).catch((error) => {
+      assertion(report, `explicit attachment follow-up did not reach the isolated provider: ${String(error)}`);
+      return null;
+    });
+    const restoredBodyObserved = Boolean(attachmentFollowup?.prompt?.includes(attachmentBodyMarker));
+    report.phases.attachmentFollowup = {
+      providerReached: Boolean(attachmentFollowup),
+      restoredBodyObserved,
+      questionWasExplicit: true,
+      persistedAgentReply: false,
+    };
+    if (!restoredBodyObserved) assertion(report, "explicit post-restart attachment follow-up did not restore the original body to the provider");
+    const completedAttachmentChat = await waitForValue(
+      async () => (await api("/api/app/chats")).chats?.find((item) => item.id === attachmentChat.id),
+      (item) => (item?.items || []).some((entry) => entry.type === "agent" && !attachmentItemIdsBeforeFollowup.has(entry.id)),
+      "post-restart attachment follow-up completion",
+      30000,
+    ).catch((error) => {
+      assertion(report, `post-restart attachment follow-up did not persist an agent reply: ${String(error)}`);
+      return null;
+    });
+    report.phases.attachmentFollowup.persistedAgentReply = Boolean(completedAttachmentChat);
   } catch (error) {
     report.error = String(error?.stack || error);
     assertion(report, "probe threw before all required acceptance phases completed");
@@ -866,10 +1076,20 @@ async function main() {
     const residue = await waitClear(20000).catch((error) => ({ error: String(error) }));
     report.cleanup.finalSnapshot = residue;
     if (!clear(residue)) assertion(report, "packaged app, backend listener, or CDP listener remained after probe cleanup");
+    const attachmentLogScan = await scanFilesForAttachmentBody(resolve(userDataRoot, "logs"));
+    report.cleanup.logsContainAttachmentBody = attachmentLogScan.found;
+    report.cleanup.attachmentLogScanReadErrorCount = attachmentLogScan.readErrorCount;
+    if (report.cleanup.logsContainAttachmentBody) assertion(report, "attachment body marker was written to an isolated app log");
+    if (attachmentLogScan.readErrorCount) assertion(report, "one or more isolated app log files could not be inspected for attachment body leakage");
     report.finishedAt = new Date().toISOString();
     report.ok = report.assertions.length === 0;
     await mkdir(evidenceRoot, { recursive: true });
-    await writeFile(reportPath, JSON.stringify(report, null, 2), "utf8");
+    const safeReport = redactAttachmentProbeBody(report);
+    const serializedReport = JSON.stringify(safeReport, null, 2);
+    if (serializedReport.includes(attachmentBodyMarker) || serializedReport.includes(attachmentBody)) {
+      throw new Error("attachment probe report redaction failed");
+    }
+    await writeFile(reportPath, serializedReport, "utf8");
     console.log(reportPath);
     if (report.assertions.length) process.exitCode = 1;
   }
@@ -908,6 +1128,26 @@ async function runSelfTest() {
   await sleep(25);
   await delayedProvider.close();
   if (!(await delayedRequest)) throw new Error("self-test: delayed fixture request remained live after cleanup");
+  const redacted = JSON.stringify(redactAttachmentProbeBody({ error: `fixture saw ${attachmentBody}` }));
+  if (redacted.includes(attachmentBodyMarker) || redacted.includes(attachmentBody) || !redacted.includes("[REDACTED_ATTACHMENT_BODY]")) {
+    throw new Error("self-test: attachment report redaction did not remove the body marker");
+  }
+  if (!/^[a-f0-9]{64}$/.test(attachmentPayloadHash)) {
+    throw new Error("self-test: attachment payload hash was not a SHA-256 address");
+  }
+  const attachmentChat = attachmentContinuityChat();
+  const compactedAttachmentShape = {
+    ...attachmentChat,
+    items: attachmentChat.items.filter((item) => item.id !== "attachment-u1" && item.id !== "attachment-a1"),
+    compactedAttachmentRefs: [{
+      id: `${marker}-attachment`, name: attachmentFileName, size: Buffer.byteLength(attachmentBody, "utf8"), type: "text/plain",
+      payloadKind: "text", payloadHash: attachmentPayloadHash,
+    }],
+  };
+  const attachmentSnapshot = attachmentDurabilitySnapshot(compactedAttachmentShape);
+  if (!attachmentSnapshot.originalTurnRemoved || !attachmentSnapshot.compactedReferenceBodyFree || !attachmentSnapshot.vaultPayloadPresent || !attachmentSnapshot.durableItemsBodyFree || !attachmentSnapshot.compactedRefsBodyFree) {
+    throw new Error("self-test: attachment continuity seed did not retain a body-free reference and vault body");
+  }
   console.log("context-compaction probe self-test passed");
 }
 

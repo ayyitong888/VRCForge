@@ -9,11 +9,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = path.join(root, "src/lib/attachment-payloads.ts");
 const source = await readFile(sourcePath, "utf8");
 const chatSessionsSource = await readFile(path.join(root, "src/hooks/use-chat-sessions.ts"), "utf8");
+const chatThreadSource = await readFile(path.join(root, "src/lib/chat-thread.ts"), "utf8");
+const compactionControllerSource = await readFile(path.join(root, "src/hooks/use-context-compaction-controller.ts"), "utf8");
+const chatRunControllerSource = await readFile(path.join(root, "src/hooks/use-chat-run-controller.ts"), "utf8");
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
   fileName: sourcePath,
 }).outputText;
-const payloads = await import(`data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`);
+const payloadModuleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`;
+const payloads = await import(payloadModuleUrl);
+const chatThreadTranspiled = ts.transpileModule(chatThreadSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+  fileName: path.join(root, "src/lib/chat-thread.ts"),
+}).outputText.replace('from "./attachment-payloads"', `from "${payloadModuleUrl}"`);
+const chatThreads = await import(`data:text/javascript;base64,${Buffer.from(chatThreadTranspiled).toString("base64")}`);
 
 const textAttachment = (overrides = {}) => ({
   id: "attachment-1",
@@ -48,6 +57,10 @@ test("restored chat normalization keeps and validates the attachment payload vau
   assert.match(
     chatSessionsSource,
     /attachmentPayloads:\s*normalizeAttachmentPayloadVault\(chat\.attachmentPayloads\)/,
+  );
+  assert.match(
+    chatSessionsSource,
+    /compactedAttachmentRefs:\s*normalizeCompactedAttachmentReferences\(chat\.compactedAttachmentRefs\)/,
   );
 });
 
@@ -133,4 +146,87 @@ test("payload garbage collection retains only bodies referenced by durable messa
     vault,
   );
   assert.deepEqual(Object.keys(selected), [kept.payloadHash]);
+});
+
+test("compacted attachment refs remain body-free, preserve distinct filenames, and share one vault body", () => {
+  const vault = {};
+  const duplicateBody = textAttachment({ id: "duplicate", name: "duplicate.txt" });
+  const refs = payloads.collectCompactedAttachmentReferences([
+    { id: "old-user", type: "user", text: "old attachment", attachments: [textAttachment(), duplicateBody] },
+  ], vault);
+  assert.equal(refs.length, 2);
+  assert.deepEqual(refs.map((reference) => reference.name), ["notes.txt", "duplicate.txt"]);
+  for (const reference of refs) {
+    assert.equal(reference.text, undefined);
+    assert.equal(reference.dataUrl, undefined);
+    assert.ok(reference.payloadHash);
+  }
+  assert.equal(JSON.stringify(refs).includes("first\\nsecond\\nthird"), false);
+
+  const selected = payloads.referencedAttachmentPayloadVault([], vault, refs);
+  assert.deepEqual(Object.keys(selected), [refs[0].payloadHash]);
+  assert.match(chatThreadSource, /referencedAttachmentPayloadVault\(referencedItems, vault, compactedAttachmentRefs\)/);
+
+  const named = payloads.resolveHistoricalAttachmentPayloads([], vault, "what is in duplicate.txt?", refs);
+  assert.equal(named.degraded, undefined);
+  assert.equal(named.attachments[0].name, "duplicate.txt");
+  assert.equal(named.attachments[0].text, "first\nsecond\nthird");
+});
+
+test("whole-chat persistence keeps a vault body referenced only by compacted history", () => {
+  const vault = {};
+  const refs = payloads.collectCompactedAttachmentReferences([
+    { id: "removed-user", type: "user", text: "inspect", attachments: [textAttachment()] },
+  ], vault);
+  const persisted = chatThreads.filterPersistableChats([{
+    id: "compacted-chat",
+    title: "Compacted attachment",
+    sessionId: "session-1",
+    attachmentPayloads: vault,
+    compactedAttachmentRefs: [{ ...refs[0], text: "must not persist" }],
+    items: [{ id: "compact-1", type: "compact", text: "Context compressed", detail: "body-free summary" }],
+  }])[0];
+
+  assert.deepEqual(persisted.compactedAttachmentRefs, refs);
+  assert.equal(persisted.attachmentPayloads[refs[0].payloadHash].text, "first\nsecond\nthird");
+  assert.equal(JSON.stringify(persisted.compactedAttachmentRefs).includes("first\\nsecond\\nthird"), false);
+});
+
+test("a compacted attachment reference survives restart-shaped history and explicitly restores on follow-up", () => {
+  const vault = {};
+  const refs = payloads.collectCompactedAttachmentReferences([
+    { id: "removed-user", type: "user", text: "inspect", attachments: [textAttachment()] },
+  ], vault);
+  const restoredRefs = payloads.normalizeCompactedAttachmentReferences([
+    { ...refs[0], text: "must never survive into a compacted ref" },
+    { ...refs[0], id: "duplicate-id" },
+  ]);
+  assert.deepEqual(restoredRefs, refs);
+  assert.equal(JSON.stringify(restoredRefs).includes("first\\nsecond\\nthird"), false);
+
+  const result = payloads.resolveHistoricalAttachmentPayloads(
+    [{ id: "compact", type: "compact", text: "Context compressed", detail: "body-free summary" }],
+    vault,
+    "what is in this attachment?",
+    restoredRefs,
+  );
+  assert.equal(result.degraded, undefined);
+  assert.equal(result.attachments[0].text, "first\nsecond\nthird");
+
+  const missing = payloads.resolveHistoricalAttachmentPayloads(
+    [],
+    {},
+    "what is in this attachment?",
+    restoredRefs,
+  );
+  assert.equal(missing.degraded, "missing_or_corrupt");
+  assert.match(missing.attachments[0].error, /missing or corrupt/i);
+});
+
+test("manual and runtime compaction capture refs only on their successful replacement paths", () => {
+  assert.match(compactionControllerSource, /applyCompactedAttachmentReferences\(chat, snapshotItems, appliedItems\)/);
+  assert.match(compactionControllerSource, /attachmentPayloads: snapshot\.attachmentPayloads/);
+  assert.match(compactionControllerSource, /compactedAttachmentRefs: snapshot\.compactedAttachmentRefs/);
+  assert.match(chatRunControllerSource, /collectCompactedAttachmentReferences\(\s*durableItems\.filter\(\(item\) => summarizedItemIds\.has\(item\.id\)\)/);
+  assert.match(chatRunControllerSource, /chat\?\.compactedAttachmentRefs/);
 });

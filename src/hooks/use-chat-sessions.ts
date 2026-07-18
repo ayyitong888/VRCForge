@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
-import { normalizeAttachmentPayloadVault } from "../lib/attachment-payloads";
+import { normalizeAttachmentPayloadVault, normalizeCompactedAttachmentReferences } from "../lib/attachment-payloads";
 import {
   applyRevisionedChatUpdate,
   normalizeChatRevision,
@@ -124,13 +124,16 @@ export function useChatSessions({
             compaction: normalizeRestoredCompaction(chat.compaction),
             contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
             attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),
+            compactedAttachmentRefs: normalizeCompactedAttachmentReferences(chat.compactedAttachmentRefs),
             items: stripTransientConversationItems(chat.items),
           };
           const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
           shouldPersistRestoredState = shouldPersistRestoredState
             || restoredCompactionWasInterrupted
             || cached.createdAt !== normalized.createdAt
-            || cached.updatedAt !== normalized.updatedAt;
+            || cached.updatedAt !== normalized.updatedAt
+            || JSON.stringify(chat.attachmentPayloads) !== JSON.stringify(normalized.attachmentPayloads)
+            || JSON.stringify(chat.compactedAttachmentRefs) !== JSON.stringify(normalized.compactedAttachmentRefs);
           return cached;
         });
         if (restoreCancelled) {

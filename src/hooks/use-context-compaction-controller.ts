@@ -9,6 +9,10 @@ import {
 } from "../lib/chat-compaction-state";
 import { stripTransientConversationItems } from "../lib/chat-thread";
 import {
+  collectCompactedAttachmentReferences,
+  mergeCompactedAttachmentReferences,
+} from "../lib/attachment-payloads";
+import {
   estimateIncomingContextTokens,
   estimateTextTokens,
   contextUsageMatchesModel,
@@ -261,6 +265,7 @@ export function useContextCompactionController({
       };
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({
         ...chat,
+        ...applyCompactedAttachmentReferences(chat, snapshotItems, appliedItems),
         sessionId: snapshot.sessionId,
         items: appliedItems,
         compaction: appliedState,
@@ -278,6 +283,8 @@ export function useContextCompactionController({
           ...chat,
           sessionId: snapshot.sessionId,
           items: snapshotItems,
+          attachmentPayloads: snapshot.attachmentPayloads,
+          compactedAttachmentRefs: snapshot.compactedAttachmentRefs,
           compaction: {
             ...startState,
             status: "failed",
@@ -409,6 +416,24 @@ function buildReplacementItems(
     durable.filter((item) => retainedIds.has(item.id)),
   );
   return [compactItem, ...retained];
+}
+
+function applyCompactedAttachmentReferences(
+  chat: ChatThread,
+  sourceItems: readonly ConversationItem[],
+  replacementItems: readonly ConversationItem[],
+): Pick<ChatThread, "attachmentPayloads" | "compactedAttachmentRefs"> {
+  const retainedIds = new Set(replacementItems.map((item) => item.id));
+  const removedItems = sourceItems.filter((item) => !retainedIds.has(item.id));
+  const attachmentPayloads = { ...(chat.attachmentPayloads || {}) };
+  const compactedAttachmentRefs = mergeCompactedAttachmentReferences(
+    chat.compactedAttachmentRefs,
+    collectCompactedAttachmentReferences(removedItems, attachmentPayloads),
+  );
+  return {
+    attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+    compactedAttachmentRefs,
+  };
 }
 
 function estimateHistoryTokens(history: ChatHistoryEntry[]): number {

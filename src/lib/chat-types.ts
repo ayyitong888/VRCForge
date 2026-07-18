@@ -28,6 +28,21 @@ export type ChatAttachmentPayload = {
   dataUrl?: string;
 };
 
+/**
+ * A body-free attachment reference retained after its original conversation
+ * turn was replaced by context compaction.  The payload remains solely in the
+ * owning chat's content-addressed vault.
+ */
+export type CompactedAttachmentReference = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  payloadKind: "data_url" | "text";
+  payloadHash: string;
+  truncated?: boolean;
+};
+
 export type ComposerActionId = "attach" | "screenshot" | "annotation" | "browser" | "desktop";
 
 export type ComposerAction = {
@@ -112,6 +127,7 @@ export type ChatThread = {
   compaction?: ChatCompactionState;
   contextUsageCache?: AgentContextUsage;
   attachmentPayloads?: Record<string, ChatAttachmentPayload>;
+  compactedAttachmentRefs?: CompactedAttachmentReference[];
   items: ConversationItem[];
 };
 

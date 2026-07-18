@@ -300,6 +300,16 @@ class DashboardServerTests(unittest.TestCase):
                         "text": "hello",
                     }
                 },
+                "compactedAttachmentRefs": [
+                    {
+                        "id": "a1",
+                        "name": "hello.txt",
+                        "size": 5,
+                        "type": "text/plain",
+                        "payloadHash": payload_hash,
+                        "payloadKind": "text",
+                    }
+                ],
                 "items": [
                     {
                         "id": "user-1",
@@ -327,6 +337,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(restored.status_code, 200)
         self.assertEqual([item["type"] for item in restored.json()["chats"][0]["items"]], ["user", "agent"])
         self.assertEqual(restored.json()["chats"][0]["attachmentPayloads"][payload_hash]["text"], "hello")
+        compacted_ref = restored.json()["chats"][0]["compactedAttachmentRefs"][0]
+        self.assertEqual(compacted_ref["payloadHash"], payload_hash)
+        self.assertNotIn("text", compacted_ref)
+        self.assertNotIn("dataUrl", compacted_ref)
 
     def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
