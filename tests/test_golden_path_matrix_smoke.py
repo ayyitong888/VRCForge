@@ -666,11 +666,13 @@ def test_vsk_package_preflight_skips_import_by_default(tmp_path: Path) -> None:
             return {
                 "ok": True,
                 "preview": {
-                    "id": "com.example.helper",
-                    "name": "Helper",
-                    "version": "1.0.0",
-                    "riskLevel": "low",
-                    "updateAction": "new",
+                    "manifest": {
+                        "id": "com.example.helper",
+                        "name": "Helper",
+                        "version": "1.0.0",
+                    },
+                    "risk_level": "low",
+                    "update_action": "new",
                 },
             }
         if (method, path) == ("GET", "/api/app/skill-packages"):
@@ -693,6 +695,15 @@ def test_vsk_package_preflight_skips_import_by_default(tmp_path: Path) -> None:
     matrix = paths_by_id(report)
     assert report["ok"] is True
     assert matrix["vsk_import_dry_run_cleanup"]["status"] == "passed"
+    assert matrix["vsk_import_dry_run_cleanup"]["steps"][0] == {
+        "name": "vsk.preflight",
+        "ok": True,
+        "id": "com.example.helper",
+        "packageName": "Helper",
+        "version": "1.0.0",
+        "riskLevel": "low",
+        "updateAction": "new",
+    }
     assert matrix["vsk_import_dry_run_cleanup"]["steps"][1] == {
         "name": "vsk.dry_run",
         "ok": True,

@@ -620,15 +620,17 @@ class GoldenPathMatrixSmoke:
         try:
             preflight = self.request_app_json("POST", "/api/app/skill-packages/preflight", {"packagePath": package_path})
             preview = ensure_dict(preflight.get("preview")) or preflight
+            manifest = ensure_dict(preview.get("manifest"))
+            preview_id = str(preview.get("id") or manifest.get("id") or "").strip()
             steps.append(
                 {
                     "name": "vsk.preflight",
-                    "ok": bool(preflight.get("ok") is True and str(preview.get("id") or "").strip()),
-                    "id": preview.get("id"),
-                    "packageName": preview.get("name"),
-                    "version": preview.get("version"),
-                    "riskLevel": preview.get("riskLevel"),
-                    "updateAction": preview.get("updateAction"),
+                    "ok": bool(preflight.get("ok") is True and preview_id),
+                    "id": preview_id,
+                    "packageName": preview.get("name") or manifest.get("name"),
+                    "version": preview.get("version") or manifest.get("version"),
+                    "riskLevel": preview.get("riskLevel") or preview.get("risk_level"),
+                    "updateAction": preview.get("updateAction") or preview.get("update_action"),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -651,7 +653,6 @@ class GoldenPathMatrixSmoke:
                 steps=steps,
             )
             return
-        preview_id = str(preview.get("id") or "").strip()
         try:
             installed_before = self.request_app_json("GET", "/api/app/skill-packages", None)
             installed_before_items = installed_before.get("installed") if isinstance(installed_before.get("installed"), list) else []
