@@ -162,7 +162,8 @@ export function appendAttachmentSummary(text: string, attachments: ChatAttachmen
             : attachment.truncated
               ? t("attachments.metadataOnlyLarge")
               : t("attachments.metadataOnly");
-      return `- ${attachment.name} (${attachment.type || t("attachments.fileTypeFallback")}, ${formatAttachmentSize(attachment.size)}, ${payload})`;
+      const degraded = attachment.error ? `; ${attachment.error}` : "";
+      return `- ${attachment.name} (${attachment.type || t("attachments.fileTypeFallback")}, ${formatAttachmentSize(attachment.size)}, ${payload}${degraded})`;
     })
     .join("\n");
   return [text.trim(), `${t("attachments.summaryHeader")}:\n${summary}`].filter(Boolean).join("\n\n");
@@ -253,6 +254,7 @@ export function serializeChatAttachments(attachments: ChatAttachment[]): AgentMe
     dataUrl: attachment.dataUrl,
     text: attachment.text,
     payloadKind: attachment.payloadKind || (attachment.dataUrl ? "data_url" : attachment.text ? "text" : "metadata"),
+    payloadHash: attachment.payloadHash,
     truncated: Boolean(attachment.truncated),
     error: attachment.error || "",
   }));

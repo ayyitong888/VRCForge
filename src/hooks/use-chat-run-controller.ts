@@ -4,6 +4,11 @@ import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import type { ChatAttachment, ChatThread, ConversationItem } from "../lib/chat-types";
 import { stripTransientConversationItems } from "../lib/chat-thread";
 import {
+  persistAttachmentReference,
+  resolveAttachmentPayloadReferences,
+  resolveHistoricalAttachmentPayloads,
+} from "../lib/attachment-payloads";
+import {
   appendAttachmentSummary,
   buildChatHistory,
   serializeChatAttachments,
@@ -250,7 +255,6 @@ export function useChatRunController({
 
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions): Promise<boolean> {
     const startedAt = Date.now();
-    const messageForModel = appendAttachmentSummary(turn.text, turn.attachments, t);
     const abortController = new AbortController();
     let userItemId = "";
     activeTurnAbortRef.current = abortController;
@@ -284,6 +288,16 @@ export function useChatRunController({
       const chatSessionId = (prepared?.sessionId ?? options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
       const chatAgentName = chat?.agentName || "desktop-agent";
       const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
+      const currentAttachments = resolveAttachmentPayloadReferences(turn.attachments, chat?.attachmentPayloads);
+      const historicalAttachments = currentAttachments.length > 0
+        ? []
+        : resolveHistoricalAttachmentPayloads(
+            baseItems,
+            chat?.attachmentPayloads,
+            turn.text,
+          ).attachments;
+      const requestAttachments = deduplicateRequestAttachments([...currentAttachments, ...historicalAttachments]);
+      const messageForModel = appendAttachmentSummary(turn.text, requestAttachments, t);
       const summarizedSourceDigest = fingerprintCompactionSource(history);
       const summarizedSourceItemIds = new Set(
         baseItems
@@ -295,7 +309,7 @@ export function useChatRunController({
           .filter((item) => item.type === "user" || item.type === "agent" || item.type === "compact")
           .map((item) => item.id),
       );
-      const userItem: ConversationItem = {
+      const userItem: Extract<ConversationItem, { type: "user" }> = {
         id: turn.goalDelivery?.userItemId || `user-${turn.id}`,
         type: "user",
         text: turn.text,
@@ -315,18 +329,33 @@ export function useChatRunController({
       };
       const message = turn.text;
       streamingTurnChatRef.current.set(turn.id, chatId);
-      updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        sessionId: chatSessionId,
-        title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-        items: [
-          ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
-            (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
-          ),
-          userItem,
-          streamingItem,
-        ],
-      }));
+      updateChat(chatId, (current) => {
+        const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
+        const storedUserItem: ConversationItem = {
+          ...userItem,
+          attachments: (userItem.attachments || []).map((attachment) => {
+            const reference = persistAttachmentReference(attachment, attachmentPayloads);
+            return {
+              ...attachment,
+              payloadHash: reference.payloadHash,
+              payloadKind: reference.payloadKind,
+            };
+          }),
+        };
+        return {
+          ...touchChat(current),
+          sessionId: chatSessionId,
+          title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+          attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+          items: [
+            ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
+              (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
+            ),
+            storedUserItem,
+            streamingItem,
+          ],
+        };
+      });
       const computerUseGrant = turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {
             sessionId: chatSessionId || undefined,
@@ -336,7 +365,7 @@ export function useChatRunController({
         : null;
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
-        attachments: serializeChatAttachments(turn.attachments),
+        attachments: serializeChatAttachments(requestAttachments),
         projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,
         provider: turn.provider,
         providerLabel: turn.providerLabel,
@@ -537,6 +566,20 @@ export function useChatRunController({
     stopCurrentRun,
     applyRuntimeDelta,
   };
+}
+
+function deduplicateRequestAttachments(attachments: ChatAttachment[]): ChatAttachment[] {
+  const seen = new Set<string>();
+  return attachments.filter((attachment) => {
+    const key = attachment.payloadHash
+      ? `payload:${attachment.payloadHash}`
+      : `attachment:${attachment.id}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function boundedRuntimeLatency(value: unknown): number | undefined {

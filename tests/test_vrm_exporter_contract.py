@@ -48,12 +48,15 @@ def test_vrm_export_restricts_output_and_validates_vrm1_content_before_replace()
     assert 'validation = "glb_v2_vrm1_extension_valid"' in SOURCE
 
 
-def test_vrm_export_is_registered_as_a_required_approved_static_unity_write():
+def test_vrm_export_is_registered_as_a_medium_risk_approved_static_unity_write():
     assert "vrc_export_vrm" in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
     assert "vrc_export_vrm" in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
     dashboard_server.register_agent_gateway_tools()
     write_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_export_vrm"]
-    assert write_handler.risk_level == "high"
+    assert write_handler.risk_level == "medium"
+    assert write_handler.risk_level_resolver is not None
+    assert write_handler.risk_level_resolver({"overwrite": False}) == "medium"
+    assert write_handler.risk_level_resolver({"overwrite": True}) == "high"
     assert "checkpoint" in write_handler.description.lower()
     override = agent_gateway.BUILTIN_SKILL_OVERRIDES["vrcforge_export_vrm"]
     assert override["title"] == "Unity Avatar to VRM 1.0"
@@ -71,6 +74,7 @@ def test_vrm_export_is_registered_as_a_required_approved_static_unity_write():
     assert skill["source"] == "builtin"
     assert skill["skillType"] == "tool"
     assert skill["permissionMode"] == "approval_required"
+    assert skill["riskLevel"] == "medium"
     assert skill["entrypointTool"] == "vrcforge_export_vrm"
     assert skill["allowedTools"] == [
         "vrcforge_request_apply",
@@ -100,3 +104,40 @@ def test_vrm_write_handler_only_delegates_to_the_static_allowlisted_unity_tool(m
 
     assert result == {"ok": True, "toolName": "vrc_export_vrm"}
     assert calls == [{"toolName": "vrc_export_vrm", "arguments": arguments}]
+
+
+def test_vrm_overwrite_escalates_to_high_risk_and_blocks_auto_approval(tmp_path):
+    source_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_export_vrm"]
+    gateway = agent_gateway.AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    gateway.register_write_handler(
+        "vrcforge_export_vrm",
+        source_handler.description,
+        source_handler.risk_level,
+        lambda arguments: {"ok": True, "arguments": arguments},
+        risk_level_resolver=source_handler.risk_level_resolver,
+    )
+
+    config = gateway.ensure_config()
+    config.execution_mode = "auto"
+    gateway.save_config(config)
+    normal = gateway.create_apply_request(
+        {
+            "target_tool": "vrcforge_export_vrm",
+            "arguments": {"author": "Test Author", "confirmRights": True, "overwrite": False},
+        }
+    )
+    assert normal["status"] == "pending"
+    assert normal["approval"]["riskLevel"] == "medium"
+    assert normal["approval"]["requiresExplicitApproval"] is True
+    assert "content rights" in normal["approval"]["explicitApprovalReason"]
+
+    overwrite = gateway.create_apply_request(
+        {
+            "target_tool": "vrcforge_export_vrm",
+            "arguments": {"author": "Test Author", "confirmRights": True, "overwrite": True},
+        }
+    )
+    assert overwrite["status"] == "pending"
+    assert overwrite["approval"]["riskLevel"] == "high"
+    assert overwrite["approval"]["requiresExplicitApproval"] is True
+    assert "medium to high risk" in overwrite["approval"]["explicitApprovalReason"]

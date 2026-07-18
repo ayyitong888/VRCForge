@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
+import { normalizeAttachmentPayloadVault } from "../lib/attachment-payloads";
 import {
   applyRevisionedChatUpdate,
   normalizeChatRevision,
@@ -122,6 +123,7 @@ export function useChatSessions({
             revision: normalizeChatRevision(chat.revision),
             compaction: normalizeRestoredCompaction(chat.compaction),
             contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
+            attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),
             items: stripTransientConversationItems(chat.items),
           };
           const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));

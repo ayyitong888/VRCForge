@@ -19,6 +19,7 @@ from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
+    RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
     SHELL_RUNNER_NATIVE,
     SHELL_RUNNER_POWERSHELL,
     native_shell_argv,
@@ -287,12 +288,32 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.json()["count"], 2)
 
     def test_chat_transcripts_never_persist_or_restore_streaming_placeholders(self) -> None:
+        payload_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         chats = [
             {
                 "id": "chat-with-orphan",
                 "sessionId": "session-orphan",
+                "attachmentPayloads": {
+                    payload_hash: {
+                        "payloadHash": payload_hash,
+                        "payloadKind": "text",
+                        "text": "hello",
+                    }
+                },
                 "items": [
-                    {"id": "user-1", "type": "user", "text": "hello"},
+                    {
+                        "id": "user-1",
+                        "type": "user",
+                        "text": "hello",
+                        "attachments": [
+                            {
+                                "id": "a1",
+                                "name": "hello.txt",
+                                "payloadHash": payload_hash,
+                                "payloadKind": "text",
+                            }
+                        ],
+                    },
                     {"id": "stream-old", "type": "streaming", "clientTurnId": "old-turn", "text": ""},
                     {"id": "agent-1", "type": "agent", "response": {"reply": "done"}},
                 ],
@@ -305,6 +326,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(written.status_code, 200)
         self.assertEqual(restored.status_code, 200)
         self.assertEqual([item["type"] for item in restored.json()["chats"][0]["items"]], ["user", "agent"])
+        self.assertEqual(restored.json()["chats"][0]["attachmentPayloads"][payload_hash]["text"], "hello")
 
     def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
@@ -4024,7 +4046,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("ProjectA private memory", no_project_prompt)
         self.assertNotIn("ProjectB private memory", no_project_prompt)
 
-    def test_llm_planner_prompt_uses_thin_loop_observations(self) -> None:
+    def test_llm_planner_prompt_uses_bounded_semantic_loop_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
@@ -4040,9 +4062,20 @@ class DashboardServerTests(unittest.TestCase):
                             "ok": True,
                             "exitCode": 0,
                             "timedOut": False,
-                            "stdoutSummary": "DO_NOT_SEND_STDOUT_SUMMARY",
-                            "stderrSummary": "DO_NOT_SEND_STDERR_SUMMARY",
-                            "payload": {"raw": "DO_NOT_SEND_PAYLOAD"},
+                            "stdoutSummary": "Indexed 3 materials at C:\\Users\\Private\\Avatar; token=secret-value",
+                            "resultSummary": {
+                                "materialCount": 3,
+                                **{f"phase{index}Count": index for index in range(20)},
+                                "summary": "Three materials are ready for the next step.",
+                                "summary_text": "Safe snake-case summaries are accepted.",
+                                "discount": 99,
+                                "payload": {"raw": "DO_NOT_SEND_NESTED_PAYLOAD"},
+                                "dataUrl": "DO_NOT_SEND_DATA_URL",
+                            },
+                            "stderrSummary": "warning: cache is stale",
+                            "warnings": ["first safe warning", "second safe warning"],
+                            "message": "X" * 10_000,
+                            "payload": {"raw": "RAW_PAYLOAD_MARKER" * 20_000},
                         },
                     },
                     {
@@ -4058,15 +4091,38 @@ class DashboardServerTests(unittest.TestCase):
                     },
                 ],
             )
+            observation = gateway._llm_loop_step_observation(
+                {
+                    "tool": "shell",
+                    "result": {
+                        "ok": True,
+                        "summary": "S" * 10_000,
+                        "payload": {"raw": "RAW_PAYLOAD_MARKER" * 20_000},
+                    },
+                }
+            )
 
         self.assertIn("shell", prompt)
         self.assertIn("exitCode=0", prompt)
+        self.assertIn("Indexed 3 materials", prompt)
+        self.assertIn("Three materials are ready", prompt)
+        self.assertIn("materialCount", prompt)
+        self.assertIn("Safe snake-case summaries", prompt)
+        self.assertIn("first safe warning", prompt)
+        self.assertIn("cache is stale", prompt)
+        self.assertIn("<path redacted>", prompt)
+        self.assertIn("token=<redacted>", prompt)
         self.assertIn("missing_parameter", prompt)
         self.assertIn("missing avatar path", prompt)
-        self.assertNotIn("DO_NOT_SEND_STDOUT_SUMMARY", prompt)
-        self.assertNotIn("DO_NOT_SEND_STDERR_SUMMARY", prompt)
-        self.assertNotIn("DO_NOT_SEND_PAYLOAD", prompt)
+        self.assertNotIn("secret-value", prompt)
+        self.assertNotIn("C:\\Users\\Private\\Avatar", prompt)
+        self.assertNotIn("RAW_PAYLOAD_MARKER", prompt)
+        self.assertNotIn("DO_NOT_SEND_NESTED_PAYLOAD", prompt)
+        self.assertNotIn("DO_NOT_SEND_DATA_URL", prompt)
         self.assertNotIn("DO_NOT_SEND_DATA", prompt)
+        self.assertNotIn("discount", prompt)
+        self.assertLessEqual(prompt.count("X"), 600)
+        self.assertLessEqual(len(observation), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
 
     def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
         with TestClient(dashboard_server.app) as client:

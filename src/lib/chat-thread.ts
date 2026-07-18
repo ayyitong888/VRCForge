@@ -1,5 +1,10 @@
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
+import {
+  persistAttachmentReference,
+  referencedAttachmentPayloadVault,
+  type AttachmentPayloadVault,
+} from "./attachment-payloads";
 
 export type ChatSidebarGroups = {
   temporaryChats: ChatThread[];
@@ -69,7 +74,19 @@ export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
   return list
     .map((chat) => {
       const items = stripTransientConversationItems(chat.items);
-      return items.length === chat.items.length ? chat : { ...chat, items };
+      const vault: AttachmentPayloadVault = { ...(chat.attachmentPayloads || {}) };
+      const referencedItems = items.map((item) => {
+        if (item.type !== "user" || !item.attachments?.length) {
+          return item;
+        }
+        return { ...item, attachments: item.attachments.map((attachment) => persistAttachmentReference(attachment, vault)) };
+      });
+      const attachmentPayloads = referencedAttachmentPayloadVault(referencedItems, vault);
+      return {
+        ...chat,
+        attachmentPayloads,
+        items: referencedItems,
+      };
     })
     .filter((chat) => !isUnstartedChat(chat));
 }

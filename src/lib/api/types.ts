@@ -295,6 +295,7 @@ export type AgentMessageAttachment = {
   dataUrl?: string;
   text?: string;
   payloadKind?: "data_url" | "text" | "metadata" | string;
+  payloadHash?: string;
   truncated?: boolean;
   error?: string;
 };

@@ -36,6 +36,7 @@ from agent_goal_store import AgentGoalStore, AgentGoalStoreError
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
+RiskLevelResolver = Callable[[dict[str, Any]], str]
 
 RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
 RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
@@ -148,6 +149,7 @@ class AgentWriteHandler:
     risk_level: str
     handler: ToolHandler
     advanced: bool = False
+    risk_level_resolver: RiskLevelResolver | None = None
 
 
 @dataclass
@@ -279,6 +281,11 @@ SKILL_INVOCATION_RE = re.compile(r"^\s*[/$]([a-zA-Z][a-zA-Z0-9_.-]{1,80})(?:\s+(
 RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS = 5_600_000
 RUNTIME_ATTACHMENT_TEXT_MAX_CHARS = 524_288
+RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS = 8
+RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS = 2_400
+RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS = 600
+RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
+RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
 DESKTOP_VISION_MAX_WIDTH = 1280
 DESKTOP_VISION_MAX_HEIGHT = 720
 # 视觉委托分析结果的展示/回灌上限：这是"给规划器看的图片描述"，不是原始载荷，
@@ -1633,6 +1640,7 @@ class AgentGateway:
         risk_level: str,
         handler: ToolHandler,
         advanced: bool = False,
+        risk_level_resolver: RiskLevelResolver | None = None,
     ) -> None:
         self._write_handlers[name] = AgentWriteHandler(
             name=name,
@@ -1640,6 +1648,7 @@ class AgentGateway:
             risk_level=risk_level,
             handler=handler,
             advanced=advanced,
+            risk_level_resolver=risk_level_resolver,
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -4893,6 +4902,31 @@ class AgentGateway:
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
         user_constraints = self.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        base_risk_level = normalize_risk_level(write_handler.risk_level)
+        effective_risk_level = base_risk_level
+        risk_escalation_reason = ""
+        if write_handler.risk_level_resolver is not None:
+            try:
+                resolved_risk_level = str(
+                    write_handler.risk_level_resolver(dict(arguments)) or ""
+                ).strip().lower()
+            except Exception as exc:  # noqa: BLE001 - a failed classifier must block the write request.
+                raise AgentGatewayError(
+                    f"Could not determine write risk for {target_tool}: {exc}",
+                    status_code=500,
+                ) from exc
+            if resolved_risk_level not in {"low", "medium", "high", "critical"}:
+                raise AgentGatewayError(
+                    f"Write risk resolver returned an invalid level for {target_tool}.",
+                    status_code=500,
+                )
+            risk_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            if risk_rank[resolved_risk_level] > risk_rank[base_risk_level]:
+                effective_risk_level = resolved_risk_level
+                risk_escalation_reason = (
+                    f"These arguments elevate the request from {base_risk_level} to "
+                    f"{effective_risk_level} risk and require manual approval in Auto Approve mode."
+                )
         preview = params.get("preview")
         requires_explicit_approval = bool(
             params.get("requires_explicit_approval")
@@ -4905,11 +4939,13 @@ class AgentGateway:
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
         requires_explicit_for_mode = (
-            requires_explicit_approval or (execution_mode == "auto" and bool(auto_policy_reason))
+            requires_explicit_approval
+            or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
         ) and not full_permission_auto
         explicit_approval_reason = str(
             params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
+            or risk_escalation_reason
             or auto_policy_reason
             or "This write request requires explicit user approval."
         ).strip()
@@ -4925,12 +4961,14 @@ class AgentGateway:
             arguments=arguments,
             reason=str(params.get("reason") or ""),
             preview=preview,
-            risk_level=write_handler.risk_level,
+            risk_level=effective_risk_level,
             user_constraints=user_constraints,
             requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
         )
-        if full_permission_auto and (requires_explicit_approval or auto_policy_reason):
+        if full_permission_auto and (
+            requires_explicit_approval or auto_policy_reason or risk_escalation_reason
+        ):
             self.append_audit(
                 {
                     "event": "approval_explicit_requirement_overridden_by_full_permission",
@@ -8612,6 +8650,8 @@ class AgentGateway:
 
     def _write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
         target_lower = str(target_tool or "").lower()
+        if target_lower == "vrcforge_export_vrm":
+            return "VRM export requires manual confirmation of content rights in Auto Approve mode."
         if any(token in target_lower for token in AUTO_APPROVAL_MANUAL_WRITE_TOKENS):
             return "Delete, remove, restore, reset, or uninstall write requests require manual approval in Auto Approve mode."
 
@@ -9699,14 +9739,16 @@ class AgentGateway:
             ):
                 value = result.get(key)
                 if value not in (None, ""):
-                    fields.append(f"{key}={summarize_text(str(value), 120)}")
+                    fields.append(f"{key}={_sanitize_planner_tool_observation_text(value, 120)}")
             for key in ("error", "reason"):
                 value = result.get(key)
                 if value not in (None, ""):
-                    fields.append(f"{key}={summarize_text(str(value), 180)}")
+                    fields.append(f"{key}={_sanitize_planner_tool_observation_text(value, 180)}")
+            for key, value in planner_safe_tool_result_fields(result).items():
+                fields.append(f"{key}={format_planner_tool_observation(value)}")
         elif result is not None:
             fields.append("result=available")
-        return "; ".join(fields)
+        return summarize_text("; ".join(fields), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
 
     def _build_llm_plan_prompt(
         self,
@@ -11680,6 +11722,198 @@ def summarize_value(key: Any, value: Any) -> Any:
             return Path(value).name or "<path>"
         return value
     return value
+
+
+_PLANNER_TOOL_OBSERVATION_TEXT_FIELDS = {
+    "summary",
+    "resultsummary",
+    "stdoutsummary",
+    "stderrsummary",
+    "summarytext",
+    "message",
+    "notice",
+}
+_PLANNER_TOOL_OBSERVATION_SCALAR_FIELDS = {
+    "status",
+    "code",
+    "schema",
+    "success",
+    "warnings",
+    "actionid",
+    "taskid",
+    "runid",
+    "operationid",
+    "jobid",
+}
+_PLANNER_TOOL_OBSERVATION_FIELD_ORDER = (
+    "summary",
+    "resultsummary",
+    "summarytext",
+    "stdoutsummary",
+    "stderrsummary",
+    "message",
+    "notice",
+    "warnings",
+    "success",
+    "status",
+    "code",
+    "schema",
+    "actionid",
+    "taskid",
+    "runid",
+    "operationid",
+    "jobid",
+)
+_PLANNER_TOOL_OBSERVATION_DISPLAY_KEYS = {
+    "summary": "summary",
+    "resultsummary": "resultSummary",
+    "summarytext": "summaryText",
+    "stdoutsummary": "stdoutSummary",
+    "stderrsummary": "stderrSummary",
+    "message": "message",
+    "notice": "notice",
+    "warnings": "warnings",
+    "success": "success",
+    "status": "status",
+    "code": "code",
+    "schema": "schema",
+    "actionid": "actionId",
+    "taskid": "taskId",
+    "runid": "runId",
+    "operationid": "operationId",
+    "jobid": "jobId",
+}
+_PLANNER_TOOL_OBSERVATION_EXCLUDED_FIELDS = {
+    "payload",
+    "data",
+    "result",
+    "raw",
+    "stdout",
+    "stderr",
+    "output",
+    "outputs",
+    "content",
+    "body",
+    "details",
+    "traceback",
+    "stack",
+    "arguments",
+    "params",
+    "parameters",
+    "attachments",
+}
+_PLANNER_TOOL_OBSERVATION_SECRET_PATTERN = re.compile(
+    r"(?i)\b(api[_ -]?key|token|authorization|password|secret)\b\s*[:=]\s*[^\s,;]+"
+)
+_PLANNER_TOOL_OBSERVATION_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]+")
+_PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\s,;]+", re.IGNORECASE)
+_PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s,;]+)")
+
+
+def _normalize_planner_tool_observation_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).strip().lower())
+
+
+def _planner_tool_observation_count_key_allowed(key: str) -> bool:
+    text = str(key).strip()
+    return bool(
+        text.lower() == "count"
+        or re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,58}Count", text)
+        or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,58}(?:_count|-count)", text, re.IGNORECASE)
+    )
+
+
+def _planner_tool_observation_candidates(value: dict[Any, Any]) -> list[tuple[str, Any]]:
+    """Return preferred semantic fields first without retaining arbitrary keys."""
+    preferred: dict[str, tuple[str, Any]] = {}
+    counts: list[tuple[str, Any]] = []
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)
+        lowered = _normalize_planner_tool_observation_key(key)
+        if lowered in _PLANNER_TOOL_OBSERVATION_EXCLUDED_FIELDS:
+            continue
+        if lowered in _PLANNER_TOOL_OBSERVATION_TEXT_FIELDS or lowered in _PLANNER_TOOL_OBSERVATION_SCALAR_FIELDS:
+            preferred.setdefault(
+                lowered,
+                (_PLANNER_TOOL_OBSERVATION_DISPLAY_KEYS[lowered], raw_value),
+            )
+        elif _planner_tool_observation_count_key_allowed(key) and len(counts) < RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS:
+            counts.append((key, raw_value))
+    ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
+    return ordered + counts
+
+
+def _sanitize_planner_tool_observation_text(value: Any, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS) -> str:
+    """Make a short, model-visible tool summary safe even when a tool mislabeled it.
+
+    This is intentionally stricter than UI/audit redaction: planning observations
+    must never disclose credential-like strings or absolute filesystem locations.
+    """
+    text = "" if value is None else str(value)
+    text = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", text)
+    text = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", text)
+    text = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", text)
+    text = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", text)
+    return summarize_text(text, limit)
+
+
+def _planner_safe_tool_observation_value(value: Any, *, depth: int = 0) -> Any | None:
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return _sanitize_planner_tool_observation_text(redact_sensitive(value))
+    if isinstance(value, list):
+        if depth >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH:
+            return None
+        projected_list = [
+            _sanitize_planner_tool_observation_text(redact_sensitive(item))
+            for item in value[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]
+            if isinstance(item, str)
+        ]
+        return projected_list or None
+    if not isinstance(value, dict) or depth >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH:
+        return None
+
+    projected: dict[str, Any] = {}
+    for key, raw_value in _planner_tool_observation_candidates(value):
+        safe_value = _planner_safe_tool_observation_value(raw_value, depth=depth + 1)
+        if safe_value is not None:
+            projected[key] = safe_value
+        if len(projected) >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS:
+            break
+    return redact_sensitive(projected) if projected else None
+
+
+def planner_safe_tool_result_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Project a bounded semantic summary for the next planning iteration.
+
+    Raw tool payloads are deliberately not traversed.  Only explicitly named
+    summary/message fields and numeric count fields can cross this boundary.
+    """
+    projected: dict[str, Any] = {}
+    already_observed = {
+        "ok", "status", "code", "exitcode", "timedout", "cancelled",
+        "approvalid", "checkpointid", "schema",
+        "error", "reason",
+    }
+    for key, raw_value in _planner_tool_observation_candidates(result):
+        lowered = _normalize_planner_tool_observation_key(key)
+        if lowered in already_observed:
+            continue
+        safe_value = _planner_safe_tool_observation_value(raw_value)
+        if safe_value is not None:
+            projected[key] = safe_value
+        if len(projected) >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS:
+            break
+    return projected
+
+
+def format_planner_tool_observation(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = str(value)
+    return _sanitize_planner_tool_observation_text(text, RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
 
 
 def redact_sensitive(value: Any) -> Any:

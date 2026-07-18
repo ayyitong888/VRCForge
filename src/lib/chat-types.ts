@@ -10,8 +10,22 @@ export type ChatAttachment = {
   dataUrl?: string;
   text?: string;
   payloadKind?: "data_url" | "text" | "metadata";
+  /** Stable local reference to the payload held in the owning chat's vault. */
+  payloadHash?: string;
   truncated?: boolean;
   error?: string;
+};
+
+/**
+ * Payloads are persisted once per chat, while individual message attachments
+ * retain only their metadata plus payloadHash.  This keeps transcript history
+ * useful without duplicating an attachment body into every model request.
+ */
+export type ChatAttachmentPayload = {
+  payloadHash: string;
+  payloadKind: "data_url" | "text";
+  text?: string;
+  dataUrl?: string;
 };
 
 export type ComposerActionId = "attach" | "screenshot" | "annotation" | "browser" | "desktop";
@@ -97,6 +111,7 @@ export type ChatThread = {
   revision?: number;
   compaction?: ChatCompactionState;
   contextUsageCache?: AgentContextUsage;
+  attachmentPayloads?: Record<string, ChatAttachmentPayload>;
   items: ConversationItem[];
 };
 

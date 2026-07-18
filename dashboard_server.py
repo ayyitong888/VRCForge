@@ -52,6 +52,7 @@ from agent_gateway import (
     PROJECTED_SKILL_STATE_SCHEMA,
     create_agent_mcp_app,
     ensure_dict,
+    normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
     parse_skill_markdown,
     redact_sensitive,
@@ -20420,8 +20421,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_export_vrm",
         "Export one selected humanoid scene avatar as validated VRM 1.0 through an installed compatible UniVRM package. Requires author metadata, confirmRights=true, approval, and a pre-write checkpoint.",
-        "high",
+        "medium",
         lambda params: unity_mcp_write_sync({"toolName": "vrc_export_vrm", "arguments": params or {}}),
+        risk_level_resolver=lambda params: "high" if normalize_bool(params.get("overwrite")) else "medium",
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_toggle_scene_object",
