@@ -28,7 +28,8 @@ const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 let token = "";
 
-const allowedOptions = new Set(["--allow-unpushed", "--help", "-h"]);
+const selfTest = process.argv.includes("--self-test");
+const allowedOptions = new Set(["--allow-unpushed", "--help", "-h", "--self-test"]);
 if (process.argv.slice(2).some((item) => !allowedOptions.has(item))) {
   console.error("Unknown packaged context-compaction probe option.");
   process.exit(2);
@@ -49,6 +50,8 @@ buildPolicy with every Allow* flag false are mandatory.
 ZIP, and extracted payload hashes, but accepts only an explicitly non-release
 local build policy and writes strictReleaseBinding=false to its report. It can
 never be used as strict release evidence.
+--self-test runs the deterministic seed and fixture-cleanup helper checks without
+opening a package; it is not acceptance evidence.
 Optional: VRCFORGE_CONTEXT_PROBE_CDP_PORT=<unused port> (default ${cdpPort})`);
   process.exit(0);
 }
@@ -167,25 +170,56 @@ async function waitClear(timeout = 30000) {
   return latest;
 }
 
-function cdpConnection(url) {
+function cdpConnection(url, openTimeoutMs = 15000) {
   const socket = new WebSocket(url);
   let id = 0;
   const pending = new Map();
+  let terminalError = null;
+  let openTimer;
+  let rejectOpenConnection = null;
+  const rejectPending = (error) => {
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+  };
+  const terminate = (error) => {
+    if (terminalError) return;
+    terminalError = error instanceof Error ? error : new Error(String(error));
+    clearTimeout(openTimer);
+    rejectPending(terminalError);
+  };
   socket.addEventListener("message", (event) => {
-    const payload = JSON.parse(String(event.data));
+    let payload;
+    try { payload = JSON.parse(String(event.data)); }
+    catch (error) { terminate(new Error(`CDP returned invalid JSON: ${String(error)}`)); return; }
     const request = pending.get(payload.id);
     if (!request) return;
     pending.delete(payload.id);
     payload.error ? request.reject(new Error(payload.error.message || JSON.stringify(payload.error))) : request.resolve(payload.result);
   });
-  const opened = new Promise((resolveOpen, rejectOpen) => {
-    socket.addEventListener("open", resolveOpen, { once: true });
-    socket.addEventListener("error", rejectOpen, { once: true });
+  socket.addEventListener("error", () => terminate(new Error("CDP WebSocket transport error.")));
+  socket.addEventListener("close", () => {
+    terminate(new Error("CDP WebSocket closed."));
+    rejectOpenConnection?.(terminalError);
   });
-  return { opened, close: () => socket.close(), send(method, params = {}) {
+  const opened = new Promise((resolveOpen, rejectOpen) => {
+    rejectOpenConnection = rejectOpen;
+    openTimer = setTimeout(() => {
+      const error = new Error(`CDP WebSocket open timed out after ${openTimeoutMs} ms.`);
+      terminate(error);
+      rejectOpen(error);
+      try { socket.close(); } catch { /* failed handshakes may already be closed */ }
+    }, openTimeoutMs);
+    socket.addEventListener("open", () => { clearTimeout(openTimer); resolveOpen(); }, { once: true });
+    socket.addEventListener("error", () => rejectOpen(terminalError || new Error("CDP WebSocket open failed.")), { once: true });
+  });
+  return { opened, close: () => { terminate(new Error("CDP client closed by context-compaction probe.")); try { socket.close(); } catch { /* best effort */ } }, send(method, params = {}) {
+    if (terminalError) return Promise.reject(terminalError);
     const requestId = ++id;
-    socket.send(JSON.stringify({ id: requestId, method, params }));
-    return new Promise((resolveSend, rejectSend) => pending.set(requestId, { resolve: resolveSend, reject: rejectSend }));
+    return new Promise((resolveSend, rejectSend) => {
+      pending.set(requestId, { resolve: resolveSend, reject: rejectSend });
+      try { socket.send(JSON.stringify({ id: requestId, method, params })); }
+      catch (error) { pending.delete(requestId); rejectSend(error); }
+    });
   }};
 }
 async function waitJson(url, timeout = 45000) {
@@ -240,15 +274,20 @@ function isolatedEnvironment() {
 }
 async function launch() {
   const child = spawn(exe, [], { stdio: "ignore", env: isolatedEnvironment() });
-  const targets = await waitJson(`http://127.0.0.1:${cdpPort}/json/list`);
-  const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-  if (!page) throw new Error("Packaged WebView page target was not found.");
-  const cdp = cdpConnection(page.webSocketDebuggerUrl);
-  await cdp.opened;
-  await cdp.send("Runtime.enable");
-  await waitEval(cdp, `(() => ({ ok: Boolean(document.body?.innerText && window.__TAURI_INTERNALS__?.invoke), tauri: typeof window.__TAURI_INTERNALS__?.invoke }))()`);
-  await waitJson(`${appOrigin}/api/health`);
-  return { child, cdp };
+  try {
+    const targets = await waitJson(`http://127.0.0.1:${cdpPort}/json/list`);
+    const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    if (!page) throw new Error("Packaged WebView page target was not found.");
+    const cdp = cdpConnection(page.webSocketDebuggerUrl);
+    await cdp.opened;
+    await cdp.send("Runtime.enable");
+    await waitEval(cdp, `(() => ({ ok: Boolean(document.body?.innerText && window.__TAURI_INTERNALS__?.invoke), tauri: typeof window.__TAURI_INTERNALS__?.invoke }))()`);
+    await waitJson(`${appOrigin}/api/health`);
+    return { child, cdp };
+  } catch (error) {
+    await requestClose(child).catch(() => undefined);
+    throw error;
+  }
 }
 async function appToken() {
   if (token) return token;
@@ -322,6 +361,42 @@ async function saveProbeChats(cdp, chats) {
   if (!Array.isArray(rest.chats) || !rest.chats.some((chat) => chat.id === chats[0].id)) throw new Error("REST did not read the chat saved through real Tauri IPC.");
   return { ipc, restCount: rest.count };
 }
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+function probeSeedMatches(actual, expected) {
+  return Boolean(actual) && actual.id === expected.id && stableJson(actual) === stableJson(expected);
+}
+function createStableSnapshotGate(expected, settleMs = 1200) {
+  let matchedAt = 0;
+  return (actual, now = Date.now()) => {
+    if (!probeSeedMatches(actual, expected)) { matchedAt = 0; return false; }
+    if (!matchedAt) matchedAt = now;
+    return now - matchedAt >= settleMs;
+  };
+}
+async function waitForStableProbeChat(chat, label, timeout = 30000) {
+  const stable = createStableSnapshotGate(chat);
+  return waitForValue(
+    async () => (await api("/api/app/chats")).chats?.find((candidate) => candidate.id === chat.id),
+    (candidate) => stable(candidate),
+    `${label} stable whole-chat persistence`,
+    timeout,
+  );
+}
+async function seedAndActivateProbeChat(cdp, chat, label) {
+  // The UI persists full chat arrays.  Reload before the direct IPC replacement
+  // to discard any prior renderer debounce, then reload again so the renderer
+  // hydrates exactly the replacement it is about to interact with.
+  await reload(cdp);
+  const save = await saveProbeChats(cdp, [chat]);
+  await reload(cdp);
+  const stored = await waitForStableProbeChat(chat, label);
+  const activation = await activateProbeChat(cdp, chat.title);
+  return { save, activation, fingerprint: createHash("sha256").update(stableJson(stored)).digest("hex") };
+}
 async function reload(cdp) {
   await cdp.send("Page.reload", { ignoreCache: true }).catch((error) => {
     if (!/Promise was collected/i.test(String(error))) throw error;
@@ -371,15 +446,33 @@ async function uiState(cdp) {
 }
 async function requestClose(child) {
   await powershell(`$p=Get-Process -Id ${Number(child.pid)} -ErrorAction SilentlyContinue; if($p){ [void]$p.CloseMainWindow() }`);
-  const final = await waitClear();
-  return { final, graceful: clear(final) };
+  let final = await waitClear();
+  const graceful = clear(final);
+  let forced = false;
+  if (!graceful) {
+    forced = true;
+    await powershell(`$p=Get-Process -Id ${Number(child.pid)} -ErrorAction SilentlyContinue; if($p){ Stop-Process -Id $p.Id -Force }`).catch(() => undefined);
+    final = await waitClear(10000);
+  }
+  return { final, graceful, forced, cleaned: clear(final) };
 }
 
 function createLoopbackProvider() {
   const requests = [];
   const waiters = new Set();
   const turnCounts = new Map();
+  const sockets = new Set();
+  const delayed = new Map();
   let cancellationDelayAvailable = true;
+  let closed = false;
+  const delay = (ms) => new Promise((resolveDelay) => {
+    const timer = setTimeout(() => { delayed.delete(timer); resolveDelay(true); }, ms);
+    delayed.set(timer, () => { clearTimeout(timer); delayed.delete(timer); resolveDelay(false); });
+  });
+  const rejectWaiters = (error) => {
+    for (const waiter of waiters) { clearTimeout(waiter.timer); waiter.reject(error); }
+    waiters.clear();
+  };
   const notify = (value) => {
     for (const waiter of [...waiters]) {
       if (waiter.matches(value)) {
@@ -390,6 +483,7 @@ function createLoopbackProvider() {
     }
   };
   const server = createServer(async (request, response) => {
+    if (closed) { response.destroy(); return; }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     let body = {};
@@ -415,7 +509,7 @@ function createLoopbackProvider() {
       notify(record);
       if (isCancelCase) {
         cancellationDelayAvailable = false;
-        await sleep(5000);
+        if (!(await delay(5000)) || closed || response.destroyed) return;
       }
       const content = JSON.stringify({
         currentGoal: `retain ${marker} goal`, completed: ["fixture evidence retained"], decisions: ["use local fixture"],
@@ -438,6 +532,10 @@ function createLoopbackProvider() {
     record.inputTokens = inputTokens;
     return respondOpenAi(response, body, content, inputTokens);
   });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
   return {
     requests,
     async listen() { await new Promise((resolveListen, rejectListen) => { server.once("error", rejectListen); server.listen(0, "127.0.0.1", resolveListen); }); return server.address().port; },
@@ -449,14 +547,27 @@ function createLoopbackProvider() {
       const existing = requests.find(matches);
       if (existing) return Promise.resolve(existing);
       return new Promise((resolveWaiter, rejectWaiter) => {
-        const waiter = { matches, resolve: resolveWaiter, timer: setTimeout(() => {
+        const waiter = { matches, resolve: resolveWaiter, reject: rejectWaiter, timer: setTimeout(() => {
           waiters.delete(waiter);
           rejectWaiter(new Error(`Timed out waiting for fixture ${kind}${phase ? `/${phase}` : ""}`));
         }, timeout) };
         waiters.add(waiter);
       });
     },
-    close() { return new Promise((resolveClose) => server.close(resolveClose)); },
+    async close() {
+      if (closed) return;
+      closed = true;
+      rejectWaiters(new Error("Context-compaction fixture closed."));
+      for (const cancel of delayed.values()) cancel();
+      for (const socket of sockets) socket.destroy();
+      server.closeAllConnections?.();
+      await new Promise((resolveClose) => {
+        const fallback = setTimeout(resolveClose, 1000);
+        fallback.unref?.();
+        server.close(() => { clearTimeout(fallback); resolveClose(); });
+      });
+      server.unref();
+    },
   };
 }
 
@@ -570,9 +681,7 @@ async function main() {
     await reload(cdp);
 
     const prefireChat = probeChat("prefire", 0.75);
-    report.phases.prefireSeed = await saveProbeChats(cdp, [prefireChat]);
-    await reload(cdp);
-    report.phases.prefireActivation = await activateProbeChat(cdp, prefireChat.title);
+    report.phases.prefireSeed = await seedAndActivateProbeChat(cdp, prefireChat, "prefire");
     report.phases.prefireSend = await uiSend(cdp, `${marker} prefire observation`);
     if (!report.phases.prefireSend?.ok) assertion(report, `prefire composer path could not start: ${report.phases.prefireSend?.reason || "unknown"}`);
     await provider.waitFor("tool", `${marker} prefire observation`, 30000).catch((error) => assertion(report, `75% prefire turn did not reach the fixture: ${String(error)}`));
@@ -589,9 +698,7 @@ async function main() {
     });
 
     const manualChat = probeChat("manual", 0.70);
-    report.phases.manualSeed = await saveProbeChats(cdp, [manualChat]);
-    await reload(cdp);
-    await activateProbeChat(cdp, manualChat.title);
+    report.phases.manualSeed = await seedAndActivateProbeChat(cdp, manualChat, "manual");
     report.phases.manualComposer = await uiSend(cdp, "/compact");
     if (!report.phases.manualComposer?.ok) assertion(report, `manual /compact composer path could not start: ${report.phases.manualComposer?.reason || "unknown"}`);
     await provider.waitFor("compaction", "evidence-manual-0", 120000, "standalone").catch((error) => assertion(report, `manual /compact did not reach the controller/provider: ${String(error)}`));
@@ -615,9 +722,7 @@ async function main() {
     else if (!report.phases.manualIpc.value.summary || !report.phases.manualIpc.value.summaryDigest) assertion(report, "manual IPC compaction did not return a structured successor summary and digest");
 
     const preTurnChat = probeChat("pre-turn", 0.86);
-    report.phases.preTurnSeed = await saveProbeChats(cdp, [preTurnChat]);
-    await reload(cdp);
-    await activateProbeChat(cdp, preTurnChat.title);
+    report.phases.preTurnSeed = await seedAndActivateProbeChat(cdp, preTurnChat, "pre-turn");
     report.phases.preTurnSend = await uiSend(cdp, `${marker} pre-turn continuation`);
     if (!report.phases.preTurnSend?.ok) assertion(report, `pre-turn composer path could not start: ${report.phases.preTurnSend?.reason || "unknown"}`);
     await provider.waitFor("compaction", "evidence-pre-turn-0", 120000, "pre_turn").catch((error) => assertion(report, `pre-turn automatic compaction did not reach the isolated provider: ${String(error)}`));
@@ -633,9 +738,7 @@ async function main() {
     if (!preTurnCompact || !(preTurnCompact.beforeTokens > preTurnCompact.afterTokens)) assertion(report, "85% pre-turn automatic compaction did not persist a reduced before/after marker");
 
     const midTurnChat = probeChat("mid-turn", 0.70, { historyCharacters: 3_520_000 });
-    report.phases.midTurnSeed = await saveProbeChats(cdp, [midTurnChat]);
-    await reload(cdp);
-    await activateProbeChat(cdp, midTurnChat.title);
+    report.phases.midTurnSeed = await seedAndActivateProbeChat(cdp, midTurnChat, "mid-turn");
     report.phases.midTurnSend = await uiSend(cdp, `${marker} mid-turn continuation`);
     await provider.waitFor("tool", `${marker} mid-turn continuation`, 120000).catch((error) => assertion(report, `mid-turn first planner/tool request was not observed: ${String(error)}`));
     await provider.waitFor("reply", `${marker} mid-turn continuation`, 120000).catch((error) => assertion(report, `mid-turn continuation reply was not observed: ${String(error)}`));
@@ -658,16 +761,14 @@ async function main() {
 
     const cancelChat = probeChat("cancel", 0.86);
     const expectedCancelIds = cancelChat.items.map((item) => item.id);
-    report.phases.cancelSeed = await saveProbeChats(cdp, [cancelChat]);
-    const persistedCancelSeed = (await api("/api/app/chats")).chats?.find((chat) => chat.id === cancelChat.id);
+    report.phases.cancelSeed = await seedAndActivateProbeChat(cdp, cancelChat, "cancellation");
+    const persistedCancelSeed = await waitForStableProbeChat(cancelChat, "cancellation baseline");
     const cancelOriginalItems = persistedCancelSeed?.items || [];
     const cancelOriginalDigest = createHash("sha256").update(JSON.stringify(cancelOriginalItems)).digest("hex");
     const cancelOriginalIds = cancelOriginalItems.map((item) => item.id);
     if (JSON.stringify(cancelOriginalIds) !== JSON.stringify(expectedCancelIds)) {
       throw new Error("Persisted cancellation baseline did not retain every original item identity.");
     }
-    await reload(cdp);
-    await activateProbeChat(cdp, cancelChat.title);
     report.phases.cancelSend = await uiSend(cdp, `${marker}-cancel pre-turn cancellation`);
     await provider.waitFor("cancel-compaction", "evidence-cancel-0", 120000, "pre_turn").catch((error) => assertion(report, `cancellation case did not reach delayed pre-turn compaction: ${String(error)}`));
     report.phases.cancelVisible = await waitEval(cdp, `(() => ({ ok: Boolean(document.querySelector("[data-context-compaction-cancel]")) }))()`, 10000)
@@ -737,7 +838,7 @@ async function main() {
     // the original durable items.
     const interrupted = probeChat("restart", 0.86);
     interrupted.compaction = { status: "compacting", generation: `${marker}-interrupted`, sourceDigest: marker, startedAt: new Date().toISOString(), beforeTokens: 8600, contextLimit: 10000 };
-    report.phases.restartSeed = await saveProbeChats(cdp, [interrupted]);
+    report.phases.restartSeed = await seedAndActivateProbeChat(cdp, interrupted, "restart");
     report.phases.firstClose = await requestClose(child);
     if (!report.phases.firstClose.graceful) assertion(report, "first packaged restart close did not release tracked processes/ports");
     launchInfo.cdp.close();
@@ -774,4 +875,47 @@ async function main() {
   }
 }
 
-main();
+async function runSelfTest() {
+  const expected = { id: "seed", revision: 1, items: [{ id: "u1", text: "baseline" }] };
+  const equivalent = { items: [{ text: "baseline", id: "u1" }], revision: 1, id: "seed" };
+  const stale = { id: "seed", revision: 1, items: [{ id: "u1", text: "stale renderer write" }] };
+  if (!probeSeedMatches(equivalent, expected)) throw new Error("self-test: canonical probe seed comparison rejected an equivalent snapshot");
+  if (probeSeedMatches(stale, expected)) throw new Error("self-test: canonical probe seed comparison accepted a stale whole-chat write");
+  const gate = createStableSnapshotGate(expected, 1000);
+  if (gate(equivalent, 10)) throw new Error("self-test: stable gate accepted its first matching observation");
+  if (!gate(equivalent, 1010)) throw new Error("self-test: stable gate did not accept a continuous matching observation");
+  if (gate(stale, 1020)) throw new Error("self-test: stale whole-chat write did not reset stable gate");
+  if (gate(equivalent, 1030)) throw new Error("self-test: stable gate did not restart after stale write");
+  if (!gate(equivalent, 2030)) throw new Error("self-test: stable gate did not recover after a new settled interval");
+  const provider = createLoopbackProvider();
+  await provider.listen();
+  const pendingWait = provider.waitFor("never", "", 20000).then(
+    () => { throw new Error("self-test: fixture waiter resolved during cleanup"); },
+    () => true,
+  );
+  await provider.close();
+  if (!(await pendingWait)) throw new Error("self-test: fixture waiter remained live after cleanup");
+  const delayedProvider = createLoopbackProvider();
+  const delayedPort = await delayedProvider.listen();
+  const delayedRequest = fetch(`http://127.0.0.1:${delayedPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "continuity-preserving context summary REDACTED_ENTRIES= evidence-cancel-0 phase=pre_turn" }] }),
+  }).then(
+    () => { throw new Error("self-test: delayed fixture request unexpectedly completed during cleanup"); },
+    () => true,
+  );
+  await sleep(25);
+  await delayedProvider.close();
+  if (!(await delayedRequest)) throw new Error("self-test: delayed fixture request remained live after cleanup");
+  console.log("context-compaction probe self-test passed");
+}
+
+if (selfTest) {
+  runSelfTest().catch((error) => {
+    console.error(String(error?.stack || error));
+    process.exitCode = 1;
+  });
+} else {
+  main();
+}
