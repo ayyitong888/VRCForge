@@ -866,6 +866,15 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "writes scene object active state after approval",
         "tags": ["wardrobe", "write"],
     },
+    "vrcforge_export_vrm": {
+        "title": "Unity Avatar to VRM 1.0",
+        "whenToUse": "Convert the current or explicitly named loaded Unity Humanoid or VRChat avatar into a VRM 1.0 file.",
+        "inputs": ["Avatar path, required author metadata and confirmRights=true, optional title/version, managed output path, and overwrite flag."],
+        "outputs": ["Validated VRM 1.0 file metadata, restrictive default license profile, exporter identity, byte length, and VRMC_vrm validation status."],
+        "sideEffects": "writes or replaces one .vrm file under Assets/VRCForge/Exports after approval",
+        "backupRestore": "uses the gateway checkpoint before export; dependency or validation failure does not replace the destination",
+        "tags": ["avatar", "vrm", "export", "checkpoint", "write"],
+    },
 }
 
 BUILTIN_SKILL_OVERRIDES["vrcforge_optimization_plan"] = {

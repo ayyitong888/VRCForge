@@ -282,6 +282,7 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_restore_safe_backup",
     "vrc_setup_outfit",
     "vrc_scan_avatar_performance",
+    "vrc_export_vrm",
 ]
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
@@ -303,6 +304,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_manage_expression_parameters",
         "vrc_manage_expression_menu",
         "vrc_manage_fx_animator",
+        "vrc_export_vrm",
         "vrc_add_component",
         "vrc_remove_component",
         "vrc_set_property",
@@ -20414,6 +20416,12 @@ def register_agent_gateway_tools() -> None:
         "Run an allowlisted VRCForge static Unity MCP write tool through the approval and rollback checkpoint boundary.",
         "high",
         unity_mcp_write_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_export_vrm",
+        "Export one selected humanoid scene avatar as validated VRM 1.0 through an installed compatible UniVRM package. Requires author metadata, confirmRights=true, approval, and a pre-write checkpoint.",
+        "high",
+        lambda params: unity_mcp_write_sync({"toolName": "vrc_export_vrm", "arguments": params or {}}),
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_toggle_scene_object",
