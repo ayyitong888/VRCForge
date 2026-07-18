@@ -22,19 +22,27 @@ type JsonRequestInit = RequestInit & { timeoutMs?: number; preferTauriIpc?: bool
 export async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeoutMs = init.timeoutMs ?? 30000;
+  const onExternalAbort = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) {
+    controller.abort(init.signal.reason);
+  } else {
+    init.signal?.addEventListener("abort", onExternalAbort, { once: true });
+  }
   const timeout = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
   const headers = new Headers(init.headers);
   if (appSessionToken && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${appSessionToken}`);
   }
   let response: Response;
+  let text = "";
   try {
     const { timeoutMs: _timeoutMs, preferTauriIpc: _preferTauriIpc, ...fetchInit } = init;
     const tauriLocalApiRequest = isTauriLocalApiUrl(url);
     if (tauriLocalApiRequest) {
       throw new ApiError("This desktop route has not been migrated to a typed IPC command.", 0);
     }
-    response = await fetch(url, { ...fetchInit, headers, signal: init.signal ?? controller.signal });
+    response = await fetch(url, { ...fetchInit, headers, signal: controller.signal });
+    text = await response.text();
   } catch (cause) {
     if (cause instanceof ApiError) {
       throw cause;
@@ -54,8 +62,8 @@ export async function requestJson<T>(url: string, init: JsonRequestInit = {}): P
     if (timeout !== undefined) {
       window.clearTimeout(timeout);
     }
+    init.signal?.removeEventListener("abort", onExternalAbort);
   }
-  const text = await response.text();
   let payload: unknown = {};
   if (text) {
     try {

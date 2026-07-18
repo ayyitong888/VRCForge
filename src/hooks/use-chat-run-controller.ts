@@ -10,6 +10,11 @@ import {
 } from "../lib/conversation-utils";
 import { isRuntimeSessionVerificationError } from "../lib/app-runtime";
 import {
+  boundedCompactionAttempts,
+  boundedCompactionSummaryCharacters,
+} from "../lib/chat-compaction-state";
+import { fingerprintCompactionSource, projectRuntimeCompactionItems } from "../lib/context-compaction";
+import {
   issueComputerUseTurnGrant,
   recordAgentRunQueued,
   requestAgentRunCancel,
@@ -25,6 +30,7 @@ export type QueuedTurn = {
   providerLabel: string;
   provider: string;
   model: string;
+  contextLimit?: number;
   queuedFrom?: boolean;
   chatId?: string;
   sessionId?: string;
@@ -60,6 +66,19 @@ export type RunSingleTurnOptions = {
   onFailure?: (message: string) => void;
 };
 
+export type PrepareTurnContextInput = {
+  endpoint: string;
+  chatId: string;
+  turn: QueuedTurn;
+  signal: AbortSignal;
+};
+
+export type PreparedTurnContext = {
+  baseItems: ConversationItem[];
+  sessionId?: string;
+  compactionGeneration?: string;
+};
+
 export type SubmitTurnResult = "started" | "queued" | "queue_full" | "failed";
 
 type UseChatRunControllerParams = {
@@ -77,6 +96,8 @@ type UseChatRunControllerParams = {
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
   handleRuntimeSessionFailure: (message: string) => void;
   setError: (message: string) => void;
+  prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
+  persistChatsNow?: () => Promise<void>;
 };
 
 export function useChatRunController({
@@ -94,6 +115,8 @@ export function useChatRunController({
   refreshRuntimeRuns,
   handleRuntimeSessionFailure,
   setError,
+  prepareTurnContext,
+  persistChatsNow,
 }: UseChatRunControllerParams) {
   const { t } = useTranslation();
   const [sending, setSending] = useState(false);
@@ -226,11 +249,6 @@ export function useChatRunController({
   }
 
   async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions): Promise<boolean> {
-    const chat = getChatById(chatId);
-    const baseItems = options?.baseItems ?? chat?.items ?? [];
-    const chatSessionId = (options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
-    const chatAgentName = chat?.agentName || "desktop-agent";
-    const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
     const startedAt = Date.now();
     const messageForModel = appendAttachmentSummary(turn.text, turn.attachments, t);
     const abortController = new AbortController();
@@ -253,6 +271,30 @@ export function useChatRunController({
         }
         targetEndpoint = readyEndpoint;
       }
+      const prepared = !options?.baseItems && prepareTurnContext
+        ? await prepareTurnContext({
+            endpoint: targetEndpoint,
+            chatId,
+            turn,
+            signal: abortController.signal,
+          })
+        : null;
+      const chat = getChatById(chatId);
+      const baseItems = prepared?.baseItems ?? options?.baseItems ?? chat?.items ?? [];
+      const chatSessionId = (prepared?.sessionId ?? options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
+      const chatAgentName = chat?.agentName || "desktop-agent";
+      const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
+      const summarizedSourceDigest = fingerprintCompactionSource(history);
+      const summarizedSourceItemIds = new Set(
+        baseItems
+          .filter((item) => item.type === "user" || item.type === "agent" || item.type === "compact" || item.type === "subagent")
+          .map((item) => item.id),
+      );
+      const summarizedItemIds = new Set(
+        baseItems
+          .filter((item) => item.type === "user" || item.type === "agent" || item.type === "compact")
+          .map((item) => item.id),
+      );
       const userItem: ConversationItem = {
         id: turn.goalDelivery?.userItemId || `user-${turn.id}`,
         type: "user",
@@ -299,6 +341,7 @@ export function useChatRunController({
         provider: turn.provider,
         providerLabel: turn.providerLabel,
         model: turn.model,
+        contextLimit: turn.contextLimit,
         clientTurnId: turn.id,
         goalDeliveryId: turn.goalDelivery?.deliveryId,
         computerUseRequested: Boolean(turn.computerUseRequested),
@@ -307,19 +350,118 @@ export function useChatRunController({
         computerUseVisualAccent: turn.computerUseVisualAccent,
       });
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      let midTurnCompactionApplied = false;
       updateChat(chatId, (current) => ({
-        ...touchChat(current),
-        sessionId: response.sessionId || response.session_id || current.sessionId,
-        items: [
-          ...stripTransientConversationItems(current.items).filter(
-            (item) => item.id !== (turn.goalDelivery?.agentItemId || response.turnId || response.turn_id),
-          ),
-          { id: turn.goalDelivery?.agentItemId || response.turnId || response.turn_id, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
-        ],
+        ...applyRuntimeResponseToChat(current),
       }));
+      if (midTurnCompactionApplied && persistChatsNow) {
+        await persistChatsNow();
+      }
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
       return true;
+
+      function applyRuntimeResponseToChat(current: ChatThread): ChatThread {
+        const responseItemId = turn.goalDelivery?.agentItemId || response.turnId || response.turn_id;
+        let durableItems = stripTransientConversationItems(current.items).filter(
+          (item) => item.id !== responseItemId,
+        );
+        let compaction = current.compaction;
+        const runtimeCompaction = response.contextCompaction;
+        const summary = String(runtimeCompaction?.summary || "").trim();
+        const currentSourceDigest = fingerprintCompactionSource(buildChatHistory(
+          durableItems.filter((item) => summarizedSourceItemIds.has(item.id)),
+          t,
+        ));
+        if (runtimeCompaction?.applied && summary && currentSourceDigest === summarizedSourceDigest) {
+          const generation = `runtime-compact-${turn.id}-${runtimeCompaction.summaryDigest?.slice(0, 12) || Date.now()}`;
+          const compactItem: Extract<ConversationItem, { type: "compact" }> = {
+            id: generation,
+            type: "compact",
+            text: t("compact.completed"),
+            detail: summary,
+            status: "completed",
+            entryCount: runtimeCompaction.entryCount ?? history.length,
+            beforeTokens: runtimeCompaction.beforeTokens,
+            afterTokens: runtimeCompaction.afterTokens,
+            contextLimit: runtimeCompaction.contextLimit,
+            createdAt: new Date().toISOString(),
+          };
+          const projection = projectRuntimeCompactionItems(durableItems, summarizedItemIds, compactItem);
+          if (projection.replacedCount > 0 || summarizedItemIds.size === 0) {
+            durableItems = projection.replacedCount > 0 ? projection.items : [compactItem, ...durableItems];
+            midTurnCompactionApplied = true;
+            compaction = {
+              generation,
+              status: "applied",
+              trigger: "auto",
+              phase: "mid_turn",
+              sourceDigest: runtimeCompaction.sourceDigest,
+              summaryDigest: runtimeCompaction.summaryDigest,
+              beforeTokens: runtimeCompaction.beforeTokens,
+              afterTokens: runtimeCompaction.afterTokens,
+              contextLimit: runtimeCompaction.contextLimit,
+              targetAfterTokens: runtimeCompaction.targetAfterTokens,
+              provider: turn.provider,
+              model: turn.model,
+              entryCount: runtimeCompaction.entryCount,
+              retainedEntryCount: runtimeCompaction.retainedEntryCount,
+              fidelity: runtimeCompaction.fidelity,
+              attempts: boundedCompactionAttempts(runtimeCompaction.attempts),
+              latencyMs: boundedRuntimeLatency(runtimeCompaction.latencyMs),
+              retainedSummaryCharacters: boundedCompactionSummaryCharacters(
+                runtimeCompaction.retainedSummaryCharacters ?? summary.length,
+              ),
+              failureClass: runtimeCompaction.failureClass,
+              suppressionReason: boundedRuntimeReason(runtimeCompaction.suppressionReason),
+              startedAt: new Date(startedAt).toISOString(),
+              completedAt: new Date().toISOString(),
+            };
+          }
+        } else if (runtimeCompaction) {
+          const failureClass = boundedRuntimeReason(runtimeCompaction.failureClass) || "unknown";
+          const status = failureClass === "cancelled"
+            ? "cancelled"
+            : failureClass.startsWith("suppressed") || runtimeCompaction.suppressionReason
+              ? "suppressed"
+              : "failed";
+          compaction = {
+            generation: `runtime-compact-${turn.id}-${failureClass}`,
+            status,
+            trigger: "auto",
+            phase: "mid_turn",
+            beforeTokens: runtimeCompaction.beforeTokens,
+            afterTokens: runtimeCompaction.afterTokens,
+            contextLimit: runtimeCompaction.contextLimit,
+            targetAfterTokens: runtimeCompaction.targetAfterTokens,
+            provider: turn.provider,
+            model: turn.model,
+            entryCount: runtimeCompaction.entryCount,
+            retainedEntryCount: runtimeCompaction.retainedEntryCount,
+            fidelity: runtimeCompaction.fidelity,
+            attempts: boundedCompactionAttempts(runtimeCompaction.attempts),
+            latencyMs: boundedRuntimeLatency(runtimeCompaction.latencyMs),
+            retainedSummaryCharacters: boundedCompactionSummaryCharacters(
+              runtimeCompaction.retainedSummaryCharacters,
+            ),
+            failureClass,
+            suppressionReason: status === "suppressed"
+              ? boundedRuntimeReason(runtimeCompaction.suppressionReason) || failureClass
+              : undefined,
+            startedAt: new Date(startedAt).toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        }
+        return {
+          ...touchChat(current),
+          sessionId: response.sessionId || response.session_id || current.sessionId,
+          compaction,
+          items: [
+            ...durableItems,
+            { id: responseItemId, type: "agent", response, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
+          ],
+        };
+      }
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
       if (options?.restoreOnFailure) {
@@ -395,4 +537,14 @@ export function useChatRunController({
     stopCurrentRun,
     applyRuntimeDelta,
   };
+}
+
+function boundedRuntimeLatency(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.min(24 * 60 * 60 * 1_000, Math.round(value))
+    : undefined;
+}
+
+function boundedRuntimeReason(value: unknown): string | undefined {
+  return typeof value === "string" ? value.trim().slice(0, 80) || undefined : undefined;
 }

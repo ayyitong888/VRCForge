@@ -1478,6 +1478,27 @@ def provider_stream_usage_missing(settings: Settings, source: str) -> dict[str, 
     }
 
 
+def stream_options_are_unsupported(exc: Exception) -> bool:
+    """Recognize endpoints that stream but do not implement usage options."""
+
+    message = str(exc).casefold()
+    if any(marker in message for marker in ("auth", "unauthorized", "forbidden", "quota", "rate limit", "billing")):
+        return False
+    names_stream_options = "stream_options" in message or "stream options" in message
+    return names_stream_options and any(
+        marker in message
+        for marker in (
+            "unsupported",
+            "not supported",
+            "not implemented",
+            "unknown parameter",
+            "invalid parameter",
+            "unrecognized",
+            "extra inputs",
+        )
+    )
+
+
 def should_retry_without_streaming(exc: Exception, settings: Settings) -> bool:
     provider = normalize_provider_name(settings.llm_provider)
     if provider not in {"ollama", "custom"}:
@@ -1542,9 +1563,13 @@ def request_openai_compatible_plan_with_metadata(
         }
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
-            try:
-                stream = client.chat.completions.create(**request_payload, stream=True)
+            usage_event: Any = None
+
+            def consume_stream(stream: Any) -> None:
+                nonlocal usage_event
                 for event in stream:
+                    if getattr(event, "usage", None) is not None:
+                        usage_event = event
                     choices = getattr(event, "choices", []) or []
                     if not choices:
                         continue
@@ -1554,12 +1579,42 @@ def request_openai_compatible_plan_with_metadata(
                         continue
                     chunks.append(text)
                     stream_callback(text)
+
+            try:
+                stream = client.chat.completions.create(
+                    **request_payload,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                consume_stream(stream)
                 return LlmPlanResponse(
                     text="".join(chunks),
                     reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
-                    usage=provider_stream_usage_missing(settings, "openai-compatible"),
+                    usage=(
+                        extract_llm_token_usage(usage_event, settings, source="openai-compatible")
+                        if usage_event is not None
+                        else provider_stream_usage_missing(settings, "openai-compatible")
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
+                if not chunks and stream_options_are_unsupported(exc):
+                    usage_event = None
+                    try:
+                        stream = client.chat.completions.create(**request_payload, stream=True)
+                        consume_stream(stream)
+                        return LlmPlanResponse(
+                            text="".join(chunks),
+                            reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
+                            usage=(
+                                extract_llm_token_usage(usage_event, settings, source="openai-compatible")
+                                if usage_event is not None
+                                else provider_stream_usage_missing(settings, "openai-compatible")
+                            ),
+                        )
+                    except Exception as compatible_stream_exc:  # noqa: BLE001
+                        if chunks or not should_retry_without_streaming(compatible_stream_exc, settings):
+                            raise
+                        exc = compatible_stream_exc
                 if not should_retry_without_streaming(exc, settings):
                     raise
         response = client.chat.completions.create(**request_payload)

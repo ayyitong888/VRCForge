@@ -17,7 +17,9 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const EXPECTED_VERSION = "1.3.0";
+const EXPECTED_VERSION = (await readFile(resolve(repoRoot, "VERSION"), "utf8"))
+  .replace(/^\uFEFF/, "")
+  .trim();
 const allowUnpushed = process.argv.includes("--allow-unpushed");
 const selfTest = process.argv.includes("--self-test");
 const cdpPort = Number(process.env.VRCFORGE_LOGGING_PROBE_CDP_PORT || "9354");
@@ -86,7 +88,7 @@ Runs the manifest-bound packaged logging and Developer Options acceptance.
 Default mode requires a clean strict release binding: HEAD, origin/main, and
 release-manifest.json commit must match. --allow-unpushed permits an explicitly
 non-release local pre-acceptance while still requiring manifest commit == HEAD,
-VERSION 1.3.0, and exact portable ZIP/payload hashes.
+VERSION ${EXPECTED_VERSION}, and exact portable ZIP/payload hashes.
 
 --self-test exercises pure provenance, log parser, privacy, report, timing, and
 process-scope helpers. It does not read a package, reserve a port, or start VRCForge.
@@ -2194,7 +2196,7 @@ function closureSucceeded(closure) {
 }
 
 function validateFinalContract(report) {
-  if (report.version !== EXPECTED_VERSION) addAssertion(report, "VERSION 1.3.0 was not proven");
+  if (report.version !== EXPECTED_VERSION) addAssertion(report, `VERSION ${EXPECTED_VERSION} was not proven`);
   if (allowUnpushed) {
     if (report.releaseBinding?.strictReleaseBinding !== false || report.mode !== "local-preacceptance") {
       addAssertion(report, "allow-unpushed mode was incorrectly marked as strict release evidence");

@@ -1985,6 +1985,12 @@ class DashboardServerTests(unittest.TestCase):
                 "clientTurnId": delivery["clientTurnId"],
                 "observe": {},
                 "plan": {"summary": "done", "planner": "test", "shellNeeded": False, "skillNeeded": False},
+                "contextCompaction": {
+                    "schema": "vrcforge.runtime_context_compaction.v1",
+                    "applied": True,
+                    "summary": "transient replacement text",
+                    "summaryDigest": "abc123",
+                },
             }
             request = {
                 "message": delivery["resumePrompt"],
@@ -2006,9 +2012,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(runtime.call_count, 1)
+        self.assertEqual(first.json()["contextCompaction"]["summary"], "transient replacement text")
         self.assertEqual(second.json()["turnId"], "turn-durable")
+        self.assertNotIn("contextCompaction", second.json())
         self.assertEqual(recoverable.json()["count"], 1)
         self.assertEqual(recoverable.json()["deliveries"][0]["response"]["turnId"], "turn-durable")
+        self.assertNotIn("contextCompaction", recoverable.json()["deliveries"][0]["response"])
         self.assertEqual(acknowledged.status_code, 200)
         self.assertEqual(after_ack.json()["count"], 0)
         goal = next(item for item in projected if item["goalId"] == goal_id)
@@ -2483,6 +2492,326 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(results["alpha"]["contextUsage"]["inputTokens"], 111)
         self.assertEqual(results["beta"]["contextUsage"]["inputTokens"], 222)
+
+    def test_agent_runtime_compacts_once_at_safe_mid_turn_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.register_tool(
+                "vrcforge_test_read",
+                "Read a bounded test value.",
+                "read/debug",
+                lambda _params: {"ok": True, "status": "ready"},
+            )
+            prompts: list[str] = []
+
+            def fake_llm(prompt: str) -> dict[str, object]:
+                prompts.append(prompt)
+                if len(prompts) == 1:
+                    payload = {
+                        "action": "skill",
+                        "skill_tool": "vrcforge_test_read",
+                        "skill_params": {},
+                        "summary": "read once",
+                    }
+                    input_tokens = 18_000
+                else:
+                    payload = {"action": "reply", "reply": "done after compacting"}
+                    input_tokens = 8_000
+                return {
+                    "text": json.dumps(payload),
+                    "usage": {
+                        "exact": True,
+                        "inputTokens": input_tokens,
+                        "outputTokens": 10,
+                        "totalTokens": input_tokens + 10,
+                    },
+                }
+
+            compact_calls: list[tuple[list[dict[str, object]], dict[str, object]]] = []
+
+            def compact_fn(history: list[dict[str, object]], metadata: dict[str, object]) -> dict[str, object]:
+                compact_calls.append((history, metadata))
+                return {
+                    "ok": True,
+                    "summary": "VRCForge successor summary",
+                    "entryCount": len(history),
+                    "retainedEntryCount": 2,
+                    "sourceDigest": "source-digest",
+                    "summaryDigest": "summary-digest",
+                    "fidelity": "fitted",
+                    "providerAttempts": 1,
+                }
+
+            gateway.llm_plan_fn = fake_llm
+            gateway.runtime_context_compact_fn = compact_fn
+            history = [
+                {"role": "user" if index % 2 == 0 else "agent", "text": f"OLD_HISTORY_{index}_" + ("x" * 1200)}
+                for index in range(24)
+            ]
+            response = gateway.runtime_message(
+                {
+                    "message": "continue safely",
+                    "sessionId": "sess-mid-turn-compaction",
+                    "history": history,
+                    "_contextCompactionLimit": 20_000,
+                }
+            )
+            audit_text = gateway.audit_log_path.read_text(encoding="utf-8")
+            runtime_run_text = gateway.runtime_run_log_path.read_text(encoding="utf-8")
+            runtime_runs = gateway.list_runtime_runs(session_id="sess-mid-turn-compaction")
+
+        self.assertEqual(len(compact_calls), 1)
+        self.assertEqual(compact_calls[0][1]["phase"], "mid_turn")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("OLD_HISTORY_0_", prompts[0])
+        self.assertNotIn("OLD_HISTORY_0_", prompts[1])
+        self.assertIn("VRCForge successor summary", prompts[1])
+        self.assertTrue(response["contextCompaction"]["applied"])
+        self.assertEqual(response["contextCompaction"]["phase"], "mid_turn")
+        self.assertEqual(response["contextCompaction"]["attempts"], 1)
+        self.assertGreaterEqual(response["contextCompaction"]["latencyMs"], 0)
+        self.assertEqual(
+            response["contextCompaction"]["retainedSummaryCharacters"],
+            len("VRCForge successor summary"),
+        )
+        self.assertEqual(response["contextUsage"]["preCompactionPeakInputTokens"], 18_000)
+        self.assertEqual(response["contextUsage"]["peakInputTokens"], 8_000)
+        self.assertNotIn("VRCForge successor summary", audit_text)
+        self.assertIn("summary-digest", audit_text)
+        completed_run = next(run for run in runtime_runs["runs"] if run.get("status") == "completed")
+        self.assertTrue(completed_run["contextCompaction"]["applied"])
+        self.assertEqual(completed_run["contextCompaction"]["phase"], "mid_turn")
+        self.assertEqual(completed_run["contextCompaction"]["summaryDigest"], "summary-digest")
+        self.assertNotIn("summary", completed_run["contextCompaction"])
+        self.assertNotIn("VRCForge successor summary", runtime_run_text)
+
+    def test_agent_runtime_stops_at_hard_limit_when_mid_turn_compaction_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.register_tool(
+                "vrcforge_test_read",
+                "Read a bounded test value.",
+                "read/debug",
+                lambda _params: {"ok": True},
+            )
+            planner_calls = 0
+
+            def fake_llm(_prompt: str) -> dict[str, object]:
+                nonlocal planner_calls
+                planner_calls += 1
+                return {
+                    "text": json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_test_read",
+                            "skill_params": {},
+                            "summary": "read once",
+                        }
+                    ),
+                    "usage": {
+                        "exact": True,
+                        "inputTokens": 19_500,
+                        "outputTokens": 10,
+                        "totalTokens": 19_510,
+                    },
+                }
+
+            gateway.llm_plan_fn = fake_llm
+            gateway.runtime_context_compact_fn = lambda _history, _metadata: (_ for _ in ()).throw(
+                TimeoutError("compactor unavailable")
+            )
+            response = gateway.runtime_message(
+                {
+                    "message": "continue safely",
+                    "sessionId": "sess-mid-turn-hard-stop",
+                    "history": [{"role": "user", "text": "original conversation remains"}],
+                    "_contextCompactionLimit": 20_000,
+                }
+            )
+
+        self.assertEqual(planner_calls, 1)
+        self.assertFalse(response["contextCompaction"]["applied"])
+        self.assertTrue(response["contextCompaction"]["blocked"])
+        self.assertEqual(response["contextCompaction"]["attempts"], 1)
+        self.assertGreaterEqual(response["contextCompaction"]["latencyMs"], 0)
+        self.assertEqual(response["plan"]["nextStep"], "context_compaction_required")
+
+    def test_agent_runtime_rechecks_hard_limit_after_suppressed_mid_turn_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.register_tool(
+                "vrcforge_test_read_alpha",
+                "Read the first bounded test value.",
+                "read/debug",
+                lambda _params: {"ok": True, "status": "alpha"},
+            )
+            gateway.register_tool(
+                "vrcforge_test_read_beta",
+                "Read the second bounded test value.",
+                "read/debug",
+                lambda _params: {"ok": True, "status": "beta"},
+            )
+            planner_calls = 0
+            compactor_calls = 0
+
+            def fake_llm(_prompt: str) -> dict[str, object]:
+                nonlocal planner_calls
+                planner_calls += 1
+                tool = "vrcforge_test_read_alpha" if planner_calls == 1 else "vrcforge_test_read_beta"
+                return {
+                    "text": json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": tool,
+                            "skill_params": {},
+                            "summary": f"read {planner_calls}",
+                        }
+                    ),
+                    "usage": {
+                        "exact": True,
+                        "inputTokens": 18_000 if planner_calls == 1 else 19_500,
+                        "outputTokens": 10,
+                        "totalTokens": 18_010 if planner_calls == 1 else 19_510,
+                    },
+                }
+
+            def failing_compactor(_history: list[dict[str, object]], _metadata: dict[str, object]) -> dict[str, object]:
+                nonlocal compactor_calls
+                compactor_calls += 1
+                raise TimeoutError("compactor unavailable")
+
+            gateway.llm_plan_fn = fake_llm
+            gateway.runtime_context_compact_fn = failing_compactor
+            response = gateway.runtime_message(
+                {
+                    "message": "continue safely",
+                    "sessionId": "sess-mid-turn-recheck",
+                    "history": [{"role": "user", "text": "original conversation remains"}],
+                    "_contextCompactionLimit": 20_000,
+                }
+            )
+
+        self.assertEqual(compactor_calls, 1)
+        self.assertEqual(planner_calls, 2)
+        self.assertFalse(response["contextCompaction"]["applied"])
+        self.assertTrue(response["contextCompaction"]["blocked"])
+        self.assertEqual(response["contextCompaction"]["failureClass"], "suppressed_after_attempt")
+        self.assertEqual(response["contextCompaction"]["suppressionReason"], "suppressed_after_attempt")
+        self.assertEqual(response["contextCompaction"]["attempts"], 0)
+        self.assertEqual(response["plan"]["nextStep"], "context_compaction_required")
+
+    def test_agent_runtime_cancel_during_compaction_keeps_original_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.register_tool(
+                "vrcforge_test_read",
+                "Read a bounded test value.",
+                "read/debug",
+                lambda _params: {"ok": True, "status": "ready"},
+            )
+            planner_calls = 0
+
+            def fake_llm(_prompt: str) -> dict[str, object]:
+                nonlocal planner_calls
+                planner_calls += 1
+                return {
+                    "text": json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_test_read",
+                            "skill_params": {},
+                            "summary": "read once",
+                        }
+                    ),
+                    "usage": {
+                        "exact": True,
+                        "inputTokens": 18_000,
+                        "outputTokens": 10,
+                        "totalTokens": 18_010,
+                    },
+                }
+
+            def cancelling_compactor(history: list[dict[str, object]], _metadata: dict[str, object]) -> dict[str, object]:
+                gateway.request_runtime_cancel(
+                    {
+                        "sessionId": "sess-mid-turn-cancel",
+                        "clientTurnId": "client-mid-turn-cancel",
+                        "reason": "test_cancel",
+                    }
+                )
+                return {
+                    "ok": True,
+                    "summary": "This summary must not replace the original history.",
+                    "entryCount": len(history),
+                    "retainedEntryCount": 1,
+                    "summaryDigest": "cancelled-summary-digest",
+                }
+
+            gateway.llm_plan_fn = fake_llm
+            gateway.runtime_context_compact_fn = cancelling_compactor
+            response = gateway.runtime_message(
+                {
+                    "message": "continue safely",
+                    "sessionId": "sess-mid-turn-cancel",
+                    "clientTurnId": "client-mid-turn-cancel",
+                    "history": [{"role": "user", "text": "original conversation remains"}],
+                    "_contextCompactionLimit": 20_000,
+                }
+            )
+
+        self.assertEqual(planner_calls, 1)
+        self.assertFalse(response["contextCompaction"]["applied"])
+        self.assertEqual(response["contextCompaction"]["failureClass"], "cancelled")
+        self.assertNotIn("summary", response["contextCompaction"])
+        self.assertEqual(response["contextUsage"]["peakInputTokens"], 18_000)
+        self.assertEqual(response["plan"]["nextStep"], "cancelled")
+
+    def test_agent_runtime_route_forwards_verified_context_limit_metadata(self) -> None:
+        runtime_payload = {
+            "ok": True,
+            "session_id": "sess-context-limit",
+            "sessionId": "sess-context-limit",
+            "turn_id": "turn-context-limit",
+            "turnId": "turn-context-limit",
+            "observe": {},
+            "plan": {"summary": "done", "reply": "done", "planner": "test"},
+        }
+        configured = SimpleNamespace(llm_provider="custom", llm_model="model-id")
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "runtime_message", return_value=runtime_payload) as runtime_message,
+            patch("dashboard_server.load_dashboard_settings", return_value=configured),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "continue",
+                        "provider": "custom",
+                        "model": "model-id",
+                        "contextLimit": 64_000,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = runtime_message.call_args.args[0]
+        self.assertEqual(forwarded["_contextCompactionLimit"], 64_000)
+        self.assertEqual(forwarded["provider"], "custom")
+        self.assertEqual(forwarded["model"], "model-id")
+
+        mismatched = dashboard_server.AgentRuntimeMessageRequest.model_validate(
+            {
+                "message": "continue",
+                "provider": "custom",
+                "model": "other-model",
+                "contextLimit": 64_000,
+            }
+        )
+        with patch("dashboard_server.load_dashboard_settings", return_value=configured):
+            self.assertIsNone(dashboard_server.verified_runtime_context_limit(mismatched))
 
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -3460,8 +3789,65 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(usage["inputTokens"], 1234)
         self.assertEqual(usage["outputTokens"], 56)
         self.assertEqual(usage["totalTokens"], 1290)
+        self.assertEqual(usage["cumulativeInputTokens"], 1234)
+        self.assertEqual(usage["cumulativeOutputTokens"], 56)
+        self.assertEqual(usage["cumulativeTotalTokens"], 1290)
+        self.assertEqual(usage["lastInputTokens"], 1234)
+        self.assertEqual(usage["lastOutputTokens"], 56)
+        self.assertEqual(usage["lastTotalTokens"], 1290)
+        self.assertEqual(usage["peakInputTokens"], 1234)
+        self.assertEqual(usage["peakTotalTokens"], 1290)
         self.assertEqual(usage["sentHistoryEntryCount"], 1)
         self.assertGreater(usage["promptCharacterCount"], 0)
+
+    def test_llm_context_usage_tracks_cumulative_last_and_peak_without_erasing_missing(self) -> None:
+        usage: dict[str, object] = {}
+
+        for tokens in (40_000, 45_000):
+            dashboard_server.AGENT_GATEWAY._record_llm_context_usage(
+                usage,
+                "prompt",
+                [{"role": "user", "text": "history"}],
+                {
+                    "exact": True,
+                    "inputTokens": tokens,
+                    "outputTokens": 0,
+                    "totalTokens": tokens,
+                },
+            )
+
+        self.assertEqual(usage["requestCount"], 2)
+        self.assertEqual(usage["inputTokens"], 85_000)
+        self.assertEqual(usage["totalTokens"], 85_000)
+        self.assertEqual(usage["cumulativeInputTokens"], 85_000)
+        self.assertEqual(usage["cumulativeTotalTokens"], 85_000)
+        self.assertEqual(usage["lastInputTokens"], 45_000)
+        self.assertEqual(usage["lastTotalTokens"], 45_000)
+        self.assertEqual(usage["peakInputTokens"], 45_000)
+        self.assertEqual(usage["peakTotalTokens"], 45_000)
+
+        measured_values = {
+            key: usage[key]
+            for key in (
+                "inputTokens",
+                "outputTokens",
+                "totalTokens",
+                "cumulativeInputTokens",
+                "cumulativeOutputTokens",
+                "cumulativeTotalTokens",
+                "lastInputTokens",
+                "lastOutputTokens",
+                "lastTotalTokens",
+                "peakInputTokens",
+                "peakTotalTokens",
+            )
+        }
+        dashboard_server.AGENT_GATEWAY._record_llm_context_usage(usage, "missing", [], None)
+
+        self.assertEqual(usage["requestCount"], 3)
+        self.assertFalse(usage["exact"])
+        self.assertEqual(usage["unavailableReason"], "provider_usage_missing")
+        self.assertEqual({key: usage[key] for key in measured_values}, measured_values)
 
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
@@ -4602,6 +4988,7 @@ class DashboardServerTests(unittest.TestCase):
             preview = SkillPackageService(root / "inspect", vrcforge_version="1.3.0").inspect_package(package_path)
             self.assertEqual(preview.manifest["id"], "community.legacy-export")
             self.assertEqual(preview.manifest["version"], "1.0.0")
+            self.assertEqual(preview.manifest["min_vrcforge_version"], "1.3.0")
             self.assertEqual(preview.manifest["entrypoints"], {"skill": "SKILL.md"})
 
     def test_manifest_user_skill_export_rejects_unsafe_support_without_residue(self) -> None:

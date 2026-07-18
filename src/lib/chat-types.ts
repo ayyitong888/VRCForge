@@ -37,10 +37,42 @@ export type ContextUsage = {
   source: "provider_usage" | "unavailable";
   exact: boolean;
   cached?: boolean;
+  inputTokenSource?: "peak" | "last" | "legacy" | "legacy_total";
+  peakInputTokens?: number;
+  lastInputTokens?: number;
+  cumulativeInputTokens?: number;
   ratio: number;
   label: string;
   title: string;
   warning: boolean;
+};
+
+export type ChatCompactionState = {
+  generation: string;
+  status: "idle" | "prefire" | "ready" | "compacting" | "applied" | "failed" | "suppressed" | "cancelled";
+  trigger?: "manual" | "auto";
+  phase?: "standalone" | "pre_turn" | "mid_turn";
+  sourceDigest?: string;
+  summaryDigest?: string;
+  beforeTokens?: number;
+  afterTokens?: number;
+  contextLimit?: number;
+  minimumReductionTokens?: number;
+  targetAfterTokens?: number;
+  provider?: string;
+  model?: string;
+  entryCount?: number;
+  retainedEntryCount?: number;
+  fidelity?: "full" | "fitted" | "fallback";
+  attempts?: number;
+  prefireOutcome?: "hit" | "waste";
+  latencyMs?: number;
+  retainedSummaryCharacters?: number;
+  suppressionReason?: string;
+  startedAt?: string;
+  completedAt?: string;
+  failureClass?: string;
+  message?: string;
 };
 
 export type ConversationItem =
@@ -49,7 +81,7 @@ export type ConversationItem =
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
   | { id: string; type: "error"; text: string; createdAt?: string }
-  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; createdAt?: string }
+  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
 
 export type ChatThread = {
@@ -62,6 +94,8 @@ export type ChatThread = {
   agentName?: string;
   pinned?: boolean;
   archived?: boolean;
+  revision?: number;
+  compaction?: ChatCompactionState;
   contextUsageCache?: AgentContextUsage;
   items: ConversationItem[];
 };

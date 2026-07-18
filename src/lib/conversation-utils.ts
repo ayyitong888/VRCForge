@@ -9,30 +9,18 @@ import type {
 import { formatAttachmentSize } from "./chat-format";
 import type { ChatAttachment, ContextUsage, ConversationItem } from "./chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
+import {
+  CONTEXT_AUTO_COMPACT_RATIO,
+  normalizeContextProvider,
+  resolveContextInputTokens,
+  resolveContextLimit,
+} from "./context-compaction";
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 
-const COMPACT_ENTRY_MAX_CHARS = 400;
-const COMPACT_HEAD_ENTRIES = 2;
-const COMPACT_TAIL_ENTRIES = 8;
-const CONTEXT_AUTO_COMPACT_RATIO = 0.92;
-const CONTEXT_TOKEN_LIMIT_ESTIMATE = 128000;
+const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
-
-type ContextLimitResolution = {
-  limit: number;
-  known: boolean;
-  source: "provider" | "known" | "estimated";
-};
-
-const KNOWN_MODEL_CONTEXT_LIMITS: Record<string, number> = {
-  "deepseek:deepseek-v4-pro": 1_000_000,
-  "gemini:gemini-2.5-flash": 1_048_576,
-  "gemini:gemini-2.5-pro": 1_048_576,
-  "gemini:gemini-2.5-flash-lite": 1_048_576,
-  "gemini:gemini-3.5-flash": 1_048_576,
-};
 
 export function formatPayload(value: unknown): string {
   if (value === null || value === undefined) {
@@ -49,20 +37,7 @@ export function formatPayload(value: unknown): string {
 }
 
 export function normalizeProviderForContext(provider: string): string {
-  const key = provider.trim().toLowerCase();
-  if (key.includes("gemini") || key.includes("google") || key.includes("vertex")) {
-    return "gemini";
-  }
-  if (key.includes("anthropic") || key.includes("claude")) {
-    return "anthropic";
-  }
-  if (key.includes("deepseek")) {
-    return "deepseek";
-  }
-  if (key.includes("openai")) {
-    return "openai";
-  }
-  return key || "unknown";
+  return normalizeContextProvider(provider);
 }
 
 export function findProviderModelInfo(models: ProviderModelInfo[], model: string): ProviderModelInfo | undefined {
@@ -80,9 +55,12 @@ export function buildContextUsageFromRuntime(
   if (!usage) {
     return undefined;
   }
-  const contextLimit = contextLimitForProviderModel(provider, model, modelInfo);
-  const limit = contextLimit.limit;
-  const used = numberOrNull(usage.inputTokens) ?? numberOrNull(usage.totalTokens);
+  const contextLimit = resolveContextLimit(provider, model, modelInfo);
+  const limit = contextLimit.known ? contextLimit.limit : CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE;
+  const resolvedInput = resolveContextInputTokens(usage);
+  const legacyTotal = numberOrNull(usage.totalTokens);
+  const used = resolvedInput?.tokens ?? legacyTotal;
+  const inputTokenSource = resolvedInput?.source ?? (legacyTotal !== null ? "legacy_total" : undefined);
   if (!usage.exact || used === null) {
     return {
       used: 0,
@@ -108,10 +86,14 @@ export function buildContextUsageFromRuntime(
     limitKnown: contextLimit.known,
     source: "provider_usage",
     exact: true,
+    inputTokenSource,
+    peakInputTokens: numberOrNull(usage.peakInputTokens) ?? undefined,
+    lastInputTokens: numberOrNull(usage.lastInputTokens) ?? undefined,
+    cumulativeInputTokens: numberOrNull(usage.cumulativeInputTokens) ?? numberOrNull(usage.inputTokens) ?? undefined,
     ratio,
     label: contextLimit.known ? `${formatCount(used)} / ${limitLabel} (${percent}%)` : `${formatCount(used)} / ${limitLabel}`,
     title: t("chat.contextUsageActualTitle", {
-      input: formatCount(numberOrNull(usage.inputTokens) ?? 0),
+      input: formatCount(used),
       output: formatCount(numberOrNull(usage.outputTokens) ?? 0),
       total: formatCount(numberOrNull(usage.totalTokens) ?? used),
       requests: formatCount(numberOrNull(usage.requestCount) ?? 1),
@@ -312,26 +294,6 @@ export function readChatAttachment(file: File, t: TFunction): Promise<ChatAttach
   });
 }
 
-export function buildCompactSummary(items: ConversationItem[], t: TFunction): string {
-  const entries = buildChatHistory(items, t).map(
-    (entry) => `${entry.role === "user" ? t("compact.user") : t("compact.assistant")}: ${clipText(entry.text.replace(/\s+/g, " ").trim(), COMPACT_ENTRY_MAX_CHARS)}`,
-  );
-  let lines = entries;
-  if (entries.length > COMPACT_HEAD_ENTRIES + COMPACT_TAIL_ENTRIES) {
-    const omitted = entries.length - COMPACT_HEAD_ENTRIES - COMPACT_TAIL_ENTRIES;
-    lines = [
-      ...entries.slice(0, COMPACT_HEAD_ENTRIES),
-      t("compact.omitted", { count: omitted }),
-      ...entries.slice(entries.length - COMPACT_TAIL_ENTRIES),
-    ];
-  }
-  return `${t("compact.summary", { count: entries.length })}\n${lines.join("\n")}`;
-}
-
-function clipText(text: string, limit: number): string {
-  return text.length > limit ? `${text.slice(0, limit)}\u2026` : text;
-}
-
 function normalizeModelId(model: string): string {
   const value = model.trim().toLowerCase();
   const modelsPathIndex = value.lastIndexOf("/models/");
@@ -339,34 +301,6 @@ function normalizeModelId(model: string): string {
     return value.slice(modelsPathIndex + "/models/".length);
   }
   return value.replace(/^models\//, "");
-}
-
-function readProviderModelContextLimit(modelInfo?: ProviderModelInfo): number | null {
-  const candidates = [
-    modelInfo?.inputTokenLimit,
-    modelInfo?.contextWindow,
-    modelInfo?.maxInputTokens,
-  ];
-  for (const value of candidates) {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function contextLimitForProviderModel(provider: string, model: string, modelInfo?: ProviderModelInfo): ContextLimitResolution {
-  const providerLimit = readProviderModelContextLimit(modelInfo);
-  if (providerLimit) {
-    return { limit: providerLimit, known: true, source: "provider" };
-  }
-  const providerKey = normalizeProviderForContext(provider);
-  const modelKey = normalizeModelId(model);
-  const knownLimit = KNOWN_MODEL_CONTEXT_LIMITS[`${providerKey}:${modelKey}`];
-  if (knownLimit) {
-    return { limit: knownLimit, known: true, source: "known" };
-  }
-  return { limit: CONTEXT_TOKEN_LIMIT_ESTIMATE, known: false, source: "estimated" };
 }
 
 function numberOrNull(value: unknown): number | null {

@@ -277,6 +277,10 @@ class ProviderStreamingTests(unittest.TestCase):
                     return [
                         SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"reply":"hel'))]),
                         SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='lo"}'))]),
+                        SimpleNamespace(
+                            choices=[],
+                            usage=SimpleNamespace(prompt_tokens=321, completion_tokens=7, total_tokens=328),
+                        ),
                     ]
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"fallback"}'))])
 
@@ -305,6 +309,48 @@ class ProviderStreamingTests(unittest.TestCase):
         self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
         self.assertEqual(FakeOpenAI.instances[0].kwargs, {"api_key": "test-key", "base_url": "https://api.deepseek.example/v1"})
         self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True])
+        self.assertEqual(FakeOpenAI.instances[0].chat.completions.calls[0]["stream_options"], {"include_usage": True})
+        self.assertEqual(response.usage["inputTokens"], 321)
+        self.assertEqual(response.usage["outputTokens"], 7)
+        self.assertTrue(response.usage["exact"])
+
+    def test_stream_usage_option_unsupported_retries_stream_without_losing_text(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("stream_options"):
+                    raise RuntimeError("unknown parameter: stream_options")
+                return [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"reply":"compatible"}'))])]
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeOpenAI:
+            instances: list["FakeOpenAI"] = []
+
+            def __init__(self, **kwargs) -> None:
+                self.chat = FakeChat()
+                FakeOpenAI.instances.append(self)
+
+        openai_module = types.ModuleType("openai")
+        openai_module.OpenAI = FakeOpenAI
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = openai_module
+        settings = make_llm_settings("deepseek", model="deepseek-chat", base_url="https://api.deepseek.example/v1")
+        chunks: list[str] = []
+
+        response = request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=chunks.append)
+
+        calls = FakeOpenAI.instances[0].chat.completions.calls
+        self.assertEqual(response.text, '{"reply":"compatible"}')
+        self.assertEqual(chunks, ['{"reply":"compatible"}'])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["stream_options"], {"include_usage": True})
+        self.assertNotIn("stream_options", calls[1])
         self.assertEqual(response.usage["unavailableReason"], "provider_stream_usage_missing")
 
     def test_custom_stream_unsupported_falls_back_to_non_streaming(self) -> None:

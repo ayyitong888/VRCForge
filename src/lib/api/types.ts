@@ -405,6 +405,14 @@ export type AgentContextUsage = {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  cumulativeInputTokens?: number;
+  cumulativeOutputTokens?: number;
+  cumulativeTotalTokens?: number;
+  lastInputTokens?: number;
+  lastOutputTokens?: number;
+  lastTotalTokens?: number;
+  peakInputTokens?: number;
+  peakTotalTokens?: number;
   cacheReadTokens?: number;
   requestCount?: number;
   sentHistoryEntryCount?: number;
@@ -474,6 +482,30 @@ export type AgentRuntimeResponse = {
   };
   reasoning?: AgentReasoningTrace;
   contextUsage?: AgentContextUsage;
+  contextCompaction?: {
+    schema: "vrcforge.runtime_context_compaction.v1" | string;
+    applied: boolean;
+    trigger?: "auto" | "manual";
+    phase?: "pre_turn" | "mid_turn" | "standalone";
+    summary?: string;
+    beforeTokens?: number;
+    afterTokens?: number;
+    contextLimit?: number;
+    triggerTokens?: number;
+    hardLimitTokens?: number;
+    targetAfterTokens?: number;
+    entryCount?: number;
+    retainedEntryCount?: number;
+    sourceDigest?: string;
+    summaryDigest?: string;
+    fidelity?: "full" | "fitted" | "fallback";
+    attempts?: number;
+    latencyMs?: number;
+    retainedSummaryCharacters?: number;
+    failureClass?: string;
+    suppressionReason?: string;
+    blocked?: boolean;
+  };
   attachments?: AgentMessageAttachment[];
   write?: {
     ok?: boolean;

@@ -57,6 +57,7 @@ import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
+import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { parseGoalWakeDirective, useGoalWake } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useOptimizationWorkspaceController } from "./hooks/use-optimization-workspace-controller";
@@ -92,7 +93,6 @@ import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationErr
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import {
   buildChatHistory,
-  buildCompactSummary,
   buildContextUsageFromRuntime,
   cloneChatAttachments,
   conversationItemText,
@@ -105,6 +105,7 @@ import {
   readChatAttachment,
   selectedTextAttachment,
 } from "./lib/conversation-utils";
+import { resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
@@ -134,7 +135,6 @@ import {
   AdvancedSettingsState,
   acknowledgeSubAgentHandoff,
   DoctorReport,
-  compactAgentHistory,
   answerAgentQuestion,
   cancelSubAgent,
   createAgentGoal,
@@ -280,7 +280,6 @@ export default function App() {
   const [subAgentError, setSubAgentError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
-  const [compacting, setCompacting] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -660,6 +659,7 @@ export default function App() {
     chatSidebar,
     touchChat,
     updateChat,
+    updateChatIfRevision,
     appendToChat,
     ensureActiveChat,
     persistChatsNow,
@@ -697,6 +697,18 @@ export default function App() {
   const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
   const pendingApprovals = pendingApprovalItems.length;
   const {
+    compacting,
+    compactChat: runContextCompaction,
+    prepareTurnContext,
+    cancelCompaction,
+  } = useContextCompactionController({
+    getChatById,
+    updateChat,
+    updateChatIfRevision,
+    persistChatsNow,
+    setError,
+  });
+  const {
     sending: chatRunSending,
     queued,
     currentTurn,
@@ -721,6 +733,8 @@ export default function App() {
     refreshRuntimeRuns: (includeEvents, target) => refreshRuntimeRunsRef.current(includeEvents, target),
     handleRuntimeSessionFailure,
     setError,
+    prepareTurnContext,
+    persistChatsNow,
   });
   const sending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -1864,6 +1878,7 @@ export default function App() {
       setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
       return true;
     }
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
     const turn: QueuedTurn = {
       id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: message,
@@ -1871,6 +1886,7 @@ export default function App() {
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
       model: providerSnapshot.model,
+      contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
     };
     setEditingMessage(null);
     setInput("");
@@ -1919,6 +1935,7 @@ export default function App() {
       setError(t("chat.noPreviousUserMessage"));
       return;
     }
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
     const turn: QueuedTurn = {
       id: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: userItem.text,
@@ -1926,6 +1943,7 @@ export default function App() {
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
       model: providerSnapshot.model,
+      contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
     };
     void runTurnNow(chat.id, turn, {
       baseItems: chat.items.slice(0, userIndex),
@@ -2003,62 +2021,24 @@ export default function App() {
       setError(t("compact.noContent"));
       return;
     }
-    const chatId = activeChat.id;
-    const items = activeChat.items;
-    const compactId = `compact-${Date.now()}`;
-    updateChat(chatId, (chat) => ({
-      ...touchChat(chat),
-      sessionId: "",
-      items: [
-        {
-          id: compactId,
-          type: "compact",
-          text: t("compact.running"),
-          status: "running",
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    }));
-    setCompacting(true);
-    let summary = "";
-    let entryCount = items.length;
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (readyEndpoint) {
-          targetEndpoint = readyEndpoint;
-        }
+    let targetEndpoint = endpoint;
+    if (!runtimeConnected) {
+      const readyEndpoint = await startRuntime();
+      if (!readyEndpoint) {
+        return;
       }
-      const payload = await compactAgentHistory(targetEndpoint, buildChatHistory(items, t));
-      summary = (payload.summary || "").trim();
-      entryCount = payload.entryCount ?? items.length;
-      if (summary) {
-        summary = `${t("compact.modelSummary", { count: entryCount })}\n${summary}`;
-      }
-    } catch {
-      summary = "";
-    } finally {
-      setCompacting(false);
+      targetEndpoint = readyEndpoint;
     }
-    if (!summary) {
-      summary = buildCompactSummary(items, t);
-    }
-    updateChat(chatId, (chat) => ({
-      ...touchChat(chat),
-      sessionId: "",
-      items: [
-        {
-          id: compactId,
-          type: "compact",
-          text: t("compact.completed"),
-          detail: summary,
-          status: "completed",
-          entryCount,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    }));
+    const limit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
+    await runContextCompaction({
+      chatId: activeChat.id,
+      endpoint: targetEndpoint,
+      trigger: "manual",
+      phase: "standalone",
+      provider: providerSnapshot.provider,
+      model: providerSnapshot.model,
+      contextLimit: limit.known ? limit.limit : undefined,
+    });
   }
 
   function openSettingsSection(section: SettingsSection = "general") {
@@ -2185,6 +2165,7 @@ export default function App() {
       message = task;
       computerUseRequested = true;
     }
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
     const turn: QueuedTurn = {
       id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: message,
@@ -2192,6 +2173,7 @@ export default function App() {
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
       model: providerSnapshot.model,
+      contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
       computerUseRequested,
       computerUseVisualTheme: computerUseRequested ? theme : undefined,
       computerUseVisualAccent: computerUseRequested ? resolveComputerUseAccentHex() || undefined : undefined,
@@ -2208,6 +2190,10 @@ export default function App() {
   function stopInteractiveActivity(actionId?: string) {
     if (currentTurn?.clientTurnId || isChatRunActive()) {
       stopCurrentRun();
+      return;
+    }
+    if (compacting && activeChatId) {
+      cancelCompaction(activeChatId);
       return;
     }
     if (actionId) {
@@ -2979,6 +2965,8 @@ export default function App() {
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
               contextUsage={contextUsage}
+              compaction={activeChat?.compaction}
+              onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
               editing={Boolean(editingMessage && editingMessage.chatId === activeChatId)}

@@ -57,6 +57,7 @@ from agent_gateway import (
     redact_sensitive,
 )
 from backend_owner_lease import BackendOwnerLease
+from context_compaction import ContextCompactionInputError, compact_context
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
     DiagnosticLogManager,
@@ -101,7 +102,7 @@ from outfit_import_planner import (
     detect_magenta_materials,
 )
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
-from path_to_skill import PathToSkillError, build_path_to_skill_source
+from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
 from project_memory_index import scan_project_memory
 from shader_adapter_registry import (
     PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
@@ -798,6 +799,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     provider: str | None = None
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
+    context_limit: int | None = Field(default=None, alias="contextLimit", gt=0, le=10_000_000)
     history: list[dict[str, Any]] = Field(default_factory=list)
     computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
     computer_use_grant_id: str | None = Field(default=None, alias="computerUseGrantId")
@@ -1306,6 +1308,16 @@ class ProviderTestRequest(ApiConfigRequest):
 
 class AgentCompactRequest(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
+    source_digest: str = Field(default="", alias="sourceDigest")
+    trigger: Literal["manual", "auto"] = "manual"
+    phase: Literal["standalone", "pre_turn", "mid_turn"] = "standalone"
+    language: str = ""
+    provider: str = ""
+    model: str = ""
+    target_tokens: int | None = Field(default=None, alias="targetTokens")
+    real_context_limit: int | None = Field(default=None, alias="realContextLimit")
+
+    model_config = {"populate_by_name": True}
 
 
 @dataclass
@@ -2193,6 +2205,7 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
     goal_delivery_started = False
+    verified_context_limit = verified_runtime_context_limit(runtime_request)
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.require_computer_use_enabled()
@@ -2230,6 +2243,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
                 "provider": runtime_request.provider,
                 "providerLabel": runtime_request.provider_label,
                 "model": runtime_request.model,
+                "_contextCompactionLimit": verified_context_limit,
                 "history": runtime_request.history,
                 "_computerUseRequested": runtime_request.computer_use_requested,
                 "_computerUseGrantId": runtime_request.computer_use_grant_id,
@@ -2240,10 +2254,16 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         )
         if runtime_request.goal_delivery_id:
             payload = {**payload, "goalDeliveryId": runtime_request.goal_delivery_id}
+            persisted_delivery_payload = dict(payload)
+            # Runtime summaries are transient replacement material for the
+            # renderer. Goal delivery sidecars retain the original chat and
+            # never persist compaction prose.
+            persisted_delivery_payload.pop("contextCompaction", None)
+            persisted_delivery_payload.pop("context_compaction", None)
             await asyncio.to_thread(
                 AGENT_GATEWAY.complete_agent_goal_delivery,
                 runtime_request.goal_delivery_id,
-                payload,
+                persisted_delivery_payload,
             )
     except AgentGatewayError as exc:
         if runtime_request.goal_delivery_id and goal_delivery_started:
@@ -2275,6 +2295,31 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     return payload
 
 
+def verified_runtime_context_limit(runtime_request: AgentRuntimeMessageRequest) -> int | None:
+    if runtime_request.context_limit is None:
+        return None
+    settings = load_dashboard_settings(ConnectionRequest())
+    raw_requested_provider = str(runtime_request.provider or "").strip()
+    if not raw_requested_provider:
+        return None
+    try:
+        requested_provider = normalize_provider_name(raw_requested_provider)
+        configured_provider = normalize_provider_name(str(settings.llm_provider or ""))
+    except RuntimeError:
+        return None
+    requested_model = str(runtime_request.model or "").strip().lower()
+    configured_model = str(settings.llm_model or "").strip().lower()
+    if requested_model.startswith("models/"):
+        requested_model = requested_model[7:]
+    if configured_model.startswith("models/"):
+        configured_model = configured_model[7:]
+    if not requested_model:
+        return None
+    if requested_provider != configured_provider or requested_model != configured_model:
+        return None
+    return runtime_request.context_limit
+
+
 @app.post("/api/app/agent/computer-use/grants")
 def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> dict[str, Any]:
     try:
@@ -2289,65 +2334,27 @@ def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> d
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-AGENT_COMPACT_TRANSCRIPT_MAX_CHARS = 60000
-
-
 @app.post("/api/app/agent/compact")
 def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
-    entries: list[str] = []
-    for item in request.history:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        role = "用户" if str(item.get("role") or "user").strip().lower() == "user" else "助手"
-        entries.append(f"{role}: {text}")
-    if not entries:
-        raise HTTPException(status_code=400, detail="history is empty; nothing to compact.")
-
     settings = load_dashboard_settings(ConnectionRequest())
-    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{provider_display_name(settings.llm_provider)} API key is not configured; LLM compaction is unavailable.",
+    summarizer: Callable[[str], Any] | None = None
+    if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
+        summarizer = lambda prompt: request_llm_plan(settings, prompt)
+    try:
+        return compact_context(
+            request.history,
+            summarizer=summarizer,
+            source_digest=request.source_digest,
+            trigger=request.trigger,
+            phase=request.phase,
+            language=request.language,
+            provider=settings.llm_provider,
+            model=settings.llm_model,
+            target_tokens=request.target_tokens,
+            real_context_limit=request.real_context_limit,
         )
-
-    transcript = "\n".join(entries)
-    if len(transcript) > AGENT_COMPACT_TRANSCRIPT_MAX_CHARS:
-        transcript = transcript[-AGENT_COMPACT_TRANSCRIPT_MAX_CHARS:]
-    prompt = (
-        "你是会话压缩助手。请把下面这段用户与助手的对话历史压缩成一份中文摘要，"
-        "保留：用户的目标和需求、已经完成的事情和结果、做出的关键决定（含具体文件名/对象名/参数值）、"
-        "尚未完成或待确认的事项。省略寒暄与重复内容。摘要控制在 500 字以内。\n"
-        '只返回 JSON，格式为 {"summary": "<中文摘要>"}，不要 Markdown，不要其他文字。\n'
-        "对话历史：\n"
-        f"{transcript}"
-    )
-    try:
-        raw_response = request_llm_plan(settings, prompt)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM compaction failed: {exc}") from exc
-
-    summary = ""
-    try:
-        raw_json = extract_json_block(raw_response)
-        payload = json.loads(raw_json) if raw_json else {}
-        if isinstance(payload, dict):
-            summary = str(payload.get("summary") or "").strip()
-    except Exception:  # noqa: BLE001
-        summary = ""
-    if not summary:
-        summary = str(raw_response or "").strip()
-    if not summary:
-        raise HTTPException(status_code=502, detail="LLM returned an empty summary.")
-    return {
-        "ok": True,
-        "summary": summary,
-        "provider": settings.llm_provider,
-        "model": settings.llm_model,
-        "entryCount": len(entries),
-    }
+    except ContextCompactionInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/app/agent/session/{session_id}")
@@ -4115,7 +4122,7 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
                 "version": "1.0.0",
                 "author": "VRCForge User",
                 "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
-                "min_vrcforge_version": app.version,
+                "min_vrcforge_version": DEFAULT_MIN_VRCFORGE_VERSION,
                 "permissions": ["read_project"],
                 "entrypoints": {"skill": "SKILL.md"},
             }
@@ -10084,6 +10091,32 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
 
 
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
+
+
+def _agent_gateway_context_compact(
+    history: list[dict[str, Any]],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Host compactor for safe runtime continuation boundaries."""
+
+    settings = load_dashboard_settings(ConnectionRequest())
+    summarizer: Callable[[str], Any] | None = None
+    if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
+        summarizer = lambda prompt: request_llm_plan(settings, prompt)
+    return compact_context(
+        history,
+        summarizer=summarizer,
+        trigger="auto",
+        phase="mid_turn",
+        language=str(metadata.get("language") or ""),
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        target_tokens=metadata.get("targetTokens"),
+        real_context_limit=metadata.get("realContextLimit"),
+    )
+
+
+AGENT_GATEWAY.runtime_context_compact_fn = _agent_gateway_context_compact
 
 
 def _agent_gateway_vision_analyze(message: str, images: list[dict[str, Any]]) -> dict[str, Any]:

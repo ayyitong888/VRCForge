@@ -7,13 +7,74 @@ export type ChatHistoryEntry = {
   text: string;
 };
 
+export type AgentHistoryContextBudget = {
+  targetTokens?: number;
+  realContextLimit?: number;
+};
+
+export type AgentHistoryCompactionPhase =
+  | "standalone"
+  | "pre_turn"
+  | "mid_turn"
+  | (string & {});
+
+export type CompactAgentHistoryOptions = {
+  history: ChatHistoryEntry[];
+  signal?: AbortSignal;
+  trigger?: "manual" | "auto";
+  phase?: AgentHistoryCompactionPhase;
+  sourceDigest?: string;
+  language?: string;
+  provider?: string;
+  model?: string;
+  targetTokens?: number;
+  realContextLimit?: number;
+  contextBudget?: AgentHistoryContextBudget;
+};
+
+export type AgentHistoryCompactionRedaction = {
+  paths?: number;
+  secrets?: number;
+  avatarBlueprintIds?: number;
+  total?: number;
+};
+
+export type AgentHistoryCompactionDetails = {
+  schema?: string;
+  summary: string;
+  entryCount?: number;
+  retainedEntryCount?: number;
+  sourceDigest?: string;
+  summaryDigest?: string;
+  clientDigestMatched?: boolean | null;
+  fidelity?: "full" | "fitted" | "fallback";
+  redaction?: AgentHistoryCompactionRedaction;
+  redactions?: AgentHistoryCompactionRedaction;
+  trigger?: "manual" | "auto";
+  phase?: AgentHistoryCompactionPhase;
+  language?: string;
+  targetTokens?: number;
+  realContextLimit?: number | null;
+  estimatedInputTokens?: number;
+  attempts?: number;
+  providerAttempts?: number;
+  failureClass?: string;
+  fallbackReason?: string;
+};
+
+export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
+  ok: boolean;
+  provider?: string;
+  model?: string;
+};
+
 export async function sendAgentMessage(
   endpoint: string,
   message: string,
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -27,6 +88,7 @@ export async function sendAgentMessage(
     provider: options.provider || undefined,
     providerLabel: options.providerLabel || undefined,
     model: options.model || undefined,
+    contextLimit: options.contextLimit && options.contextLimit > 0 ? Math.floor(options.contextLimit) : undefined,
     computerUseRequested: Boolean(options.computerUseRequested),
     computerUseGrantId: options.computerUseGrantId,
     computerUseVisualTheme: options.computerUseVisualTheme,
@@ -51,6 +113,7 @@ export async function sendAgentMessage(
       provider: request.provider,
       providerLabel: request.providerLabel,
       model: request.model,
+      contextLimit: request.contextLimit,
       computerUseRequested: request.computerUseRequested,
       computerUseGrantId: request.computerUseGrantId,
       computerUseVisualTheme: request.computerUseVisualTheme,
@@ -595,19 +658,40 @@ export async function clearAgentMemory(
   });
 }
 
-export async function compactAgentHistory(
+export function compactAgentHistory(
   endpoint: string,
   history: ChatHistoryEntry[],
-): Promise<{ ok: boolean; summary: string; provider?: string; model?: string; entryCount?: number }> {
+  signal?: AbortSignal,
+): Promise<CompactAgentHistoryResponse>;
+export function compactAgentHistory(
+  endpoint: string,
+  options: CompactAgentHistoryOptions,
+): Promise<CompactAgentHistoryResponse>;
+export async function compactAgentHistory(
+  endpoint: string,
+  historyOrOptions: ChatHistoryEntry[] | CompactAgentHistoryOptions,
+  signal?: AbortSignal,
+): Promise<CompactAgentHistoryResponse> {
+  const options: CompactAgentHistoryOptions = Array.isArray(historyOrOptions)
+    ? { history: historyOrOptions, signal }
+    : historyOrOptions;
+  const { signal: requestSignal, contextBudget, ...requestBody } = options;
+  const body = {
+    ...requestBody,
+    targetTokens: requestBody.targetTokens ?? contextBudget?.targetTokens,
+    realContextLimit: requestBody.realContextLimit ?? contextBudget?.realContextLimit,
+  };
   if (hasTauriInternals()) {
-    return invokeTauriWithAbort("compact_agent_history", {
-      request: { body: { history }, timeoutMs: 120000 },
-    });
+    return invokeTauriWithAbort<CompactAgentHistoryResponse>("compact_agent_history", {
+      request: { body, timeoutMs: 120000 },
+    }, requestSignal);
   }
-  return requestJson(`${endpoint}/api/app/agent/compact`, {
+  return requestJson<CompactAgentHistoryResponse>(`${endpoint}/api/app/agent/compact`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ history }),
+    body: JSON.stringify(body),
+    signal: requestSignal,
+    timeoutMs: 120000,
   });
 }
 

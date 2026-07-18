@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -47,6 +48,10 @@ ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
 ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
 APPLY_RECOVERY_SCHEMA = "vrcforge.interrupted_apply_recovery.v1"
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
+RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
+RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.85
+RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
+RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 LOCAL_STATE_CHECKPOINT_TARGETS = {
@@ -1520,6 +1525,13 @@ class AgentGateway:
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
         self.llm_plan_fn: Callable[[str], Any] | None = None
+        # Optional host-owned context compactor. It receives a redaction-safe
+        # history snapshot plus bounded policy metadata and returns a validated
+        # successor summary. The gateway invokes it only between tool results
+        # and the next model sample, never during approval/write mutation.
+        self.runtime_context_compact_fn: Callable[
+            [list[dict[str, Any]], dict[str, Any]], dict[str, Any]
+        ] | None = None
         # Optional vision-analysis hook injected by the host server. Receives
         # (message, image_attachments) and returns a dict:
         #   {"status": "analyzed", "text", "provider", "providerLabel",
@@ -2299,6 +2311,17 @@ class AgentGateway:
         last_plan: dict[str, Any] = {}
         iterations = 0
         cap_reached = False
+        runtime_compaction: dict[str, Any] | None = None
+        runtime_compaction_attempted = False
+        runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
+
+        def discard_runtime_compaction_for_cancel() -> None:
+            nonlocal runtime_compaction
+            if runtime_compaction_usage_checkpoint is not None:
+                context_usage.clear()
+                context_usage.update(runtime_compaction_usage_checkpoint)
+            if runtime_compaction is not None:
+                runtime_compaction = runtime_compaction_cancelled_view(runtime_compaction)
 
         if bool(params.get("_computerUseRequested")):
             bootstrap_params: dict[str, Any] = {
@@ -2344,6 +2367,7 @@ class AgentGateway:
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
             if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+                discard_runtime_compaction_for_cancel()
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
@@ -2351,6 +2375,49 @@ class AgentGateway:
                     "nextStep": "cancelled",
                 }
                 break
+            if step_index > 0:
+                usage_before_compaction = dict(context_usage)
+                history, compaction_result, compaction_blocked = self._maybe_compact_runtime_history(
+                    message=message,
+                    params=params,
+                    observe=observe,
+                    history=history,
+                    loop_state=loop_state,
+                    context_usage=context_usage,
+                    attempt_compaction=not runtime_compaction_attempted,
+                )
+                if compaction_result is not None:
+                    runtime_compaction_attempted = True
+                    if compaction_result.get("applied"):
+                        if runtime_compaction_usage_checkpoint is None:
+                            runtime_compaction_usage_checkpoint = usage_before_compaction
+                        runtime_compaction = compaction_result
+                    elif runtime_compaction is None or not runtime_compaction.get("applied"):
+                        runtime_compaction = compaction_result
+                    elif compaction_blocked:
+                        runtime_compaction = {**runtime_compaction, "blocked": True}
+                if self._consume_runtime_cancel_request(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                ):
+                    discard_runtime_compaction_for_cancel()
+                    last_plan = {
+                        "summary": "Runtime turn was cancelled by the user.",
+                        "reply": "Request cancelled.",
+                        "planner": "runtime",
+                        "nextStep": "cancelled",
+                    }
+                    break
+                if compaction_blocked:
+                    last_plan = {
+                        "summary": "Context compaction could not create enough safe headroom.",
+                        "reply": "VRCForge paused before another model request because the context was at its safety limit and compaction did not create enough headroom. The original conversation is still intact; retry manual compaction or switch to a model with a larger verified context window.",
+                        "planner": "runtime",
+                        "nextStep": "context_compaction_required",
+                    }
+                    iterations += 1
+                    break
             plan = self._plan_agent_turn(
                 message,
                 params,
@@ -2362,6 +2429,7 @@ class AgentGateway:
             )
             iterations += 1
             if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+                discard_runtime_compaction_for_cancel()
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
@@ -2516,8 +2584,14 @@ class AgentGateway:
         context_usage = ensure_dict(context_usage)
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
-        top_plan = first_plan if iterations <= 1 else self._summarize_loop_plan(
-            message, first_plan, last_plan, steps
+        terminal_override = str(last_plan.get("nextStep") or "") in {
+            "cancelled",
+            "context_compaction_required",
+        }
+        top_plan = last_plan if terminal_override else (
+            first_plan if iterations <= 1 else self._summarize_loop_plan(
+                message, first_plan, last_plan, steps
+            )
         )
         if cap_reached and isinstance(top_plan, dict):
             top_plan["stepLimitReached"] = True
@@ -2559,6 +2633,8 @@ class AgentGateway:
             turn["reasoning"] = reasoning_trace
         if context_usage:
             turn["contextUsage"] = context_usage
+        if runtime_compaction:
+            turn["contextCompaction"] = runtime_compaction_audit_view(runtime_compaction)
         if shell_payload is not None:
             turn["shell"] = shell_payload
         if skill_payload is not None:
@@ -2594,6 +2670,7 @@ class AgentGateway:
                 "skillTool": skill_payload.get("tool") if skill_payload else "",
                 "writeStatus": write_payload.get("status") if write_payload else "none",
                 "contextUsage": context_usage,
+                "contextCompaction": runtime_compaction_audit_view(runtime_compaction),
             }
         )
         self._append_runtime_run(
@@ -2614,6 +2691,7 @@ class AgentGateway:
                 write_payload=write_payload,
                 approval_id=approval_id,
                 context_usage=context_usage,
+                context_compaction=runtime_compaction_audit_view(runtime_compaction),
             )
         )
 
@@ -2638,6 +2716,8 @@ class AgentGateway:
             payload["reasoning"] = reasoning_trace
         if context_usage:
             payload["contextUsage"] = context_usage
+        if runtime_compaction:
+            payload["contextCompaction"] = runtime_compaction
         if shell_payload is not None:
             payload["shell"] = shell_payload
         if skill_payload is not None:
@@ -2911,6 +2991,7 @@ class AgentGateway:
         write_payload: dict[str, Any] | None,
         approval_id: str,
         context_usage: dict[str, Any] | None = None,
+        context_compaction: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         approval_ids = []
         if approval_id:
@@ -2954,6 +3035,8 @@ class AgentGateway:
         }
         if context_usage:
             record["contextUsage"] = context_usage
+        if context_compaction:
+            record["contextCompaction"] = context_compaction
         return record
 
     def request_runtime_cancel(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -9301,14 +9384,31 @@ class AgentGateway:
                     "inputTokens": 0,
                     "outputTokens": 0,
                     "totalTokens": 0,
+                    "cumulativeInputTokens": 0,
+                    "cumulativeOutputTokens": 0,
+                    "cumulativeTotalTokens": 0,
                     "cacheReadTokens": 0,
                     "promptCharacterCount": 0,
                 }
             )
 
+        # Keep the original cumulative field names as compatibility aliases.
+        # This also upgrades an in-memory usage projection created by an older
+        # build without discarding any measurements it already contains.
+        for legacy_key, cumulative_key in (
+            ("inputTokens", "cumulativeInputTokens"),
+            ("outputTokens", "cumulativeOutputTokens"),
+            ("totalTokens", "cumulativeTotalTokens"),
+        ):
+            if cumulative_key not in current:
+                current[cumulative_key] = int(current.get(legacy_key) or 0)
+            if legacy_key not in current:
+                current[legacy_key] = int(current.get(cumulative_key) or 0)
+
         current["requestCount"] = int(current.get("requestCount") or 0) + 1
         current["promptCharacterCount"] = int(current.get("promptCharacterCount") or 0) + len(prompt)
         current["lastPromptCharacterCount"] = len(prompt)
+        current["lastPromptEstimatedTokens"] = estimate_runtime_context_tokens(prompt)
         current["sentHistoryEntryCount"] = sum(
             1 for entry in history if isinstance(entry, dict) and str(entry.get("text") or "").strip()
         )
@@ -9331,18 +9431,178 @@ class AgentGateway:
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
 
-        if exact and (input_tokens is not None or output_tokens is not None or total_tokens is not None):
+        if exact and (
+            input_tokens is not None
+            or output_tokens is not None
+            or total_tokens is not None
+            or cache_read_tokens is not None
+        ):
             if input_tokens is not None:
-                current["inputTokens"] = int(current.get("inputTokens") or 0) + input_tokens
+                cumulative_input_tokens = int(current.get("cumulativeInputTokens") or 0) + input_tokens
+                current["inputTokens"] = cumulative_input_tokens
+                current["cumulativeInputTokens"] = cumulative_input_tokens
+                current["lastInputTokens"] = input_tokens
+                current["peakInputTokens"] = max(int(current.get("peakInputTokens") or 0), input_tokens)
             if output_tokens is not None:
-                current["outputTokens"] = int(current.get("outputTokens") or 0) + output_tokens
+                cumulative_output_tokens = int(current.get("cumulativeOutputTokens") or 0) + output_tokens
+                current["outputTokens"] = cumulative_output_tokens
+                current["cumulativeOutputTokens"] = cumulative_output_tokens
+                current["lastOutputTokens"] = output_tokens
             if total_tokens is not None:
-                current["totalTokens"] = int(current.get("totalTokens") or 0) + total_tokens
+                cumulative_total_tokens = int(current.get("cumulativeTotalTokens") or 0) + total_tokens
+                current["totalTokens"] = cumulative_total_tokens
+                current["cumulativeTotalTokens"] = cumulative_total_tokens
+                current["lastTotalTokens"] = total_tokens
+                current["peakTotalTokens"] = max(int(current.get("peakTotalTokens") or 0), total_tokens)
             if cache_read_tokens is not None:
                 current["cacheReadTokens"] = int(current.get("cacheReadTokens") or 0) + cache_read_tokens
         else:
             current["exact"] = False
             current["unavailableReason"] = str(usage.get("unavailableReason") or "provider_usage_missing")
+
+    def _maybe_compact_runtime_history(
+        self,
+        *,
+        message: str,
+        params: dict[str, Any],
+        observe: dict[str, Any],
+        history: list[dict[str, Any]],
+        loop_state: list[dict[str, Any]],
+        context_usage: dict[str, Any],
+        attempt_compaction: bool = True,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
+        """Compact only at the safe boundary before a continuation sample.
+
+        Returns ``(history, metadata, blocked)``. Metadata intentionally keeps
+        the successor summary for the caller response, while audit callers
+        must use ``runtime_compaction_audit_view`` so transcript content never
+        enters diagnostic ledgers.
+        """
+
+        context_limit = usage_int(params.get("_contextCompactionLimit"))
+        compact_fn = self.runtime_context_compact_fn
+        if not context_limit or context_limit <= 0 or not history:
+            return history, None, False
+        if not bool(context_usage.get("exact")):
+            return history, None, False
+        last_input_tokens = usage_int(context_usage.get("lastInputTokens"))
+        previous_prompt_tokens = usage_int(context_usage.get("lastPromptEstimatedTokens"))
+        if last_input_tokens is None or previous_prompt_tokens is None:
+            return history, None, False
+
+        next_prompt = self._build_llm_plan_prompt(
+            self._message_with_runtime_context(message, observe),
+            history,
+            loop_state,
+            observe=observe,
+        )
+        next_prompt_tokens = estimate_runtime_context_tokens(next_prompt)
+        provider_overhead = max(0, last_input_tokens - previous_prompt_tokens)
+        projected_tokens = provider_overhead + next_prompt_tokens
+        trigger_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO + 0.999999))
+        hard_limit_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_HARD_RATIO + 0.999999))
+        if projected_tokens < trigger_tokens:
+            return history, None, False
+
+        target_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO))
+        metadata: dict[str, Any] = {
+            "schema": RUNTIME_CONTEXT_COMPACTION_SCHEMA,
+            "applied": False,
+            "trigger": "auto",
+            "phase": "mid_turn",
+            "beforeTokens": projected_tokens,
+            "contextLimit": context_limit,
+            "triggerTokens": trigger_tokens,
+            "hardLimitTokens": hard_limit_tokens,
+            "targetAfterTokens": target_tokens,
+        }
+        if compact_fn is None or not attempt_compaction:
+            metadata["failureClass"] = (
+                "compactor_unavailable" if compact_fn is None else "suppressed_after_attempt"
+            )
+            metadata["attempts"] = 0
+            metadata["suppressionReason"] = metadata["failureClass"]
+            metadata["blocked"] = projected_tokens >= hard_limit_tokens
+            return history, metadata, bool(metadata["blocked"])
+        compaction_started = time.perf_counter()
+        try:
+            result = compact_fn(
+                history,
+                {
+                    "trigger": "auto",
+                    "phase": "mid_turn",
+                    "language": str(params.get("language") or ""),
+                    "provider": str(params.get("provider") or ""),
+                    "model": str(params.get("model") or ""),
+                    "targetTokens": target_tokens,
+                    "realContextLimit": context_limit,
+                },
+            )
+            summary = str(ensure_dict(result).get("summary") or "").strip()
+            if not summary:
+                raise ValueError("empty_summary")
+            replacement_history = [{"role": "agent", "text": summary}]
+            replacement_prompt = self._build_llm_plan_prompt(
+                self._message_with_runtime_context(message, observe),
+                replacement_history,
+                loop_state,
+                observe=observe,
+            )
+            after_tokens = provider_overhead + estimate_runtime_context_tokens(replacement_prompt)
+            minimum_reduction = max(1024, int(context_limit * 0.10 + 0.999999))
+            if after_tokens >= projected_tokens:
+                raise ValueError("no_reduction")
+            if projected_tokens - after_tokens < minimum_reduction:
+                raise ValueError("insufficient_reduction")
+            if after_tokens >= trigger_tokens:
+                raise ValueError("still_over_threshold")
+
+            metadata.update(
+                {
+                    "applied": True,
+                    "summary": summary,
+                    "afterTokens": after_tokens,
+                    "entryCount": result.get("entryCount"),
+                    "retainedEntryCount": result.get("retainedEntryCount"),
+                    "sourceDigest": result.get("sourceDigest"),
+                    "summaryDigest": result.get("summaryDigest"),
+                    "fidelity": result.get("fidelity"),
+                    "attempts": bounded_runtime_compaction_integer(result.get("providerAttempts"), 16),
+                    "latencyMs": bounded_runtime_compaction_integer(
+                        (time.perf_counter() - compaction_started) * 1000,
+                        24 * 60 * 60 * 1000,
+                    ),
+                    "retainedSummaryCharacters": bounded_runtime_compaction_integer(len(summary), 100_000),
+                    "failureClass": result.get("fallbackReason"),
+                }
+            )
+            pre_compaction_peak = usage_int(context_usage.get("peakInputTokens"))
+            if pre_compaction_peak is not None:
+                context_usage["preCompactionPeakInputTokens"] = pre_compaction_peak
+            for key in (
+                "lastInputTokens",
+                "lastOutputTokens",
+                "lastTotalTokens",
+                "peakInputTokens",
+                "peakTotalTokens",
+                "lastPromptCharacterCount",
+                "lastPromptEstimatedTokens",
+            ):
+                context_usage.pop(key, None)
+            context_usage["compactionCount"] = int(context_usage.get("compactionCount") or 0) + 1
+            context_usage["windowId"] = hashlib.sha256(
+                f"{metadata.get('summaryDigest') or summary}:{time.time_ns()}".encode("utf-8")
+            ).hexdigest()[:16]
+            return replacement_history, metadata, False
+        except Exception as exc:  # noqa: BLE001 - host/provider failures are classified and bounded.
+            metadata["failureClass"] = classify_runtime_compaction_failure(exc)
+            metadata["attempts"] = 1
+            metadata["latencyMs"] = bounded_runtime_compaction_integer(
+                (time.perf_counter() - compaction_started) * 1000,
+                24 * 60 * 60 * 1000,
+            )
+            metadata["blocked"] = projected_tokens >= hard_limit_tokens
+            return history, metadata, bool(metadata["blocked"])
 
     def _message_with_runtime_context(self, message: str, observe: dict[str, Any]) -> str:
         lines = [message]
@@ -10619,6 +10879,88 @@ def usage_int(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return max(0, int(value.strip()))
     return None
+
+
+def estimate_runtime_context_tokens(text: str) -> int:
+    """Conservative dependency-free estimate for unsampled prompt deltas."""
+
+    quarter_tokens = 0
+    for character in str(text or ""):
+        codepoint = ord(character)
+        is_cjk = (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0x3040 <= codepoint <= 0x30FF
+            or 0xAC00 <= codepoint <= 0xD7AF
+        )
+        quarter_tokens += 4 if is_cjk else len(character.encode("utf-8"))
+    return (quarter_tokens + 3) // 4
+
+
+def classify_runtime_compaction_failure(exc: Exception) -> str:
+    message = str(exc or "").casefold()
+    if "empty_summary" in message or "schema" in message or "privacy" in message:
+        return "schema_privacy"
+    if any(marker in message for marker in ("no_reduction", "insufficient_reduction", "still_over_threshold")):
+        return "insufficient_reduction"
+    if any(marker in message for marker in ("auth", "api key", "credit", "quota", "billing")):
+        return "auth_credit"
+    if any(marker in message for marker in ("timeout", "temporar", "unavailable", "connection", "429", "5xx")):
+        return "transient"
+    if any(marker in message for marker in ("context", "token", "too large", "oversize")):
+        return "size"
+    return "unknown"
+
+
+def bounded_runtime_compaction_integer(value: Any, maximum: int) -> int | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return min(maximum, round(number))
+
+
+def runtime_compaction_audit_view(value: dict[str, Any] | None) -> dict[str, Any]:
+    source = ensure_dict(value)
+    return {
+        key: source.get(key)
+        for key in (
+            "schema",
+            "applied",
+            "trigger",
+            "phase",
+            "beforeTokens",
+            "afterTokens",
+            "contextLimit",
+            "triggerTokens",
+            "hardLimitTokens",
+            "targetAfterTokens",
+            "entryCount",
+            "retainedEntryCount",
+            "summaryDigest",
+            "fidelity",
+            "attempts",
+            "latencyMs",
+            "retainedSummaryCharacters",
+            "failureClass",
+            "suppressionReason",
+            "blocked",
+        )
+        if source.get(key) not in (None, "")
+    }
+
+
+def runtime_compaction_cancelled_view(value: dict[str, Any] | None) -> dict[str, Any]:
+    source = ensure_dict(value)
+    return {
+        **{key: item for key, item in source.items() if key not in {"summary", "suppressionReason"}},
+        "applied": False,
+        "failureClass": "cancelled",
+        "blocked": False,
+    }
 
 
 def summarize_text(text: str, limit: int = 240) -> str:

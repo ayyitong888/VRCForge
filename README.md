@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/source-v1.3.0-blue)](https://github.com/ayyitong888/VRCForge)
+[![Version](https://img.shields.io/badge/source-v1.3.1-blue)](https://github.com/ayyitong888/VRCForge)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -12,8 +12,8 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.3.0`. Latest published stable release:
-`1.2.0` (`v1.2.0`) until the 1.3.0 release gate and publication complete.
+Current source / target release: `1.3.1`. Latest published stable release:
+`1.2.0` (`v1.2.0`) until the 1.3.1 release gate and publication complete.
 
 ## Install / 安装
 
@@ -27,7 +27,7 @@ https://github.com/ayyitong888/VRCForge/releases/latest
 
 Program files: `%ProgramFiles%\VRCForge`. User data: `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-Portable zip (`VRCForge_Windows_x64_1.3.0.zip`) is also available for no-install/debug use after the 1.3.0 release is published.
+Portable zip (`VRCForge_Windows_x64_1.3.1.zip`) is also available for no-install/debug use after the 1.3.1 release is published.
 
 ## Features / 功能概览
 
@@ -41,7 +41,7 @@ Portable zip (`VRCForge_Windows_x64_1.3.0.zip`) is also available for no-install
 
 **Agent gateway / Agent 接入:** Local MCP + REST gateway for external agents (Codex, Claude Code, etc.). Read/plan/request-only; writes require desktop approval. One-click connector install for Codex App, Codex CLI, Claude Code CLI, and Claude Cowork.
 
-**Agentic runtime / Agent 运行时:** Scheduled Goals with durable restart delivery, explicit user/project Memory controls, allowlisted `/delegate` skill dispatch, reviewed sub-agent Adopt/Dismiss handoffs, and explicit-user-only Computer Use.
+**Agentic runtime / Agent 运行时:** Scheduled Goals with durable restart delivery, explicit user/project Memory controls, allowlisted `/delegate` skill dispatch, reviewed sub-agent Adopt/Dismiss handoffs, explicit-user-only Computer Use, and automatic context compaction with exact-usage gates, visible cancellation, and restart recovery.
 
 **Skill packages / 技能包:** `.vsk` community skill packages with manifest and SHA-256 lock validation, Ed25519 signing/trust governance, atomic import/projection, Path-to-Skill capture, SDK scaffolding, and searchable runtime audit evidence.
 

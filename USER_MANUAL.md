@@ -5,8 +5,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.3.0`. Latest published stable release:
-`1.2.0` (`v1.2.0`) until the 1.3.0 release gate and publication complete.
+Current source / target release: `1.3.1`. Latest published stable release:
+`1.2.0` (`v1.2.0`) until the 1.3.1 release gate and publication complete.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -43,7 +43,7 @@ Paranoid remains preview-only pending additional proof.
 | Agent workspace with multi-chat sessions | Agent 工作台与多会话 | 已可用 / Available |
 | First-run resilient normal-agent fallback | Optional Unity/skill/project failures do not block ordinary agent chat | 已可用 / Available |
 | Chat persistence and history replay | 会话持久化与历史回放 | 已可用 / Available |
-| `/compact` history compaction | `/compact` 历史压缩 | 已可用 / Available |
+| Automatic and `/compact` history compaction | Exact provider/model usage drives bounded prefire, automatic compaction, and a hard safety gate; manual `/compact`, visible cancellation, deterministic fallback, and restart recovery remain available | Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
 | Scheduled Goals | Durable background wake/resume into the owning chat with restart recovery and idempotent materialization | Available |
@@ -74,7 +74,7 @@ Paranoid remains preview-only pending additional proof.
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
 | Face/shader adjustment checkpoint timeline | Manual and automatic face/shader checkpoints with create/read/update/delete, overwrite, A/B selection, preview, and apply through restore approval | Current source line, approval/checkpoint required |
 | External agent connector templates and smoke | Built-in and custom JSON/TOML MCP config installation without plaintext tokens, plus supervised write/rollback smoke | 已可用 / Available |
-| `.vsk` community skill packages | Signed import/preflight/trust, atomic projection/governance, Path-to-Skill capture, SDK scaffold/lock validation, and searchable package/runtime audit | Current source line; packaged acceptance pending |
+| `.vsk` community skill packages | Signed import/preflight/trust, atomic projection/governance, Path-to-Skill capture, SDK scaffold/lock validation, and searchable package/runtime audit | Available; packaged lifecycle acceptance passed |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
 | Batch workflows | 批量工作流 | 计划中 / Planned |

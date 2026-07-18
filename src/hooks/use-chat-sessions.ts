@@ -3,6 +3,12 @@ import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import {
+  applyRevisionedChatUpdate,
+  normalizeChatRevision,
+  normalizeRestoredCompaction,
+  restoredCompactionRequiresPersistence,
+} from "../lib/chat-compaction-state";
+import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
   filterPersistableChats,
@@ -100,8 +106,9 @@ export function useChatSessions({
     void (async () => {
       try {
         const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
-        let shouldCacheRestoredTimestamps = false;
+        let shouldPersistRestoredState = false;
         const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
+          const restoredCompactionWasInterrupted = restoredCompactionRequiresPersistence(chat.compaction);
           const normalized: ChatThread = {
             id: chat.id,
             sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
@@ -112,12 +119,16 @@ export function useChatSessions({
             agentName: typeof chat.agentName === "string" ? chat.agentName : "",
             pinned: chat.pinned === true,
             archived: chat.archived === true,
+            revision: normalizeChatRevision(chat.revision),
+            compaction: normalizeRestoredCompaction(chat.compaction),
             contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
             items: stripTransientConversationItems(chat.items),
           };
           const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
-          shouldCacheRestoredTimestamps =
-            shouldCacheRestoredTimestamps || cached.createdAt !== normalized.createdAt || cached.updatedAt !== normalized.updatedAt;
+          shouldPersistRestoredState = shouldPersistRestoredState
+            || restoredCompactionWasInterrupted
+            || cached.createdAt !== normalized.createdAt
+            || cached.updatedAt !== normalized.updatedAt;
           return cached;
         });
         if (restoreCancelled) {
@@ -144,7 +155,7 @@ export function useChatSessions({
               expandProjectGroup(latest.projectPath);
             }
           }
-            if (shouldCacheRestoredTimestamps) {
+            if (shouldPersistRestoredState) {
               if (chatTimestampCacheTimerRef.current) {
                 window.clearTimeout(chatTimestampCacheTimerRef.current);
               }
@@ -221,18 +232,44 @@ export function useChatSessions({
     return { ...chat, createdAt: chat.createdAt || timestamp, updatedAt: timestamp };
   }
 
-  function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread) {
-    markChatsDirty();
+  function updateChat(chatId: string, updater: (chat: ChatThread) => ChatThread): boolean {
+    return updateChatIfRevision(chatId, undefined, updater);
+  }
+
+  /**
+   * Apply one chat mutation only when the caller still owns the observed
+   * revision. Long-running work (context compaction, delivery materialization,
+   * approvals) must use this instead of committing an old snapshot over a
+   * newer chat.
+   */
+  function updateChatIfRevision(
+    chatId: string,
+    expectedRevision: number | undefined,
+    updater: (chat: ChatThread) => ChatThread,
+  ): boolean {
+    let changed = false;
     const next = chatsRef.current.map((chat) => {
       if (chat.id !== chatId) {
         return chat;
       }
-      const updated = updater(chat);
+      const revisioned = applyRevisionedChatUpdate(chat, expectedRevision, updater);
+      if (!revisioned.applied) {
+        return chat;
+      }
+      const updated = revisioned.chat;
       const items = stripSupersededStreamingItems(updated.items);
-      return cacheChatContextUsageFast(items === updated.items ? updated : { ...updated, items });
+      changed = true;
+      return cacheChatContextUsageFast({
+        ...(items === updated.items ? updated : { ...updated, items }),
+      });
     });
+    if (!changed) {
+      return false;
+    }
+    markChatsDirty();
     chatsRef.current = next;
     setChats(next);
+    return true;
   }
 
   function appendToChat(chatId: string, item: ConversationItem) {
@@ -247,7 +284,7 @@ export function useChatSessions({
     const id = `chat-${Date.now()}`;
     const now = new Date().toISOString();
     markChatsDirty();
-    const created = { id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, items: [] };
+    const created = { id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, revision: 0, items: [] };
     chatsRef.current = [created, ...chatsRef.current];
     setChats(chatsRef.current);
     setActiveChatId(id);
@@ -355,6 +392,7 @@ export function useChatSessions({
     markChatsDirty,
     touchChat,
     updateChat,
+    updateChatIfRevision,
     appendToChat,
     ensureActiveChat,
     persistChatsNow,

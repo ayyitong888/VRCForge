@@ -113,6 +113,7 @@ pub(crate) struct DesktopAgentMessageRequest {
     provider: Option<String>,
     provider_label: Option<String>,
     model: Option<String>,
+    context_limit: Option<u64>,
     client_turn_id: Option<String>,
     goal_delivery_id: Option<String>,
     #[serde(default)]
@@ -655,6 +656,7 @@ pub async fn send_agent_message(
                 "provider": request.provider,
                 "providerLabel": request.provider_label,
                 "model": request.model,
+                "contextLimit": request.context_limit,
                 "computerUseRequested": request.computer_use_requested,
                 "computerUseGrantId": request.computer_use_grant_id,
                 "computerUseVisualTheme": request.computer_use_visual_theme,
@@ -2057,8 +2059,13 @@ pub async fn clear_agent_memory(
 }
 
 #[tauri::command]
-pub fn compact_agent_history(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/agent/compact", request, 120_000)
+pub async fn compact_agent_history(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/compact", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-import { Loader2, MonitorUp } from "lucide-react";
+import { AlertTriangle, Loader2, MonitorUp, X } from "lucide-react";
 import { useMemo, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
@@ -8,6 +8,7 @@ import type {
   ComposerAction,
   ComposerActionId,
   ContextUsage,
+  ChatCompactionState,
   ConversationItem,
   MessageFeedback,
 } from "../../lib/chat-types";
@@ -39,6 +40,8 @@ export function ChatWorkspace({
   onAttachFiles,
   onRemoveAttachment,
   contextUsage,
+  compaction,
+  onCancelCompaction,
   providerLabel,
   model,
   editing,
@@ -83,6 +86,8 @@ export function ChatWorkspace({
   onAttachFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (id: string) => void;
   contextUsage?: ContextUsage;
+  compaction?: ChatCompactionState;
+  onCancelCompaction?: () => void;
   providerLabel: string;
   model: string;
   editing: boolean;
@@ -156,6 +161,7 @@ export function ChatWorkspace({
               <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {composer(false)}
         </div>
       </div>
@@ -230,9 +236,51 @@ export function ChatWorkspace({
               <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {composer(true)}
         </div>
       </div>
     </>
+  );
+}
+
+function CompactionStatus({ state, onCancel }: { state?: ChatCompactionState; onCancel?: () => void }) {
+  const { t } = useTranslation();
+  if (!state || state.status === "idle" || state.status === "applied") {
+    return null;
+  }
+  const active = state.status === "ready" || state.status === "compacting";
+  const label =
+    state.status === "prefire"
+      ? t("compact.prefire")
+      : state.status === "ready"
+      ? t("compact.preparing")
+      : state.status === "compacting"
+        ? t("compact.running")
+        : state.status === "failed"
+          ? t("compact.failed")
+          : state.status === "cancelled"
+            ? t("compact.cancelled")
+            : t("compact.suppressed");
+  return (
+    <div
+      className="mb-3 flex items-center gap-2 rounded-lg border border-border bg-muted/45 px-3 py-2 text-xs text-muted-foreground"
+      data-context-compaction-status={state.status}
+      role={state.status === "failed" ? "alert" : "status"}
+    >
+      {active ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+      <span className="min-w-0 flex-1">{label}</span>
+      {state.status === "compacting" && onCancel ? (
+        <button
+          type="button"
+          className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onCancel}
+          data-context-compaction-cancel
+        >
+          <X className="h-3.5 w-3.5" />
+          {t("compact.cancel")}
+        </button>
+      ) : null}
+    </div>
   );
 }

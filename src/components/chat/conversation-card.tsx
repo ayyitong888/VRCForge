@@ -27,7 +27,7 @@ import type { AgentApproval, AgentReasoningTrace, AgentRuntimeResponse, AgentSki
 import type { ApprovalActionState, ChatAttachment, ConversationItem, MessageFeedback } from "../../lib/chat-types";
 import { thinkingTraceLabel } from "../../lib/provider-ui";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
-import { cn } from "../../lib/utils";
+import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
@@ -174,12 +174,15 @@ export function ConversationCard({
 
   if (item.type === "compact") {
     const running = item.status === "running";
+    const usageChange = typeof item.beforeTokens === "number" && typeof item.afterTokens === "number"
+      ? t("compact.usageChange", { before: formatCount(item.beforeTokens), after: formatCount(item.afterTokens) })
+      : "";
     return (
       <div className="group flex max-w-[85%] items-center gap-3 py-1 text-xs text-muted-foreground">
         <div className="h-px flex-1 bg-border/70" />
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-          <span>{item.text}</span>
+          <span>{item.text}{usageChange ? ` · ${usageChange}` : ""}</span>
         </div>
         <div className="h-px flex-1 bg-border/70" />
       </div>
