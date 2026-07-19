@@ -218,6 +218,59 @@ where
         .map_err(|error| format!("VRCForge runtime worker failed: {error}"))?
 }
 
+/// Raw-body variant of `backend_json_request` for binary uploads (chat
+/// attachment vault ingestion). Keeps the same session-token, transport-proof,
+/// and 401/403 re-verify semantics; only the request body encoding differs.
+pub(crate) fn backend_bytes_request(
+    method: &str,
+    path: String,
+    body: &[u8],
+    content_type: &str,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let user_data = user_data_dir()?;
+    let app_session_token = ensure_app_session_token(&user_data)?;
+    ensure_backend_session_verified(&app_session_token)?;
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(timeout)
+        .redirects(0)
+        .build();
+    let url = format!("{BACKEND_ENDPOINT}{path}");
+    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
+    let send_once = || {
+        let response = agent
+            .request(method, &url)
+            .set("Accept", "application/json")
+            .set("Origin", "tauri://localhost")
+            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+            .set("X-VRCForge-Transport-Proof", &transport_proof)
+            .set("Authorization", &format!("Bearer {app_session_token}"))
+            .set("Content-Type", content_type)
+            .send_bytes(body);
+        app_api_response_from_ureq(response)
+    };
+    let mut response = send_once()?;
+    if matches!(response.status, 401 | 403) {
+        clear_backend_session_verify_cache();
+        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            mark_backend_session_verified();
+            response = send_once()?;
+            if matches!(response.status, 401 | 403) {
+                clear_backend_session_verify_cache();
+            }
+        } else {
+            return Err(runtime_session_verification_error());
+        }
+    }
+    if response.ok {
+        Ok(response.body)
+    } else {
+        Err(webview_error_message(&response.body))
+    }
+}
+
 #[tauri::command]
 pub fn start_backend(
     app_handle: tauri::AppHandle,
@@ -605,6 +658,28 @@ pub(crate) fn clear_backend_session_verify_cache() {
     if let Ok(mut guard) = backend_session_verify_cache().lock() {
         *guard = None;
     }
+}
+
+/// Inverse of `percent_encode_query_component` for metadata smuggled through
+/// ASCII-only invoke headers (chat attachment uploads). Returns `None` when the
+/// escape sequences are malformed or the decoded bytes are not valid UTF-8.
+pub(crate) fn percent_decode_utf8(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let text = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(text, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 pub(crate) fn percent_encode_query_component(value: &str) -> String {

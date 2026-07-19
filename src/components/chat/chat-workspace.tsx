@@ -67,6 +67,7 @@ export function ChatWorkspace({
   onApprove,
   onReject,
   onModifyApproval,
+  onImportAttachment,
   onOpenSettings,
   onOpenDoctor,
 }: {
@@ -113,6 +114,7 @@ export function ChatWorkspace({
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
   onModifyApproval: (approval: AgentApproval) => void;
+  onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenSettings: () => void;
   onOpenDoctor: () => void;
 }) {
@@ -194,6 +196,7 @@ export function ChatWorkspace({
                 onApprove={onApprove}
                 onReject={onReject}
                 onModifyApproval={onModifyApproval}
+                onImportAttachment={onImportAttachment}
                 onOpenSettings={onOpenSettings}
                 onOpenDoctor={onOpenDoctor}
               />

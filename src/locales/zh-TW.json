@@ -1117,7 +1117,10 @@
     "fileTypeFallback": "檔案",
     "payloadLimitError": "檔案超過 {{limit}} 載荷上限。",
     "readTextFailed": "讀取文字載荷失敗。",
-    "readFileFailed": "讀取檔案載荷失敗。"
+    "readFileFailed": "讀取檔案載荷失敗。",
+    "vaultStored": "已本機保存，不傳送給模型",
+    "importToProject": "匯入到專案",
+    "vaultUploadFailed": "本機保存失敗（{{reason}}），已回退為僅元資料。"
   },
   "goal": {
     "empty": "請在 /goal 後寫目標。",

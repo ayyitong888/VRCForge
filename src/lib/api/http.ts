@@ -17,6 +17,11 @@ export function setAppSessionToken(token: string) {
   appSessionToken = token.trim();
 }
 
+/** Session auth headers for raw (non-JSON) requests that bypass requestJson. */
+export function appSessionAuthHeaders(): Record<string, string> {
+  return appSessionToken ? { Authorization: `Bearer ${appSessionToken}` } : {};
+}
+
 type JsonRequestInit = RequestInit & { timeoutMs?: number; preferTauriIpc?: boolean };
 
 export async function requestJson<T>(url: string, init: JsonRequestInit = {}): Promise<T> {

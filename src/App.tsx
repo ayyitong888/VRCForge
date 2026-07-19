@@ -102,9 +102,9 @@ import {
   latestAgentContextUsage,
   latestConversationItemId,
   normalizeProviderForContext,
-  readChatAttachment,
   selectedTextAttachment,
 } from "./lib/conversation-utils";
+import { ingestChatAttachment } from "./lib/attachment-ingest";
 import { resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
@@ -155,6 +155,7 @@ import {
   fetchSubAgents,
   mergeSubAgent,
   requestAgentDesktopAction,
+  requestChatAttachmentImport,
   refreshProjects,
   repairUnityMcpBridge,
   setAppSessionToken,
@@ -2211,7 +2212,11 @@ export default function App() {
       return;
     }
     const selected = Array.from(files).slice(0, remaining);
-    const nextAttachments = await Promise.all(selected.map((file) => readChatAttachment(file, t)));
+    const chatId = ensureActiveChat();
+    const nextAttachments: ChatAttachment[] = [];
+    for (const file of selected) {
+      nextAttachments.push(await ingestChatAttachment(file, { endpoint, chatId }, t));
+    }
     setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
     if (files.length > remaining) {
       setError(t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN }));
@@ -2220,6 +2225,30 @@ export default function App() {
 
   function removeAttachment(id: string) {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  }
+
+  async function importVaultAttachment(attachment: ChatAttachment) {
+    const payloadHash = attachment.payloadKind === "vault_file" ? attachment.payloadHash : attachment.vaultPayloadHash;
+    if (!payloadHash) {
+      return;
+    }
+    setError("");
+    try {
+      const response = await requestChatAttachmentImport(endpoint, {
+        payloadHash,
+        projectPath: activeChat?.projectPath || activeProjectPath || undefined,
+      });
+      const approval = response?.approval as AgentApproval | undefined;
+      if (approval && typeof approval.id === "string" && approval.id) {
+        // Surface the pending import approval immediately; runtime polling keeps it in sync.
+        setAgentApprovals((current) => {
+          const existing = current ?? [];
+          return existing.some((item) => item.id === approval.id) ? existing : [approval, ...existing];
+        });
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   async function reconcileSubAgentHandoffs(tasks: SubAgentTask[]) {
@@ -2995,6 +3024,7 @@ export default function App() {
               onApprove={approveShell}
               onReject={rejectShell}
               onModifyApproval={modifyApprovalInComposer}
+              onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
               onOpenSettings={() => openSettingsSection("models")}
               onOpenDoctor={() => void openDoctor()}
             />

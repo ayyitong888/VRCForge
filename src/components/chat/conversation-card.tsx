@@ -49,6 +49,7 @@ export function ConversationCard({
   onApprove,
   onReject,
   onModifyApproval,
+  onImportAttachment,
   onOpenSettings,
   onOpenDoctor,
 }: {
@@ -65,6 +66,7 @@ export function ConversationCard({
   onApprove?: (approvalId: string) => void;
   onReject?: (approvalId: string) => void;
   onModifyApproval?: (approval: AgentApproval) => void;
+  onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenSettings?: () => void;
   onOpenDoctor?: () => void;
 }) {
@@ -82,7 +84,7 @@ export function ConversationCard({
               {t("chat.queuedSent")}
             </div>
           ) : null}
-          {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
+          {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} onImport={onImportAttachment} /> : null}
           {item.text ? (
             <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">
               <ChatMarkdown text={item.text} />
@@ -90,7 +92,7 @@ export function ConversationCard({
           ) : null}
           {otherAttachments.length ? (
             <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
-              <AttachmentStrip attachments={otherAttachments} compact />
+              <AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact />
             </div>
           ) : null}
           <MessageActions
@@ -423,7 +425,13 @@ export function ConversationCard({
   );
 }
 
-export function UserImageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+export function UserImageAttachments({
+  attachments,
+  onImport,
+}: {
+  attachments: ChatAttachment[];
+  onImport?: (attachment: ChatAttachment) => void;
+}) {
   const [preview, setPreview] = useState<ChatAttachment | null>(null);
   const { t } = useTranslation();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -452,16 +460,27 @@ export function UserImageAttachments({ attachments }: { attachments: ChatAttachm
     <>
       <div className="flex flex-wrap justify-end gap-2">
         {attachments.map((attachment) => (
-          <button
-            key={attachment.id}
-            type="button"
-            className="group/image block overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
-            onClick={() => setPreview(attachment)}
-            aria-label={t("chat.imagePreview")}
-            title={attachment.name}
-          >
-            <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
-          </button>
+          <div key={attachment.id} className="relative">
+            <button
+              type="button"
+              className="group/image block overflow-hidden rounded-lg border border-border bg-muted/70 transition hover:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-ring"
+              onClick={() => setPreview(attachment)}
+              aria-label={t("chat.imagePreview")}
+              title={attachment.name}
+            >
+              <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover transition group-hover/image:scale-[1.02]" />
+            </button>
+            {attachment.vaultPayloadHash && onImport ? (
+              <button
+                type="button"
+                className="absolute bottom-1 left-1 rounded border border-border bg-background/90 px-1.5 py-0.5 text-[10px] text-foreground"
+                onClick={() => onImport(attachment)}
+                title={t("attachments.importToProject")}
+              >
+                {t("attachments.importToProject")}
+              </button>
+            ) : null}
+          </div>
         ))}
       </div>
       {preview?.dataUrl ? (

@@ -423,10 +423,13 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
 export function AttachmentStrip({
   attachments,
   onRemove,
+  onImport,
   compact = false,
 }: {
   attachments: ChatAttachment[];
   onRemove?: (id: string) => void;
+  /** 1.3.2: import affordance for vault-stored attachments (archives / oversized images). */
+  onImport?: (attachment: ChatAttachment) => void;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
@@ -439,6 +442,7 @@ export function AttachmentStrip({
         {attachments.map((attachment) => {
           const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
           const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
+          const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
           const extension = attachmentExtension(attachment, t("attachments.fileTypeFallback"));
           const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
           return (
@@ -468,6 +472,17 @@ export function AttachmentStrip({
                     <div className="mt-0.5 flex items-center gap-2 text-xs uppercase text-muted-foreground">
                       <span>{extension}</span>
                       {attachment.truncated ? <span className="normal-case text-amber-700">{t("attachments.metadataOnly")}</span> : null}
+                      {isVaultFile ? <span className="normal-case text-sky-700">{t("attachments.vaultStored")}</span> : null}
+                      {isVaultFile && onImport ? (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded border border-border px-1.5 py-0.5 normal-case text-foreground transition-colors hover:bg-muted"
+                          onClick={() => onImport(attachment)}
+                          title={t("attachments.importToProject")}
+                        >
+                          {t("attachments.importToProject")}
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -477,6 +492,16 @@ export function AttachmentStrip({
                   {selectedPreview}
                   {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
                 </div>
+              ) : null}
+              {isImage && isVaultFile && onImport ? (
+                <button
+                  type="button"
+                  className="absolute bottom-2 left-2 rounded border border-border bg-background/90 px-1.5 py-0.5 text-[10px] text-foreground shadow-sm"
+                  onClick={() => onImport(attachment)}
+                  title={t("attachments.importToProject")}
+                >
+                  {t("attachments.importToProject")}
+                </button>
               ) : null}
               {onRemove ? (
                 <button
@@ -503,6 +528,7 @@ export function AttachmentStrip({
     <div className={cn("flex min-w-0 flex-wrap gap-2", compact ? "mt-2" : "")}>
       {attachments.map((attachment) => {
         const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
+        const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
         const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
         return (
           <div
@@ -520,6 +546,17 @@ export function AttachmentStrip({
             <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? t("attachments.selectedText", { count: 1 }) : attachment.name}</span>
             {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
             {attachment.truncated ? <span className="shrink-0 text-amber-700">{t("attachments.metadataOnly")}</span> : null}
+            {isVaultFile ? <span className="shrink-0 text-sky-700">{t("attachments.vaultStored")}</span> : null}
+            {isVaultFile && onImport ? (
+              <button
+                type="button"
+                className="shrink-0 rounded border border-border px-1.5 py-0.5 text-foreground transition-colors hover:bg-muted"
+                onClick={() => onImport(attachment)}
+                title={t("attachments.importToProject")}
+              >
+                {t("attachments.importToProject")}
+              </button>
+            ) : null}
             {isSelectedText && selectedPreview ? (
               <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
                 {selectedPreview}

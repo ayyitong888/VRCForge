@@ -1117,7 +1117,10 @@
     "fileTypeFallback": "file",
     "payloadLimitError": "File exceeds {{limit}} payload limit.",
     "readTextFailed": "Failed to read text payload.",
-    "readFileFailed": "Failed to read file payload."
+    "readFileFailed": "Failed to read file payload.",
+    "vaultStored": "stored locally, not sent to model",
+    "importToProject": "Import to project",
+    "vaultUploadFailed": "Local storage failed ({{reason}}); falling back to metadata."
   },
   "goal": {
     "empty": "Write a goal after /goal.",

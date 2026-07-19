@@ -183,7 +183,7 @@ export function normalizeCompactedAttachmentReferences(value: unknown): Compacte
       || typeof reference.name !== "string"
       || typeof reference.type !== "string"
       || typeof reference.size !== "number" || !Number.isSafeInteger(reference.size) || reference.size < 0
-      || (reference.payloadKind !== "text" && reference.payloadKind !== "data_url")
+      || (reference.payloadKind !== "text" && reference.payloadKind !== "data_url" && reference.payloadKind !== "vault_file")
       || typeof reference.payloadHash !== "string" || !PAYLOAD_HASH_PATTERN.test(reference.payloadHash)
     ) {
       continue;
@@ -195,6 +195,10 @@ export function normalizeCompactedAttachmentReferences(value: unknown): Compacte
       type: reference.type,
       payloadKind: reference.payloadKind,
       payloadHash: reference.payloadHash,
+      ...(typeof reference.vaultPayloadHash === "string" && PAYLOAD_HASH_PATTERN.test(reference.vaultPayloadHash)
+        ? { vaultPayloadHash: reference.vaultPayloadHash }
+        : {}),
+      ...(reference.vaultKind ? { vaultKind: reference.vaultKind } : {}),
       ...(reference.truncated === true ? { truncated: true } : {}),
     };
     const identity = compactedAttachmentReferenceIdentity(normalizedReference);
@@ -339,6 +343,11 @@ export function resolveAttachmentPayloadReferences(
   vault: AttachmentPayloadVault | undefined,
 ): ChatAttachment[] {
   return attachments.map((attachment) => {
+    if (attachment.payloadKind === "vault_file") {
+      // Body-free by design: the bytes stay in the backend vault and the
+      // reference is already complete. Nothing to restore or degrade.
+      return attachment;
+    }
     if (attachmentPayload(attachment) && !attachment.payloadHash) {
       return attachment;
     }
@@ -368,6 +377,11 @@ function attachmentPayload(attachment: ChatAttachment): { payloadKind: "text" | 
 }
 
 function restoreAttachmentPayload(attachment: ChatAttachment, vault: AttachmentPayloadVault | undefined): ChatAttachment | null {
+  if (attachment.payloadKind === "vault_file") {
+    // A vault_file reference is the payload: metadata + payloadHash travel to
+    // the runtime, which reads the bytes through its own vault tools.
+    return PAYLOAD_HASH_PATTERN.test(attachment.payloadHash || "") ? { ...attachment } : null;
+  }
   const inline = attachmentPayload(attachment);
   if (inline) {
     const payloadHash = attachmentPayloadHash(inline.value);
@@ -407,6 +421,7 @@ function historicalPayloadAttachments(
     for (const attachment of item.attachments || []) {
       const hasPayload = attachment.payloadKind === "text"
         || attachment.payloadKind === "data_url"
+        || attachment.payloadKind === "vault_file"
         || typeof attachment.text === "string"
         || typeof attachment.dataUrl === "string";
       const identity = historicalAttachmentIdentity(attachment);
@@ -433,7 +448,7 @@ function toCompactedAttachmentReference(attachment: ChatAttachment): CompactedAt
     || typeof attachment.name !== "string"
     || typeof attachment.type !== "string"
     || typeof attachment.size !== "number" || !Number.isSafeInteger(attachment.size) || attachment.size < 0
-    || (attachment.payloadKind !== "text" && attachment.payloadKind !== "data_url")
+    || (attachment.payloadKind !== "text" && attachment.payloadKind !== "data_url" && attachment.payloadKind !== "vault_file")
     || typeof attachment.payloadHash !== "string" || !PAYLOAD_HASH_PATTERN.test(attachment.payloadHash)
   ) {
     return null;
@@ -445,6 +460,10 @@ function toCompactedAttachmentReference(attachment: ChatAttachment): CompactedAt
     type: attachment.type,
     payloadKind: attachment.payloadKind,
     payloadHash: attachment.payloadHash,
+    ...(typeof attachment.vaultPayloadHash === "string" && PAYLOAD_HASH_PATTERN.test(attachment.vaultPayloadHash)
+      ? { vaultPayloadHash: attachment.vaultPayloadHash }
+      : {}),
+    ...(attachment.vaultKind ? { vaultKind: attachment.vaultKind } : {}),
     ...(attachment.truncated === true ? { truncated: true } : {}),
   };
 }

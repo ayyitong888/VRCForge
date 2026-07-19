@@ -12,6 +12,8 @@ const chatSessionsSource = await readFile(path.join(root, "src/hooks/use-chat-se
 const chatThreadSource = await readFile(path.join(root, "src/lib/chat-thread.ts"), "utf8");
 const compactionControllerSource = await readFile(path.join(root, "src/hooks/use-context-compaction-controller.ts"), "utf8");
 const chatRunControllerSource = await readFile(path.join(root, "src/hooks/use-chat-run-controller.ts"), "utf8");
+const attachmentIngestSource = await readFile(path.join(root, "src/lib/attachment-ingest.ts"), "utf8");
+const rustCommandsSource = await readFile(path.join(root, "src-tauri/src/commands.rs"), "utf8");
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
   fileName: sourcePath,
@@ -23,6 +25,18 @@ const chatThreadTranspiled = ts.transpileModule(chatThreadSource, {
   fileName: path.join(root, "src/lib/chat-thread.ts"),
 }).outputText.replace('from "./attachment-payloads"', `from "${payloadModuleUrl}"`);
 const chatThreads = await import(`data:text/javascript;base64,${Buffer.from(chatThreadTranspiled).toString("base64")}`);
+
+test("desktop vault upload uses bounded chunks and aborts abandoned sessions", () => {
+  assert.match(attachmentIngestSource, /file\.slice\(offset, Math\.min\(file\.size, offset \+ chunkSize\)\)/);
+  assert.match(attachmentIngestSource, /"begin_chat_attachment_upload"/);
+  assert.match(attachmentIngestSource, /"append_chat_attachment_upload"/);
+  assert.match(attachmentIngestSource, /"finish_chat_attachment_upload"/);
+  assert.match(attachmentIngestSource, /"abort_chat_attachment_upload"/);
+  assert.doesNotMatch(attachmentIngestSource, /new Uint8Array\(await file\.arrayBuffer\(\)\)/);
+  for (const command of ["begin_chat_attachment_upload", "append_chat_attachment_upload", "finish_chat_attachment_upload", "abort_chat_attachment_upload"]) {
+    assert.match(rustCommandsSource, new RegExp(`pub async fn ${command}`));
+  }
+});
 
 const textAttachment = (overrides = {}) => ({
   id: "attachment-1",

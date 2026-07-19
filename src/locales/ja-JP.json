@@ -1117,7 +1117,10 @@
     "fileTypeFallback": "ファイル",
     "payloadLimitError": "ファイルが {{limit}} のペイロード上限を超えています。",
     "readTextFailed": "テキストペイロードを読み取れませんでした。",
-    "readFileFailed": "ファイルペイロードを読み取れませんでした。"
+    "readFileFailed": "ファイルペイロードを読み取れませんでした。",
+    "vaultStored": "ローカル保存済み、モデルには送信されません",
+    "importToProject": "プロジェクトへインポート",
+    "vaultUploadFailed": "ローカル保存に失敗しました（{{reason}}）。メタデータのみへフォールバックしました。"
   },
   "goal": {
     "empty": "/goal の後にゴールを書いてください。",

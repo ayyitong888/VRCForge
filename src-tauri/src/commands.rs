@@ -2115,6 +2115,98 @@ pub fn save_chats(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, 
     post_json_body_command("/api/app/chats", request, 60_000)
 }
 
+/// Hard shell-side ceiling for chat attachment uploads. The backend vault
+/// enforces the real per-kind caps (512MB archives / 64MB images); this only
+/// bounds what the IPC bridge is willing to carry.
+const CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[tauri::command]
+pub async fn begin_chat_attachment_upload(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-attachments/uploads", request, 30_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn append_chat_attachment_upload(
+    request: tauri::ipc::Request<'_>,
+) -> Result<serde_json::Value, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Chat attachment upload chunk requires a raw binary body.".to_string());
+    };
+    if bytes.is_empty() {
+        return Err("Chat attachment upload chunk is empty.".to_string());
+    }
+    if bytes.len() > CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES {
+        return Err("Chat attachment upload chunk exceeds the transport size limit.".to_string());
+    }
+    let header_text = |name: &str| -> Result<String, String> {
+        request
+            .headers()
+            .get(name)
+            .ok_or_else(|| format!("Chat attachment header {name} is required."))?
+            .to_str()
+            .map(str::to_string)
+            .map_err(|_| format!("Chat attachment header {name} is not ASCII."))
+    };
+    let upload_id = header_text("x-vrcforge-upload-id")?;
+    if !upload_id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+    {
+        return Err("Chat attachment upload id is invalid.".to_string());
+    }
+    let offset = header_text("x-vrcforge-upload-offset")?
+        .parse::<u64>()
+        .map_err(|_| "Chat attachment upload offset is invalid.".to_string())?;
+    let bytes = bytes.to_vec();
+    let path = format!("/api/app/chat-attachments/uploads/{upload_id}/chunks?offset={offset}");
+    blocking_backend_json_request(move || {
+        backend_bytes_request(
+            "POST",
+            path,
+            &bytes,
+            "application/octet-stream",
+            Some(120_000),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn finish_chat_attachment_upload(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-attachments/uploads/finish", request, 300_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn abort_chat_attachment_upload(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-attachments/uploads/abort", request, 30_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn request_chat_attachment_import(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-attachments/import", request, 120_000)
+    })
+    .await
+}
+
 #[tauri::command]
 pub fn fetch_optimization_proofs(
     request: DesktopOptimizationProofsRequest,

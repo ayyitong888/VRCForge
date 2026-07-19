@@ -9,9 +9,18 @@ export type ChatAttachment = {
   type: string;
   dataUrl?: string;
   text?: string;
-  payloadKind?: "data_url" | "text" | "metadata";
+  /**
+   * "vault_file" marks a binary stored in the backend's on-disk attachment
+   * vault: the message carries metadata + payloadHash only and the bytes
+   * never enter a model prompt.
+   */
+  payloadKind?: "data_url" | "text" | "metadata" | "vault_file";
   /** Stable local reference to the payload held in the owning chat's vault. */
   payloadHash?: string;
+  /** Vault reference retained alongside a verified inline image payload. */
+  vaultPayloadHash?: string;
+  /** Backend vault format kind (zip / unitypackage / png / ...). */
+  vaultKind?: string;
   truncated?: boolean;
   error?: string;
 };
@@ -38,8 +47,10 @@ export type CompactedAttachmentReference = {
   name: string;
   size: number;
   type: string;
-  payloadKind: "data_url" | "text";
+  payloadKind: "data_url" | "text" | "vault_file";
   payloadHash: string;
+  vaultPayloadHash?: string;
+  vaultKind?: string;
   truncated?: boolean;
 };
 

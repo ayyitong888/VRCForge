@@ -294,8 +294,12 @@ export type AgentMessageAttachment = {
   type: string;
   dataUrl?: string;
   text?: string;
-  payloadKind?: "data_url" | "text" | "metadata" | string;
+  payloadKind?: "data_url" | "text" | "metadata" | "vault_file" | string;
   payloadHash?: string;
+  /** Vault reference retained alongside a verified inline image payload. */
+  vaultPayloadHash?: string;
+  /** Backend vault format kind for payloadKind === "vault_file". */
+  vaultKind?: string;
   truncated?: boolean;
   error?: string;
 };

@@ -348,6 +348,27 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["outfit", "booth", "unitypackage", "preview"],
     },
+    "vrcforge_inspect_chat_attachment": {
+        "title": "Chat Attachment Inspection",
+        "inputs": ["Vault payloadHash plus optional entryPath for a bounded single-entry text extract."],
+        "outputs": ["Attachment metadata, guarded archive listing or entry text, or image header dimensions."],
+        "sideEffects": "reads the local attachment vault only; bytes never enter the prompt",
+        "tags": ["attachment", "vault", "inspection"],
+    },
+    "vrcforge_import_chat_image": {
+        "title": "Chat Image Import",
+        "inputs": ["Vault payloadHash, Unity project path, and optional Assets/ target folder."],
+        "outputs": ["Copied asset path and asset database refresh result."],
+        "sideEffects": "writes one image file under Assets/ after approval",
+        "tags": ["attachment", "vault", "import"],
+    },
+    "vrcforge_import_chat_archive": {
+        "title": "Chat Archive Import",
+        "inputs": ["Vault payloadHash, Unity project path, and optional managed Assets/ target folder."],
+        "outputs": ["Supervised outfit import result or conservative managed ZIP extraction result."],
+        "sideEffects": "re-verifies the content hash and archive guards, then imports or extracts safe asset types after approval and checkpoint",
+        "tags": ["attachment", "vault", "archive", "import", "write"],
+    },
     "vrcforge_unity_status": {
         "title": "Unity MCP Status",
         "inputs": ["Optional Unity MCP host, port, and instance."],
@@ -9665,8 +9686,22 @@ class AgentGateway:
                 kind = str(attachment.get("payloadKind") or "metadata")
                 if attachment.get("text"):
                     lines.append(f"- {name} (text): {summarize_text(str(attachment.get('text') or ''), 1200)}")
+                elif kind == "vault_file":
+                    lines.append(
+                        f"- {name} (vault_file, {attachment.get('type') or 'file'}, {attachment.get('size') or 0} bytes, "
+                        f"payloadHash {attachment.get('payloadHash') or 'unknown'}): stored locally, never sent to the model. "
+                        "Use vrcforge_inspect_chat_attachment to list/read it; importing into Unity requires the supervised import lane."
+                    )
                 else:
-                    lines.append(f"- {name} ({kind}, {attachment.get('type') or 'file'}, {attachment.get('size') or 0} bytes)")
+                    vault_copy = str(attachment.get("vaultPayloadHash") or "").strip()
+                    vault_note = (
+                        f", vault copy payloadHash {vault_copy}; use vrcforge_inspect_chat_attachment or the supervised import lane"
+                        if vault_copy
+                        else ""
+                    )
+                    lines.append(
+                        f"- {name} ({kind}, {attachment.get('type') or 'file'}, {attachment.get('size') or 0} bytes{vault_note})"
+                    )
         vision = ensure_dict((observe.get("turn") or {}).get("visionAnalysis"))
         if vision:
             # 文本规划器本身看不到图片：这里回灌的是"带标签的委托分析结果"，
@@ -10623,6 +10658,7 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_preflight_skill_package",
         "vrcforge_scan_project_index",
         "vrcforge_inspect_outfit_package",
+        "vrcforge_inspect_chat_attachment",
         "vrcforge_plan_outfit_import",
         "vrcforge_health",
         "vrcforge_unity_status",
@@ -11095,6 +11131,22 @@ def normalize_runtime_attachments(value: Any) -> list[dict[str, Any]]:
         }
         data_url = str(raw.get("dataUrl") or raw.get("data_url") or "")
         text = str(raw.get("text") or "")
+        declared_kind = str(raw.get("payloadKind") or raw.get("payload_kind") or "")
+        vault_hash = str(raw.get("payloadHash") or raw.get("payload_hash") or "").strip().lower()
+        inline_vault_hash = str(raw.get("vaultPayloadHash") or raw.get("vault_payload_hash") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", inline_vault_hash):
+            item["vaultPayloadHash"] = inline_vault_hash
+            item["vaultKind"] = summarize_text(str(raw.get("vaultKind") or raw.get("vault_kind") or ""), 32)
+        if declared_kind == "vault_file" and re.fullmatch(r"[0-9a-f]{64}", vault_hash):
+            # 1.3.2 vault 附件：字节永远不进 prompt/transcript，只保留可复读的
+            # 内容寻址引用；检查/物化走 vrcforge_inspect_chat_attachment 与
+            # 受监督导入通道。
+            item["payloadKind"] = "vault_file"
+            item["payloadHash"] = vault_hash
+            item["vaultKind"] = summarize_text(str(raw.get("vaultKind") or raw.get("vault_kind") or ""), 32)
+            item["replayable"] = True
+            attachments.append(item)
+            continue
         if data_url:
             item["dataUrl"] = data_url[:RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS]
             item["payloadKind"] = "data_url"

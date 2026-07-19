@@ -58,6 +58,16 @@ from agent_gateway import (
     redact_sensitive,
 )
 from backend_owner_lease import BackendOwnerLease
+from chat_attachment_vault import (
+    ARCHIVE_MAX_BYTES,
+    INSPECTION_SCHEMA as CHAT_ATTACHMENT_INSPECTION_SCHEMA,
+    ChatAttachmentVault,
+    ChatAttachmentVaultError,
+    extract_archive_entry_text,
+    guard_vault_archive,
+    inspect_image_bytes,
+    is_vault_payload_hash,
+)
 from context_compaction import ContextCompactionInputError, compact_context
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
@@ -1057,6 +1067,33 @@ class AgentNotesRequest(BaseModel):
 
 class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatAttachmentImportRequest(BaseModel):
+    payload_hash: str = Field(alias="payloadHash")
+    project_path: str = Field(default="", alias="projectPath")
+    target_folder: str = Field(default="", alias="targetFolder")
+    selected_unitypackage: str = Field(default="", alias="selectedUnityPackage")
+    selected_prefab: str = Field(default="", alias="selectedPrefab")
+    base_avatar_name: str = Field(default="", alias="baseAvatarName")
+    max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
+
+    model_config = {"populate_by_name": True}
+
+
+class ChatAttachmentUploadBeginRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=512)
+    chat_id: str = Field(alias="chatId", min_length=1, max_length=256)
+    declared_type: str = Field(default="application/octet-stream", alias="declaredType", max_length=256)
+    size: int = Field(ge=1, le=ARCHIVE_MAX_BYTES)
+
+    model_config = {"populate_by_name": True}
+
+
+class ChatAttachmentUploadFinishRequest(BaseModel):
+    upload_id: str = Field(alias="uploadId", min_length=16, max_length=128)
+
+    model_config = {"populate_by_name": True}
 
 
 class ProjectPrefsRequest(BaseModel):
@@ -3355,8 +3392,18 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
         )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
+    # Vault 引用同步：该请求总是携带全部会话，作为活引用快照驱动 LRU 清理。
+    # 清理失败绝不阻断会话保存。
+    vault_retention: dict[str, Any] = {}
+    try:
+        vault_retention = await asyncio.to_thread(
+            chat_attachment_vault_store().retain,
+            collect_vault_attachment_refs(chats),
+        )
+    except Exception:
+        vault_retention = {}
     project_paths = [{"path": str(path), "count": count} for path, _payload, count in project_serialized]
-    return {"ok": True, "path": str(app_path), "count": len(chats), "appCount": len(app_chats), "projectPaths": project_paths}
+    return {"ok": True, "path": str(app_path), "count": len(chats), "appCount": len(app_chats), "projectPaths": project_paths, "vaultRetention": vault_retention}
 
 
 def is_empty_chat_transcript(chat: dict[str, Any]) -> bool:
@@ -3376,6 +3423,531 @@ def sanitize_chat_transcript(chat: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict) or str(item.get("type") or "") != "streaming"
     ]
     return chat if len(durable_items) == len(items) else {**chat, "items": durable_items}
+
+
+# ---- chat attachment vault (1.3.2) ---------------------------------------
+# 二进制体不进 prompt/transcript：字节落 chat_attachment_vault 域模块管理的
+# 本地文件库，durable message 只带 metadata + payloadHash。这里只做薄接线。
+
+_CHAT_ATTACHMENT_VAULT: ChatAttachmentVault | None = None
+_CHAT_ATTACHMENT_VAULT_LOCK = Lock()
+_CHAT_ATTACHMENT_UPLOADS: dict[str, dict[str, Any]] = {}
+_CHAT_ATTACHMENT_UPLOAD_LOCK = Lock()
+CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024
+CHAT_ATTACHMENT_UPLOAD_STALE_SECONDS = 60 * 60
+CHAT_ATTACHMENT_UPLOAD_MAX_SESSIONS = 16
+CHAT_ATTACHMENT_UPLOAD_MAX_STAGED_BYTES = 2 * ARCHIVE_MAX_BYTES
+CHAT_ATTACHMENT_UPLOAD_MAX_SESSIONS_PER_CHAT = 4
+
+
+def chat_attachment_vault_store() -> ChatAttachmentVault:
+    global _CHAT_ATTACHMENT_VAULT
+    root = AGENT_GATEWAY.user_constraints_path.parent / "chat-attachments"
+    if _CHAT_ATTACHMENT_VAULT is None or _CHAT_ATTACHMENT_VAULT.root != root:
+        with _CHAT_ATTACHMENT_VAULT_LOCK:
+            if _CHAT_ATTACHMENT_VAULT is None or _CHAT_ATTACHMENT_VAULT.root != root:
+                _CHAT_ATTACHMENT_VAULT = ChatAttachmentVault(root)
+                _cleanup_stale_chat_attachment_upload_files(root, time.time())
+    return _CHAT_ATTACHMENT_VAULT
+
+
+def _cleanup_stale_chat_attachment_upload_files(root: Path, now: float) -> None:
+    uploads_dir = root / "uploads"
+    if not uploads_dir.is_dir():
+        return
+    for path in uploads_dir.glob("*.partial"):
+        try:
+            if now - path.stat().st_mtime > CHAT_ATTACHMENT_UPLOAD_STALE_SECONDS:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _cleanup_stale_chat_attachment_uploads(now: float) -> None:
+    stale_ids = [
+        upload_id
+        for upload_id, entry in _CHAT_ATTACHMENT_UPLOADS.items()
+        if now - float(entry.get("updatedAt") or entry.get("createdAt") or 0.0) > CHAT_ATTACHMENT_UPLOAD_STALE_SECONDS
+    ]
+    for upload_id in stale_ids:
+        entry = _CHAT_ATTACHMENT_UPLOADS.pop(upload_id, None)
+        if entry:
+            try:
+                Path(str(entry["path"])).unlink(missing_ok=True)
+            except OSError:
+                pass
+    _cleanup_stale_chat_attachment_upload_files(chat_attachment_vault_store().root, now)
+
+
+def _chat_attachment_upload_path(upload_id: str) -> Path:
+    uploads_dir = chat_attachment_vault_store().root / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return uploads_dir / f"{upload_id}.partial"
+
+
+def _take_chat_attachment_upload(upload_id: str) -> dict[str, Any]:
+    key = str(upload_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+        raise HTTPException(status_code=400, detail="Invalid chat attachment upload id.")
+    with _CHAT_ATTACHMENT_UPLOAD_LOCK:
+        entry = _CHAT_ATTACHMENT_UPLOADS.pop(key, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Chat attachment upload session was not found.")
+    return entry
+
+
+def collect_vault_attachment_refs(chats: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Collect every payloadHash a durable transcript still references, per chat.
+
+    保守收集：user items 的 attachments、compactedAttachmentRefs、
+    attachmentPayloads 键全算活引用——多收无害（retain 只按索引匹配），
+    漏收会误删仍被引用的附件体。
+    """
+
+    refs: dict[str, set[str]] = {}
+    for chat in chats:
+        chat_id = str(chat.get("id") or "").strip()
+        if not chat_id:
+            continue
+        hashes: set[str] = set()
+        items = chat.get("items") if isinstance(chat.get("items"), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            attachments = item.get("attachments") if isinstance(item.get("attachments"), list) else []
+            for attachment in attachments:
+                if isinstance(attachment, dict):
+                    value = str(attachment.get("payloadHash") or "").strip().lower()
+                    if is_vault_payload_hash(value):
+                        hashes.add(value)
+                    vault_value = str(attachment.get("vaultPayloadHash") or "").strip().lower()
+                    if is_vault_payload_hash(vault_value):
+                        hashes.add(vault_value)
+        compacted = chat.get("compactedAttachmentRefs") if isinstance(chat.get("compactedAttachmentRefs"), list) else []
+        for reference in compacted:
+            if isinstance(reference, dict):
+                value = str(reference.get("payloadHash") or "").strip().lower()
+                if is_vault_payload_hash(value):
+                    hashes.add(value)
+                vault_value = str(reference.get("vaultPayloadHash") or "").strip().lower()
+                if is_vault_payload_hash(vault_value):
+                    hashes.add(vault_value)
+        payloads = chat.get("attachmentPayloads") if isinstance(chat.get("attachmentPayloads"), dict) else {}
+        for key in payloads:
+            value = str(key or "").strip().lower()
+            if is_vault_payload_hash(value):
+                hashes.add(value)
+        refs[chat_id] = hashes
+    return refs
+
+
+@app.post("/api/app/chat-attachments/uploads")
+def app_begin_chat_attachment_upload(request: ChatAttachmentUploadBeginRequest) -> dict[str, Any]:
+    now = time.time()
+    upload_id = secrets.token_urlsafe(24)
+    path = _chat_attachment_upload_path(upload_id)
+    with _CHAT_ATTACHMENT_UPLOAD_LOCK:
+        _cleanup_stale_chat_attachment_uploads(now)
+        if len(_CHAT_ATTACHMENT_UPLOADS) >= CHAT_ATTACHMENT_UPLOAD_MAX_SESSIONS:
+            raise HTTPException(status_code=429, detail="Too many active chat attachment uploads.")
+        staged_bytes = sum(int(entry.get("size") or 0) for entry in _CHAT_ATTACHMENT_UPLOADS.values())
+        if staged_bytes + request.size > CHAT_ATTACHMENT_UPLOAD_MAX_STAGED_BYTES:
+            raise HTTPException(status_code=429, detail="Active chat attachment uploads exceed the staging quota.")
+        active_for_chat = sum(
+            1 for entry in _CHAT_ATTACHMENT_UPLOADS.values() if str(entry.get("chatId") or "") == request.chat_id
+        )
+        if active_for_chat >= CHAT_ATTACHMENT_UPLOAD_MAX_SESSIONS_PER_CHAT:
+            raise HTTPException(status_code=429, detail="This chat has too many active attachment uploads.")
+        try:
+            path.touch(exist_ok=False)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not stage chat attachment upload: {exc}") from exc
+        _CHAT_ATTACHMENT_UPLOADS[upload_id] = {
+            "path": str(path),
+            "name": request.name,
+            "chatId": request.chat_id,
+            "declaredType": request.declared_type,
+            "size": request.size,
+            "received": 0,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+    return {
+        "ok": True,
+        "uploadId": upload_id,
+        "chunkSize": CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES,
+        "size": request.size,
+    }
+
+
+@app.post("/api/app/chat-attachments/uploads/{upload_id}/chunks")
+async def app_append_chat_attachment_upload(upload_id: str, request: Request, offset: int = 0) -> dict[str, Any]:
+    chunk = await request.body()
+    if not chunk:
+        raise HTTPException(status_code=400, detail="Chat attachment upload chunk is empty.")
+    if len(chunk) > CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Chat attachment upload chunk exceeds the transport cap.")
+    return await asyncio.to_thread(_append_chat_attachment_upload_chunk, upload_id, offset, chunk)
+
+
+def _append_chat_attachment_upload_chunk(upload_id: str, offset: int, chunk: bytes) -> dict[str, Any]:
+    """Append one bounded chunk without blocking the FastAPI event loop on disk I/O."""
+
+    with _CHAT_ATTACHMENT_UPLOAD_LOCK:
+        entry = _CHAT_ATTACHMENT_UPLOADS.get(upload_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Chat attachment upload session was not found.")
+        received = int(entry["received"])
+        total_size = int(entry["size"])
+        if offset != received:
+            raise HTTPException(status_code=409, detail=f"Upload offset mismatch: expected {received}, received {offset}.")
+        if received + len(chunk) > total_size:
+            raise HTTPException(status_code=413, detail="Chat attachment upload exceeds its declared size.")
+        try:
+            with Path(str(entry["path"])).open("ab") as handle:
+                handle.write(chunk)
+                handle.flush()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not append chat attachment upload: {exc}") from exc
+        entry["received"] = received + len(chunk)
+        entry["updatedAt"] = time.time()
+        return {"ok": True, "uploadId": upload_id, "received": entry["received"], "size": total_size}
+
+
+@app.post("/api/app/chat-attachments/uploads/finish")
+def app_finish_chat_attachment_upload(request: ChatAttachmentUploadFinishRequest) -> Any:
+    entry = _take_chat_attachment_upload(request.upload_id)
+    path = Path(str(entry["path"]))
+    try:
+        if int(entry["received"]) != int(entry["size"]):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Chat attachment upload is incomplete ({entry['received']}/{entry['size']} bytes).",
+            )
+        attachment = chat_attachment_vault_store().ingest_file(
+            source_path=path,
+            name=str(entry["name"]),
+            declared_type=str(entry["declaredType"]),
+            chat_id=str(entry["chatId"]),
+        )
+    except ChatAttachmentVaultError as exc:
+        path.unlink(missing_ok=True)
+        return JSONResponse({"ok": False, "reason": exc.reason, "error": str(exc)}, status_code=exc.status_code)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return {"ok": True, "attachment": attachment}
+
+
+@app.post("/api/app/chat-attachments/uploads/abort")
+def app_abort_chat_attachment_upload(request: ChatAttachmentUploadFinishRequest) -> dict[str, Any]:
+    try:
+        entry = _take_chat_attachment_upload(request.upload_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {"ok": True, "aborted": False}
+        raise
+    Path(str(entry["path"])).unlink(missing_ok=True)
+    return {"ok": True, "aborted": True}
+
+
+@app.get("/api/app/chat-attachments/{payload_hash}")
+def app_read_chat_attachment(payload_hash: str) -> dict[str, Any]:
+    try:
+        resolved = chat_attachment_vault_store().resolve(payload_hash)
+    except ChatAttachmentVaultError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=f"{exc} (reason: {exc.reason})") from exc
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Chat attachment was not found in the local vault.")
+    return {"ok": True, "attachment": resolved}
+
+
+@app.post("/api/app/chat-attachments/import")
+async def app_request_chat_attachment_import(request: ChatAttachmentImportRequest) -> dict[str, Any]:
+    vault = chat_attachment_vault_store()
+    try:
+        resolved = await asyncio.to_thread(vault.resolve, request.payload_hash)
+    except ChatAttachmentVaultError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=f"{exc} (reason: {exc.reason})") from exc
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Chat attachment was not found in the local vault.")
+    params = request.model_dump(by_alias=True)
+    try:
+        if resolved["category"] == "archive":
+            # 归档物化复用既有 outfit-import 写通道（vault 文件名保留扩展名，
+            # 计划器/导入器按磁盘路径工作，无需感知 vault）。
+            plan_params = {**params, "packagePath": resolved["path"]}
+            guard = await asyncio.to_thread(
+                guard_vault_archive,
+                Path(str(resolved["path"])),
+                str(resolved["kind"]),
+            )
+            preview = await asyncio.to_thread(plan_outfit_import_sync, plan_params)
+            plan_payload = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
+            if not preview.get("ok") or not plan_payload.get("readyToApply"):
+                if resolved["kind"] != "zip":
+                    raise HTTPException(status_code=400, detail=preview.get("error") or "Outfit import plan is not ready to apply.")
+                preview = {
+                    "ok": True,
+                    "schema": CHAT_ATTACHMENT_INSPECTION_SCHEMA,
+                    "archiveGuard": guard,
+                    "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")},
+                    "plan": {
+                        "kind": "managed_zip_extract",
+                        "readyToApply": True,
+                        "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
+                    },
+                }
+            payload = AGENT_GATEWAY.create_apply_request(
+                {
+                    "target_tool": "vrcforge_import_chat_archive",
+                    "arguments": params,
+                    "reason": f"Import chat attachment {resolved['name']} through the supervised outfit-import lane.",
+                    "preview": {**preview, "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")}},
+                    "agent_name": "desktop-agent",
+                }
+            )
+        else:
+            preview = {
+                "ok": True,
+                "schema": CHAT_ATTACHMENT_INSPECTION_SCHEMA,
+                "chatAttachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind", "category")},
+                "image": await asyncio.to_thread(
+                    inspect_image_bytes,
+                    Path(resolved["path"]),
+                    resolved["kind"],
+                    resolved["size"],
+                ),
+                "plan": {
+                    "kind": "chat_image_copy",
+                    "readyToApply": True,
+                    "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
+                },
+            }
+            payload = AGENT_GATEWAY.create_apply_request(
+                {
+                    "target_tool": "vrcforge_import_chat_image",
+                    "arguments": {
+                        "payloadHash": resolved["payloadHash"],
+                        "projectPath": request.project_path,
+                        "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
+                    },
+                    "reason": f"Copy chat image {resolved['name']} into the Unity project imports folder.",
+                    "preview": preview,
+                    "agent_name": "desktop-agent",
+                }
+            )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    payload_hash = str(params.get("payloadHash") or params.get("payload_hash") or "").strip().lower()
+    if not payload_hash:
+        raise AgentGatewayError("payloadHash is required.", status_code=400)
+    try:
+        resolved = chat_attachment_vault_store().resolve(payload_hash)
+    except ChatAttachmentVaultError as exc:
+        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
+    if resolved is None:
+        raise AgentGatewayError("Chat attachment was not found in the local vault.", status_code=404)
+    path = Path(str(resolved["path"]))
+    result: dict[str, Any] = {
+        "ok": True,
+        "schema": CHAT_ATTACHMENT_INSPECTION_SCHEMA,
+        "summary": f"Vault attachment {resolved['name']} is {resolved['kind']} ({resolved['size']} bytes).",
+        "attachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "type", "kind", "category", "extension")},
+    }
+    try:
+        if resolved["category"] == "image":
+            result["image"] = inspect_image_bytes(path, str(resolved["kind"]), int(resolved["size"]))
+            dimensions = result["image"]
+            if dimensions.get("width") and dimensions.get("height"):
+                result["summary"] += f" Dimensions: {dimensions['width']}x{dimensions['height']}."
+            return result
+        result["archiveGuard"] = guard_vault_archive(path, str(resolved["kind"]))
+        result["entryCount"] = int(result["archiveGuard"].get("entryCount") or 0)
+        result["totalUncompressedBytes"] = int(result["archiveGuard"].get("totalUncompressedBytes") or 0)
+        entry_path = str(params.get("entryPath") or params.get("entry_path") or "").strip()
+        if entry_path:
+            result["entry"] = extract_archive_entry_text(path, str(resolved["kind"]), entry_path)
+            result["summary"] = f"Read bounded text from archive entry {entry_path}."
+            result["summaryText"] = str(result["entry"].get("text") or "")
+        else:
+            max_entries = max(1, min(int(params.get("maxEntries") or params.get("max_entries") or 2000), 10000))
+            result["listing"] = inspect_outfit_package(str(path), max_entries=max_entries)
+            listing_summary = result["listing"].get("summary") if isinstance(result["listing"], dict) else {}
+            if isinstance(listing_summary, dict):
+                for key, value in listing_summary.items():
+                    if key.lower().endswith("count") and isinstance(value, int):
+                        result[key] = value
+            result["summary"] = f"Guarded archive listing contains {result['entryCount']} entries."
+            result["summaryText"] = _chat_attachment_listing_summary(result["listing"])
+    except ChatAttachmentVaultError as exc:
+        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
+    return result
+
+
+def _chat_attachment_listing_summary(listing: Any) -> str:
+    if not isinstance(listing, dict):
+        return ""
+    names: list[str] = []
+    for field in ("unityPackages", "prefabCandidates", "textures", "materials", "models"):
+        values = listing.get(field)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict):
+                name = str(item.get("path") or item.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            if len(names) >= 24:
+                break
+        if len(names) >= 24:
+            break
+    return "Detected import candidates:\n" + "\n".join(f"- {name}" for name in names) if names else "No supported import candidates detected."
+
+
+def import_chat_image_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    payload_hash = str(params.get("payloadHash") or params.get("payload_hash") or "").strip().lower()
+    if not payload_hash:
+        raise AgentGatewayError("payloadHash is required.", status_code=400)
+    try:
+        resolved = chat_attachment_vault_store().resolve(payload_hash)
+    except ChatAttachmentVaultError as exc:
+        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
+    if resolved is None:
+        raise AgentGatewayError("Chat attachment was not found in the local vault.", status_code=404)
+    if resolved["category"] != "image":
+        raise AgentGatewayError("vrcforge_import_chat_image only accepts image attachments; archives go through the outfit-import lane.", status_code=400)
+    project_root = _resolve_unity_project_root_for_import(params, {})
+    target_folder = str(params.get("targetFolder") or params.get("target_folder") or "Assets/VRCForge/Imports")
+    target_root = _resolve_import_target_folder(project_root, target_folder)
+    source = Path(str(resolved["path"]))
+    stem = sanitize_artifact_name(Path(str(resolved["name"])).stem) or "chat-image"
+    extension = str(resolved["extension"])
+    target = (target_root / f"{stem}{extension}").resolve()
+    if target.exists():
+        target = (target_root / f"{stem}_{payload_hash[:8]}{extension}").resolve()
+    _ensure_path_inside_project(project_root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    copied_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+    if copied_hash != payload_hash:
+        target.unlink(missing_ok=True)
+        raise AgentGatewayError("Copied chat image failed content-hash verification.", status_code=409)
+    asset_path = target.relative_to(project_root).as_posix()
+    refresh = refresh_asset_database_sync({**params, "projectPath": str(project_root)})
+    return {
+        "ok": True,
+        "kind": "chat_image_copy",
+        "assetPath": asset_path,
+        "copiedFiles": [asset_path],
+        "copiedFileCount": 1,
+        "attachment": {key: resolved[key] for key in ("payloadHash", "name", "size", "kind")},
+        "assetDatabaseRefresh": refresh,
+    }
+
+
+CHAT_ZIP_SAFE_EXTRACT_SUFFIXES = {
+    ".prefab", ".mat", ".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr",
+    ".fbx", ".blend", ".obj", ".asset", ".controller", ".anim",
+    ".txt", ".md", ".json",
+}
+
+
+def import_chat_archive_sync(params: dict[str, Any]) -> dict[str, Any]:
+    """Re-resolve and verify a vault archive at execution time before any project write."""
+
+    params = params or {}
+    payload_hash = str(params.get("payloadHash") or params.get("payload_hash") or "").strip().lower()
+    if not payload_hash:
+        raise AgentGatewayError("payloadHash is required.", status_code=400)
+    try:
+        resolved = chat_attachment_vault_store().resolve(payload_hash)
+    except ChatAttachmentVaultError as exc:
+        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
+    if resolved is None:
+        raise AgentGatewayError("Chat attachment was not found in the local vault.", status_code=404)
+    if resolved["category"] != "archive":
+        raise AgentGatewayError("vrcforge_import_chat_archive only accepts archive attachments.", status_code=400)
+    source = Path(str(resolved["path"]))
+    try:
+        archive_guard = guard_vault_archive(source, str(resolved["kind"]))
+    except ChatAttachmentVaultError as exc:
+        raise AgentGatewayError(f"{exc} (reason: {exc.reason})", status_code=exc.status_code) from exc
+
+    plan_params = {**params, "packagePath": str(source)}
+    plan = plan_outfit_import_sync(plan_params)
+    plan_payload = plan.get("plan") if isinstance(plan.get("plan"), dict) else {}
+    if plan.get("ok") and plan_payload.get("readyToApply"):
+        result = import_outfit_package_sync(plan_params)
+        return {**result, "payloadHash": payload_hash, "archiveGuard": archive_guard}
+    if resolved["kind"] != "zip":
+        raise AgentGatewayError(plan.get("error") or "Archive import plan is not ready to apply.", status_code=400)
+    return _extract_chat_zip_to_managed_assets(params, resolved, archive_guard)
+
+
+def _extract_chat_zip_to_managed_assets(
+    params: dict[str, Any],
+    resolved: dict[str, Any],
+    archive_guard: dict[str, Any],
+) -> dict[str, Any]:
+    project_root = _resolve_unity_project_root_for_import(params, {})
+    target_folder = str(params.get("targetFolder") or params.get("target_folder") or "Assets/VRCForge/Imports")
+    target_parent = _resolve_import_target_folder(project_root, target_folder)
+    stem = sanitize_artifact_name(Path(str(resolved["name"])).stem) or "chat-archive"
+    target_root = (target_parent / f"{stem}_{str(resolved['payloadHash'])[:8]}").resolve()
+    _ensure_path_inside_project(project_root, target_root)
+    if target_root.exists():
+        raise AgentGatewayError(f"Managed ZIP target already exists: {target_root.relative_to(project_root).as_posix()}", status_code=409)
+
+    source = Path(str(resolved["path"]))
+    copied: list[str] = []
+    seen: set[str] = set()
+    try:
+        with zipfile.ZipFile(source) as archive:
+            infos = archive.infolist()
+            for info in infos:
+                normalized = info.filename.replace("\\", "/").strip("/")
+                if not normalized or info.is_dir():
+                    continue
+                key = normalized.casefold()
+                if key in seen:
+                    raise AgentGatewayError(f"ZIP contains a duplicate target path: {normalized}", status_code=400)
+                seen.add(key)
+                suffix = Path(normalized).suffix.lower()
+                if suffix not in CHAT_ZIP_SAFE_EXTRACT_SUFFIXES:
+                    raise AgentGatewayError(f"ZIP entry type is not allowed for managed Assets extraction: {normalized}", status_code=400)
+                target = (target_root / Path(*PurePosixPath(normalized).parts)).resolve()
+                _ensure_path_inside_project(project_root, target)
+                try:
+                    target.relative_to(target_root)
+                except ValueError as exc:
+                    raise AgentGatewayError(f"ZIP entry escapes the managed target: {normalized}", status_code=400) from exc
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source_handle, target.open("xb") as target_handle:
+                    shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                copied.append(target.relative_to(project_root).as_posix())
+    except Exception:
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        raise
+    refresh = refresh_asset_database_sync({**params, "projectPath": str(project_root)})
+    return {
+        "ok": True,
+        "kind": "managed_zip_extract",
+        "payloadHash": resolved["payloadHash"],
+        "targetFolder": target_root.relative_to(project_root).as_posix(),
+        "copiedFiles": copied[:256],
+        "copiedFileCount": len(copied),
+        "archiveGuard": archive_guard,
+        "assetDatabaseRefresh": refresh,
+    }
 
 
 PROJECT_PREFS_MAX_PATHS = 64
@@ -20004,6 +20576,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", inspect_outfit_package_sync)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_inspect_chat_attachment",
+        "Inspect a vault-stored chat attachment by payloadHash: bounded archive listing with bomb/zip-slip guards, single-entry text extract via entryPath, or image header metadata. Read-only; materialization goes through the supervised import lane.",
+        "read/debug",
+        inspect_chat_attachment_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", plan_outfit_import_sync)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
@@ -20321,6 +20899,18 @@ def register_agent_gateway_tools() -> None:
         "Import a direct UnityPackage or copy loose outfit prefab/material/texture assets into the Unity project through VRCForge.",
         "high",
         import_outfit_package_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_import_chat_image",
+        "Copy a vault-stored chat image attachment into the Unity project's Assets/VRCForge/Imports folder through VRCForge.",
+        "high",
+        import_chat_image_sync,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_import_chat_archive",
+        "Re-verify and import a vault-stored chat archive through the supervised outfit lane or conservative managed ZIP extraction.",
+        "high",
+        import_chat_archive_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_component",

@@ -19,7 +19,7 @@ import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
-const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 
 export function formatPayload(value: unknown): string {
@@ -159,9 +159,11 @@ export function appendAttachmentSummary(text: string, attachments: ChatAttachmen
           ? t("attachments.payloadAttached")
           : attachment.payloadKind === "text"
             ? t("attachments.textAttached")
-            : attachment.truncated
-              ? t("attachments.metadataOnlyLarge")
-              : t("attachments.metadataOnly");
+            : attachment.payloadKind === "vault_file"
+              ? t("attachments.vaultStored")
+              : attachment.truncated
+                ? t("attachments.metadataOnlyLarge")
+                : t("attachments.metadataOnly");
       const degraded = attachment.error ? `; ${attachment.error}` : "";
       return `- ${attachment.name} (${attachment.type || t("attachments.fileTypeFallback")}, ${formatAttachmentSize(attachment.size)}, ${payload}${degraded})`;
     })
@@ -255,6 +257,8 @@ export function serializeChatAttachments(attachments: ChatAttachment[]): AgentMe
     text: attachment.text,
     payloadKind: attachment.payloadKind || (attachment.dataUrl ? "data_url" : attachment.text ? "text" : "metadata"),
     payloadHash: attachment.payloadHash,
+    ...(attachment.vaultPayloadHash ? { vaultPayloadHash: attachment.vaultPayloadHash } : {}),
+    ...(attachment.vaultKind ? { vaultKind: attachment.vaultKind } : {}),
     truncated: Boolean(attachment.truncated),
     error: attachment.error || "",
   }));
