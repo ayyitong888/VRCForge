@@ -285,6 +285,20 @@ export type ProviderTestResult = {
   skipped?: boolean;
 };
 
+export type ProviderReasoningVariants = {
+  schema: "vrcforge.reasoning_variants.v1" | string;
+  provider: string;
+  model: string;
+  transport: string;
+  defaultKey: "default" | string;
+  variants: Array<{
+    key: string;
+    level: string;
+    displayKey: string;
+    requestMode: string;
+  }>;
+};
+
 export async function fetchProviderModels(
   endpoint: string,
   config: { provider: string; api_key?: string; base_url?: string; model?: string },
@@ -301,9 +315,26 @@ export async function fetchProviderModels(
   });
 }
 
+export async function fetchReasoningVariants(
+  endpoint: string,
+  request: { provider: string; model: string },
+): Promise<ProviderReasoningVariants> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProviderReasoningVariants>("fetch_reasoning_variants", {
+      request: { ...request, timeoutMs: 10000 },
+    });
+  }
+  return requestJson<ProviderReasoningVariants>(`${endpoint}/api/app/provider/reasoning-variants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    timeoutMs: 10000,
+  });
+}
+
 export async function testProviderCapability(
   endpoint: string,
-  request: { provider: string; api_key?: string; base_url?: string; model?: string; capability: "text" | "structured" | "vision" },
+  request: { provider: string; api_key?: string; base_url?: string; model?: string; thinking_level?: string; capability: "text" | "structured" | "vision" },
 ): Promise<ProviderTestResult> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ProviderTestResult>("test_provider_capability", {

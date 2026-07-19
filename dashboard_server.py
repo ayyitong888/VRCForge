@@ -134,6 +134,9 @@ from vrchat_blendshape_agent import (
     Settings,
     UnityMcpError,
     build_planning_payload,
+    build_anthropic_request_payload,
+    build_gemini_generate_config,
+    build_openai_compatible_request_payload,
     create_blendshape_plan,
     create_material_tuning_plan,
     create_shader_visual_review,
@@ -147,6 +150,10 @@ from vrchat_blendshape_agent import (
     mock_execute_payload,
     normalize_base_url,
     normalize_provider_name,
+    normalize_reasoning_effort,
+    model_rejects_fixed_temperature,
+    reasoning_effort_variants,
+    reasoning_variants_descriptor,
     provider_display_name,
     provider_requires_api_key,
     read_plan_json,
@@ -492,10 +499,17 @@ class ApiConfigRequest(BaseModel):
     api_key: str = ""
     base_url: str | None = None
     model: str | None = None
+    # Model-aware reasoning variant; empty means provider default/no override.
+    thinking_level: str = ""
 
 
 class ApiModelListRequest(ApiConfigRequest):
     pass
+
+
+class ReasoningVariantsRequest(BaseModel):
+    provider: str = DEFAULT_LLM_PROVIDER
+    model: str = ""
 
 
 class VisionConfigRequest(BaseModel):
@@ -1366,6 +1380,9 @@ class DashboardApiConfig:
     api_key: str
     base_url: str
     model: str
+    # Normalized model-aware reasoning variant. The vision lane constructs
+    # configs without it on purpose, so vision requests never inherit it.
+    thinking_level: str = ""
 
 
 @dataclass
@@ -6895,7 +6912,10 @@ def read_api_config() -> dict[str, Any]:
 async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     global DASHBOARD_API_CONFIG
 
-    config = normalize_api_config_request(request)
+    try:
+        config = normalize_api_config_request(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not config.api_key.strip():
         saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
         if saved and saved.provider == config.provider and saved.api_key.strip():
@@ -6904,6 +6924,7 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
                 api_key=saved.api_key,
                 base_url=config.base_url,
                 model=config.model,
+                thinking_level=config.thinking_level,
             )
     DASHBOARD_API_CONFIG = config
     save_dashboard_api_config(DASHBOARD_API_CONFIG)
@@ -7018,9 +7039,17 @@ async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
                 api_key=saved.api_key,
                 base_url=request.base_url,
                 model=request.model,
+                thinking_level=request.thinking_level,
                 capability=request.capability,
             )
     return await asyncio.to_thread(run_provider_test_sync, request)
+
+
+@app.post("/api/app/provider/reasoning-variants")
+def read_reasoning_variants(request: ReasoningVariantsRequest) -> dict[str, Any]:
+    """Return the backend-owned provider/model reasoning capability descriptor."""
+
+    return reasoning_variants_descriptor(request.provider, request.model)
 
 
 def _resolve_install_source_assets() -> Path:
@@ -14684,12 +14713,21 @@ def load_initial_dashboard_api_config() -> DashboardApiConfig:
     api_key = str(api_section.get("api_key") or settings.llm_api_key).strip()
     base_url = normalize_base_url(api_section.get("base_url"), provider, defaults["base_url"])
     model = str(api_section.get("model") or settings.llm_model or defaults["model"]).strip() or defaults["model"]
+    # 1.3.3: prefer the dashboard document, fall back to the legacy settings
+    # field (`llm.thinking_level`, historically Gemini-only).
+    raw_thinking_level = (
+        api_section.get("thinking_level")
+        if "thinking_level" in api_section
+        else settings.gemini_thinking_level
+    )
+    thinking_level = normalize_reasoning_effort(raw_thinking_level)
 
     return DashboardApiConfig(
         provider=provider,
         api_key=api_key,
         base_url=base_url,
         model=model,
+        thinking_level=thinking_level,
     )
 
 
@@ -14745,11 +14783,23 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
     model = str(request.model or defaults["model"]).strip() or defaults["model"]
     base_url = normalize_base_url(request.base_url, provider, defaults["base_url"])
 
+    thinking_level = normalize_reasoning_effort(request.thinking_level)
+    raw_thinking_level = str(request.thinking_level or "").strip()
+    if raw_thinking_level and raw_thinking_level.lower() not in {"off", "default"}:
+        supported = reasoning_effort_variants(provider, model)
+        if not thinking_level or thinking_level not in supported:
+            supported_text = ", ".join(supported) if supported else "provider default only"
+            raise ValueError(
+                f"Reasoning variant '{raw_thinking_level}' is not supported by {provider}/{model}; "
+                f"supported: {supported_text}."
+            )
+
     return DashboardApiConfig(
         provider=provider,
         api_key=request.api_key.strip(),
         base_url=base_url,
         model=model,
+        thinking_level=thinking_level,
     )
 
 
@@ -14767,8 +14817,20 @@ def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
 
 
 def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
-    config = normalize_api_config_request(request)
     capability = request.capability
+    try:
+        config = normalize_api_config_request(request)
+    except ValueError as exc:
+        provider = normalize_provider_name(request.provider)
+        return {
+            "ok": False,
+            "status": "error",
+            "capability": capability,
+            "provider": provider,
+            "providerLabel": provider_display_name(provider),
+            "model": str(request.model or ""),
+            "message": str(exc),
+        }
     provider_label = provider_display_name(config.provider)
     if provider_requires_api_key(config.provider) and not config.api_key.strip():
         return {
@@ -14838,7 +14900,17 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
             client = genai.Client(vertexai=True, project=project, location=location)
         else:
             client = genai.Client(api_key=config.api_key)
-        response = client.models.generate_content(model=config.model, contents=prompt)
+        generate_kwargs: dict[str, Any] = {"model": config.model, "contents": prompt}
+        if config.thinking_level:
+            try:
+                from google.genai import types as genai_types
+            except ImportError as exc:
+                raise RuntimeError("The installed google-genai package does not expose thinking configuration.") from exc
+            settings = _provider_probe_settings(config)
+            generate_config = build_gemini_generate_config(settings, genai_types)
+            if generate_config is not None:
+                generate_kwargs["config"] = generate_config
+        response = client.models.generate_content(**generate_kwargs)
         return str(getattr(response, "text", "") or response)
     if config.provider == "anthropic":
         try:
@@ -14846,11 +14918,8 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
         except ImportError as exc:
             raise RuntimeError("The anthropic package is not installed.") from exc
         client = anthropic.Anthropic(api_key=config.api_key)
-        response = client.messages.create(
-            model=config.model,
-            max_tokens=64,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request_payload = build_anthropic_request_payload(_provider_probe_settings(config), prompt)
+        response = client.messages.create(**request_payload)
         parts = getattr(response, "content", []) or []
         texts = [str(getattr(part, "text", "") or "") for part in parts]
         return "\n".join(text for text in texts if text).strip()
@@ -14860,12 +14929,11 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
         raise RuntimeError("The openai package is not installed.") from exc
     if not config.base_url.strip() and config.provider not in {"openai"}:
         raise RuntimeError("Base URL is empty.")
-    kwargs: dict[str, Any] = {
-        "model": config.model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 64,
-    }
+    kwargs = build_openai_compatible_request_payload(_provider_probe_settings(config), prompt)
+    if model_rejects_fixed_temperature(config.model):
+        kwargs["max_completion_tokens"] = 512
+    else:
+        kwargs["max_tokens"] = 64
     if structured:
         kwargs["response_format"] = {"type": "json_object"}
     client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url or None, timeout=30.0)
@@ -14875,6 +14943,30 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
         return ""
     message = getattr(choices[0], "message", None)
     return str(getattr(message, "content", "") or "")
+
+
+def _provider_probe_settings(config: DashboardApiConfig) -> Settings:
+    """Build an in-memory Settings object so provider tests use production request policy."""
+
+    return Settings(
+        llm_provider=config.provider,
+        llm_api_key=config.api_key,
+        llm_base_url=config.base_url,
+        llm_model=config.model,
+        llm_api_key_env="",
+        gemini_thinking_level=config.thinking_level,
+        unity_mcp_command=[],
+        unity_mcp_host="127.0.0.1",
+        unity_mcp_port=0,
+        unity_mcp_instance="",
+        unity_mcp_retries=0,
+        unity_mcp_retry_backoff_seconds=0.0,
+        unity_mcp_timeout_seconds=0,
+        export_tool_name="",
+        execute_tool_name="",
+        export_path=Path("Assets/VRCForge/blendshapes_export.json"),
+        min_confidence=0.0,
+    )
 
 
 # 主模型视觉能力判定：保守白名单——判错的代价是"该走委托的没走"（仍有诚实提示），
@@ -15077,12 +15169,16 @@ def _run_provider_vision_analysis(
     ]
     message_content.append({"type": "text", "text": prompt})
     client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url or None, timeout=60.0)
-    response = client.chat.completions.create(
-        model=config.model,
-        messages=[{"role": "user", "content": message_content}],
-        temperature=0,
-        max_tokens=1024,
-    )
+    vision_kwargs: dict[str, Any] = {
+        "model": config.model,
+        "messages": [{"role": "user", "content": message_content}],
+    }
+    if model_rejects_fixed_temperature(config.model):
+        vision_kwargs["max_completion_tokens"] = 1024
+    else:
+        vision_kwargs["temperature"] = 0
+        vision_kwargs["max_tokens"] = 1024
+    response = client.chat.completions.create(**vision_kwargs)
     choices = getattr(response, "choices", []) or []
     text = ""
     if choices:
@@ -15284,6 +15380,7 @@ def save_dashboard_config_document() -> None:
             "api_key": api.api_key,
             "base_url": api.base_url,
             "model": api.model,
+            "thinking_level": api.thinking_level,
         }
     }
     if vision.provider:
@@ -15318,6 +15415,8 @@ def serialize_api_config(include_secret: bool) -> dict[str, Any]:
         "apiKeyPresent": bool(config.api_key),
         "base_url": config.base_url,
         "model": config.model,
+        # Always present so build_llm_settings override handling sees the key.
+        "thinking_level": config.thinking_level,
         "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
         "authHeader": provider_auth_label(config.provider),
         "apiKeyRequired": provider_requires_api_key(config.provider),

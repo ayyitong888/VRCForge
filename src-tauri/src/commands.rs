@@ -43,6 +43,8 @@ pub(crate) struct DesktopProviderConfigRequest {
     #[serde(default, alias = "baseUrl")]
     base_url: Option<String>,
     model: Option<String>,
+    #[serde(default, alias = "thinkingLevel")]
+    thinking_level: Option<String>,
     #[serde(default, alias = "timeoutMs")]
     timeout_ms: Option<u64>,
 }
@@ -68,7 +70,17 @@ pub(crate) struct DesktopProviderTestRequest {
     #[serde(default, alias = "baseUrl")]
     base_url: Option<String>,
     model: Option<String>,
+    #[serde(default, alias = "thinkingLevel")]
+    thinking_level: Option<String>,
     capability: String,
+    #[serde(default, alias = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DesktopReasoningVariantsRequest {
+    provider: String,
+    model: String,
     #[serde(default, alias = "timeoutMs")]
     timeout_ms: Option<u64>,
 }
@@ -430,16 +442,25 @@ pub fn update_api_config(
     request: DesktopProviderConfigRequest,
 ) -> Result<serde_json::Value, String> {
     let secret = request.api_key.clone().unwrap_or_default();
+    let mut body = provider_config_body(
+        request.provider,
+        request.api_key,
+        request.base_url,
+        request.model,
+    );
+    if let serde_json::Value::Object(object) = &mut body {
+        if let Some(thinking_level) = request.thinking_level {
+            object.insert(
+                "thinking_level".to_string(),
+                serde_json::Value::String(thinking_level),
+            );
+        }
+    }
     sanitize_provider_result(
         backend_json_request(
             "POST",
             "/api/config".to_string(),
-            Some(provider_config_body(
-                request.provider,
-                request.api_key,
-                request.base_url,
-                request.model,
-            )),
+            Some(body),
             request.timeout_ms,
         ),
         &[secret.as_str()],
@@ -508,6 +529,10 @@ pub fn test_provider_capability(
     );
     if let serde_json::Value::Object(object) = &mut body {
         object.insert(
+            "thinking_level".to_string(),
+            serde_json::Value::String(request.thinking_level.unwrap_or_default()),
+        );
+        object.insert(
             "capability".to_string(),
             serde_json::Value::String(request.capability),
         );
@@ -521,6 +546,24 @@ pub fn test_provider_capability(
         ),
         &[secret.as_str()],
     )
+}
+
+#[tauri::command]
+pub async fn fetch_reasoning_variants(
+    request: DesktopReasoningVariantsRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/provider/reasoning-variants".to_string(),
+            Some(serde_json::json!({
+            "provider": request.provider,
+            "model": request.model,
+            })),
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]

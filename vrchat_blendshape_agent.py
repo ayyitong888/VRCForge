@@ -5,6 +5,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1335,13 +1336,18 @@ def request_gemini_plan_with_metadata(
         ) from exc
 
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
+    genai_types: Any = None
+    if image_paths or normalize_reasoning_effort(settings.gemini_thinking_level):
+        try:
+            from google.genai import types as genai_types
+        except ImportError as exc:
+            raise RuntimeError("The installed google-genai package does not expose the required content/config types.") from exc
     contents: Any = prompt
     if image_paths:
-        from google.genai import types
-
-        image_parts = [build_google_genai_image_part(types, path) for path in image_paths]
+        image_parts = [build_google_genai_image_part(genai_types, path) for path in image_paths]
         contents = [prompt, *image_parts]
 
+    generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
     client = genai.Client(api_key=settings.llm_api_key)
     try:
         if stream_callback is not None and not image_paths:
@@ -1350,6 +1356,7 @@ def request_gemini_plan_with_metadata(
             for chunk in client.models.generate_content_stream(
                 model=settings.llm_model,
                 contents=contents,
+                config=generate_config,
             ):
                 final_chunk = chunk
                 text = str(getattr(chunk, "text", "") or "")
@@ -1365,6 +1372,7 @@ def request_gemini_plan_with_metadata(
         response = client.models.generate_content(
             model=settings.llm_model,
             contents=contents,
+            config=generate_config,
         )
         return LlmPlanResponse(
             text=getattr(response, "text", "") or "",
@@ -1405,13 +1413,18 @@ def request_vertex_ai_plan_with_metadata(
 
     project, location = resolve_vertex_ai_project_location(settings.llm_base_url)
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
+    genai_types: Any = None
+    if image_paths or normalize_reasoning_effort(settings.gemini_thinking_level):
+        try:
+            from google.genai import types as genai_types
+        except ImportError as exc:
+            raise RuntimeError("The installed google-genai package does not expose the required content/config types.") from exc
     contents: Any = prompt
     if image_paths:
-        from google.genai import types
-
-        image_parts = [build_google_genai_image_part(types, path) for path in image_paths]
+        image_parts = [build_google_genai_image_part(genai_types, path) for path in image_paths]
         contents = [prompt, *image_parts]
 
+    generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
     try:
         client = genai.Client(vertexai=True, project=project, location=location)
         if stream_callback is not None and not image_paths:
@@ -1420,6 +1433,7 @@ def request_vertex_ai_plan_with_metadata(
             for chunk in client.models.generate_content_stream(
                 model=settings.llm_model,
                 contents=contents,
+                config=generate_config,
             ):
                 final_chunk = chunk
                 text = str(getattr(chunk, "text", "") or "")
@@ -1435,6 +1449,7 @@ def request_vertex_ai_plan_with_metadata(
         response = client.models.generate_content(
             model=settings.llm_model,
             contents=contents,
+            config=generate_config,
         )
         return LlmPlanResponse(
             text=getattr(response, "text", "") or "",
@@ -1519,6 +1534,330 @@ def should_retry_without_streaming(exc: Exception, settings: Settings) -> bool:
     )
 
 
+# --- 1.3.3 Provider reasoning-effort controls -------------------------------
+# One model-aware Settings variant is mapped through the provider's native
+# transport. The value is carried by the existing
+# `Settings.gemini_thinking_level` field (legacy name, now shared by every
+# provider lane). Empty means provider default; unknown/custom lanes send
+# nothing.
+
+REASONING_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+REASONING_THINKING_BUDGET_TOKENS = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 8192,
+    "high": 16384,
+    "xhigh": 24576,
+    "max": 31999,
+}
+GEMINI_25_THINKING_BUDGET_TOKENS = {
+    "none": 0,
+    "minimal": 512,
+    "low": 1024,
+    "medium": 8192,
+    "high": 16384,
+    "xhigh": 24576,
+    "max": 24576,
+}
+ANTHROPIC_RESPONSE_BASE_MAX_TOKENS = 1400
+# OpenAI-compatible endpoints that accept the `reasoning_effort` parameter.
+# Ollama and custom endpoints stay parameter-free (spec: unknown/custom send
+# no reasoning parameter; unrecognized params can hard-fail those servers).
+# Model families that reject a fixed sampling temperature (o-series and GPT-5
+# reasoning models). Matched on the bare model id after any vendor prefix.
+_TEMPERATURE_REJECTING_MODEL_PATTERN = re.compile(r"^(o[0-9]|gpt-5)")
+_ANTHROPIC_ADAPTIVE_THINKING_MODEL_PATTERN = re.compile(
+    r"^claude-(?:"
+    r"opus-(?:4-(?:6|7|8)|[5-9])"
+    r"|sonnet-(?:4-6|[5-9])"
+    r"|fable-[5-9]"
+    r"|mythos(?:-[0-9]+|-preview)"
+    r")"
+)
+_ANTHROPIC_MANUAL_THINKING_MODEL_PATTERN = re.compile(
+    r"^claude-(?:(?:opus|sonnet|haiku)-4(?:-[0-5])?|3-7-sonnet)(?:[-.]|$)"
+)
+_ANTHROPIC_OUTPUT_EFFORT_MODEL_PATTERN = re.compile(
+    r"^claude-(?:"
+    r"opus-(?:4-(?:5|6|7|8)|[5-9])"
+    r"|sonnet-(?:4-6|[5-9])"
+    r"|fable-[5-9]"
+    r"|mythos(?:-[0-9]+|-preview)"
+    r")"
+)
+
+
+def normalize_reasoning_effort(value: Any) -> str:
+    """Normalize a recognized provider reasoning variant; empty means provider default."""
+
+    level = str(value or "").strip().lower()
+    return level if level in REASONING_EFFORT_LEVELS else ""
+
+
+def reasoning_thinking_budget(level: str) -> int | None:
+    """Token budget for a normalized level; None means "send nothing"."""
+
+    return REASONING_THINKING_BUDGET_TOKENS.get(normalize_reasoning_effort(level))
+
+
+def _no_reasoning_variants(_model_id: str) -> list[str]:
+    return []
+
+
+def _openai_reasoning_variants(model_id: str) -> list[str]:
+    if re.match(r"^o[0-9](?:[.-]|$)", model_id):
+        return ["low", "medium", "high"]
+    if not model_id.startswith("gpt-5"):
+        return []
+    version_match = re.match(r"^gpt-5[.-](\d+)(?:[.-]|$)", model_id)
+    version = int(version_match.group(1)) if version_match else None
+    if "-chat" in model_id or "pro" in model_id:
+        # VRCForge currently uses Chat Completions; GPT-5 Chat/Pro aliases do
+        # not expose the configurable reasoning transport used by this lane.
+        return []
+    if "codex" in model_id:
+        if version is not None and version >= 3:
+            return ["none", "low", "medium", "high", "xhigh"]
+        if version is not None and version >= 2:
+            return ["low", "medium", "high", "xhigh"]
+        return ["low", "medium", "high"]
+    if version is not None and version >= 6:
+        return ["none", "low", "medium", "high", "xhigh", "max"]
+    if version is not None and version >= 2:
+        return ["none", "low", "medium", "high", "xhigh"]
+    if version == 1:
+        return ["none", "low", "medium", "high"]
+    return ["minimal", "low", "medium", "high"]
+
+
+def _deepseek_reasoning_variants(model_id: str) -> list[str]:
+    # DeepSeek exposes a native thinking on/off switch, not a graded effort
+    # enum. `high` is VRCForge's semantic label for enabled thinking.
+    if re.match(r"^deepseek-(?:chat|reasoner)(?:[-.]|$)", model_id):
+        return ["none", "high"]
+    return []
+
+
+def _openrouter_reasoning_variants(model_id: str) -> list[str]:
+    if model_id in {"auto", "free"}:
+        return []
+    return ["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def _anthropic_reasoning_variants(model_id: str) -> list[str]:
+    if anthropic_model_supports_adaptive_thinking(model_id):
+        if re.search(r"(?:opus-4[-.]?[7-9]|opus-[5-9]|sonnet-[5-9]|fable-[5-9]|mythos-[5-9])", model_id):
+            return ["low", "medium", "high", "xhigh", "max"]
+        return ["low", "medium", "high", "max"]
+    if anthropic_model_supports_output_effort(model_id):
+        return ["low", "medium", "high"]
+    if anthropic_model_supports_manual_thinking(model_id):
+        return ["minimal", "low", "medium", "high", "xhigh", "max"]
+    return []
+
+
+def _gemini_reasoning_variants(model_id: str) -> list[str]:
+    mode = gemini_model_thinking_mode(model_id)
+    if mode == "level":
+        return ["minimal", "low", "medium", "high"] if "flash" in model_id else ["low", "medium", "high"]
+    if mode == "budget":
+        return (["none"] if "flash" in model_id else []) + ["low", "medium", "high", "max"]
+    return []
+
+
+# One extension point for current and future providers. Adding xAI, Mistral,
+# Groq, or another configured lane requires a resolver plus a request adapter;
+# unknown/custom providers remain fail-closed.
+REASONING_PROVIDER_VARIANT_RESOLVERS: dict[str, Callable[[str], list[str]]] = {
+    "openai": _openai_reasoning_variants,
+    "deepseek": _deepseek_reasoning_variants,
+    "openrouter": _openrouter_reasoning_variants,
+    "anthropic": _anthropic_reasoning_variants,
+    "gemini": _gemini_reasoning_variants,
+    "vertexai": _gemini_reasoning_variants,
+    "ollama": _no_reasoning_variants,
+    "custom": _no_reasoning_variants,
+}
+
+
+def reasoning_effort_variants(provider: str, model: str) -> list[str]:
+    """Return VRCForge's model-aware, weakest-to-strongest reasoning variants."""
+
+    model_id = bare_provider_model_id(model)
+    if not model_id:
+        return []
+    resolver = REASONING_PROVIDER_VARIANT_RESOLVERS.get(normalize_provider_name(provider), _no_reasoning_variants)
+    return resolver(model_id)
+
+
+def reasoning_variants_descriptor(provider: str, model: str) -> dict[str, Any]:
+    levels = reasoning_effort_variants(provider, model)
+    provider_id = normalize_provider_name(provider)
+    model_id = bare_provider_model_id(model)
+    transport = {
+        "openai": "openai_chat_completions",
+        "deepseek": "deepseek_chat_completions",
+        "openrouter": "openrouter_chat_completions",
+        "anthropic": "anthropic_messages",
+        "gemini": "google_generate_content",
+        "vertexai": "vertex_generate_content",
+        "ollama": "ollama_chat_completions",
+        "custom": "custom_chat_completions",
+    }.get(provider_id, "unknown")
+    request_mode = {
+        "openai": "reasoning_effort",
+        "deepseek": "thinking_toggle",
+        "openrouter": "reasoning.effort",
+        "gemini": f"thinking_{gemini_model_thinking_mode(model_id)}",
+        "vertexai": f"thinking_{gemini_model_thinking_mode(model_id)}",
+    }.get(provider_id, "")
+    if provider_id == "anthropic":
+        if anthropic_model_supports_adaptive_thinking(model_id):
+            request_mode = "adaptive_thinking_effort"
+        elif anthropic_model_supports_output_effort(model_id):
+            request_mode = "manual_thinking_effort"
+        elif anthropic_model_supports_manual_thinking(model_id):
+            request_mode = "manual_thinking_budget"
+    return {
+        "schema": "vrcforge.reasoning_variants.v1",
+        "provider": provider_id,
+        "model": str(model or "").strip(),
+        "transport": transport,
+        "defaultKey": "default",
+        "variants": [
+            {
+                "key": level,
+                "level": level,
+                "displayKey": f"provider.reasoning_{level}",
+                "requestMode": request_mode,
+            }
+            for level in levels
+        ],
+    }
+
+
+def model_rejects_fixed_temperature(model: str) -> bool:
+    """True for model families that reject a fixed temperature (o-series, GPT-5)."""
+
+    normalized = str(model or "").strip().lower()
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1]
+    return bool(_TEMPERATURE_REJECTING_MODEL_PATTERN.match(normalized))
+
+
+def bare_provider_model_id(model: str) -> str:
+    """Return a normalized model id without an optional provider/path prefix."""
+
+    return str(model or "").strip().lower().rsplit("/", 1)[-1]
+
+
+def anthropic_model_supports_adaptive_thinking(model: str) -> bool:
+    """Whether the Anthropic model should use adaptive thinking + output effort."""
+
+    return bool(_ANTHROPIC_ADAPTIVE_THINKING_MODEL_PATTERN.match(bare_provider_model_id(model)))
+
+
+def anthropic_model_supports_manual_thinking(model: str) -> bool:
+    return bool(_ANTHROPIC_MANUAL_THINKING_MODEL_PATTERN.match(bare_provider_model_id(model)))
+
+
+def anthropic_model_supports_output_effort(model: str) -> bool:
+    return bool(_ANTHROPIC_OUTPUT_EFFORT_MODEL_PATTERN.match(bare_provider_model_id(model)))
+
+
+def gemini_model_thinking_mode(model: str) -> str:
+    """Return the supported GenerateContent thinking control for a Gemini model."""
+
+    normalized = bare_provider_model_id(model)
+    if normalized.startswith("gemini-3"):
+        return "level"
+    if normalized.startswith("gemini-2.5"):
+        return "budget"
+    return ""
+
+
+def build_openai_compatible_request_payload(settings: Settings, user_content: Any) -> dict[str, Any]:
+    """Chat-completions payload with reasoning/temperature policy applied."""
+
+    payload: dict[str, Any] = {"model": settings.llm_model}
+    level = normalize_reasoning_effort(settings.gemini_thinking_level)
+    supported = reasoning_effort_variants(settings.llm_provider, settings.llm_model)
+    active_level = level if level in supported else ""
+    if not model_rejects_fixed_temperature(settings.llm_model) and not (
+        normalize_provider_name(settings.llm_provider) == "deepseek" and active_level
+    ):
+        payload["temperature"] = 0.1
+    payload["messages"] = [
+        {
+            "role": "system",
+            "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+        },
+        {"role": "user", "content": user_content},
+    ]
+    provider = normalize_provider_name(settings.llm_provider)
+    if active_level and provider == "openai":
+        payload["reasoning_effort"] = active_level
+    elif active_level and provider == "deepseek":
+        payload["extra_body"] = {"thinking": {"type": "disabled" if active_level == "none" else "enabled"}}
+    elif active_level and provider == "openrouter":
+        payload["extra_body"] = {"reasoning": {"effort": active_level}}
+    return payload
+
+
+def build_anthropic_request_payload(settings: Settings, user_content: Any) -> dict[str, Any]:
+    """Messages payload with model-aware adaptive/manual thinking controls."""
+
+    payload: dict[str, Any] = {
+        "model": settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
+        "max_tokens": ANTHROPIC_RESPONSE_BASE_MAX_TOKENS,
+        "system": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    level = normalize_reasoning_effort(settings.gemini_thinking_level)
+    if level not in reasoning_effort_variants("anthropic", payload["model"]):
+        level = ""
+    budget = reasoning_thinking_budget(level)
+    if budget is not None:
+        payload["max_tokens"] = ANTHROPIC_RESPONSE_BASE_MAX_TOKENS + budget
+        if anthropic_model_supports_adaptive_thinking(payload["model"]):
+            if level in {"xhigh", "max"}:
+                payload["max_tokens"] = max(payload["max_tokens"], 65536)
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": level}
+        else:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if anthropic_model_supports_output_effort(payload["model"]):
+                payload["output_config"] = {"effort": level}
+    return payload
+
+
+def build_gemini_generate_config(settings: Settings, types_module: Any) -> Any | None:
+    """GenerateContentConfig carrying the model-supported thinking control.
+
+    `types_module` is `google.genai.types`, injected so tests can pass a fake
+    module without the SDK installed.
+    """
+
+    level = normalize_reasoning_effort(settings.gemini_thinking_level)
+    if level not in reasoning_effort_variants(settings.llm_provider, settings.llm_model):
+        return None
+    mode = gemini_model_thinking_mode(settings.llm_model)
+    if mode == "level":
+        thinking_config = types_module.ThinkingConfig(thinking_level=level)
+    elif mode == "budget":
+        budget = GEMINI_25_THINKING_BUDGET_TOKENS[level]
+        if level == "max" and "pro" in bare_provider_model_id(settings.llm_model):
+            budget = 32768
+        thinking_config = types_module.ThinkingConfig(
+            thinking_budget=budget
+        )
+    else:
+        return None
+    return types_module.GenerateContentConfig(
+        thinking_config=thinking_config
+    )
+
+
 def request_openai_compatible_plan_with_metadata(
     settings: Settings,
     prompt: str,
@@ -1550,19 +1889,10 @@ def request_openai_compatible_plan_with_metadata(
 
     client = OpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
     try:
-        request_payload = {
-            "model": settings.llm_model,
-            "temperature": 0.1,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
-                },
-                {"role": "user", "content": user_content},
-            ],
-        }
+        request_payload = build_openai_compatible_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
+            reasoning_chunks: list[Any] = []
             usage_event: Any = None
 
             def consume_stream(stream: Any) -> None:
@@ -1574,6 +1904,10 @@ def request_openai_compatible_plan_with_metadata(
                     if not choices:
                         continue
                     delta = getattr(choices[0], "delta", None)
+                    for field in ("reasoning_content", "reasoning", "thinking", "reasoning_details"):
+                        value = get_value(delta, field)
+                        if value:
+                            reasoning_chunks.append({field: value})
                     text = str(getattr(delta, "content", "") or "")
                     if not text:
                         continue
@@ -1589,7 +1923,11 @@ def request_openai_compatible_plan_with_metadata(
                 consume_stream(stream)
                 return LlmPlanResponse(
                     text="".join(chunks),
-                    reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
+                    reasoning=extract_llm_reasoning_trace(
+                        {"choices": [{"message": {"reasoning_details": reasoning_chunks}}]},
+                        settings,
+                        source="openai-compatible",
+                    ),
                     usage=(
                         extract_llm_token_usage(usage_event, settings, source="openai-compatible")
                         if usage_event is not None
@@ -1604,7 +1942,11 @@ def request_openai_compatible_plan_with_metadata(
                         consume_stream(stream)
                         return LlmPlanResponse(
                             text="".join(chunks),
-                            reasoning={"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "openai-compatible"},
+                            reasoning=extract_llm_reasoning_trace(
+                                {"choices": [{"message": {"reasoning_details": reasoning_chunks}}]},
+                                settings,
+                                source="openai-compatible",
+                            ),
                             usage=(
                                 extract_llm_token_usage(usage_event, settings, source="openai-compatible")
                                 if usage_event is not None
@@ -1681,12 +2023,7 @@ def request_anthropic_plan_with_metadata(
 
     client = anthropic.Anthropic(api_key=settings.llm_api_key)
     try:
-        request_payload = {
-            "model": settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
-            "max_tokens": 1400,
-            "system": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
-            "messages": [{"role": "user", "content": user_content}],
-        }
+        request_payload = build_anthropic_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_message: Any = None

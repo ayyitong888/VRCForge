@@ -3,7 +3,9 @@ import { useTranslation } from "react-i18next";
 import {
   AppBootstrap,
   ProviderModelInfo,
+  ProviderReasoningVariants,
   fetchProviderModels,
+  fetchReasoningVariants,
   testProviderCapability,
   updateApiConfig,
   updateVisionConfig,
@@ -48,6 +50,9 @@ export function useProviderSettings({
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
+  // Provider default (send nothing) is distinct from an explicit `none` variant.
+  const [apiThinkingLevel, setApiThinkingLevel] = useState("default");
+  const [reasoningVariants, setReasoningVariants] = useState<ProviderReasoningVariants | null>(null);
   const [savingApiConfig, setSavingApiConfig] = useState(false);
   const [visionProvider, setVisionProvider] = useState("");
   const [visionApiKey, setVisionApiKey] = useState("");
@@ -69,9 +74,35 @@ export function useProviderSettings({
     setApiProvider(apiConfig.provider || "gemini");
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
+    setApiThinkingLevel(apiConfig.thinking_level || "default");
     setModelOptions([]);
     setModelOptionsScope(null);
-  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model]);
+  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.thinking_level]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!runtimeConnected || !endpoint || !apiProvider || !apiModel.trim()) {
+      setReasoningVariants(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void fetchReasoningVariants(endpoint, { provider: apiProvider, model: apiModel.trim() })
+      .then((descriptor) => {
+        if (cancelled) {
+          return;
+        }
+        setReasoningVariants(descriptor);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReasoningVariants(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [endpoint, runtimeConnected, apiProvider, apiModel]);
 
   useEffect(() => {
     if (!visionConfig) {
@@ -119,6 +150,7 @@ export function useProviderSettings({
         api_key: apiKey.trim(),
         base_url: apiBaseUrl.trim(),
         model: apiModel.trim(),
+        thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
       });
       setApiKey("");
       await refresh(targetEndpoint);
@@ -133,6 +165,8 @@ export function useProviderSettings({
     setApiProvider(provider);
     setApiModel(defaultModelForProvider(provider));
     setApiBaseUrl(defaultBaseUrlForProvider(provider));
+    setApiThinkingLevel("default");
+    setReasoningVariants(null);
     setModelOptions([]);
     setModelOptionsScope(null);
     setModelsError("");
@@ -247,6 +281,7 @@ export function useProviderSettings({
         api_key: apiKey.trim(),
         base_url: apiBaseUrl.trim(),
         model: apiModel.trim(),
+        thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
         capability,
       });
       setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}`);
@@ -269,6 +304,9 @@ export function useProviderSettings({
     setApiBaseUrl,
     apiModel,
     setApiModel,
+    apiThinkingLevel,
+    setApiThinkingLevel,
+    reasoningVariants,
     apiKeySaved,
     savingApiConfig,
     modelOptions,

@@ -11,6 +11,7 @@ import type {
   ExternalAgentConnectorStatus,
   PermissionState,
   ProviderModelInfo,
+  ProviderReasoningVariants,
   VisionConfig,
 } from "../../lib/api";
 import { EXECUTION_MODES, executionModeLabel, permissionVisualState } from "../../lib/permission-ui";
@@ -40,6 +41,8 @@ type SettingsWorkspaceProps = {
   apiKey: string;
   apiBaseUrl: string;
   apiModel: string;
+  apiThinkingLevel: string;
+  reasoningVariants: ProviderReasoningVariants | null;
   apiKeySaved: boolean;
   savingApiConfig: boolean;
   modelOptions: ProviderModelInfo[];
@@ -82,6 +85,7 @@ type SettingsWorkspaceProps = {
   onApiKeyChange: (value: string) => void;
   onApiBaseUrlChange: (value: string) => void;
   onApiModelChange: (value: string) => void;
+  onApiThinkingLevelChange: (value: string) => void;
   onSaveApiProvider: (event?: FormEvent) => void;
   onVisionProviderChange: (value: string) => void;
   onVisionApiKeyChange: (value: string) => void;
@@ -123,6 +127,8 @@ export function SettingsWorkspace({
   apiKey,
   apiBaseUrl,
   apiModel,
+  apiThinkingLevel,
+  reasoningVariants,
   apiKeySaved,
   savingApiConfig,
   modelOptions,
@@ -165,6 +171,7 @@ export function SettingsWorkspace({
   onApiKeyChange,
   onApiBaseUrlChange,
   onApiModelChange,
+  onApiThinkingLevelChange,
   onSaveApiProvider,
   onVisionProviderChange,
   onVisionApiKeyChange,
@@ -322,6 +329,8 @@ export function SettingsWorkspace({
               apiKey={apiKey}
               baseUrl={apiBaseUrl}
               model={apiModel}
+              thinkingLevel={apiThinkingLevel}
+              reasoningVariants={reasoningVariants}
               saving={savingApiConfig}
               models={modelOptions}
               loadingModels={loadingModels}
@@ -336,6 +345,7 @@ export function SettingsWorkspace({
               onApiKeyChange={onApiKeyChange}
               onBaseUrlChange={onApiBaseUrlChange}
               onModelChange={onApiModelChange}
+              onThinkingLevelChange={onApiThinkingLevelChange}
               onSubmit={onSaveApiProvider}
             />
           </div>

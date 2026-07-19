@@ -606,7 +606,19 @@
     "fetchedModels": "已拉取 {{count}} 個可用模型",
     "coreDisconnectedModels": "核心未連線，無法取得模型列表",
     "noModelsReturned": "該供應商未回傳模型列表，可手動填寫模型名",
-    "modelPlaceholder": "點擊右側刷新拉取模型列表，或手動填寫"
+    "modelPlaceholder": "點擊右側刷新拉取模型列表，或手動填寫",
+    "reasoningEffort": "推理強度",
+    "reasoningEffortHint": "只顯示目前供應商與模型支援的檔位。預設不傳送覆寫參數；模型支援時，「無」會明確關閉推理。",
+    "reasoning_default": "預設",
+    "reasoning_none": "無",
+    "reasoning_minimal": "最小",
+    "reasoning_low": "低",
+    "reasoning_medium": "中",
+    "reasoning_high": "高",
+    "reasoning_xhigh": "極高",
+    "reasoning_max": "最大",
+    "reasoningUnsupported": "已儲存但不受支援：{{level}}",
+    "reasoningUnsupportedHint": "目前模型不支援這個已儲存檔位。儲存前請選擇「預設」或一個受支援的檔位。"
   },
   "thinking": {
     "reasoning": "推理",

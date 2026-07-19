@@ -138,6 +138,8 @@ export type ApiConfig = {
   apiKeyPresent: boolean;
   base_url?: string;
   model?: string;
+  /** Model-aware reasoning variant; empty means provider default (no override). */
+  thinking_level?: string;
   usesBaseUrl?: boolean;
   authHeader?: string;
   apiKeyRequired: boolean;

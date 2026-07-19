@@ -162,6 +162,7 @@ fn main() {
             fetch_optimization_proofs,
             fetch_optimization_plan,
             fetch_provider_models,
+            fetch_reasoning_variants,
             fetch_checkpoints,
             fetch_interrupted_apply_recoveries,
             fetch_project_prefs,

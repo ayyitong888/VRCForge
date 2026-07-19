@@ -606,7 +606,19 @@
     "fetchedModels": "Fetched {{count}} available models",
     "coreDisconnectedModels": "Core disconnected, unable to fetch model list",
     "noModelsReturned": "Provider returned no model list; you can type the model name manually",
-    "modelPlaceholder": "Click refresh to fetch model list, or type manually"
+    "modelPlaceholder": "Click refresh to fetch model list, or type manually",
+    "reasoningEffort": "Reasoning effort",
+    "reasoningEffortHint": "Only variants supported by this provider and model are shown. Default sends no override; None explicitly disables reasoning when supported.",
+    "reasoning_default": "Default",
+    "reasoning_none": "None",
+    "reasoning_minimal": "Minimal",
+    "reasoning_low": "Low",
+    "reasoning_medium": "Medium",
+    "reasoning_high": "High",
+    "reasoning_xhigh": "Extra high",
+    "reasoning_max": "Maximum",
+    "reasoningUnsupported": "Unsupported saved level: {{level}}",
+    "reasoningUnsupportedHint": "This saved level is not supported by the selected model. Choose Default or a supported level before saving."
   },
   "thinking": {
     "reasoning": "Reasoning",

@@ -606,7 +606,19 @@
     "fetchedModels": "已拉取 {{count}} 个可用模型",
     "coreDisconnectedModels": "核心未连接，无法获取模型列表",
     "noModelsReturned": "该供应商未返回模型列表，可手动填写模型名",
-    "modelPlaceholder": "点击右侧刷新拉取模型列表，或手动填写"
+    "modelPlaceholder": "点击右侧刷新拉取模型列表，或手动填写",
+    "reasoningEffort": "推理强度",
+    "reasoningEffortHint": "只显示当前供应商与模型支持的档位。默认不发送覆盖参数；模型支持时，“无”会明确关闭推理。",
+    "reasoning_default": "默认",
+    "reasoning_none": "无",
+    "reasoning_minimal": "最小",
+    "reasoning_low": "低",
+    "reasoning_medium": "中",
+    "reasoning_high": "高",
+    "reasoning_xhigh": "极高",
+    "reasoning_max": "最大",
+    "reasoningUnsupported": "已保存但不受支持：{{level}}",
+    "reasoningUnsupportedHint": "当前模型不支持这个已保存档位。保存前请选择“默认”或一个受支持的档位。"
   },
   "thinking": {
     "reasoning": "推理",

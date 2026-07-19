@@ -606,7 +606,19 @@
     "fetchedModels": "{{count}} 個の利用可能なモデルを取得しました",
     "coreDisconnectedModels": "コア未接続、モデルリストを取得できません",
     "noModelsReturned": "プロバイダーがモデルリストを返しませんでした。モデル名を手動入力できます",
-    "modelPlaceholder": "右の更新ボタンでモデルリストを取得、または手動入力"
+    "modelPlaceholder": "右の更新ボタンでモデルリストを取得、または手動入力",
+    "reasoningEffort": "推論強度",
+    "reasoningEffortHint": "現在のプロバイダーとモデルが対応するレベルだけを表示します。デフォルトは上書きせず、対応モデルでは「なし」で推論を明示的に無効化します。",
+    "reasoning_default": "デフォルト",
+    "reasoning_none": "なし",
+    "reasoning_minimal": "最小",
+    "reasoning_low": "低",
+    "reasoning_medium": "中",
+    "reasoning_high": "高",
+    "reasoning_xhigh": "非常に高い",
+    "reasoning_max": "最大",
+    "reasoningUnsupported": "保存済みの未対応レベル: {{level}}",
+    "reasoningUnsupportedHint": "選択中のモデルはこの保存済みレベルに対応していません。保存前にデフォルトまたは対応レベルを選んでください。"
   },
   "thinking": {
     "reasoning": "推論",

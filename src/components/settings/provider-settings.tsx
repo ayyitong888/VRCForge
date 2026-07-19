@@ -1,7 +1,7 @@
 import { Check, Eye, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import i18n from "../../i18n";
-import type { ProviderModelInfo } from "../../lib/api";
+import type { ProviderModelInfo, ProviderReasoningVariants } from "../../lib/api";
 import { providerCapabilities, providerNeedsApiKey } from "../../lib/provider-ui";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -11,6 +11,9 @@ type ProviderSetupProps = {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** Backend-resolved reasoning variant; `default` sends no override. */
+  thinkingLevel: string;
+  reasoningVariants: ProviderReasoningVariants | null;
   saving: boolean;
   models: ProviderModelInfo[];
   loadingModels: boolean;
@@ -25,6 +28,7 @@ type ProviderSetupProps = {
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onThinkingLevelChange: (value: string) => void;
   onSubmit: (event?: FormEvent) => void;
 };
 
@@ -48,12 +52,13 @@ type VisionProfileSetupProps = {
 };
 
 const PROVIDERS_REQUIRING_BASE_URL = ["openai", "deepseek", "openrouter", "ollama", "vertexai", "custom"];
-
 export function ProviderSetup({
   provider,
   apiKey,
   baseUrl,
   model,
+  thinkingLevel,
+  reasoningVariants,
   saving,
   models,
   loadingModels,
@@ -68,9 +73,14 @@ export function ProviderSetup({
   onApiKeyChange,
   onBaseUrlChange,
   onModelChange,
+  onThinkingLevelChange,
   onSubmit,
 }: ProviderSetupProps) {
   const requiresBaseUrl = PROVIDERS_REQUIRING_BASE_URL.includes(provider);
+  const supportedReasoningVariants = reasoningVariants?.variants ?? [];
+  const supportsReasoning = supportedReasoningVariants.length > 0;
+  const hasUnsupportedReasoningVariant =
+    thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(provider);
 
@@ -171,6 +181,32 @@ export function ProviderSetup({
             <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.fetchedModels", { count: models.length })}</div>
           ) : null}
         </SettingsFieldLabel>
+        {supportsReasoning || hasUnsupportedReasoningVariant ? (
+          <SettingsFieldLabel label={i18n.t("provider.reasoningEffort")}>
+            <select
+              value={thinkingLevel}
+              onChange={(event) => onThinkingLevelChange(event.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+            >
+              <option value="default">{i18n.t("provider.reasoning_default")}</option>
+              {hasUnsupportedReasoningVariant ? (
+                <option value={thinkingLevel} disabled>
+                  {i18n.t("provider.reasoningUnsupported", { level: thinkingLevel })}
+                </option>
+              ) : null}
+              {supportedReasoningVariants.map((variant) => (
+                <option key={variant.key} value={variant.key}>
+                  {i18n.t(variant.displayKey)}
+                </option>
+              ))}
+            </select>
+            <div className={`mt-1.5 text-xs ${hasUnsupportedReasoningVariant ? "text-destructive/80" : "text-muted-foreground"}`}>
+              {hasUnsupportedReasoningVariant
+                ? i18n.t("provider.reasoningUnsupportedHint")
+                : i18n.t("provider.reasoningEffortHint")}
+            </div>
+          </SettingsFieldLabel>
+        ) : null}
       </div>
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
