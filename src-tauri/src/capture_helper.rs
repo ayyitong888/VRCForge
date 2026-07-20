@@ -89,7 +89,10 @@ impl GraphicsCaptureApiHandler for OneShotCapture {
     }
 }
 
-fn write_status(path: &Path, payload: serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn write_status(
+    path: &Path,
+    payload: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

@@ -1103,6 +1103,43 @@ def test_payload_and_backend_smokes_must_match_manifest_zip_hash(tmp_path, monke
     assert _step(report, "payload_zip.unpack")["ok"] is False
 
 
+def test_packaged_backend_gate_requires_doctor_and_cli_self_tests(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    backend_path = tmp_path / "artifacts" / "packaged-backend-smoke-101" / "packaged-bootstrap-summary.json"
+    backend = json.loads(backend_path.read_text(encoding="utf-8"))
+    backend["schema"] = "vrcforge.packaged_backend_smoke.v2"
+    backend["version"] = "1.3.4"
+    write_json(backend_path, backend)
+
+    step = gate.check_packaged_backend(
+        backend_path,
+        "1.3.4",
+        backend["payloadZipSha256"],
+    )
+
+    assert step["ok"] is False
+    assert step["details"]["doctorEvidenceRequired"] is True
+
+
+def test_packaged_backend_gate_preserves_legacy_v1_evidence(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    backend_path = tmp_path / "artifacts" / "packaged-backend-smoke-101" / "packaged-bootstrap-summary.json"
+    backend = json.loads(backend_path.read_text(encoding="utf-8"))
+
+    step = gate.check_packaged_backend(
+        backend_path,
+        "1.0.1",
+        backend["payloadZipSha256"],
+    )
+
+    assert step["ok"] is True
+    assert step["details"]["doctorEvidenceRequired"] is False
+
+
 def test_installer_smoke_requires_full_phase_and_cleanup_evidence(tmp_path, monkeypatch):
     gate = load_gate()
     write_minimum_tree(tmp_path)

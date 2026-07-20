@@ -291,6 +291,15 @@ pub(crate) struct DesktopUnityMcpRepairRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopDoctorFixRequest {
+    check_id: String,
+    mode: Option<String>,
+    project_path: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopDiagnosticsUpdateRequest {
     log_level: Option<String>,
     debug_logging: Option<bool>,
@@ -1067,32 +1076,64 @@ pub async fn fetch_workspace_diff(
 }
 
 #[tauri::command]
-pub fn fetch_doctor(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "GET",
-        "/api/app/doctor".to_string(),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+pub async fn fetch_doctor(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/doctor".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn repair_unity_mcp_bridge(
+pub async fn fix_doctor_check(
+    request: DesktopDoctorFixRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        let check_id = request.check_id.trim();
+        if check_id.is_empty() || check_id.len() > 160 {
+            return Err("Doctor check id is invalid.".to_string());
+        }
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/doctor/fix/{}",
+                percent_encode_query_component(check_id)
+            ),
+            Some(serde_json::json!({
+                "mode": request.mode.as_deref().unwrap_or("safe"),
+                "projectPath": request.project_path,
+            })),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn repair_unity_mcp_bridge(
     request: DesktopUnityMcpRepairRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/doctor/unity-mcp/repair".to_string(),
-        Some(serde_json::json!({
-            "projectPath": request.project_path,
-            "allowUnityRelaunch": request.allow_unity_relaunch,
-            "waitSeconds": request.wait_seconds,
-            "closeTimeoutSeconds": request.close_timeout_seconds,
-        })),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/doctor/unity-mcp/repair".to_string(),
+            Some(serde_json::json!({
+                "projectPath": request.project_path,
+                "allowUnityRelaunch": request.allow_unity_relaunch,
+                "waitSeconds": request.wait_seconds,
+                "closeTimeoutSeconds": request.close_timeout_seconds,
+            })),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]

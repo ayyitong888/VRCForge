@@ -28,6 +28,7 @@ type UseApprovalExecutionParams = {
   refresh: (target?: string) => Promise<void>;
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
   loadCheckpoints: () => Promise<void>;
+  reloadChatStorageState: () => Promise<boolean>;
 };
 
 export function useApprovalExecution({
@@ -46,6 +47,7 @@ export function useApprovalExecution({
   refresh,
   refreshRuntimeRuns,
   loadCheckpoints,
+  reloadChatStorageState,
 }: UseApprovalExecutionParams) {
   const { t } = useTranslation();
   const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
@@ -107,6 +109,7 @@ export function useApprovalExecution({
     setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
     setError("");
     const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
+    const pendingTargetTool = pendingApprovalItems.find((approval) => approval.id === approvalId)?.targetTool || "";
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
       const executionResult = payload.execution?.result;
@@ -123,8 +126,16 @@ export function useApprovalExecution({
       await refresh();
       await refreshRuntimeRuns(false);
       const executionRecord = asRecord(payload.execution);
-      const executionTargetTool = typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "";
+      const executionApproval = asRecord(executionRecord?.approval);
+      const executionTargetTool =
+        (typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "")
+        || (typeof executionApproval?.targetTool === "string" ? executionApproval.targetTool : "")
+        || payload.approval?.targetTool
+        || pendingTargetTool;
       const executionResultRecord = asRecord(executionResult);
+      if (executionTargetTool === "vrcforge_repair_project_chat_store" && executionRecord?.status === "applied") {
+        await reloadChatStorageState();
+      }
       const resolvedRecoveries = executionResultRecord?.resolvedApplyRecoveries;
       const shouldRefreshCheckpoints =
         activeView === "checkpoints" ||

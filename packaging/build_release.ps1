@@ -464,10 +464,41 @@ try {
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-APACHE") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-APACHE-2.0.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\uv-DISTRIBUTION-NOTES.txt") -Force
 
+    $payloadIntegrityManifest = [ordered]@{
+        schema = "vrcforge.payload-integrity.v1"
+        version = $Version
+        files = [ordered]@{
+            desktop = [ordered]@{
+                relativePath = "VRCForge.exe"
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "VRCForge.exe")).Hash.ToLowerInvariant()
+            }
+            backend = [ordered]@{
+                relativePath = "backend/vrcforge_backend.exe"
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "backend\vrcforge_backend.exe")).Hash.ToLowerInvariant()
+            }
+            version = [ordered]@{
+                relativePath = "VERSION"
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "VERSION")).Hash.ToLowerInvariant()
+            }
+        }
+    }
+    $payloadIntegrityPath = Join-Path $payloadRoot "payload-integrity.json"
+    $payloadIntegrityJson = ($payloadIntegrityManifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine
+    [System.IO.File]::WriteAllText($payloadIntegrityPath, $payloadIntegrityJson, [System.Text.UTF8Encoding]::new($false))
+
     $payloadZip = Join-Path $releaseRoot "VRCForge_Windows_x64_$Version.zip"
     Remove-Item -LiteralPath $payloadZip -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
     $payloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadZip).Hash.ToLowerInvariant()
+
+    & python .\scripts\smoke_packaged_backend.py `
+        --version $Version `
+        --packaged-root $payloadRoot `
+        --payload-zip $payloadZip `
+        --artifacts-dir (Join-Path $repoRoot "artifacts")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged Doctor and CLI self-test failed."
+    }
 
     $offlineInstaller = Join-Path $releaseRoot "VRCForge_Offline_Installer_x64.exe"
     $webInstaller = Join-Path $releaseRoot "VRCForge_Web_Installer_x64.exe"
@@ -511,6 +542,10 @@ try {
         uvDownloadUrl = $uvDownloadUrl
         uvDownloadSha256 = $UvDownloadSha256
         uvRuntime = $uvRuntimeProvenance
+        packagedDoctorSelfTest = [ordered]@{
+            schema = "vrcforge.packaged_backend_smoke.v2"
+            passed = $true
+        }
         artifacts = @(
             @{ name = [System.IO.Path]::GetFileName($UnityPackagePath); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $UnityPackagePath).Hash.ToLowerInvariant() },
             @{ name = [System.IO.Path]::GetFileName($payloadZip); sha256 = $payloadSha256 },

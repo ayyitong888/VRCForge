@@ -16,6 +16,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -28,8 +29,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -57,6 +59,7 @@ from agent_gateway import (
     parse_skill_markdown,
     redact_sensitive,
 )
+from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from backend_owner_lease import BackendOwnerLease
 from chat_attachment_vault import (
     ARCHIVE_MAX_BYTES,
@@ -85,6 +88,14 @@ from diagnostic_safety import (
     build_safety_posture,
     changed_safety_flags,
     permission_security_state,
+)
+from doctor_service import (
+    DoctorRule,
+    DoctorService,
+    DoctorServiceError,
+    PhaseLog,
+    sanitize_doctor_text,
+    sanitize_doctor_value,
 )
 from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
@@ -115,6 +126,21 @@ from outfit_import_planner import (
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
 from project_memory_index import scan_project_memory
+from runtime_settings_safety import (
+    load_runtime_settings_safely,
+    read_runtime_settings_document_safely,
+    runtime_settings_diagnostic,
+)
+from session_store_integrity import (
+    SESSION_STORE_INTEGRITY_SCHEMA,
+    SessionStoreTarget,
+    is_valid_chat_record,
+    load_strict_json,
+    path_has_link_like_segment,
+    repair_session_store,
+    scan_session_store,
+    scan_session_stores,
+)
 from shader_adapter_registry import (
     PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
     normalize_shader_family_id,
@@ -124,7 +150,7 @@ from shader_adapter_registry import (
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
-from sub_agent_tasks import SubAgentTaskRegistry
+from sub_agent_tasks import SUB_AGENT_LOG_SCHEMA, SUB_AGENT_RESULT_SCHEMA, SubAgentTaskRegistry
 from vrchat_blendshape_agent import (
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
@@ -225,6 +251,7 @@ SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.js
 SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
 TOOLS_DIR = ROOT_DIR / "tools"
 CONFIG_PATH = resolve_runtime_path("VRCFORGE_CONFIG_PATH", CONFIG_DIR / "config.json")
+CONFIG_DOCUMENT_LOCK = RLock()
 RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     "VRCFORGE_SETTINGS_PATH",
     CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
@@ -490,6 +517,13 @@ class UnityMcpRepairRequest(BaseModel):
     allow_unity_relaunch: bool = Field(default=False, alias="allowUnityRelaunch")
     wait_seconds: int = Field(default=90, alias="waitSeconds", ge=5, le=360)
     close_timeout_seconds: int = Field(default=60, alias="closeTimeoutSeconds", ge=5, le=180)
+
+    model_config = {"populate_by_name": True}
+
+
+class DoctorFixRequest(BaseModel):
+    mode: Literal["safe", "force"] = "safe"
+    project_path: str = Field(default="", alias="projectPath")
 
     model_config = {"populate_by_name": True}
 
@@ -1081,6 +1115,9 @@ class AgentNotesRequest(BaseModel):
 
 class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
+    source_revisions: list[dict[str, Any]] = Field(default_factory=list, alias="sourceRevisions")
+
+    model_config = {"populate_by_name": True}
 
 
 class ChatAttachmentImportRequest(BaseModel):
@@ -1796,9 +1833,10 @@ def health_request_has_app_auth(request: Request) -> bool:
 
 
 def build_full_health_payload() -> dict[str, Any]:
-    settings = load_settings(
+    settings = load_runtime_settings_safely(
         RUNTIME_SETTINGS_PATH,
         llm_override=serialize_api_config(include_secret=True),
+        loader=load_settings,
     )
     components = build_health_components(settings)
     return {
@@ -3248,6 +3286,10 @@ async def write_agent_notes(request: AgentNotesRequest) -> dict[str, Any]:
 
 CHAT_TRANSCRIPTS_MAX_BYTES = 16 * 1024 * 1024
 CHAT_TRANSCRIPTS_MAX_CHATS = 100
+CHAT_TRANSCRIPTS_LOCK = RLock()
+CHAT_REQUESTED_PROJECT_PATH_LIMIT = 100
+CHAT_REQUESTED_PROJECT_PATHS: dict[str, str] = {}
+AGENT_GATEWAY.bind_project_chat_checkpoint_lock(CHAT_TRANSCRIPTS_LOCK)
 
 
 def chat_transcripts_path() -> Path:
@@ -3269,6 +3311,9 @@ def resolve_chat_project_root(project_path: str) -> Path | None:
     if not root.is_absolute():
         return None
     try:
+        anchor = Path(root.anchor)
+        if not root.anchor or path_has_link_like_segment(root, anchor):
+            return None
         if not root.exists() or not root.is_dir():
             return None
         return root.resolve()
@@ -3280,7 +3325,10 @@ def project_chat_transcripts_path(project_path: str) -> Path | None:
     root = resolve_chat_project_root(project_path)
     if root is None:
         return None
-    return root / ".vrcforge" / "chat-transcripts.json"
+    target = root / ".vrcforge" / "chat-transcripts.json"
+    if path_has_link_like_segment(target, root):
+        return None
+    return target
 
 
 def normalize_chat_project_key(project_path: str) -> str:
@@ -3290,125 +3338,411 @@ def normalize_chat_project_key(project_path: str) -> str:
     return str(root).replace("/", "\\").lower()
 
 
+def remember_chat_project_path(project_path: str) -> None:
+    """Keep a bounded set of project chat sources actually requested this run."""
+
+    root = resolve_chat_project_root(project_path)
+    if root is None:
+        return
+    key = normalize_chat_project_key(str(root))
+    if not key:
+        return
+    CHAT_REQUESTED_PROJECT_PATHS.pop(key, None)
+    CHAT_REQUESTED_PROJECT_PATHS[key] = str(root)
+    while len(CHAT_REQUESTED_PROJECT_PATHS) > CHAT_REQUESTED_PROJECT_PATH_LIMIT:
+        oldest = next(iter(CHAT_REQUESTED_PROJECT_PATHS))
+        CHAT_REQUESTED_PROJECT_PATHS.pop(oldest, None)
+
+
 def load_chat_project_index_paths() -> list[str]:
     path = chat_project_index_path()
+    if path_has_link_like_segment(path, path.parent):
+        return []
     if not path.exists():
         return []
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        if path.stat().st_size > CHAT_TRANSCRIPTS_MAX_BYTES:
+            return []
+        payload = load_strict_json(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return []
     if not isinstance(payload, dict):
         return []
-    return [str(item) for item in payload.get("projectPaths", []) if isinstance(item, str) and item.strip()]
+    project_paths = payload.get("projectPaths")
+    if not isinstance(project_paths, list):
+        return []
+    return [str(item) for item in project_paths if isinstance(item, str) and item.strip()]
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temp_path.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            directory_fd = -1
+        if directory_fd >= 0:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_fd)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.replace(path)
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def load_chat_transcript_file(path: Path) -> list[dict[str, Any]]:
-    chats: list[dict[str, Any]] = []
-    if path.exists():
+def snapshot_chat_storage_files(paths: list[Path]) -> tuple[dict[Path, bytes | None], dict[Path, bool]]:
+    """Capture exact bytes before a multi-file chat transaction starts."""
+
+    snapshots: dict[Path, bytes | None] = {}
+    parent_existence: dict[Path, bool] = {}
+    for path in dict.fromkeys(paths):
+        parent_existence[path.parent] = path.parent.exists()
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and isinstance(payload.get("chats"), list):
-                chats = [
-                    sanitized
-                    for item in payload["chats"]
-                    if isinstance(item, dict)
-                    for sanitized in [sanitize_chat_transcript(item)]
-                    if not is_empty_chat_transcript(sanitized)
-                ]
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=500, detail=f"无法读取会话记录: {exc}") from exc
-    return chats
+            snapshots[path] = path.read_bytes()
+        except FileNotFoundError:
+            snapshots[path] = None
+    return snapshots, parent_existence
+
+
+def restore_chat_storage_files(
+    snapshots: dict[Path, bytes | None],
+    parent_existence: dict[Path, bool],
+) -> bool:
+    """Best-effort exact rollback; return false if any restoration step fails."""
+
+    restored = True
+    for path, original in snapshots.items():
+        if original is None:
+            continue
+        try:
+            atomic_write_bytes(path, original)
+        except OSError:
+            restored = False
+    for path, original in snapshots.items():
+        if original is not None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            restored = False
+    for parent, existed in parent_existence.items():
+        if existed or parent.name != ".vrcforge":
+            continue
+        try:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            restored = False
+    return restored
+
+
+def chat_store_target(path: Path, *, scope: str, project_path: str = "") -> SessionStoreTarget:
+    if scope == "project":
+        project_root = resolve_chat_project_root(project_path) or path.parent.parent
+        project_key = normalize_chat_project_key(project_path) or str(project_root).lower()
+        suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+        return SessionStoreTarget(
+            store_id=f"chat.project.{suffix}",
+            path=path,
+            scope="project_owned",
+            format="json",
+            required_list_field="chats",
+            required_list_item_kind="chat",
+            document_version_field="version",
+            known_document_versions=(1,),
+            guard_root=project_root,
+            max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+            max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+        )
+    return SessionStoreTarget(
+        store_id="chat.app",
+        path=path,
+        scope="app_owned",
+        format="json",
+        required_list_field="chats",
+        required_list_item_kind="chat",
+        document_version_field="version",
+        known_document_versions=(1,),
+        guard_root=path.parent,
+        max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+        max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+    )
+
+
+def chat_project_index_target() -> SessionStoreTarget:
+    return SessionStoreTarget(
+        store_id="chat.project-index",
+        path=chat_project_index_path(),
+        scope="app_owned",
+        format="json",
+        required_list_field="projectPaths",
+        required_list_item_kind="nonempty_string",
+        document_version_field="version",
+        known_document_versions=(1,),
+        guard_root=chat_project_index_path().parent,
+        max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+        max_list_items=CHAT_REQUESTED_PROJECT_PATH_LIMIT,
+    )
+
+
+def chat_recovery_marker(scan: dict[str, Any], *, scope: str) -> dict[str, Any]:
+    return {
+        "storeId": str(scan.get("storeId") or ""),
+        "scope": scope,
+        "status": str(scan.get("status") or "error"),
+        "reason": str(scan.get("reason") or "read_error"),
+        "requiresApproval": bool(scan.get("requiresApproval")),
+        "invalidCount": int(scan.get("invalidCount") or 0),
+        "quarantinedCount": int(scan.get("quarantinedCount") or 0),
+    }
+
+
+def chat_recovered_marker(result: dict[str, Any], *, scope: str) -> dict[str, Any]:
+    invalid_count = int(result.get("invalidCount") or 0)
+    return {
+        "storeId": str(result.get("storeId") or ""),
+        "scope": scope,
+        "status": "recovered",
+        "reason": str(result.get("reason") or "recovered"),
+        "requiresApproval": False,
+        "invalidCount": invalid_count,
+        "quarantinedCount": invalid_count,
+    }
+
+
+def load_chat_transcript_file(
+    target: SessionStoreTarget,
+    *,
+    scope: str,
+    self_heal_app_owned: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    """Load one chat source without allowing it to poison healthy sources."""
+
+    scan = scan_session_store(target)
+    recovery_notice: dict[str, Any] | None = None
+    if self_heal_app_owned and target.scope == "app_owned" and scan.get("status") == "needs_repair":
+        repaired = repair_session_store(target, scan)
+        if repaired.get("status") in {"repaired", "quarantined"}:
+            recovery_notice = chat_recovered_marker(repaired, scope=scope)
+            scan = scan_session_store(target)
+    source = {
+        "storeId": scan.get("storeId"),
+        "scope": scope,
+        "exists": scan.get("exists"),
+        "digest": scan.get("digest"),
+        "status": scan.get("status"),
+    }
+    if scan.get("status") == "missing":
+        return [], source, recovery_notice
+    if scan.get("status") != "ok":
+        return [], source, chat_recovery_marker(scan, scope=scope)
+    try:
+        payload = load_strict_json(target.path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        marker = {**scan, "status": "needs_repair", "reason": "snapshot_changed"}
+        source["status"] = "needs_repair"
+        return [], source, chat_recovery_marker(marker, scope=scope)
+    if not isinstance(payload, dict) or not isinstance(payload.get("chats"), list):
+        marker = {**scan, "status": "unsupported", "reason": "invalid_record_shape"}
+        source["status"] = "unsupported"
+        return [], source, chat_recovery_marker(marker, scope=scope)
+    chats = [
+        sanitized
+        for item in payload["chats"]
+        if isinstance(item, dict)
+        for sanitized in [sanitize_chat_transcript(item)]
+        if not is_empty_chat_transcript(sanitized)
+    ]
+    return chats, source, recovery_notice
+
+
+def inspect_chat_project_index(*, self_heal_app_owned: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    target = chat_project_index_target()
+    scan = scan_session_store(target)
+    recovery_notice: dict[str, Any] | None = None
+    if self_heal_app_owned and scan.get("status") == "needs_repair":
+        repaired = repair_session_store(target, scan)
+        if repaired.get("status") in {"repaired", "quarantined"}:
+            recovery_notice = chat_recovered_marker(repaired, scope="app-index")
+            scan = scan_session_store(target)
+    source = {
+        "storeId": scan.get("storeId"),
+        "scope": "app-index",
+        "exists": scan.get("exists"),
+        "digest": scan.get("digest"),
+        "status": scan.get("status"),
+    }
+    if scan.get("status") == "missing":
+        return source, recovery_notice
+    if scan.get("status") != "ok":
+        return source, chat_recovery_marker(scan, scope="app-index")
+    try:
+        payload = load_strict_json(target.path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        marker = {**scan, "status": "needs_repair", "reason": "snapshot_changed"}
+        source["status"] = "needs_repair"
+        return source, chat_recovery_marker(marker, scope="app-index")
+    if not isinstance(payload, dict) or not isinstance(payload.get("projectPaths"), list):
+        marker = {**scan, "status": "unsupported", "reason": "invalid_record_shape"}
+        source["status"] = "unsupported"
+        return source, chat_recovery_marker(marker, scope="app-index")
+    return source, recovery_notice
+
+
+def chat_record_fingerprint(chat: dict[str, Any]) -> str:
+    encoded = json.dumps(chat, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @app.get("/api/app/chats")
 def read_chat_transcripts(request: Request) -> dict[str, Any]:
-    app_path = chat_transcripts_path()
-    chats: list[dict[str, Any]] = load_chat_transcript_file(app_path)
-    sources: list[dict[str, Any]] = [{"scope": "app", "path": str(app_path), "exists": app_path.exists()}]
-    seen_ids = {str(item.get("id") or "") for item in chats if str(item.get("id") or "")}
-    for project_path in request.query_params.getlist("projectPath"):
-        path = project_chat_transcripts_path(project_path)
-        if path is None:
-            continue
-        added = 0
-        for chat in load_chat_transcript_file(path):
-            chat_id = str(chat.get("id") or "")
-            if chat_id and chat_id in seen_ids:
+    with CHAT_TRANSCRIPTS_LOCK:
+        app_path = chat_transcripts_path()
+        app_target = chat_store_target(app_path, scope="app")
+        chats, app_source, app_recovery = load_chat_transcript_file(
+            app_target,
+            scope="app",
+            self_heal_app_owned=True,
+        )
+        sources: list[dict[str, Any]] = [{**app_source, "path": str(app_path)}]
+        recoveries: list[dict[str, Any]] = [app_recovery] if app_recovery else []
+        index_source, index_recovery = inspect_chat_project_index(self_heal_app_owned=True)
+        sources.append({**index_source, "path": str(chat_project_index_path())})
+        if index_recovery:
+            recoveries.append(index_recovery)
+        seen_chat_fingerprints = {
+            str(item.get("id") or ""): chat_record_fingerprint(item)
+            for item in chats
+            if str(item.get("id") or "")
+        }
+        conflicting_chat_ids: set[str] = set()
+        requested_project_paths = request.query_params.getlist("projectPath")
+        for requested_project_path in requested_project_paths:
+            remember_chat_project_path(requested_project_path)
+        index_recovery_blocking = bool(index_recovery and index_recovery.get("status") != "recovered")
+        indexed_project_paths = [] if index_recovery_blocking else load_chat_project_index_paths()
+        indexed_project_values = {str(value).strip().casefold() for value in indexed_project_paths if str(value).strip()}
+        project_sources = list(dict.fromkeys([*indexed_project_paths, *requested_project_paths]))
+        for project_path in project_sources:
+            path = project_chat_transcripts_path(project_path)
+            if path is None:
+                project_root = resolve_chat_project_root(project_path)
+                if project_root is not None:
+                    unsafe_path = project_root / ".vrcforge" / "chat-transcripts.json"
+                    unsafe_target = chat_store_target(unsafe_path, scope="project", project_path=str(project_root))
+                    unsafe_scan = scan_session_store(unsafe_target)
+                    unsafe_source = {
+                        "storeId": unsafe_scan.get("storeId"),
+                        "scope": "project",
+                        "exists": unsafe_scan.get("exists"),
+                        "digest": unsafe_scan.get("digest"),
+                        "status": unsafe_scan.get("status"),
+                        "projectPath": project_path,
+                        "path": str(unsafe_path),
+                        "count": 0,
+                    }
+                    sources.append(unsafe_source)
+                    recoveries.append(chat_recovery_marker(unsafe_scan, scope="project"))
+                elif str(project_path or "").strip():
+                    unavailable_store_id = f"chat.unavailable.{hashlib.sha256(str(project_path).encode('utf-8', errors='replace')).hexdigest()[:16]}"
+                    unavailable_source = {
+                        "storeId": unavailable_store_id,
+                        "scope": "project",
+                        "exists": False,
+                        "digest": "",
+                        "status": "unsupported",
+                        "reason": "project_unavailable",
+                        "projectPath": project_path,
+                        "unavailable": True,
+                        "indexed": str(project_path).strip().casefold() in indexed_project_values,
+                        "count": 0,
+                    }
+                    sources.append(unavailable_source)
+                    if unavailable_source["indexed"]:
+                        recoveries.append(
+                            {
+                                "storeId": unavailable_store_id,
+                                "scope": "project",
+                                "status": "unsupported",
+                                "reason": "project_unavailable",
+                                "requiresApproval": False,
+                                "invalidCount": 0,
+                                "quarantinedCount": 0,
+                            }
+                        )
                 continue
-            if not str(chat.get("projectPath") or "").strip():
-                chat = {**chat, "projectPath": str(resolve_chat_project_root(project_path) or project_path)}
-            chats.append(chat)
-            if chat_id:
-                seen_ids.add(chat_id)
-            added += 1
-        sources.append({"scope": "project", "projectPath": project_path, "path": str(path), "exists": path.exists(), "count": added})
-    return {"ok": True, "path": str(app_path), "exists": app_path.exists(), "chats": chats, "count": len(chats), "sources": sources}
+            target = chat_store_target(path, scope="project", project_path=project_path)
+            project_chats, project_source, project_recovery = load_chat_transcript_file(target, scope="project")
+            added = 0
+            source_project_path = str(resolve_chat_project_root(project_path) or project_path)
+            for chat in project_chats:
+                chat_id = str(chat.get("id") or "")
+                # A project-owned file is authoritative for its own scope. An
+                # embedded path is untrusted data and must never move a chat to
+                # another project on the next whole-store save.
+                chat = {**chat, "projectPath": source_project_path}
+                fingerprint = chat_record_fingerprint(chat)
+                previous_fingerprint = seen_chat_fingerprints.get(chat_id) if chat_id else None
+                if previous_fingerprint is not None:
+                    if previous_fingerprint != fingerprint and chat_id not in conflicting_chat_ids:
+                        conflicting_chat_ids.add(chat_id)
+                        recoveries.append(
+                            {
+                                "storeId": f"chat.merge.{hashlib.sha256(chat_id.encode('utf-8')).hexdigest()[:16]}",
+                                "scope": "merge",
+                                "status": "unsupported",
+                                "reason": "duplicate_chat_id_conflict",
+                                "requiresApproval": False,
+                                "invalidCount": 1,
+                                "quarantinedCount": 0,
+                            }
+                        )
+                    continue
+                chats.append(chat)
+                if chat_id:
+                    seen_chat_fingerprints[chat_id] = fingerprint
+                added += 1
+            sources.append(
+                {
+                    **project_source,
+                    "projectPath": project_path,
+                    "path": str(path),
+                    "count": added,
+                }
+            )
+            if project_recovery:
+                recoveries.append(project_recovery)
+        return {
+            "ok": True,
+            "path": str(app_path),
+            "exists": app_path.exists(),
+            "chats": chats,
+            "count": len(chats),
+            "sources": sources,
+            "recoveries": recoveries,
+            "writeBlocked": any(item.get("status") != "recovered" for item in recoveries),
+        }
 
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    chats = [
-        sanitized
-        for chat in request.chats[:CHAT_TRANSCRIPTS_MAX_CHATS]
-        for sanitized in [sanitize_chat_transcript(chat)]
-        if not is_empty_chat_transcript(sanitized)
-    ]
-    app_chats: list[dict[str, Any]] = []
-    project_groups: dict[str, dict[str, Any]] = {}
-    for chat in chats:
-        project_path = str(chat.get("projectPath") or "").strip()
-        project_key = normalize_chat_project_key(project_path)
-        project_file = project_chat_transcripts_path(project_path) if project_key else None
-        if project_key and project_file is not None:
-            group = project_groups.setdefault(project_key, {"path": project_file, "projectPath": str(resolve_chat_project_root(project_path) or project_path), "chats": []})
-            group["chats"].append(chat)
-        else:
-            app_chats.append(chat)
-    serialized = json.dumps({"version": 1, "chats": app_chats}, ensure_ascii=False)
-    total_bytes = len(serialized.encode("utf-8"))
-    project_serialized: list[tuple[Path, str, int]] = []
-    for group in project_groups.values():
-        payload = json.dumps({"version": 1, "scope": "project", "chats": group["chats"]}, ensure_ascii=False)
-        total_bytes += len(payload.encode("utf-8"))
-        project_serialized.append((group["path"], payload, len(group["chats"])))
-    if total_bytes > CHAT_TRANSCRIPTS_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="会话记录超过 16MB 上限，请删除旧会话后重试。")
-    app_path = chat_transcripts_path()
-    stale_project_files: list[Path] = []
-    current_project_keys = set(project_groups.keys())
-    for project_path in load_chat_project_index_paths():
-        project_key = normalize_chat_project_key(project_path)
-        project_file = project_chat_transcripts_path(project_path)
-        if project_key and project_key not in current_project_keys and project_file is not None:
-            stale_project_files.append(project_file)
-    try:
-        atomic_write_text(app_path, serialized)
-        for path, payload, _count in project_serialized:
-            atomic_write_text(path, payload)
-        for path in stale_project_files:
-            if path.exists():
-                path.unlink()
-                parent = path.parent
-                if parent.name == ".vrcforge" and parent.exists() and not any(parent.iterdir()):
-                    parent.rmdir()
-        atomic_write_json(
-            chat_project_index_path(),
-            {"version": 1, "projectPaths": [str(group["projectPath"]) for group in project_groups.values()]},
-        )
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"无法写入会话记录: {exc}") from exc
+    storage_result, chats = await asyncio.to_thread(write_chat_transcripts_storage, request)
     # Vault 引用同步：该请求总是携带全部会话，作为活引用快照驱动 LRU 清理。
     # 清理失败绝不阻断会话保存。
     vault_retention: dict[str, Any] = {}
@@ -3419,8 +3753,284 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
         )
     except Exception:
         vault_retention = {}
+    return {**storage_result, "vaultRetention": vault_retention}
+
+
+def _chat_source_revision_map(request: ChatTranscriptsRequest) -> dict[str, dict[str, Any]]:
+    revisions: dict[str, dict[str, Any]] = {}
+    for item in request.source_revisions:
+        if not isinstance(item, dict):
+            continue
+        store_id = str(item.get("storeId") or "").strip()
+        if store_id:
+            revisions[store_id] = item
+    return revisions
+
+
+def _assert_chat_source_writable(
+    target: SessionStoreTarget,
+    *,
+    scope: str,
+    revisions: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if target.store_id == "chat.project-index":
+        source, recovery = inspect_chat_project_index()
+    else:
+        _ignored, source, recovery = load_chat_transcript_file(target, scope=scope)
+    if recovery:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "chat_store_recovery_required", "recovery": recovery},
+        )
+    expected = revisions.get(target.store_id)
+    if expected is None:
+        if bool(source.get("exists")):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "chat_store_snapshot_changed",
+                    "storeId": target.store_id,
+                },
+            )
+    else:
+        expected_exists = bool(expected.get("exists"))
+        expected_digest = str(expected.get("digest") or "")
+        current_exists = bool(source.get("exists"))
+        current_digest = str(source.get("digest") or "")
+        if expected_exists != current_exists or not hmac.compare_digest(expected_digest, current_digest):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "chat_store_snapshot_changed",
+                    "storeId": target.store_id,
+                },
+            )
+    return source
+
+
+def _assert_no_current_chat_source_id_conflicts(
+    app_path: Path,
+    project_sources: list[tuple[Path, str]],
+) -> None:
+    """Fail before any write when durable sources disagree on one chat id."""
+
+    seen: dict[str, str] = {}
+
+    def admit(chat: dict[str, Any]) -> None:
+        chat_id = str(chat.get("id") or "")
+        if not chat_id:
+            return
+        fingerprint = chat_record_fingerprint(chat)
+        previous = seen.get(chat_id)
+        if previous is not None and previous != fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "chat_store_duplicate_id_conflict",
+                    "storeId": f"chat.merge.{hashlib.sha256(chat_id.encode('utf-8')).hexdigest()[:16]}",
+                },
+            )
+        seen[chat_id] = fingerprint
+
+    app_chats, _source, app_recovery = load_chat_transcript_file(
+        chat_store_target(app_path, scope="app"),
+        scope="app",
+    )
+    if app_recovery:
+        raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": app_recovery})
+    for chat in app_chats:
+        admit(chat)
+
+    unique_projects: dict[str, tuple[Path, str]] = {}
+    for path, project_path in project_sources:
+        key = normalize_chat_project_key(project_path) or str(path).casefold()
+        unique_projects[key] = (path, project_path)
+    for path, project_path in unique_projects.values():
+        target = chat_store_target(path, scope="project", project_path=project_path)
+        project_chats, _source, project_recovery = load_chat_transcript_file(target, scope="project")
+        if project_recovery:
+            raise HTTPException(status_code=409, detail={"code": "chat_store_recovery_required", "recovery": project_recovery})
+        source_project_path = str(resolve_chat_project_root(project_path) or project_path)
+        for chat in project_chats:
+            admit({**chat, "projectPath": source_project_path})
+
+
+def write_chat_transcripts_storage(request: ChatTranscriptsRequest) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if len(request.chats) > CHAT_TRANSCRIPTS_MAX_CHATS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Chat storage accepts at most {CHAT_TRANSCRIPTS_MAX_CHATS} chats; no data was written.",
+        )
+    invalid_chat_count = sum(1 for chat in request.chats if not is_valid_chat_record(chat))
+    chat_ids = [str(chat.get("id") or "") for chat in request.chats]
+    if invalid_chat_count or len(set(chat_ids)) != len(chat_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="Chat storage rejected malformed or duplicate chat records; no data was written.",
+        )
+    chats = [
+        sanitized
+        for chat in request.chats
+        for sanitized in [sanitize_chat_transcript(chat)]
+        if not is_empty_chat_transcript(sanitized)
+    ]
+    app_chats: list[dict[str, Any]] = []
+    project_groups: dict[str, dict[str, Any]] = {}
+    for chat in chats:
+        project_path = str(chat.get("projectPath") or "").strip()
+        project_key = normalize_chat_project_key(project_path)
+        project_file = project_chat_transcripts_path(project_path) if project_key else None
+        if project_path and not project_key:
+            raise HTTPException(status_code=422, detail="Chat project path is unavailable or invalid; no data was written.")
+        if project_key and project_file is None:
+            raise HTTPException(status_code=409, detail="Chat project storage path is unsafe; no data was written.")
+        if project_key and project_file is not None:
+            group = project_groups.setdefault(project_key, {"path": project_file, "projectPath": str(resolve_chat_project_root(project_path) or project_path), "chats": []})
+            group["chats"].append(chat)
+        else:
+            app_chats.append(chat)
+    try:
+        serialized = json.dumps({"version": 1, "chats": app_chats}, ensure_ascii=False, allow_nan=False)
+        total_bytes = len(serialized.encode("utf-8"))
+        project_serialized: list[tuple[Path, str, int]] = []
+        for group in project_groups.values():
+            payload = json.dumps(
+                {"version": 1, "scope": "project", "chats": group["chats"]},
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            total_bytes += len(payload.encode("utf-8"))
+            project_serialized.append((group["path"], payload, len(group["chats"])))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Chat storage rejected a non-JSON or excessively nested value; no data was written.",
+        ) from exc
+    if total_bytes > CHAT_TRANSCRIPTS_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="会话记录超过 16MB 上限，请删除旧会话后重试。")
+    app_path = chat_transcripts_path()
+    with CHAT_TRANSCRIPTS_LOCK:
+        revisions = _chat_source_revision_map(request)
+        stale_project_sources: dict[str, tuple[str, Path]] = {}
+        current_project_keys = set(project_groups.keys())
+        candidate_project_paths = list(load_chat_project_index_paths())
+        for revision in revisions.values():
+            if (
+                revision.get("scope") == "project"
+                and revision.get("status") == "ok"
+                and revision.get("exists") is True
+                and isinstance(revision.get("projectPath"), str)
+            ):
+                candidate_project_paths.append(str(revision["projectPath"]))
+        for project_path in candidate_project_paths:
+            project_key = normalize_chat_project_key(project_path)
+            project_file = project_chat_transcripts_path(project_path)
+            if not project_key or project_key in current_project_keys or project_file is None:
+                continue
+            target = chat_store_target(project_file, scope="project", project_path=project_path)
+            revision = revisions.get(target.store_id)
+            if revision is not None and str(revision.get("projectPath") or ""):
+                resolved_revision_root = resolve_chat_project_root(str(revision.get("projectPath") or ""))
+                if resolved_revision_root is None or normalize_chat_project_key(str(resolved_revision_root)) != project_key:
+                    continue
+            stale_project_sources[project_key] = (project_path, project_file)
+        stale_project_files = list(stale_project_sources.values())
+
+        _assert_chat_source_writable(
+            chat_store_target(app_path, scope="app"),
+            scope="app",
+            revisions=revisions,
+        )
+        _assert_chat_source_writable(
+            chat_project_index_target(),
+            scope="app-index",
+            revisions=revisions,
+        )
+        for group in project_groups.values():
+            _assert_chat_source_writable(
+                chat_store_target(group["path"], scope="project", project_path=group["projectPath"]),
+                scope="project",
+                revisions=revisions,
+            )
+        for project_path, project_file in stale_project_files:
+            _assert_chat_source_writable(
+                chat_store_target(project_file, scope="project", project_path=project_path),
+                scope="project",
+                revisions=revisions,
+            )
+
+        _assert_no_current_chat_source_id_conflicts(
+            app_path,
+            [
+                *[(group["path"], group["projectPath"]) for group in project_groups.values()],
+                *[(project_file, project_path) for project_path, project_file in stale_project_files],
+            ],
+        )
+
+        index_path = chat_project_index_path()
+        mutation_paths = [
+            app_path,
+            *[path for path, _payload, _count in project_serialized],
+            *[path for _project_path, path in stale_project_files],
+            index_path,
+        ]
+        storage_snapshot: dict[Path, bytes | None] = {}
+        parent_existence: dict[Path, bool] = {}
+        try:
+            storage_snapshot, parent_existence = snapshot_chat_storage_files(mutation_paths)
+            atomic_write_text(app_path, serialized)
+            for path, payload, _count in project_serialized:
+                atomic_write_text(path, payload)
+            for _project_path, path in stale_project_files:
+                if path.exists():
+                    path.unlink()
+            atomic_write_json(
+                index_path,
+                {"version": 1, "projectPaths": [str(group["projectPath"]) for group in project_groups.values()]},
+            )
+        except OSError as exc:
+            rollback_ok = restore_chat_storage_files(storage_snapshot, parent_existence)
+            detail = (
+                "Unable to write chat storage; all source files were restored."
+                if rollback_ok
+                else "Unable to write chat storage and exact rollback could not be verified; run Doctor before retrying."
+            )
+            raise HTTPException(status_code=500, detail=detail) from exc
+        for _project_path, path in stale_project_files:
+            parent = path.parent
+            try:
+                if parent.name == ".vrcforge" and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                pass
+
+        source_revisions: list[dict[str, Any]] = []
+        _app_chats, app_source, _app_recovery = load_chat_transcript_file(
+            chat_store_target(app_path, scope="app"),
+            scope="app",
+        )
+        source_revisions.append(app_source)
+        index_source, _index_recovery = inspect_chat_project_index()
+        source_revisions.append(index_source)
+        for group in project_groups.values():
+            _group_chats, source, _recovery = load_chat_transcript_file(
+                chat_store_target(group["path"], scope="project", project_path=group["projectPath"]),
+                scope="project",
+            )
+            source_revisions.append(source)
+
     project_paths = [{"path": str(path), "count": count} for path, _payload, count in project_serialized]
-    return {"ok": True, "path": str(app_path), "count": len(chats), "appCount": len(app_chats), "projectPaths": project_paths, "vaultRetention": vault_retention}
+    return (
+        {
+            "ok": True,
+            "path": str(app_path),
+            "count": len(chats),
+            "appCount": len(app_chats),
+            "projectPaths": project_paths,
+            "sourceRevisions": source_revisions,
+        },
+        chats,
+    )
 
 
 def is_empty_chat_transcript(chat: dict[str, Any]) -> bool:
@@ -5013,6 +5623,9 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     if params.get("revokeToken") is True or params.get("revoke_token") is True:
         config.token = secrets.token_urlsafe(32)
         config.approval_token = secrets.token_urlsafe(32)
+        rotated_at = datetime.now(timezone.utc).isoformat()
+        config.token_created_at = config.token_created_at or rotated_at
+        config.token_rotated_at = rotated_at
     AGENT_GATEWAY.save_config(config)
     if checkpoint_limit is not None:
         prune_summary = AGENT_GATEWAY.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
@@ -6040,7 +6653,7 @@ def _status_from_counts(error_count: int = 0, warning_count: int = 0, unknown_co
 
 
 def _doctor_section_for_id(check_id: str) -> str:
-    if check_id.startswith("desktop.") or check_id.startswith("backend.") or check_id.startswith("doctor."):
+    if check_id.startswith("desktop.") or check_id.startswith("backend.") or check_id.startswith("doctor.") or check_id.startswith("app."):
         return "Runtime"
     if check_id.startswith("unity."):
         return "Unity environment"
@@ -6054,7 +6667,26 @@ def _doctor_section_for_id(check_id: str) -> str:
         return "Skills"
     if check_id.startswith("checkpoint."):
         return "Rollback"
+    if check_id.startswith("session."):
+        return "Session storage"
+    if check_id.startswith("security."):
+        return "Security"
     return "Doctor"
+
+
+def _doctor_section_id(check_id: str) -> str:
+    section = _doctor_section_for_id(check_id)
+    return {
+        "Runtime": "runtime",
+        "Unity environment": "unity",
+        "SDK / dependencies": "packages",
+        "Providers": "providers",
+        "External agents": "external",
+        "Skills": "skills",
+        "Rollback": "rollback",
+        "Session storage": "sessions",
+        "Security": "security",
+    }.get(section, "doctor")
 
 
 def _doctor_fix_command_for_id(check_id: str) -> str:
@@ -6100,21 +6732,45 @@ def _redact_local_path(value: Any) -> str:
     return f".../{name}" if name else "<redacted path>"
 
 
+def _redact_doctor_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme.lower() in {"http", "https", "ws", "wss"} and parsed.hostname:
+            host = parsed.hostname
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            return f"{parsed.scheme.lower()}://{host}{port}"
+    except (TypeError, ValueError):
+        pass
+    if "://" in text or "@" in text:
+        return "<redacted url>"
+    return text.split("?", 1)[0].split("#", 1)[0]
+
+
 def _redact_doctor_detail(value: Any, key_hint: str = "") -> Any:
     key = key_hint.lower()
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for item_key, item_value in value.items():
             lower_key = str(item_key).lower()
-            if any(marker in lower_key for marker in ("path", "directory", "folder", "root")) and "url" not in lower_key:
+            if "url" in lower_key:
+                redacted[str(item_key)] = _redact_doctor_url(item_value)
+            elif any(marker in lower_key for marker in ("path", "directory", "folder", "root")):
                 redacted[str(item_key)] = _redact_local_path(item_value)
             else:
                 redacted[str(item_key)] = _redact_doctor_detail(item_value, lower_key)
         return redacted
     if isinstance(value, list):
         return [_redact_doctor_detail(item, key_hint) for item in value]
-    if isinstance(value, str) and (_looks_like_local_path(value) or any(marker in key for marker in ("path", "directory", "folder", "root"))):
-        return _redact_local_path(value)
+    if isinstance(value, str):
+        if "url" in key or re.match(r"^(?:https?|wss?)://", value.strip(), flags=re.IGNORECASE):
+            return _redact_doctor_url(value)
+        if _looks_like_local_path(value) or any(marker in key for marker in ("path", "directory", "folder", "root")):
+            return _redact_local_path(value)
     return value
 
 
@@ -6128,22 +6784,29 @@ def _doctor_check(
     detail: Any = None,
     actions: list[str] | None = None,
     fixable: bool = False,
+    fix_modes: list[str] | None = None,
 ) -> dict[str, Any]:
     if status not in {"ok", "warning", "error", "unknown"}:
         status = "unknown"
+    safe_title = sanitize_doctor_text(title)
+    safe_message = sanitize_doctor_text(message)
+    safe_why = sanitize_doctor_text(why_it_matters)
+    safe_how = sanitize_doctor_text(how_to_fix)
     return {
         "id": check_id,
         "section": _doctor_section_for_id(check_id),
-        "title": title,
+        "sectionId": _doctor_section_id(check_id),
+        "title": safe_title,
         "status": status,
-        "message": message,
-        "whatFailed": "" if status == "ok" else message,
-        "whyItMatters": why_it_matters,
-        "howToFix": how_to_fix,
+        "message": safe_message,
+        "whatFailed": "" if status == "ok" else safe_message,
+        "whyItMatters": safe_why,
+        "howToFix": safe_how,
         "fixCommand": _doctor_fix_command_for_id(check_id),
         "fixable": fixable,
+        "fixModes": fix_modes or (["safe"] if fixable else []),
         "actions": actions or ["retry", "open_logs", "copy_diagnostic_summary"],
-        "detail": _redact_doctor_detail(detail),
+        "detail": sanitize_doctor_value(_redact_doctor_detail(detail)),
     }
 
 
@@ -6187,10 +6850,11 @@ def _doctor_sections(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for check in checks:
         section = str(check.get("section") or "Doctor")
         sections.setdefault(section, []).append(check)
-    order = ["Runtime", "Unity environment", "SDK / dependencies", "Providers", "External agents", "Skills", "Rollback", "Doctor"]
+    order = ["Runtime", "Unity environment", "SDK / dependencies", "Providers", "External agents", "Skills", "Rollback", "Session storage", "Security", "Doctor"]
     names = [name for name in order if name in sections] + sorted(name for name in sections if name not in order)
     return [
         {
+            "id": _doctor_section_id(str(sections[name][0].get("id") or "")),
             "name": name,
             "summary": _doctor_summary(sections[name]),
             "checkIds": [str(check.get("id") or "") for check in sections[name]],
@@ -6282,6 +6946,881 @@ def _package_doctor_check(
         status = "warning" if optional else "error"
         message = f"{title} was not detected."
     return _doctor_check(check_id, title, status, message, why_it_matters, how_to_fix, info)
+
+
+_APP_DOCTOR_SERVICE: DoctorService | None = None
+_APP_DOCTOR_SERVICE_LOCK = Lock()
+
+
+def _doctor_component_detect(component_key: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def detect(context: dict[str, Any]) -> dict[str, Any]:
+        health = context.get("health") if isinstance(context.get("health"), dict) else {}
+        components = health.get("components") if isinstance(health.get("components"), dict) else {}
+        component = components.get(component_key) if isinstance(components.get(component_key), dict) else {}
+        status = str(component.get("status") or "unknown")
+        if status not in {"ok", "warning", "error", "unknown"}:
+            status = "unknown"
+        return {
+            "status": status,
+            "message": str(component.get("message") or "The component did not report a result."),
+            "detail": component.get("detail") if isinstance(component.get("detail"), dict) else {},
+        }
+
+    return detect
+
+
+def _detect_checkpoint_doctor(_context: dict[str, Any]) -> dict[str, Any]:
+    inspection = AGENT_GATEWAY.inspect_checkpoint_storage()
+    status = str(inspection.get("status") or "unknown")
+    message = {
+        "ok": "Checkpoint storage and its JSONL projection are healthy.",
+        "warning": "Checkpoint storage needs a safe repair before new writes are trusted.",
+        "error": "Checkpoint storage is unsafe or unreadable; writes must remain blocked.",
+    }.get(status, "Checkpoint storage could not be fully inspected.")
+    return {"status": status, "message": message, "detail": inspection}
+
+
+def _repair_checkpoint_doctor(_context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
+    before = AGENT_GATEWAY.inspect_checkpoint_storage()
+    phases.add("inspect", "ok" if before.get("fixable") else "warning", "Checkpoint storage was inspected under its writer lock.")
+    result = AGENT_GATEWAY.repair_checkpoint_storage(expected_snapshot=str(before.get("snapshot") or ""))
+    status = str(result.get("status") or "failed")
+    phases.add(
+        "repair",
+        "ok" if status in {"healthy", "repaired"} else "warning" if status in {"busy", "needs_user_action"} else "error",
+        "Checkpoint storage repair finished without deleting recovery evidence.",
+        {"status": status, "changed": bool(result.get("changed")), "quarantined": bool(result.get("quarantineId"))},
+    )
+    return {
+        "status": status if status in {"healthy", "repaired", "busy", "needs_user_action"} else "failed",
+        "changed": bool(result.get("changed")),
+    }
+
+
+def _skill_triage_state(skill: dict[str, Any]) -> tuple[str, str]:
+    validation = skill.get("validation") if isinstance(skill.get("validation"), dict) else {}
+    status = str(validation.get("status") or "ok")
+    reasons = [str(item).lower() for item in validation.get("reasons") or [] if isinstance(item, str)]
+    combined = " ".join(reasons)
+    if any(marker in combined for marker in ("missing env", "missing binaries", "unsupported os", "unavailable", "dependencies")):
+        return "missing_requirements", "requirements_missing"
+    if any(marker in combined for marker in ("allowed tools", "disallowed", "entrypoint tool", "allowlist")):
+        return "blocked_allowlist", "tool_policy_blocked"
+    if status == "error" or skill.get("loadError"):
+        return "broken", "manifest_or_integrity_error"
+    if not skill.get("enabled", True):
+        return "missing_requirements", "disabled"
+    if not skill.get("available", True) or status == "warning":
+        return "missing_requirements", "requirements_unavailable"
+    return "eligible", "eligible"
+
+
+def _skill_signature_failed(entry: dict[str, Any]) -> bool:
+    candidates = [
+        entry.get("signatureStatus"),
+        entry.get("signature_status"),
+        ensure_dict(entry.get("signature")).get("status"),
+        ensure_dict(entry.get("governance")).get("signatureStatus"),
+    ]
+    return any(str(value or "").strip().lower() in {"invalid", "failed", "tampered", "mismatch"} for value in candidates)
+
+
+def _skill_doctor_snapshot() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    registry = AGENT_GATEWAY.build_skill_registry()
+    skills = registry.get("skills") if isinstance(registry.get("skills"), list) else []
+    rows: list[dict[str, Any]] = []
+    repair_candidates: list[dict[str, Any]] = []
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        state, reason = _skill_triage_state(skill)
+        skill_id = str(skill.get("name") or "unknown")
+        rows.append(
+            {
+                "id": skill_id,
+                "name": str(skill.get("title") or skill_id)[:120],
+                "state": state,
+                "reason": reason,
+            }
+        )
+        if state == "broken" and str(skill.get("source") or "") == "user":
+            storage_path = Path(str(skill.get("storagePath") or ""))
+            try:
+                manifest_digest = hashlib.sha256(storage_path.read_bytes()).hexdigest()
+            except OSError:
+                manifest_digest = ""
+            repair_candidates.append(
+                {
+                    "kind": "user_manifest",
+                    "id": skill_id,
+                    "storagePath": skill.get("storagePath"),
+                    "manifestDigest": manifest_digest,
+                }
+            )
+
+    try:
+        service = skill_package_service()
+        installed = service.list_installed()
+    except Exception:
+        installed = []
+        rows.append(
+            {
+                "id": "skill-package-registry",
+                "name": "Skill package registry",
+                "state": "broken",
+                "reason": "registry_unreadable",
+            }
+        )
+    for entry in installed:
+        if not isinstance(entry, dict) or not _skill_signature_failed(entry):
+            continue
+        package_id = str(entry.get("skill_id") or entry.get("skillId") or entry.get("id") or "").strip()
+        if package_id:
+            repair_candidates.append({"kind": "package_signature", "id": package_id, "enabled": bool(entry.get("enabled", True))})
+            rows.append({"id": package_id, "name": package_id, "state": "broken", "reason": "signature_failure"})
+    rows.sort(key=lambda item: (item["state"] != "broken", item["name"].casefold(), item["id"]))
+    return registry, rows, repair_candidates
+
+
+def _detect_skills_doctor(_context: dict[str, Any]) -> dict[str, Any]:
+    registry, rows, _candidates = _skill_doctor_snapshot()
+    broken = sum(1 for row in rows if row["state"] == "broken")
+    attention = sum(1 for row in rows if row["state"] != "eligible")
+    status = "error" if broken else "warning" if attention else "ok"
+    return {
+        "status": status,
+        "message": "Skill registry is healthy." if status == "ok" else "Skill registry contains unavailable or broken entries.",
+        "detail": {
+            "schema": registry.get("schema"),
+            "count": len(rows),
+            "brokenCount": broken,
+            "attentionCount": attention,
+            "rows": rows,
+        },
+    }
+
+
+def _path_is_reparse_or_link(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return bool(reparse_flag and attributes & reparse_flag)
+    except OSError:
+        return True
+
+
+def _quarantine_broken_user_skill(candidate: dict[str, Any]) -> bool:
+    storage_value = str(candidate.get("storagePath") or "").strip()
+    if not storage_value:
+        return False
+    source = Path(storage_value)
+    root = AGENT_GATEWAY.user_skills_dir.resolve()
+    try:
+        resolved_source = source.resolve(strict=True)
+        resolved_source.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    skill_dir = resolved_source.parent
+    if skill_dir.parent != root or _path_is_reparse_or_link(skill_dir) or _path_is_reparse_or_link(resolved_source):
+        return False
+    expected_digest = str(candidate.get("manifestDigest") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        return False
+    raw = resolved_source.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        return False
+    quarantine_root = AGENT_GATEWAY.user_constraints_path.parent / "quarantine" / "skills"
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    destination = quarantine_root / f"{skill_dir.name}.{hashlib.sha256(raw).hexdigest()[:16]}.quarantine"
+    if destination.exists():
+        return not skill_dir.exists()
+    os.replace(skill_dir, destination)
+    return True
+
+
+def _repair_skills_doctor(_context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
+    changed = False
+    failures = 0
+    with SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.user_skill_lock:
+        _registry, rows, candidates = _skill_doctor_snapshot()
+        candidate_ids = {str(candidate.get("id") or "") for candidate in candidates}
+        unresolved_broken = any(
+            row.get("state") == "broken" and str(row.get("id") or "") not in candidate_ids
+            for row in rows
+        )
+        for candidate in candidates:
+            try:
+                if candidate.get("kind") == "user_manifest":
+                    candidate_changed = _quarantine_broken_user_skill(candidate)
+                else:
+                    result = skill_package_service().set_enabled(str(candidate.get("id") or ""), False)
+                    candidate_changed = bool(result.changed)
+                changed = candidate_changed or changed
+            except Exception:
+                failures += 1
+    phases.add(
+        "quarantine_or_disable",
+        "error" if failures else "ok",
+        "Broken user manifests were quarantined and signature failures were disabled without deletion.",
+        {"candidateCount": len(candidates), "changed": changed, "failureCount": failures},
+    )
+    if failures or unresolved_broken:
+        return {"status": "needs_user_action", "changed": changed}
+    if changed:
+        return {"status": "repaired", "changed": True}
+    return {"status": "needs_user_action" if candidates else "healthy", "changed": False}
+
+
+def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
+    targets = [
+        SessionStoreTarget(
+            "session.chat.app",
+            chat_transcripts_path(),
+            "app_owned",
+            "json",
+            required_list_field="chats",
+            required_list_item_kind="chat",
+            document_version_field="version",
+            known_document_versions=(1,),
+            guard_root=chat_transcripts_path().parent,
+            max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+            max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+        ),
+        SessionStoreTarget(
+            "session.chat.index",
+            chat_project_index_path(),
+            "app_owned",
+            "json",
+            required_list_field="projectPaths",
+            required_list_item_kind="nonempty_string",
+            document_version_field="version",
+            known_document_versions=(1,),
+            guard_root=chat_project_index_path().parent,
+            max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+            max_list_items=CHAT_REQUESTED_PROJECT_PATH_LIMIT,
+        ),
+        SessionStoreTarget(
+            "session.runtime-runs",
+            AGENT_GATEWAY.runtime_run_log_path,
+            "app_owned",
+            "jsonl",
+            ("vrcforge.runtime_run.v1",),
+            schema_required=True,
+            required_string_fields=("id", "createdAt", "event"),
+            guard_root=AGENT_GATEWAY.runtime_run_log_path.parent,
+        ),
+        SessionStoreTarget(
+            "session.agent-goals",
+            AGENT_GATEWAY.agent_goal_log_path,
+            "app_owned",
+            "jsonl",
+            ("vrcforge.agent_goal.v1", "vrcforge.agent_goal.v2"),
+            schema_required=True,
+            required_string_fields=("event",),
+            guard_root=AGENT_GATEWAY.agent_goal_log_path.parent,
+        ),
+        SessionStoreTarget(
+            "session.agent-progress",
+            AGENT_GATEWAY.agent_progress_log_path,
+            "app_owned",
+            "jsonl",
+            ("vrcforge.agent_progress.v1",),
+            schema_required=True,
+            required_string_fields=("id", "createdAt", "event"),
+            guard_root=AGENT_GATEWAY.agent_progress_log_path.parent,
+        ),
+        SessionStoreTarget(
+            "session.agent-questions",
+            AGENT_GATEWAY.agent_question_log_path,
+            "app_owned",
+            "jsonl",
+            ("vrcforge.agent_question.v1",),
+            schema_required=True,
+            required_string_fields=("id", "createdAt", "event"),
+            guard_root=AGENT_GATEWAY.agent_question_log_path.parent,
+        ),
+        SessionStoreTarget(
+            "session.subagent-events",
+            SUB_AGENT_REGISTRY._event_log_path(),
+            "app_owned",
+            "jsonl",
+            (SUB_AGENT_LOG_SCHEMA,),
+            schema_required=True,
+            required_string_fields=("timestamp", "taskId", "event"),
+            required_object_fields=("task",),
+            guard_root=SUB_AGENT_REGISTRY.artifact_dir,
+        ),
+    ]
+    with CHAT_TRANSCRIPTS_LOCK:
+        remembered_project_paths = list(CHAT_REQUESTED_PROJECT_PATHS.values())
+    project_values = {
+        str(item).strip()
+        for item in [*load_chat_project_index_paths(), *remembered_project_paths]
+        if str(item).strip()
+    }
+    selected = str(context.get("selected_project_path") or "").strip()
+    if selected:
+        project_values.add(selected)
+    for project_path in sorted(project_values):
+        project_root = resolve_chat_project_root(project_path)
+        if project_root is None:
+            continue
+        path = project_root / ".vrcforge" / "chat-transcripts.json"
+        suffix = hashlib.sha256(normalize_chat_project_key(project_path).encode("utf-8", errors="replace")).hexdigest()[:16]
+        targets.append(
+            SessionStoreTarget(
+                f"session.chat.project.{suffix}",
+                path,
+                "project_owned",
+                "json",
+                required_list_field="chats",
+                required_list_item_kind="chat",
+                document_version_field="version",
+                known_document_versions=(1,),
+                guard_root=project_root,
+                max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+                max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+            )
+        )
+    for result_path in sorted(AGENT_GATEWAY.agent_goal_result_dir.glob("*.json")):
+        suffix = hashlib.sha256(result_path.name.encode()).hexdigest()[:16]
+        targets.append(
+            SessionStoreTarget(
+                f"session.goal-result.{suffix}",
+                result_path,
+                "app_owned",
+                "json",
+                (GOAL_DELIVERY_RESULT_SCHEMA,),
+                schema_required=True,
+                required_string_fields=("deliveryId", "goalId", "clientTurnId", "completedAt"),
+                required_object_fields=("response",),
+                guard_root=AGENT_GATEWAY.agent_goal_result_dir,
+            )
+        )
+    subagent_results = SUB_AGENT_REGISTRY.artifact_dir / "results"
+    for result_path in sorted(subagent_results.glob("*.json")):
+        suffix = hashlib.sha256(result_path.name.encode()).hexdigest()[:16]
+        targets.append(
+            SessionStoreTarget(
+                f"session.subagent-result.{suffix}",
+                result_path,
+                "app_owned",
+                "json",
+                (SUB_AGENT_RESULT_SCHEMA,),
+                schema_required=True,
+                required_string_fields=("taskId",),
+                required_object_fields=("result",),
+                guard_root=subagent_results,
+            )
+        )
+    return targets
+
+
+def _unavailable_session_project_stores(context: dict[str, Any]) -> list[dict[str, Any]]:
+    values = {str(item).strip() for item in load_chat_project_index_paths() if str(item).strip()}
+    selected = str(context.get("selected_project_path") or "").strip()
+    if selected:
+        values.add(selected)
+    unavailable: list[dict[str, Any]] = []
+    for value in sorted(values):
+        if resolve_chat_project_root(value) is not None:
+            continue
+        suffix = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
+        unavailable.append(
+            {
+                "schema": SESSION_STORE_INTEGRITY_SCHEMA,
+                "storeId": f"session.chat.unavailable.{suffix}",
+                "basename": "chat-transcripts.json",
+                "scope": "project_owned",
+                "format": "json",
+                "status": "unsupported",
+                "reason": "project_unavailable",
+                "exists": False,
+                "digest": "",
+                "recordCount": 0,
+                "invalidCount": 0,
+                "unknownSchemaCount": 0,
+                "semanticIssueCount": 1,
+                "requiresApproval": False,
+            }
+        )
+    return unavailable
+
+
+def _detect_session_storage_doctor(context: dict[str, Any]) -> dict[str, Any]:
+    report = scan_session_stores(_session_store_targets(context))
+    stores = [
+        *(report.get("stores") if isinstance(report.get("stores"), list) else []),
+        *_unavailable_session_project_stores(context),
+    ]
+    app_damage = [item for item in stores if item.get("scope") == "app_owned" and item.get("status") == "needs_repair"]
+    project_damage = [item for item in stores if item.get("scope") == "project_owned" and item.get("status") == "needs_repair"]
+    unsupported = [item for item in stores if item.get("status") in {"error", "unsupported"}]
+    status = "error" if app_damage else "warning" if project_damage or unsupported else "ok"
+    return {
+        "status": status,
+        "message": "Session stores are healthy." if status == "ok" else "One or more session stores need explicit recovery.",
+        "detail": {
+            "storeCount": len(stores),
+            "appRepairCount": len(app_damage),
+            "projectApprovalCount": len(project_damage),
+            "unsupportedCount": len(unsupported),
+            "stores": stores,
+        },
+    }
+
+
+def _repair_session_storage_doctor(context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
+    changed = False
+    approval_queued = 0
+    failures = 0
+    recovered_store_count = 0
+    detected_invalid_count = 0
+    invalid_quarantined_count = 0
+    approval_queued_invalid_count = 0
+    unresolved_count = len(_unavailable_session_project_stores(context))
+    for target in _session_store_targets(context):
+        scan = scan_session_store(target)
+        if scan.get("status") in {"error", "unsupported"}:
+            unresolved_count += 1
+            continue
+        if scan.get("status") != "needs_repair":
+            continue
+        detected_invalid_count += int(scan.get("invalidCount") or 0)
+        if target.scope == "project_owned":
+            project_root = target.path.parent.parent
+            try:
+                pending = next(
+                    (
+                        approval
+                        for approval in AGENT_GATEWAY.list_approvals(include_expired=False)
+                        if approval.get("status") == "pending"
+                        and approval.get("targetTool") == "vrcforge_repair_project_chat_store"
+                        and ensure_dict(approval.get("arguments")).get("storeId") == target.store_id
+                        and ensure_dict(approval.get("arguments")).get("expectedDigest") == str(scan.get("digest") or "")
+                    ),
+                    None,
+                )
+                request = {"ok": True, "status": "pending", "approval": pending} if pending else AGENT_GATEWAY.create_apply_request(
+                    {
+                        "target_tool": "vrcforge_repair_project_chat_store",
+                        "arguments": {
+                            "projectRoot": str(project_root),
+                            "projectPath": str(project_root),
+                            "expectedDigest": str(scan.get("digest") or ""),
+                            "storeId": target.store_id,
+                        },
+                        "reason": "Repair a damaged project chat transcript store through the supervised write lane.",
+                        "preview": {
+                            "storeId": target.store_id,
+                            "scope": "project_owned",
+                            "reason": str(scan.get("reason") or "needs_repair"),
+                        },
+                        "agent_name": "doctor",
+                        "requires_explicit_approval": True,
+                        "never_auto_approve": True,
+                        "explicit_approval_reason": "Project-owned chat recovery always requires explicit approval.",
+                    },
+                    internal_wrapper=True,
+                )
+            except Exception:
+                failures += 1
+                continue
+            if request.get("ok") and request.get("status") == "pending":
+                approval_queued += 1
+                approval_queued_invalid_count += int(scan.get("invalidCount") or 0)
+            else:
+                failures += 1
+            continue
+        lock = CHAT_TRANSCRIPTS_LOCK if target.store_id.startswith("session.chat") else SUB_AGENT_REGISTRY._lock if target.store_id.startswith("session.subagent") else AGENT_GATEWAY._lock
+        with lock:
+            result = repair_session_store(target, scan)
+        changed = bool(result.get("changed")) or changed
+        if result.get("status") in {"repaired", "quarantined", "already_repaired"}:
+            recovered_store_count += 1
+        if result.get("status") in {"repaired", "quarantined"}:
+            invalid_quarantined_count += int(result.get("invalidCount") or 0)
+        if result.get("status") in {"failed", "conflict"}:
+            failures += 1
+        elif result.get("status") in {"repaired", "quarantined", "already_repaired"}:
+            # A mixed JSONL can contain both syntax damage and future or
+            # semantically unfamiliar records. Repair only the damaged bytes,
+            # then report the preserved remainder honestly instead of claiming
+            # the store healthy merely because the write succeeded.
+            post_repair = scan_session_store(target)
+            if post_repair.get("status") in {"error", "unsupported", "needs_repair"}:
+                unresolved_count += 1
+    if failures:
+        phase_status = "error"
+        phase_message = "One or more session-store repairs failed; unchanged evidence was preserved."
+    elif unresolved_count:
+        phase_status = "warning"
+        phase_message = "Unsupported or unreadable session evidence was preserved for manual recovery."
+    elif approval_queued:
+        phase_status = "warning"
+        phase_message = "Project-owned session recovery was queued for explicit approval; no project evidence was changed yet."
+    else:
+        phase_status = "ok"
+        phase_message = "Repairable app-owned session evidence was isolated with exact backups."
+    phases.add(
+        "repair_session_stores",
+        phase_status,
+        phase_message,
+        {
+            "changed": changed,
+            "approvalQueuedCount": approval_queued,
+            "recoveredStoreCount": recovered_store_count,
+            "detectedInvalidCount": detected_invalid_count,
+            "invalidQuarantinedCount": invalid_quarantined_count,
+            "approvalQueuedInvalidCount": approval_queued_invalid_count,
+            "unresolvedCount": unresolved_count,
+            "failureCount": failures,
+        },
+    )
+    if failures:
+        return {"status": "needs_user_action", "changed": changed}
+    if unresolved_count:
+        return {"status": "needs_user_action", "changed": changed}
+    if approval_queued:
+        return {"status": "queued_for_approval", "changed": changed}
+    return {"status": "repaired" if changed else "healthy", "changed": changed}
+
+
+def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
+    """Execute one approved, digest-bound project chat recovery."""
+
+    params = params or {}
+    project_value = str(
+        params.get("projectPath") or params.get("project_path") or params.get("projectRoot") or params.get("project_root") or ""
+    ).strip()
+    project_root = resolve_chat_project_root(project_value)
+    if project_root is None:
+        return {"ok": False, "status": "conflict", "reason": "invalid_project_root", "changed": False}
+    path = project_chat_transcripts_path(str(project_root))
+    if path is None:
+        return {"ok": False, "status": "conflict", "reason": "invalid_project_root", "changed": False}
+    project_key = normalize_chat_project_key(str(project_root))
+    suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+    target = SessionStoreTarget(
+        f"session.chat.project.{suffix}",
+        path,
+        "project_owned",
+        "json",
+        required_list_field="chats",
+        required_list_item_kind="chat",
+        document_version_field="version",
+        known_document_versions=(1,),
+        guard_root=project_root,
+        max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+        max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+    )
+    if str(params.get("storeId") or "").strip() != target.store_id:
+        return {"ok": False, "status": "conflict", "reason": "store_binding_changed", "changed": False}
+    expected_digest = str(params.get("expectedDigest") or params.get("expected_digest") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        return {"ok": False, "status": "conflict", "reason": "invalid_snapshot", "changed": False}
+    with CHAT_TRANSCRIPTS_LOCK:
+        current = scan_session_store(target)
+        if current.get("status") != "needs_repair" or current.get("digest") != expected_digest:
+            prior_scan = {
+                "schema": SESSION_STORE_INTEGRITY_SCHEMA,
+                "storeId": target.store_id,
+                "basename": target.path.name,
+                "scope": target.scope,
+                "format": target.format,
+                "exists": True,
+                "digest": expected_digest,
+            }
+            prior_result = repair_session_store(target, prior_scan, project_write_authorized=True)
+            if prior_result.get("status") == "already_repaired":
+                return {**prior_result, "ok": True}
+            return {"ok": False, "status": "conflict", "reason": "snapshot_changed", "changed": False}
+        result = repair_session_store(target, current, project_write_authorized=True)
+    return {
+        **result,
+        "ok": result.get("status") in {"repaired", "quarantined", "already_repaired", "no_change"},
+    }
+
+
+def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: PhaseLog) -> dict[str, Any]:
+    request = UnityMcpRepairRequest(
+        projectPath=str(context.get("selected_project_path") or ""),
+        allowUnityRelaunch=mode == "force",
+        waitSeconds=120 if mode == "force" else 90,
+        closeTimeoutSeconds=60,
+    )
+    result = repair_unity_mcp_bridge_sync(request)
+    for item in result.get("phases") or []:
+        if isinstance(item, dict):
+            phases.add(str(item.get("id") or "bridge"), str(item.get("status") or "warning"), str(item.get("message") or "Bridge repair phase completed."))
+    if result.get("ok"):
+        return {"status": "repaired" if result.get("status") != "healthy" else "healthy", "changed": result.get("status") != "healthy"}
+    return {"status": "needs_user_action" if result.get("status") == "needs_user_action" else "failed", "changed": False}
+
+
+def _is_matching_doctor_package_approval(approval: dict[str, Any], project_key: str) -> bool:
+    arguments = ensure_dict(approval.get("arguments"))
+    return bool(
+        project_key
+        and approval.get("status") == "pending"
+        and approval.get("targetTool") == "vrcforge_install_vpm_package"
+        and str(approval.get("agentName") or "").strip().casefold() == "doctor"
+        and approval.get("requiresExplicitApproval") is True
+        and approval.get("autoApprovalBlocked") is True
+        and str(arguments.get("packageId") or "").strip().casefold() == "com.coplaydev.unity-mcp"
+        and normalize_chat_project_key(str(arguments.get("projectPath") or "")) == project_key
+        and not str(arguments.get("repository") or "").strip()
+        and not str(arguments.get("preferredManager") or "").strip()
+        and arguments.get("includePrerelease") is False
+    )
+
+
+def _repair_unity_package_doctor(context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
+    project_path = str(context.get("selected_project_path") or "").strip()
+    if not project_path:
+        phases.add("project_required", "warning", "Select a Unity project before requesting package repair.")
+        return {"status": "needs_user_action", "changed": False}
+    project_key = normalize_chat_project_key(project_path)
+    if not project_key:
+        phases.add("project_unavailable", "warning", "The selected Unity project path is unavailable or unsafe.")
+        return {"status": "needs_user_action", "changed": False}
+    pending = next(
+        (
+            approval
+            for approval in AGENT_GATEWAY.list_approvals(include_expired=False)
+            if _is_matching_doctor_package_approval(approval, project_key)
+        ),
+        None,
+    )
+    result = (
+        {"ok": True, "status": "pending", "approval": pending}
+        if pending is not None
+        else request_package_install_sync(
+            {
+                "projectPath": project_path,
+                "packageId": "com.coplaydev.unity-mcp",
+                "requiresExplicitApproval": True,
+                "neverAutoApprove": True,
+            },
+            agent_name="doctor",
+        )
+    )
+    status = str(result.get("status") or "")
+    queued = bool(result.get("ok")) and status == "pending"
+    executed = bool(result.get("ok")) and status == "executed"
+    phases.add(
+        "request_supervised_install",
+        "ok" if queued or executed else "warning",
+        "Unity MCP package repair was routed through the supervised package request lane.",
+        {"queued": queued, "executed": executed},
+    )
+    if executed:
+        return {"status": "repaired", "changed": True}
+    return {"status": "queued_for_approval" if queued else "needs_user_action", "changed": False}
+
+
+def _detect_runtime_settings_doctor(_context: dict[str, Any]) -> dict[str, Any]:
+    # Refresh the path-bound diagnostic from disk on every Doctor run. The
+    # loader is read-only and falls back in memory, so external corruption is
+    # visible without making Doctor itself unavailable.
+    load_runtime_settings_safely(RUNTIME_SETTINGS_PATH, loader=load_settings)
+    diagnostic = runtime_settings_diagnostic(RUNTIME_SETTINGS_PATH)
+    return {
+        "status": diagnostic.get("status", "unknown"),
+        "message": diagnostic.get("message", "Runtime settings status is unavailable."),
+        "detail": {"code": diagnostic.get("code"), "fallbackActive": diagnostic.get("fallbackActive")},
+    }
+
+
+def _detect_security_developer_options(context: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(ensure_dict(context.get("security_meta")).get("developerOptionsEnabled"))
+    return {
+        "status": "warning" if enabled else "ok",
+        "message": "Developer Options are enabled." if enabled else "Developer Options are disabled.",
+        "detail": {"enabled": enabled, "readOnly": True},
+    }
+
+
+def _detect_security_token_age(context: dict[str, Any]) -> dict[str, Any]:
+    security_meta = ensure_dict(context.get("security_meta"))
+    reference_at = str(security_meta.get("tokenRotatedAt") or security_meta.get("tokenCreatedAt") or "").strip()
+    if not reference_at:
+        return {"status": "unknown", "message": "Gateway token age is unknown for this legacy configuration.", "detail": {"ageKnown": False, "readOnly": True}}
+    try:
+        reference = datetime.fromisoformat(reference_at.replace("Z", "+00:00"))
+        age_days = max(0, (datetime.now(timezone.utc) - reference.astimezone(timezone.utc)).days)
+    except (ValueError, TypeError):
+        return {"status": "unknown", "message": "Gateway token age metadata is invalid.", "detail": {"ageKnown": False, "readOnly": True}}
+    return {
+        "status": "warning" if age_days > 90 else "ok",
+        "message": "Gateway token rotation is overdue." if age_days > 90 else "Gateway token age is within policy.",
+        "detail": {"ageKnown": True, "ageDays": age_days, "readOnly": True},
+    }
+
+
+def _detect_security_trusted_signers(context: dict[str, Any]) -> dict[str, Any]:
+    meta = ensure_dict(context.get("security_meta"))
+    registry_readable = meta.get("skillRegistryReadable") is True
+    signer_count = int(meta.get("trustedSignerCount") or 0)
+    installed_count = int(meta.get("installedSkillPackageCount") or 0)
+    if not registry_readable:
+        return {
+            "status": "error",
+            "message": "Skill signer trust posture could not be established because the package registry is unreadable.",
+            "detail": {"registryReadable": False, "readOnly": True},
+        }
+    warn = installed_count > 0 and signer_count == 0
+    return {
+        "status": "warning" if warn else "ok",
+        "message": "Installed Skill packages have no trusted signer policy." if warn else "Skill signer trust posture is bounded.",
+        "detail": {"trustedSignerCount": signer_count, "installedPackageCount": installed_count, "readOnly": True},
+    }
+
+
+def build_doctor_service_context() -> dict[str, Any]:
+    health = build_agentic_app_health()
+    selected_project = _selected_project_path_from_health(health)
+    gateway_config = AGENT_GATEWAY.ensure_config()
+    server_config = getattr(CURRENT_UVICORN_SERVER, "config", None)
+    host = str(getattr(server_config, "host", "127.0.0.1") or "127.0.0.1")
+    port = int(getattr(server_config, "port", 8757) or 8757)
+    skill_registry_readable = True
+    try:
+        package_service = skill_package_service()
+        package_registry = package_service.load_registry()
+        installed_packages = package_service.list_installed()
+        governance = package_registry.get("governance") if isinstance(package_registry.get("governance"), dict) else {}
+        trusted = governance.get("trusted_signers") or governance.get("trustedSigners") or []
+        trusted_count = len(trusted) if isinstance(trusted, (list, dict)) else 0
+    except Exception:
+        installed_packages = []
+        trusted_count = 0
+        skill_registry_readable = False
+    execution_mode = str(gateway_config.execution_mode or "approval")
+    broad_writes = bool(
+        gateway_config.enabled
+        and gateway_config.allow_write_requests
+        and execution_mode in {"auto", "roslyn_full_auto"}
+    )
+    full_permission = bool(gateway_config.allow_write_requests and execution_mode == "roslyn_full_auto")
+    packaged = bool(getattr(sys, "frozen", False))
+    backend_path = Path(sys.executable) if packaged else ROOT_DIR / "backend" / "vrcforge_backend.exe"
+    return {
+        "health": health,
+        "selected_project_path": selected_project,
+        "app_config": {"path": CONFIG_PATH},
+        "doctor_port": {
+            "host": host,
+            "port": port,
+            "gatewayUrl": AGENT_GATEWAY.public_base_url,
+            "currentPid": os.getpid(),
+            "ownerPid": os.getpid() if BACKEND_OWNER_LEASE.owned else None,
+            "ownerLeaseOwned": BACKEND_OWNER_LEASE.owned,
+        },
+        "desktop_install": {
+            "packaged": packaged,
+            "manifestPath": ROOT_DIR / "payload-integrity.json",
+            "desktopVersion": os.environ.get("VRCFORGE_DESKTOP_VERSION", app.version),
+            "desktopPath": ROOT_DIR / "VRCForge.exe",
+            "backendPath": backend_path,
+            "versionPath": ROOT_DIR / "VERSION",
+            "stateDir": USER_DATA_DIR,
+        },
+        "security": {
+            "external_writes": {
+                "broadPermissions": broad_writes,
+                "approvalRequired": not broad_writes,
+                "checkpointRequired": True,
+                "fullPermission": full_permission,
+            },
+            "bind_auth": {"publicBind": host not in {"127.0.0.1", "::1", "localhost"}, "tokenRequired": gateway_config.require_token, "tokenStrong": len(gateway_config.token) >= 32},
+            "mcp_exposure": {"broadExposure": host not in {"127.0.0.1", "::1", "localhost"}, "writeToolsSupervised": True},
+            "process_exec": {
+                "unsafeExec": full_permission or (broad_writes and gateway_config.developer_options_enabled),
+                "approvalRequired": not broad_writes,
+                "policyBounded": not full_permission,
+                "fullPermission": full_permission,
+            },
+        },
+        "security_meta": {
+            "developerOptionsEnabled": gateway_config.developer_options_enabled,
+            "tokenCreatedAt": getattr(gateway_config, "token_created_at", ""),
+            "tokenRotatedAt": getattr(gateway_config, "token_rotated_at", ""),
+            "trustedSignerCount": trusted_count,
+            "installedSkillPackageCount": len(installed_packages),
+            "skillRegistryReadable": skill_registry_readable,
+        },
+    }
+
+
+def app_doctor_service() -> DoctorService:
+    global _APP_DOCTOR_SERVICE
+    with _APP_DOCTOR_SERVICE_LOCK:
+        if _APP_DOCTOR_SERVICE is not None:
+            return _APP_DOCTOR_SERVICE
+        service = DoctorService(build_doctor_service_context)
+        service.register_rule(DoctorRule("app.runtime_settings", "Runtime", "Runtime settings", _detect_runtime_settings_doctor))
+        service.register_rule(DoctorRule("checkpoint.backend", "Rollback", "Checkpoint backend", _detect_checkpoint_doctor, _repair_checkpoint_doctor))
+        service.register_rule(DoctorRule("skills.registry", "Skills", "Skill registry", _detect_skills_doctor, _repair_skills_doctor))
+        service.register_rule(DoctorRule("session.storage", "Session storage", "Session store integrity", _detect_session_storage_doctor, _repair_session_storage_doctor))
+        service.register_rule(DoctorRule("unity.mcp.package", "Unity environment", "Unity MCP package", _doctor_component_detect("mcpPackageConfigured"), _repair_unity_package_doctor))
+        service.register_rule(DoctorRule("unity.mcp.bridge", "Unity environment", "Unity MCP bridge", _doctor_component_detect("unityMcpBridgeReachable"), _repair_unity_bridge_doctor))
+        service.register_rule(DoctorRule("unity.mcp.instance", "Unity environment", "Unity instance registration", _doctor_component_detect("unityMcpInstance"), _repair_unity_bridge_doctor))
+        service.register_rule(DoctorRule("security.developer_options", "Security", "Developer Options posture", _detect_security_developer_options))
+        service.register_rule(DoctorRule("security.gateway_token_age", "Security", "Gateway token age", _detect_security_token_age))
+        service.register_rule(DoctorRule("security.trusted_signers", "Security", "Trusted Skill signers", _detect_security_trusted_signers))
+        _APP_DOCTOR_SERVICE = service
+        return service
+
+
+DOCTOR_RULE_COPY: dict[str, tuple[str, str]] = {
+    "app.config": ("Provider and vision settings must remain recoverable without silently discarding unknown or legacy values.", "Run Safe fix to create a verified backup and canonicalize a valid document."),
+    "app.runtime_settings": ("The runtime settings file controls Unity bridge defaults and legacy provider fallback.", "Repair the file manually when fallback mode is active; Doctor never replaces malformed settings with an empty document."),
+    "doctor.port": ("Loopback listener ownership prevents accidental public exposure and ambiguous runtime connections.", "Close the foreign process or change the configured port; Doctor never kills a process."),
+    "desktop.install_integrity": ("Installed desktop and backend bytes must match the package that was built and shipped.", "Reinstall from a verified VRCForge package if version or file hashes do not match."),
+    "checkpoint.backend": ("Every write depends on readable checkpoint evidence for rollback.", "Run Safe fix to recreate missing storage and quarantine malformed JSONL rows."),
+    "skills.registry": ("Only eligible Skills should be exposed to the runtime and external agents.", "Run Safe fix to quarantine broken user manifests and disable signature failures without deleting evidence."),
+    "session.storage": ("Chat, goal, run, and sub-agent continuity depends on durable stores that do not silently lose corrupt records.", "Run Safe fix for app-owned data; Unity-project data remains approval-gated."),
+    "unity.mcp.package": ("The Unity MCP package is required for the supervised editor bridge.", "Run Safe fix to create a package-install approval request."),
+}
+
+
+def _merge_registered_doctor_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = {str(check.get("id") or ""): check for check in checks}
+    for detected in app_doctor_service().detect_all():
+        check_id = str(detected.get("id") or "")
+        status = str(detected.get("status") or "unknown")
+        if status == "skipped":
+            status = "ok"
+        why, how = DOCTOR_RULE_COPY.get(
+            check_id,
+            ("This posture contributes to VRCForge runtime safety and recoverability.", "Review the diagnostic detail and keep this check within its supervised policy."),
+        )
+        fixable = bool(detected.get("fixable"))
+        actions = (
+            ["repair_unity_bridge", "fix", "retry", "open_logs", "copy_diagnostic_summary"]
+            if check_id in {"unity.mcp.bridge", "unity.mcp.instance"}
+            else ["fix", "retry", "open_logs", "copy_diagnostic_summary"]
+            if fixable
+            else ["retry", "open_logs", "copy_diagnostic_summary"]
+        )
+        merged[check_id] = _doctor_check(
+            check_id,
+            str(detected.get("title") or check_id),
+            status,
+            str(detected.get("message") or "Check completed."),
+            why,
+            how,
+            detected.get("detail"),
+            actions=actions,
+            fixable=fixable,
+            fix_modes=["safe", "force"] if check_id in {"app.config", "unity.mcp.bridge", "unity.mcp.instance"} else (["safe"] if fixable else []),
+        )
+    ordered_ids = [str(check.get("id") or "") for check in checks]
+    extras = [check_id for check_id in merged if check_id not in ordered_ids]
+    return [merged[check_id] for check_id in ordered_ids if check_id in merged] + [merged[check_id] for check_id in extras]
 
 
 def build_app_doctor_report() -> dict[str, Any]:
@@ -6569,6 +8108,7 @@ def build_app_doctor_report() -> dict[str, Any]:
             )
         )
 
+    checks = _merge_registered_doctor_checks(checks)
     summary = _doctor_summary(checks)
     return {
         "ok": summary["errorCount"] == 0,
@@ -6649,6 +8189,64 @@ async def repair_agentic_app_unity_mcp(request: UnityMcpRepairRequest) -> dict[s
             "status": result.get("status"),
             "ok": result.get("ok"),
             "phaseCount": len(result.get("phases") or []),
+        },
+    )
+    return result
+
+
+@app.post("/api/app/doctor/fix/{check_id}")
+async def fix_agentic_app_doctor_check(check_id: str, request: DoctorFixRequest) -> dict[str, Any]:
+    await emit_log_async(
+        "info",
+        "doctor",
+        "Doctor repair requested.",
+        {"checkId": check_id, "mode": request.mode},
+    )
+    try:
+        def run_fix() -> dict[str, Any]:
+            global DASHBOARD_API_CONFIG
+            global DASHBOARD_VISION_CONFIG
+            project_override = request.project_path.strip()
+            fix_args: tuple[Any, ...] = (
+                (check_id, request.mode, {"selected_project_path": project_override})
+                if project_override and check_id in {"session.storage", "unity.mcp.package", "unity.mcp.bridge", "unity.mcp.instance"}
+                else (check_id, request.mode)
+            )
+            if check_id == "app.config":
+                with CONFIG_DOCUMENT_LOCK:
+                    result = app_doctor_service().fix(*fix_args)
+                    if result.get("status") == "repaired":
+                        DASHBOARD_API_CONFIG = load_initial_dashboard_api_config()
+                        DASHBOARD_VISION_CONFIG = load_initial_dashboard_vision_config()
+                    return result
+            return app_doctor_service().fix(*fix_args)
+
+        result = await asyncio.to_thread(run_fix)
+    except DoctorServiceError as exc:
+        await emit_log_async(
+            "warn" if exc.status_code < 500 else "error",
+            "doctor",
+            "Doctor repair was not applied.",
+            {"checkId": check_id, "mode": request.mode, "statusCode": exc.status_code},
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    result_status = str(result.get("status") or "failed")
+    audit_level = (
+        "success"
+        if result_status in {"healthy", "repaired"}
+        else "error"
+        if result_status in {"failed", "error"}
+        else "warn"
+    )
+    await emit_log_async(
+        audit_level,
+        "doctor",
+        "Doctor repair finished." if audit_level == "success" else "Doctor repair requires follow-up.",
+        {
+            "checkId": check_id,
+            "mode": request.mode,
+            "status": result.get("status"),
+            "changed": bool(result.get("changed")),
         },
     )
     return result
@@ -10562,10 +12160,11 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
 
 def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Settings:
     settings_path = resolve_local_path(request.settings_path)
-    settings = load_settings(
+    settings = load_runtime_settings_safely(
         settings_path,
         getattr(request, "model", None),
         llm_override=serialize_api_config(include_secret=True),
+        loader=load_settings,
     )
 
     settings.unity_mcp_host = request.unity_host or DASHBOARD_STATE.unity_host or settings.unity_mcp_host
@@ -14704,31 +16303,45 @@ def normalize_path_string(value: str) -> str:
 
 def load_initial_dashboard_api_config() -> DashboardApiConfig:
     settings_path = RUNTIME_SETTINGS_PATH
-    settings = load_settings(settings_path)
+    settings = load_runtime_settings_safely(settings_path, loader=load_settings)
     config_document = load_config_document()
-    api_section = config_document.get("api") or {}
+    raw_api_section = config_document.get("api")
+    api_section = raw_api_section if isinstance(raw_api_section, dict) else {}
 
-    provider = normalize_provider_name(api_section.get("provider") or settings.llm_provider or DEFAULT_LLM_PROVIDER)
-    defaults = get_provider_defaults(provider)
-    api_key = str(api_section.get("api_key") or settings.llm_api_key).strip()
-    base_url = normalize_base_url(api_section.get("base_url"), provider, defaults["base_url"])
-    model = str(api_section.get("model") or settings.llm_model or defaults["model"]).strip() or defaults["model"]
-    # 1.3.3: prefer the dashboard document, fall back to the legacy settings
-    # field (`llm.thinking_level`, historically Gemini-only).
-    raw_thinking_level = (
-        api_section.get("thinking_level")
-        if "thinking_level" in api_section
-        else settings.gemini_thinking_level
-    )
-    thinking_level = normalize_reasoning_effort(raw_thinking_level)
+    def build(section: dict[str, Any]) -> DashboardApiConfig:
+        provider = normalize_provider_name(section.get("provider") or settings.llm_provider or DEFAULT_LLM_PROVIDER)
+        defaults = get_provider_defaults(provider)
+        api_key = str(section.get("api_key") or settings.llm_api_key).strip()
+        base_url = normalize_base_url(section.get("base_url"), provider, defaults["base_url"])
+        model = str(section.get("model") or settings.llm_model or defaults["model"]).strip() or defaults["model"]
+        raw_thinking_level = (
+            section.get("thinking_level")
+            if "thinking_level" in section
+            else settings.gemini_thinking_level
+        )
+        return DashboardApiConfig(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            thinking_level=normalize_reasoning_effort(raw_thinking_level),
+        )
 
-    return DashboardApiConfig(
-        provider=provider,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        thinking_level=thinking_level,
-    )
+    try:
+        return build(api_section)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        # Preserve the malformed document for Doctor; keep the backend alive
+        # with the already-safe runtime settings or provider defaults.
+        try:
+            return build({})
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            defaults = get_provider_defaults(DEFAULT_LLM_PROVIDER)
+            return DashboardApiConfig(
+                provider=DEFAULT_LLM_PROVIDER,
+                api_key="",
+                base_url=defaults["base_url"],
+                model=defaults["model"],
+            )
 
 
 def load_initial_dashboard_vision_config() -> DashboardVisionConfig:
@@ -14738,15 +16351,18 @@ def load_initial_dashboard_vision_config() -> DashboardVisionConfig:
     provider = str(vision_section.get("provider") or "").strip()
     if not provider:
         return DashboardVisionConfig()
-    provider = normalize_provider_name(provider)
-    defaults = get_provider_defaults(provider)
-    return DashboardVisionConfig(
-        provider=provider,
-        api_key=str(vision_section.get("api_key") or "").strip(),
-        base_url=normalize_base_url(vision_section.get("base_url"), provider, defaults["base_url"]),
-        model=str(vision_section.get("model") or "").strip(),
-        enabled=bool(vision_section.get("enabled", True)),
-    )
+    try:
+        provider = normalize_provider_name(provider)
+        defaults = get_provider_defaults(provider)
+        return DashboardVisionConfig(
+            provider=provider,
+            api_key=str(vision_section.get("api_key") or "").strip(),
+            base_url=normalize_base_url(vision_section.get("base_url"), provider, defaults["base_url"]),
+            model=str(vision_section.get("model") or "").strip(),
+            enabled=bool(vision_section.get("enabled", True)),
+        )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return DashboardVisionConfig()
 
 
 def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVisionConfig:
@@ -14766,15 +16382,14 @@ def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVi
 
 
 def load_config_document() -> dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        return {}
-
-    try:
-        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-
-    return payload if isinstance(payload, dict) else {}
+    with CONFIG_DOCUMENT_LOCK:
+        if not CONFIG_PATH.exists():
+            return {}
+        try:
+            payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
 
 def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfig:
@@ -15239,7 +16854,7 @@ def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
 
 
 def resolve_vertex_project_location(value: str) -> tuple[str, str]:
-    settings = load_settings(
+    settings = load_runtime_settings_safely(
         RUNTIME_SETTINGS_PATH,
         llm_override={
             "provider": "vertexai",
@@ -15247,6 +16862,7 @@ def resolve_vertex_project_location(value: str) -> tuple[str, str]:
             "base_url": value,
             "model": get_provider_defaults("vertexai")["model"],
         },
+        loader=load_settings,
     )
     from vrchat_blendshape_agent import resolve_vertex_ai_project_location
 
@@ -15372,38 +16988,56 @@ def save_dashboard_config_document() -> None:
     单文件双段：任何一段保存都重写整个文档，避免旧的"只写 api 段"行为把
     vision 段冲掉。
     """
-    api = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-    vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
-    payload: dict[str, Any] = {
-        "api": {
-            "provider": api.provider,
-            "api_key": api.api_key,
-            "base_url": api.base_url,
-            "model": api.model,
-            "thinking_level": api.thinking_level,
+    with CONFIG_DOCUMENT_LOCK:
+        api = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+        vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+        payload: dict[str, Any] = {
+            "api": {
+                "provider": api.provider,
+                "api_key": api.api_key,
+                "base_url": api.base_url,
+                "model": api.model,
+                "thinking_level": api.thinking_level,
+            }
         }
-    }
-    if vision.provider:
-        payload["vision"] = {
-            "provider": vision.provider,
-            "api_key": vision.api_key,
-            "base_url": vision.base_url,
-            "model": vision.model,
-            "enabled": vision.enabled,
-        }
-    atomic_write_json(CONFIG_PATH, payload)
+        if vision.provider:
+            payload["vision"] = {
+                "provider": vision.provider,
+                "api_key": vision.api_key,
+                "base_url": vision.base_url,
+                "model": vision.model,
+                "enabled": vision.enabled,
+            }
+        if CONFIG_PATH.is_file():
+            original = CONFIG_PATH.read_bytes()
+            digest = hashlib.sha256(original).hexdigest()
+            backup = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.backup-{digest}.bak")
+            if backup.exists() or backup.is_symlink():
+                if _path_is_reparse_or_link(backup) or not backup.is_file() or backup.read_bytes() != original:
+                    raise OSError("Provider configuration backup collision or verification failure.")
+            else:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                with backup.open("xb") as handle:
+                    handle.write(original)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if _path_is_reparse_or_link(backup) or not backup.is_file() or backup.read_bytes() != original:
+                    raise OSError("Provider configuration backup verification failed.")
+        atomic_write_json(CONFIG_PATH, payload)
 
 
 def save_dashboard_api_config(config: DashboardApiConfig) -> None:
     global DASHBOARD_API_CONFIG
-    DASHBOARD_API_CONFIG = config
-    save_dashboard_config_document()
+    with CONFIG_DOCUMENT_LOCK:
+        DASHBOARD_API_CONFIG = config
+        save_dashboard_config_document()
 
 
 def save_dashboard_vision_config(config: DashboardVisionConfig) -> None:
     global DASHBOARD_VISION_CONFIG
-    DASHBOARD_VISION_CONFIG = config
-    save_dashboard_config_document()
+    with CONFIG_DOCUMENT_LOCK:
+        DASHBOARD_VISION_CONFIG = config
+        save_dashboard_config_document()
 
 
 def serialize_api_config(include_secret: bool) -> dict[str, Any]:
@@ -15480,16 +17114,33 @@ def mask_secret(value: str) -> str:
 
 def load_initial_dashboard_state() -> DashboardState:
     settings_path = RUNTIME_SETTINGS_PATH
-    settings = load_settings(
+    settings = load_runtime_settings_safely(
         settings_path,
         llm_override=serialize_api_config(include_secret=True) if DASHBOARD_API_CONFIG is not None else None,
+        loader=load_settings,
     )
-    raw = json.loads(settings_path.read_text(encoding="utf-8-sig")) if settings_path.exists() else {}
-    dashboard_settings = raw.get("dashboard") or {}
+    raw = read_runtime_settings_document_safely(settings_path)
+    raw_dashboard_settings = raw.get("dashboard")
+    dashboard_settings = raw_dashboard_settings if isinstance(raw_dashboard_settings, dict) else {}
 
-    project_roots = [Path(path) for path in dashboard_settings.get("project_roots", [])]
-    unity_editor_path = str(dashboard_settings.get("unity_editor_path", "")).strip()
-    status_push_interval_seconds = float(dashboard_settings.get("status_push_interval_seconds", 2.5))
+    raw_project_roots = dashboard_settings.get("project_roots", [])
+    project_roots: list[Path] = []
+    if isinstance(raw_project_roots, list):
+        for value in raw_project_roots:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                project_roots.append(Path(value))
+            except (OSError, ValueError):
+                continue
+    raw_unity_editor_path = dashboard_settings.get("unity_editor_path", "")
+    unity_editor_path = str(raw_unity_editor_path).strip() if isinstance(raw_unity_editor_path, (str, Path)) else ""
+    try:
+        status_push_interval_seconds = float(dashboard_settings.get("status_push_interval_seconds", 2.5))
+    except (TypeError, ValueError):
+        status_push_interval_seconds = 2.5
+    if not math.isfinite(status_push_interval_seconds) or not 0.25 <= status_push_interval_seconds <= 300:
+        status_push_interval_seconds = 2.5
 
     return DashboardState(
         settings_path=settings_path,
@@ -16847,10 +18498,23 @@ def request_package_install_sync(params: dict[str, Any], agent_name: str = "exte
         }
     optimizer_package = bool(ensure_dict(plan.get("package")).get("dependencyId"))
     explicit_policy: dict[str, Any] = {}
-    if optimizer_package:
+    never_auto_approve = bool(params.get("neverAutoApprove") or params.get("never_auto_approve"))
+    explicit_request = bool(
+        params.get("requiresExplicitApproval")
+        or params.get("requires_explicit_approval")
+        or never_auto_approve
+    )
+    if optimizer_package or explicit_request:
         explicit_policy = {
             "requires_explicit_approval": True,
-            "explicit_approval_reason": "Optimizer package install requests require explicit user approval even when global auto mode is enabled.",
+            "never_auto_approve": never_auto_approve,
+            "explicit_approval_reason": (
+                "Doctor package repair requires explicit user approval in every execution mode."
+                if never_auto_approve
+                else "Package install requests require explicit user approval when requested by policy."
+                if explicit_request
+                else "Optimizer package install requests require explicit user approval even when global auto mode is enabled."
+            ),
         }
     return AGENT_GATEWAY.create_apply_request(
         {
@@ -20840,6 +22504,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", set_skill_package_enabled_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", uninstall_skill_package_sync)
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_repair_project_chat_store",
+        "Repair a digest-bound project chat transcript store after explicit approval.",
+        "medium",
+        repair_project_chat_store_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)

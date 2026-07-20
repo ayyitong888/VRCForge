@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import runpy
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -35,6 +36,66 @@ class FakeClient:
             return {"ok": True, "execution": {"ok": True, "checkpoint": {"id": "ckpt"}}}
         if path == "/api/app/validation/report":
             return {"ok": True, "schema": "vrcforge.validation.v1", "gate": {"status": "pass"}}
+        raise AssertionError(f"unexpected call: {method} {path} {body}")
+
+
+def _doctor_report(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_checks = [
+        {
+            "id": str(check["id"]),
+            "status": str(check["status"]),
+            "fixable": bool(check.get("fixable", False)),
+        }
+        for check in checks
+    ]
+    return {
+        "ok": not any(check["status"] == "error" for check in normalized_checks),
+        "schema": "vrcforge.doctor.v1",
+        "summary": {
+            "okCount": sum(check["status"] == "ok" for check in normalized_checks),
+            "warningCount": sum(check["status"] == "warning" for check in normalized_checks),
+            "errorCount": sum(check["status"] == "error" for check in normalized_checks),
+            "unknownCount": sum(check["status"] == "unknown" for check in normalized_checks),
+        },
+        "checks": normalized_checks,
+    }
+
+
+class DoctorClient:
+    def __init__(
+        self,
+        reports: list[dict[str, Any]],
+        *,
+        fix_results: dict[str, Any] | None = None,
+        failures: dict[str, str] | None = None,
+    ) -> None:
+        self.reports = list(reports)
+        self.fix_results = fix_results or {}
+        self.failures = failures or {}
+        self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append((method, path, body))
+        failure = self.failures.get(f"{method} {path}")
+        if failure:
+            raise vrcforge_cli.CliError(failure)
+        if method == "GET" and path == "/api/app/doctor":
+            if not self.reports:
+                raise AssertionError("unexpected extra Doctor report request")
+            return self.reports.pop(0)
+        if method == "POST" and path.startswith("/api/app/doctor/fix/"):
+            return self.fix_results.get(
+                path,
+                {
+                    "ok": True,
+                    "schema": "vrcforge.doctor_fix.v1",
+                    "checkId": urllib.parse.unquote(path.rsplit("/", 1)[-1]),
+                    "mode": str((body or {}).get("mode") or "safe"),
+                    "status": "repaired",
+                    "changed": True,
+                    "phases": [],
+                },
+            )
         raise AssertionError(f"unexpected call: {method} {path} {body}")
 
 
@@ -138,6 +199,242 @@ def test_client_wraps_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(vrcforge_cli.CliError, match="Cannot reach VRCForge runtime"):
         vrcforge_cli.VRCForgeClient(timeout=0.01).request("GET", "/api/app/doctor")
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_rc"),
+    [("ok", 0), ("warning", 1), ("unknown", 1), ("error", 2)],
+)
+def test_doctor_no_fix_wraps_report_and_uses_summary_exit_code(status: str, expected_rc: int) -> None:
+    report = _doctor_report([{"id": "desktop.runtime", "status": status}])
+    client = DoctorClient([report])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(["doctor"], client=client, stdout=stdout)  # type: ignore[arg-type]
+
+    assert rc == expected_rc
+    payload = json.loads(stdout.getvalue())
+    assert payload["schema"] == "vrcforge.cli-doctor.v1"
+    assert payload["fixRequested"] is False
+    assert payload["initialReport"] == report
+    assert payload["report"] == report
+    assert payload["summary"] == report["summary"]
+    assert payload["exitCode"] == expected_rc
+    assert payload["ok"] is (expected_rc == 0)
+    assert client.calls == [("GET", "/api/app/doctor", None)]
+
+
+def test_doctor_fix_posts_only_fixable_non_ok_checks_in_report_order_and_rechecks() -> None:
+    initial = _doctor_report(
+        [
+            {"id": "skills.bad/package", "status": "warning", "fixable": True},
+            {"id": "doctor.already_ok", "status": "ok", "fixable": True},
+            {"id": "security.warn_only", "status": "error", "fixable": False},
+            {"id": "doctor.second id", "status": "unknown", "fixable": True},
+        ]
+    )
+    final = _doctor_report([{"id": "desktop.runtime", "status": "ok"}])
+    client = DoctorClient([initial, final])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(
+        ["doctor", "--fix", "--yes", "--json"],
+        client=client,  # type: ignore[arg-type]
+        stdout=stdout,
+    )
+
+    assert rc == 0
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("POST", "/api/app/doctor/fix/skills.bad%2Fpackage", {"mode": "safe"}),
+        ("POST", "/api/app/doctor/fix/doctor.second%20id", {"mode": "safe"}),
+        ("GET", "/api/app/doctor", None),
+    ]
+    payload = json.loads(stdout.getvalue())
+    assert payload["report"] == final
+    assert [fix["checkId"] for fix in payload["fixes"]] == ["skills.bad/package", "doctor.second id"]
+    assert all(fix["result"]["schema"] == "vrcforge.doctor_fix.v1" for fix in payload["fixes"])
+
+
+def test_doctor_force_uses_force_mode_but_final_report_still_controls_exit() -> None:
+    initial = _doctor_report([{"id": "checkpoint.backend", "status": "error", "fixable": True}])
+    final = _doctor_report([{"id": "security.posture", "status": "warning", "fixable": False}])
+    client = DoctorClient([initial, final])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(
+        ["doctor", "--fix", "--force", "--yes"],
+        client=client,  # type: ignore[arg-type]
+        stdout=stdout,
+    )
+
+    assert rc == 1
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("POST", "/api/app/doctor/fix/checkpoint.backend", {"mode": "force"}),
+        ("GET", "/api/app/doctor", None),
+    ]
+    assert all("/approvals/" not in path for _, path, _ in client.calls)
+    payload = json.loads(stdout.getvalue())
+    assert payload["mode"] == "force"
+    assert payload["exitCode"] == 1
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["doctor", "--fix", "--json"],
+        ["--json", "doctor", "--fix"],
+        ["doctor", "--force"],
+    ],
+)
+def test_doctor_argument_errors_are_structured_and_do_not_call_runtime(arguments: list[str]) -> None:
+    client = DoctorClient([])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(arguments, client=client, stdout=stdout, stdin=io.StringIO("FIX\n"))  # type: ignore[arg-type]
+
+    assert rc == 2
+    payload = json.loads(stdout.getvalue())
+    assert payload["schema"] == "vrcforge.cli-doctor.v1"
+    assert payload["error"]["code"] in {"confirmation_required", "invalid_arguments"}
+    assert payload["exitCode"] == 2
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("arguments", [["--json", "doctor"], ["doctor", "--json"]])
+def test_doctor_accepts_json_before_or_after_subcommand(arguments: list[str]) -> None:
+    client = DoctorClient([_doctor_report([{"id": "desktop.runtime", "status": "ok"}])])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(arguments, client=client, stdout=stdout)  # type: ignore[arg-type]
+
+    assert rc == 0
+    assert json.loads(stdout.getvalue())["schema"] == "vrcforge.cli-doctor.v1"
+
+
+def test_doctor_non_json_fix_prompts_once_before_contacting_runtime() -> None:
+    report = _doctor_report([{"id": "desktop.runtime", "status": "ok"}])
+    client = DoctorClient([report, report])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(
+        ["doctor", "--fix"],
+        client=client,  # type: ignore[arg-type]
+        stdin=io.StringIO("FIX\n"),
+        stdout=stdout,
+    )
+
+    assert rc == 0
+    assert stdout.getvalue().count("Type FIX to continue") == 1
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("GET", "/api/app/doctor", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("client", "error_code"),
+    [
+        (DoctorClient([], failures={"GET /api/app/doctor": "offline"}), "transport_error"),
+        (DoctorClient([{"schema": "unexpected"}]), "schema_error"),
+    ],
+)
+def test_doctor_transport_or_schema_failure_returns_two(client: DoctorClient, error_code: str) -> None:
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(["doctor", "--json"], client=client, stdout=stdout)  # type: ignore[arg-type]
+
+    assert rc == 2
+    payload = json.loads(stdout.getvalue())
+    assert payload["error"]["code"] == error_code
+    assert payload["exitCode"] == 2
+
+
+def test_doctor_rejects_summary_counts_that_disagree_with_checks() -> None:
+    report = _doctor_report([{"id": "runtime.bad", "status": "error"}])
+    report["summary"]["errorCount"] = 0
+    report["summary"]["okCount"] = 1
+    client = DoctorClient([report])
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(["doctor", "--json"], client=client, stdout=stdout)  # type: ignore[arg-type]
+
+    assert rc == 2
+    assert json.loads(stdout.getvalue())["error"]["code"] == "schema_error"
+
+
+def test_doctor_fix_transport_failure_returns_two_without_continuing() -> None:
+    initial = _doctor_report([{"id": "checkpoint.backend", "status": "error", "fixable": True}])
+    path = "/api/app/doctor/fix/checkpoint.backend"
+    client = DoctorClient([initial], failures={f"POST {path}": "repair unavailable"})
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(
+        ["doctor", "--fix", "--yes", "--json"],
+        client=client,  # type: ignore[arg-type]
+        stdout=stdout,
+    )
+
+    assert rc == 2
+    payload = json.loads(stdout.getvalue())
+    assert payload["error"]["code"] == "fix_transport_error"
+    assert payload["fixes"] == []
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("POST", path, {"mode": "safe"}),
+    ]
+
+
+def test_doctor_rejects_non_object_fix_response_without_rechecking() -> None:
+    initial = _doctor_report([{"id": "skills.registry", "status": "warning", "fixable": True}])
+    path = "/api/app/doctor/fix/skills.registry"
+    client = DoctorClient([initial], fix_results={path: ["not", "an", "object"]})
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(
+        ["doctor", "--fix", "--yes", "--json"],
+        client=client,  # type: ignore[arg-type]
+        stdout=stdout,
+    )
+
+    assert rc == 2
+    payload = json.loads(stdout.getvalue())
+    assert payload["error"]["code"] == "fix_schema_error"
+    assert payload["fixes"] == []
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("POST", path, {"mode": "safe"}),
+    ]
+
+
+def test_doctor_rejects_fix_response_with_mismatched_identity() -> None:
+    initial = _doctor_report([{"id": "skills.registry", "status": "warning", "fixable": True}])
+    path = "/api/app/doctor/fix/skills.registry"
+    client = DoctorClient(
+        [initial],
+        fix_results={
+            path: {
+                "ok": True,
+                "schema": "vrcforge.doctor_fix.v1",
+                "checkId": "other.check",
+                "mode": "safe",
+                "status": "repaired",
+                "changed": True,
+                "phases": [],
+            }
+        },
+    )
+    stdout = io.StringIO()
+
+    rc = vrcforge_cli.run(["doctor", "--fix", "--yes", "--json"], client=client, stdout=stdout)  # type: ignore[arg-type]
+
+    assert rc == 2
+    assert json.loads(stdout.getvalue())["error"]["code"] == "fix_schema_error"
+    assert client.calls == [
+        ("GET", "/api/app/doctor", None),
+        ("POST", path, {"mode": "safe"}),
+    ]
 
 
 def test_skill_init_generates_valid_one_tool_source_and_smoke(tmp_path: Path) -> None:

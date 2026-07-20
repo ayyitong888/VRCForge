@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   fetchProjectPrefs,
@@ -411,9 +411,9 @@ export function useProjectManagement({
     setCollapsedProjects((current) => ({ ...current, [key]: !current[key] }));
   }
 
-  function expandProjectGroup(key: string) {
+  const expandProjectGroup = useCallback((key: string) => {
     setCollapsedProjects((current) => (current[key] ? { ...current, [key]: false } : current));
-  }
+  }, []);
 
   return {
     showProjectModal,

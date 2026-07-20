@@ -644,14 +644,25 @@ def check_packaged_backend(path: Path, version: str, expected_payload_sha256: st
     if parse_error:
         return evidence_step("packaged_backend.support_bundle", False, True, path, reason=parse_error, category="packaged-runtime")
     support_path = Path(str(payload.get("supportBundlePath") or ""))
+    schema = str(payload.get("schema") or "")
+    require_doctor = version_at_least(version, "1.3.4") or schema == "vrcforge.packaged_backend_smoke.v2"
+    schema_ok = (
+        schema == "vrcforge.packaged_backend_smoke.v2"
+        if require_doctor
+        else schema in {"vrcforge.packaged_backend_smoke.v1", "vrcforge.packaged_backend_smoke.v2"}
+    )
+    doctor_ok = not require_doctor or (
+        payload.get("doctorOk") is True and payload.get("cliDoctorOk") is True
+    )
     ok = bool(
-        payload.get("schema") == "vrcforge.packaged_backend_smoke.v1"
+        schema_ok
         and payload.get("ok") is True
         and payload.get("version") == version
         and payload.get("portableMode") is True
         and payload.get("bootstrapOk") is True
         and payload.get("proofIndexOk") is True
         and payload.get("supportBundleOk") is True
+        and doctor_ok
         and str(payload.get("supportBundlePath") or "")
         and support_path.is_file()
         and bool(expected_payload_sha256)
@@ -664,9 +675,23 @@ def check_packaged_backend(path: Path, version: str, expected_payload_sha256: st
         path,
         category="packaged-runtime",
         schema=str(payload.get("schema") or ""),
-        fields_checked=["ok", "version", "portableMode", "bootstrapOk", "proofIndexOk", "supportBundleOk", "supportBundlePath", "payloadZipSha256"],
+        fields_checked=[
+            "ok",
+            "version",
+            "portableMode",
+            "bootstrapOk",
+            "proofIndexOk",
+            "supportBundleOk",
+            *(["doctorOk", "cliDoctorOk"] if require_doctor else []),
+            "supportBundlePath",
+            "payloadZipSha256",
+        ],
         reason="" if ok else "packaged backend/support bundle smoke did not pass",
-        details={"payloadZipSha256": payload.get("payloadZipSha256"), "expectedPayloadZipSha256": expected_payload_sha256},
+        details={
+            "payloadZipSha256": payload.get("payloadZipSha256"),
+            "expectedPayloadZipSha256": expected_payload_sha256,
+            "doctorEvidenceRequired": require_doctor,
+        },
     )
 
 

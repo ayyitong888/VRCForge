@@ -540,7 +540,7 @@ export type AgentRuntimeResponse = {
     error?: string;
   };
   skill?: AgentSkillResult;
-  result?: AgentShellResult;
+  result?: AgentShellResult | Record<string, unknown>;
   vision?: AgentVisionAnalysis;
   steps?: Array<{
     index?: number;
@@ -793,6 +793,7 @@ export type DoctorStatus = "ok" | "warning" | "error" | "unknown";
 export type DoctorCheck = {
   id: string;
   section?: string;
+  sectionId?: string;
   title: string;
   status: DoctorStatus;
   message: string;
@@ -801,6 +802,7 @@ export type DoctorCheck = {
   howToFix: string;
   fixCommand?: string;
   fixable?: boolean;
+  fixModes?: Array<"safe" | "force">;
   actions?: string[];
   detail?: unknown;
 };
@@ -825,11 +827,42 @@ export type DoctorReport = {
   };
   summary: DoctorSummary;
   sections?: Array<{
+    id?: string;
     name: string;
     summary: DoctorSummary;
     checkIds: string[];
   }>;
   checks: DoctorCheck[];
+};
+
+export type DoctorFixMode = "safe" | "force";
+
+export type DoctorFixPhase = {
+  id: string;
+  status: "ok" | "warning" | "error" | "skipped" | string;
+  message: string;
+  timestamp?: string;
+  detail?: unknown;
+};
+
+export type DoctorFixResult = {
+  ok: boolean;
+  schema: "vrcforge.doctor_fix.v1" | string;
+  checkId: string;
+  mode: DoctorFixMode;
+  status: "healthy" | "repaired" | "queued_for_approval" | "needs_user_action" | "failed" | "busy" | "unsupported" | string;
+  changed: boolean;
+  generatedAt?: string;
+  phases: DoctorFixPhase[];
+  before?: unknown;
+  after?: unknown;
+};
+
+export type DoctorSkillTriageRow = {
+  id: string;
+  name: string;
+  state: "eligible" | "missing_requirements" | "blocked_allowlist" | "broken";
+  reason: string;
 };
 
 export type UnityMcpRepairResult = {

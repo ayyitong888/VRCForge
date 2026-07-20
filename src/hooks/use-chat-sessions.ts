@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { fetchChats, saveChats } from "../lib/api";
+import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import { normalizeAttachmentPayloadVault, normalizeCompactedAttachmentReferences } from "../lib/attachment-payloads";
 import {
@@ -9,6 +9,12 @@ import {
   normalizeRestoredCompaction,
   restoredCompactionRequiresPersistence,
 } from "../lib/chat-compaction-state";
+import {
+  preserveConflictingChatCopies,
+  reconcileChatStorage,
+  snapshotChatFingerprints,
+  sourceRevisionsFromPayload,
+} from "../lib/chat-storage-reconcile";
 import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
@@ -26,6 +32,16 @@ type InitialChatState = {
   chats: ChatThread[];
   activeChatId: string;
 };
+
+type ChatStorageLoadOutcome = {
+  status: "ready" | "blocked" | "conflict" | "cancelled";
+  chats: ChatThread[];
+  shouldPersist: boolean;
+};
+
+function projectDurableChatFingerprint(chat: ChatThread): unknown {
+  return filterPersistableChats([chat])[0] ?? null;
+}
 
 type UseChatSessionsParams = {
   endpoint: string;
@@ -54,13 +70,16 @@ export function useChatSessions({
   expandProjectGroup,
   initialChatState,
 }: UseChatSessionsParams) {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
   const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
   const [renamingChatId, setRenamingChatId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState("");
+  const [chatRecoveries, setChatRecoveries] = useState<ChatRecoveryMarker[]>([]);
+  const [chatPersistenceBlocked, setChatPersistenceBlocked] = useState(false);
+  const [resolvingChatStorageConflict, setResolvingChatStorageConflict] = useState(false);
 
   const chatsLoadedRef = useRef(false);
   const restoredChatPathKeyRef = useRef("");
@@ -69,6 +88,16 @@ export function useChatSessions({
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const chatsRef = useRef<ChatThread[]>(initialChatState.chats);
   const chatsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chatRestoreGenerationRef = useRef(0);
+  const chatSourceRevisionsRef = useRef<ChatSourceRevision[]>([]);
+  // The initial browser cache is an unsynchronized local candidate, not a
+  // server baseline. An empty baseline preserves it as a local addition during
+  // the first three-way merge instead of interpreting a missing server row as
+  // a confirmed deletion.
+  const chatBaselineFingerprintsRef = useRef<Record<string, string>>({});
+  const chatPersistenceBlockedRef = useRef(false);
+  const chatStorageRecoveryBlockedRef = useRef(false);
+  const chatDeletedIdsRef = useRef<Set<string>>(new Set());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const chatSidebar = useMemo(
@@ -89,112 +118,361 @@ export function useChatSessions({
     [],
   );
 
+  function collectChatStorageProjectPaths(snapshot = chatsRef.current): string[] {
+    const paths = [
+      ...projectPaths,
+      ...customProjectPaths,
+      activeProjectPath,
+      ...snapshot.map((chat) => chat.projectPath),
+    ];
+    const selected = new Map<string, string>();
+    for (const value of paths) {
+      const path = String(value || "").trim();
+      if (!path) {
+        continue;
+      }
+      selected.set(normalizeProjectPathKey(path) || path.toLowerCase(), path);
+    }
+    return [...selected.values()];
+  }
+
+  function enqueueChatStorageOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = chatsSaveQueueRef.current.catch(() => undefined).then(operation);
+    chatsSaveQueueRef.current = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
+  function markChatStorageConflict(conflictIds: string[]) {
+    const conflictMarker: ChatRecoveryMarker = {
+      storeId: "chat.concurrent-conflict",
+      scope: "app",
+      status: "conflict",
+      reason: "concurrent_update",
+      requiresApproval: false,
+      invalidCount: conflictIds.length,
+    };
+    chatPersistenceBlockedRef.current = true;
+    setChatPersistenceBlocked(true);
+    setChatRecoveries([conflictMarker]);
+    setError(t("chat.sessionConcurrentConflict", { count: conflictIds.length }));
+  }
+
+  async function reconcileFetchedChatStorage(
+    payload: StoredChats<unknown>,
+    shouldCommit: () => boolean = () => true,
+  ): Promise<ChatStorageLoadOutcome> {
+    if (!shouldCommit()) {
+      return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
+    }
+    const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
+    const localProjectKeys = new Set(
+      chatsRef.current
+        .map((chat) => normalizeProjectPathKey(chat.projectPath))
+        .filter(Boolean),
+    );
+    const unavailableLocalRecoveries: ChatRecoveryMarker[] = (payload.sources || []).flatMap((source) => {
+      const projectPath = typeof source.projectPath === "string" ? source.projectPath : "";
+      const projectKey = normalizeProjectPathKey(projectPath);
+      if (source.unavailable !== true || source.indexed === true || !projectKey || !localProjectKeys.has(projectKey)) {
+        return [];
+      }
+      return [{
+        storeId: String(source.storeId || "chat.project-unavailable"),
+        scope: "project",
+        status: "unsupported",
+        reason: "project_unavailable",
+        requiresApproval: false,
+        invalidCount: 0,
+      }];
+    });
+    const recoveries = [...(payload.recoveries || []), ...unavailableLocalRecoveries];
+    const blockingRecoveries = recoveries.filter((recovery) => recovery.status !== "recovered");
+    const blocked = payload.writeBlocked === true || blockingRecoveries.length > 0;
+    const recoveringFromDamagedSource = chatStorageRecoveryBlockedRef.current
+      || recoveries.some((recovery) => recovery.status === "recovered");
+    const { chats: unfilteredRemoteChats, shouldPersist } = normalizeStoredChatSnapshot(payload.chats || []);
+    const unfilteredRemoteFingerprints = snapshotChatFingerprints(unfilteredRemoteChats, projectDurableChatFingerprint);
+    const remoteChats = recoveringFromDamagedSource
+      ? unfilteredRemoteChats.filter((chat) => {
+          if (!chatDeletedIdsRef.current.has(chat.id)) {
+            return true;
+          }
+          const baselineFingerprint = chatBaselineFingerprintsRef.current[chat.id];
+          return baselineFingerprint !== undefined && unfilteredRemoteFingerprints[chat.id] !== baselineFingerprint;
+        })
+      : unfilteredRemoteChats;
+    if (!shouldCommit()) {
+      return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
+    }
+    chatSourceRevisionsRef.current = sourceRevisions;
+    if (blocked) {
+      const current = chatsRef.current;
+      const currentIds = new Set(current.map((chat) => chat.id));
+      const additions = remoteChats.filter(
+        (chat) => !currentIds.has(chat.id) && chatBaselineFingerprintsRef.current[chat.id] === undefined,
+      );
+      const safeChats = additions.length ? [...current, ...additions] : current;
+      chatsRef.current = safeChats;
+      setChats(safeChats);
+      chatPersistenceBlockedRef.current = true;
+      chatStorageRecoveryBlockedRef.current = true;
+      setChatPersistenceBlocked(true);
+      setChatRecoveries(recoveries);
+      setError(t("chat.sessionRecoveryBlocked", { count: blockingRecoveries.length }));
+      return { status: "blocked", chats: safeChats, shouldPersist: false };
+    }
+    const reconciliationBaseline = recoveringFromDamagedSource
+      ? {}
+      : chatBaselineFingerprintsRef.current;
+    const reconciled = reconcileChatStorage(
+      reconciliationBaseline,
+      chatsRef.current,
+      remoteChats,
+      projectDurableChatFingerprint,
+    );
+    if (reconciled.status === "conflict") {
+      if (recoveringFromDamagedSource) {
+        chatBaselineFingerprintsRef.current = {};
+      }
+      chatStorageRecoveryBlockedRef.current = false;
+      markChatStorageConflict(reconciled.conflictIds);
+      return { status: "conflict", chats: chatsRef.current, shouldPersist: false };
+    }
+    const remoteFingerprints = snapshotChatFingerprints(remoteChats, projectDurableChatFingerprint);
+    const mergedFingerprints = snapshotChatFingerprints(reconciled.chats, projectDurableChatFingerprint);
+    const mergedDiffersFromRemote = !chatFingerprintSnapshotsEqual(mergedFingerprints, remoteFingerprints);
+    chatBaselineFingerprintsRef.current = remoteFingerprints;
+    chatsRef.current = reconciled.chats;
+    setChats(reconciled.chats);
+    chatPersistenceBlockedRef.current = false;
+    chatStorageRecoveryBlockedRef.current = false;
+    setChatPersistenceBlocked(false);
+    setChatRecoveries(recoveries);
+    if (recoveringFromDamagedSource || mergedDiffersFromRemote) {
+      // Quarantine makes a damaged source disappear; that disappearance is not
+      // a user-confirmed deletion. Preserve the in-memory candidate and make
+      // the clean snapshot durable before clearing the recovery transition.
+      markChatsDirty();
+    }
+    return {
+      status: "ready",
+      chats: reconciled.chats,
+      shouldPersist: shouldPersist || recoveringFromDamagedSource || mergedDiffersFromRemote,
+    };
+  }
+
+  async function saveChatSnapshotWithinStorageOperation(
+    snapshot: ChatThread[],
+    saveVersion: number,
+    clearDirty: boolean,
+  ): Promise<void> {
+    if (chatPersistenceBlockedRef.current) {
+      throw new Error(t("chat.sessionSaveBlocked"));
+    }
+    const result = await saveChats(endpoint, snapshot, chatSourceRevisionsRef.current);
+    if (result.sourceRevisions) {
+      chatSourceRevisionsRef.current = result.sourceRevisions;
+    }
+    chatBaselineFingerprintsRef.current = snapshotChatFingerprints(snapshot, projectDurableChatFingerprint);
+    if (chatsSaveVersionRef.current === saveVersion) {
+      if (clearDirty) {
+        chatsDirtyRef.current = false;
+      }
+      chatDeletedIdsRef.current.clear();
+    }
+  }
+
+  async function saveWithOneReconcileRetryWithinStorageOperation(
+    initialSnapshot: ChatThread[],
+    initialSaveVersion: number,
+    clearDirty: boolean,
+  ): Promise<void> {
+    let snapshot = initialSnapshot;
+    let saveVersion = initialSaveVersion;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await saveChatSnapshotWithinStorageOperation(snapshot, saveVersion, clearDirty);
+        return;
+      } catch (cause) {
+        if (attempt > 0) {
+          throw cause;
+        }
+        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+        const outcome = await reconcileFetchedChatStorage(payload);
+        if (outcome.status !== "ready") {
+          throw cause;
+        }
+        snapshot = filterPersistableChats(chatsRef.current);
+        saveVersion = chatsSaveVersionRef.current;
+      }
+    }
+  }
+
   useEffect(() => {
     if (!runtimeConnected || !projectPrefsReady) {
       return;
     }
-    const restoreProjectPaths = Array.from(
-      new Set([...projectPaths.filter(Boolean), ...customProjectPaths.filter(Boolean)]),
-    );
+    const restoreProjectPaths = collectChatStorageProjectPaths();
     const restorePathKey = restoreProjectPaths.map((path) => normalizeProjectPathKey(path)).sort().join("\n");
     if (chatsLoadedRef.current && restoredChatPathKeyRef.current === restorePathKey) {
       return;
     }
     let restoreCancelled = false;
-    let restoreCompleted = false;
-    chatsLoadedRef.current = true;
+    const restoreGeneration = chatRestoreGenerationRef.current + 1;
+    chatRestoreGenerationRef.current = restoreGeneration;
+    chatsLoadedRef.current = false;
     restoredChatPathKeyRef.current = restorePathKey;
     void (async () => {
       try {
-        const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
-        let shouldPersistRestoredState = false;
-        const restored = (payload.chats || []).filter(isStoredChat).map((chat) => {
-          const restoredCompactionWasInterrupted = restoredCompactionRequiresPersistence(chat.compaction);
-          const normalized: ChatThread = {
-            id: chat.id,
-            sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
-            title: typeof chat.title === "string" ? chat.title : "",
-            projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
-            createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
-            updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
-            agentName: typeof chat.agentName === "string" ? chat.agentName : "",
-            pinned: chat.pinned === true,
-            archived: chat.archived === true,
-            revision: normalizeChatRevision(chat.revision),
-            compaction: normalizeRestoredCompaction(chat.compaction),
-            contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
-            attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),
-            compactedAttachmentRefs: normalizeCompactedAttachmentReferences(chat.compactedAttachmentRefs),
-            items: stripTransientConversationItems(chat.items),
-          };
-          const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
-          shouldPersistRestoredState = shouldPersistRestoredState
-            || restoredCompactionWasInterrupted
-            || cached.createdAt !== normalized.createdAt
-            || cached.updatedAt !== normalized.updatedAt
-            || JSON.stringify(chat.attachmentPayloads) !== JSON.stringify(normalized.attachmentPayloads)
-            || JSON.stringify(chat.compactedAttachmentRefs) !== JSON.stringify(normalized.compactedAttachmentRefs);
-          return cached;
+        const outcome = await enqueueChatStorageOperation(async () => {
+          if (restoreCancelled || chatRestoreGenerationRef.current !== restoreGeneration) {
+            return { status: "cancelled", chats: chatsRef.current, shouldPersist: false } satisfies ChatStorageLoadOutcome;
+          }
+          const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
+          return reconcileFetchedChatStorage(
+            payload,
+            () => !restoreCancelled && chatRestoreGenerationRef.current === restoreGeneration,
+          );
         });
-        if (restoreCancelled) {
+        if (restoreCancelled || outcome.status === "cancelled") {
           return;
         }
-        if (restored.length > 0) {
+        chatsLoadedRef.current = true;
+        if (outcome.chats.length > 0) {
           const initialSaveVersion = chatsSaveVersionRef.current;
-          let restoredLengthAfterMerge = restored.length;
-          setChats((current) => {
-            if (current.length === 0) {
-              restoredLengthAfterMerge = restored.length;
-              return restored;
-            }
-            const existingIds = new Set(current.map((chat) => chat.id));
-            const additions = restored.filter((chat) => !existingIds.has(chat.id));
-            restoredLengthAfterMerge = current.length + additions.length;
-            return additions.length ? [...current, ...additions] : current;
-          });
           if (!activeChatId && activeProjectPath) {
             const activeProjectKey = normalizeProjectPathKey(activeProjectPath);
-            const latest = restored.find((chat) => normalizeProjectPathKey(chat.projectPath) === activeProjectKey && !chat.archived);
+            const latest = outcome.chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === activeProjectKey && !chat.archived);
             if (latest) {
               setActiveChatId(latest.id);
               expandProjectGroup(latest.projectPath);
             }
           }
-            if (shouldPersistRestoredState) {
-              if (chatTimestampCacheTimerRef.current) {
-                window.clearTimeout(chatTimestampCacheTimerRef.current);
-              }
-              chatTimestampCacheTimerRef.current = window.setTimeout(() => {
-                chatTimestampCacheTimerRef.current = null;
-                if (chatsSaveVersionRef.current !== initialSaveVersion || chatsRef.current.length !== restoredLengthAfterMerge) {
-                  return;
-                }
-                void enqueueChatSave(filterPersistableChats(chatsRef.current), chatsSaveVersionRef.current, false);
-              }, 3000);
+          if (outcome.shouldPersist && !chatPersistenceBlockedRef.current) {
+            if (chatTimestampCacheTimerRef.current) {
+              window.clearTimeout(chatTimestampCacheTimerRef.current);
             }
+            chatTimestampCacheTimerRef.current = window.setTimeout(() => {
+              chatTimestampCacheTimerRef.current = null;
+              if (chatsSaveVersionRef.current !== initialSaveVersion) {
+                return;
+              }
+              void enqueueChatSave(false)
+                .catch(() => setError(t("chat.sessionSaveBlocked")));
+            }, 3000);
+          }
         }
-        restoreCompleted = true;
       } catch {
+        if (restoreCancelled) {
+          return;
+        }
         chatsLoadedRef.current = false;
         restoredChatPathKeyRef.current = "";
+        setError(t("chat.sessionRestoreFailed"));
       }
     })();
     return () => {
       restoreCancelled = true;
-      if (!restoreCompleted) {
-        chatsLoadedRef.current = false;
-        restoredChatPathKeyRef.current = "";
-      }
     };
-  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeChatId, activeProjectPath, expandProjectGroup]);
+  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeChatId, activeProjectPath, expandProjectGroup, setError, t]);
+
+  const reloadChatStorageState = useCallback(async (): Promise<boolean> => {
+    if (!runtimeConnected || !projectPrefsReady) {
+      return false;
+    }
+    return enqueueChatStorageOperation(async () => {
+      const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+      const outcome = await reconcileFetchedChatStorage(payload);
+      if (outcome.status !== "ready") {
+        return false;
+      }
+      if (chatsDirtyRef.current) {
+        await saveWithOneReconcileRetryWithinStorageOperation(
+          filterPersistableChats(chatsRef.current),
+          chatsSaveVersionRef.current,
+          true,
+        );
+      }
+      return true;
+    });
+  }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, setError, t]);
+
+  const resolveChatStorageConflict = useCallback(async (): Promise<boolean> => {
+    if (!runtimeConnected || !projectPrefsReady) {
+      return false;
+    }
+    setResolvingChatStorageConflict(true);
+    try {
+      return await enqueueChatStorageOperation(async () => {
+        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+        if (payload.writeBlocked === true || (payload.recoveries || []).length > 0) {
+          await reconcileFetchedChatStorage(payload);
+          return false;
+        }
+        const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
+        const { chats: remoteChats } = normalizeStoredChatSnapshot(payload.chats || []);
+        const localCopyIds = new Map<string, string>();
+        const resolved = preserveConflictingChatCopies(
+          chatBaselineFingerprintsRef.current,
+          chatsRef.current,
+          remoteChats,
+          (chat, index) => {
+            const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${index}`;
+            const id = `chat-recovered-${suffix}`;
+            localCopyIds.set(chat.id, id);
+            const now = new Date().toISOString();
+            const copyLabel = t("chat.concurrentConflictLocalCopy");
+            return {
+              ...chat,
+              id,
+              sessionId: "",
+              title: chat.title ? `${chat.title} — ${copyLabel}` : copyLabel,
+              pinned: false,
+              archived: false,
+              revision: 0,
+              createdAt: now,
+              updatedAt: now,
+            };
+          },
+          projectDurableChatFingerprint,
+        );
+        chatSourceRevisionsRef.current = sourceRevisions;
+        chatBaselineFingerprintsRef.current = snapshotChatFingerprints(remoteChats, projectDurableChatFingerprint);
+        chatsRef.current = resolved.chats;
+        setChats(resolved.chats);
+        setActiveChatId((current) => localCopyIds.get(current) || current);
+        // Keep the visible recovery marker until the conflict-preserving CAS
+        // write succeeds. Internally unblock only this serialized write.
+        chatPersistenceBlockedRef.current = false;
+        markChatsDirty();
+        try {
+          await saveChatSnapshotWithinStorageOperation(
+            filterPersistableChats(resolved.chats),
+            chatsSaveVersionRef.current,
+            true,
+          );
+        } catch (cause) {
+          chatPersistenceBlockedRef.current = true;
+          setChatPersistenceBlocked(true);
+          throw cause;
+        }
+        chatStorageRecoveryBlockedRef.current = false;
+        setChatPersistenceBlocked(false);
+        setChatRecoveries([]);
+        return true;
+      });
+    } finally {
+      setResolvingChatStorageConflict(false);
+    }
+  }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, t]);
 
   useEffect(() => {
-    if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current) {
+    if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current || chatPersistenceBlockedRef.current) {
       return;
     }
-    const saveVersion = chatsSaveVersionRef.current;
     const timer = window.setTimeout(() => {
-      void enqueueChatSave(filterPersistableChats(chats), saveVersion, true);
+      void enqueueChatSave(true)
+        .catch(() => setError(t("chat.sessionSaveBlocked")));
     }, 800);
     return () => window.clearTimeout(timer);
   }, [chats, runtimeConnected, endpoint]);
@@ -210,27 +488,25 @@ export function useChatSessions({
    * or handoff boundary can await persistChatsNow instead of relying on the
    * normal debounce.
    */
-  function enqueueChatSave(snapshot: ChatThread[], saveVersion: number, clearDirty: boolean): Promise<void> {
-    const pending = chatsSaveQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        await saveChats(endpoint, snapshot);
-        if (clearDirty && chatsSaveVersionRef.current === saveVersion) {
-          chatsDirtyRef.current = false;
-        }
-      });
-    chatsSaveQueueRef.current = pending.catch(() => undefined);
+  function enqueueChatSave(clearDirty: boolean): Promise<void> {
+    // A queued snapshot must never be paired with source revisions refreshed by
+    // an earlier operation. Re-sample both the chat state and its generation
+    // only when this operation reaches the head of the storage queue.
+    const pending = enqueueChatStorageOperation(() => (
+      saveWithOneReconcileRetryWithinStorageOperation(
+        filterPersistableChats(chatsRef.current),
+        chatsSaveVersionRef.current,
+        clearDirty,
+      )
+    ));
     return pending.catch((cause) => {
-      if (clearDirty) {
-        chatsDirtyRef.current = true;
-      }
+      chatsDirtyRef.current = true;
       throw cause;
     });
   }
 
   function persistChatsNow(): Promise<void> {
-    const saveVersion = chatsSaveVersionRef.current;
-    return enqueueChatSave(filterPersistableChats(chatsRef.current), saveVersion, true);
+    return enqueueChatSave(true);
   }
 
   function touchChat(chat: ChatThread, timestamp = new Date().toISOString()): ChatThread {
@@ -330,8 +606,11 @@ export function useChatSessions({
   }
 
   function deleteChatPermanently(chatId: string) {
+    chatDeletedIdsRef.current.add(chatId);
     markChatsDirty();
-    setChats((list) => list.filter((chat) => chat.id !== chatId));
+    const next = chatsRef.current.filter((chat) => chat.id !== chatId);
+    chatsRef.current = next;
+    setChats(next);
     if (activeChatId === chatId) {
       setActiveChatId("");
     }
@@ -360,7 +639,11 @@ export function useChatSessions({
       return;
     }
     markChatsDirty();
-    setChats((list) => list.map((chat) => (normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat)));
+    const next = chatsRef.current.map((chat) => (
+      normalizeProjectPathKey(chat.projectPath) === key ? { ...chat, archived } : chat
+    ));
+    chatsRef.current = next;
+    setChats(next);
     if (archived && activeProjectPath && normalizeProjectPathKey(activeProjectPath) === key) {
       setActiveChatId("");
     }
@@ -394,6 +677,11 @@ export function useChatSessions({
     deleteTargetId,
     setDeleteTargetId,
     chatSidebar,
+    chatRecoveries,
+    chatPersistenceBlocked,
+    resolvingChatStorageConflict,
+    resolveChatStorageConflict,
+    reloadChatStorageState,
     markChatsDirty,
     touchChat,
     updateChat,
@@ -413,4 +701,46 @@ export function useChatSessions({
     openChat,
     selectProject,
   };
+}
+
+function chatFingerprintSnapshotsEqual(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
+}
+
+function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; shouldPersist: boolean } {
+  let shouldPersist = false;
+  const chats = values.filter(isStoredChat).map((chat) => {
+    const restoredCompactionWasInterrupted = restoredCompactionRequiresPersistence(chat.compaction);
+    const normalized: ChatThread = {
+      id: chat.id,
+      sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
+      title: typeof chat.title === "string" ? chat.title : "",
+      projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+      createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
+      updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
+      agentName: typeof chat.agentName === "string" ? chat.agentName : "",
+      pinned: chat.pinned === true,
+      archived: chat.archived === true,
+      revision: normalizeChatRevision(chat.revision),
+      compaction: normalizeRestoredCompaction(chat.compaction),
+      contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
+      attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),
+      compactedAttachmentRefs: normalizeCompactedAttachmentReferences(chat.compactedAttachmentRefs),
+      items: stripTransientConversationItems(chat.items),
+    };
+    const cached = cacheChatContextUsageFast(cacheChatTimestampsFast(normalized));
+    shouldPersist = shouldPersist
+      || restoredCompactionWasInterrupted
+      || cached.createdAt !== normalized.createdAt
+      || cached.updatedAt !== normalized.updatedAt
+      || JSON.stringify(chat.attachmentPayloads) !== JSON.stringify(normalized.attachmentPayloads)
+      || JSON.stringify(chat.compactedAttachmentRefs) !== JSON.stringify(normalized.compactedAttachmentRefs);
+    return cached;
+  });
+  return { chats, shouldPersist };
 }

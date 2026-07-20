@@ -67,6 +67,77 @@ def test_support_bundle_validation_rejects_secret_and_user_path(tmp_path: Path) 
     assert "diagnostics.json:absolute-user-path" in result["privacyFindings"]
 
 
+def packaged_doctor_report(*, extra_status: str | None = None) -> dict:
+    checks = [
+        {
+            "id": "desktop.install_integrity",
+            "status": "ok",
+            "fixable": False,
+            "detail": {
+                "schemaValid": True,
+                "manifestVersionMatched": True,
+                "versionFileMatched": True,
+                "fileChecks": [],
+            },
+        }
+    ]
+    if extra_status is not None:
+        checks.append(
+            {
+                "id": f"runtime.{extra_status}",
+                "status": extra_status,
+                "fixable": False,
+                "detail": {},
+            }
+        )
+    summary = {
+        "okCount": sum(item["status"] == "ok" for item in checks),
+        "warningCount": sum(item["status"] == "warning" for item in checks),
+        "errorCount": sum(item["status"] == "error" for item in checks),
+        "unknownCount": sum(item["status"] == "unknown" for item in checks),
+    }
+    return {
+        "schema": "vrcforge.doctor.v1",
+        "ok": summary["errorCount"] == 0,
+        "summary": summary,
+        "checks": checks,
+    }
+
+
+def test_packaged_doctor_allows_explicit_warning_but_rejects_any_error() -> None:
+    smoke = load_script("smoke_packaged_backend.py")
+
+    warning_ok, warning_evidence = smoke.evaluate_packaged_doctor(
+        packaged_doctor_report(extra_status="warning")
+    )
+    error_ok, error_evidence = smoke.evaluate_packaged_doctor(
+        packaged_doctor_report(extra_status="error")
+    )
+
+    assert warning_ok is True
+    assert warning_evidence["summary"]["warningCount"] == 1
+    assert error_ok is False
+    assert error_evidence["summary"]["errorCount"] == 1
+
+
+def test_packaged_cli_doctor_never_accepts_semantic_exit_two() -> None:
+    smoke = load_script("smoke_packaged_backend.py")
+    report = packaged_doctor_report(extra_status="error")
+    payload = {
+        "schema": "vrcforge.cli-doctor.v1",
+        "report": report,
+        "summary": report["summary"],
+        "error": None,
+        "exitCode": 2,
+    }
+
+    ok, evidence = smoke.evaluate_packaged_cli_doctor(payload, 2)
+
+    assert ok is False
+    assert evidence["expectedExitCode"] == 2
+    assert evidence["errorFree"] is False
+
+
 def test_payload_zip_rejects_traversal_and_duplicate_members() -> None:
     smoke = load_script("smoke_payload_zip_unpack.py")
     infos = [

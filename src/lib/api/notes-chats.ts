@@ -21,13 +21,34 @@ export async function saveAgentNotes(endpoint: string, content: string): Promise
   });
 }
 
+export type ChatSourceRevision = {
+  storeId: string;
+  scope: string;
+  exists: boolean;
+  digest: string;
+  status: string;
+  projectPath?: string;
+};
+
+export type ChatRecoveryMarker = {
+  storeId: string;
+  scope: string;
+  status: string;
+  reason: string;
+  requiresApproval: boolean;
+  invalidCount?: number;
+  quarantinedCount?: number;
+};
+
 export type StoredChats<T> = {
   ok: boolean;
   path: string;
   exists: boolean;
   chats: T[];
   count: number;
-  sources?: Array<Record<string, unknown>>;
+  sources?: Array<ChatSourceRevision & Record<string, unknown>>;
+  recoveries?: ChatRecoveryMarker[];
+  writeBlocked?: boolean;
 };
 
 export async function fetchChats<T>(endpoint: string, projectPaths: string[] = []): Promise<StoredChats<T>> {
@@ -49,15 +70,23 @@ export async function fetchChats<T>(endpoint: string, projectPaths: string[] = [
 export async function saveChats<T>(
   endpoint: string,
   chats: T[],
-): Promise<{ ok: boolean; path: string; count: number; appCount?: number; projectPaths?: Array<Record<string, unknown>> }> {
+  sourceRevisions: ChatSourceRevision[] = [],
+): Promise<{
+  ok: boolean;
+  path: string;
+  count: number;
+  appCount?: number;
+  projectPaths?: Array<Record<string, unknown>>;
+  sourceRevisions?: ChatSourceRevision[];
+}> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("save_chats", {
-      request: { body: { chats }, timeoutMs: 60000 },
+      request: { body: { chats, sourceRevisions }, timeoutMs: 60000 },
     });
   }
   return requestJson(`${endpoint}/api/app/chats`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chats }),
+    body: JSON.stringify({ chats, sourceRevisions }),
   });
 }

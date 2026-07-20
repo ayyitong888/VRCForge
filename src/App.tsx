@@ -58,6 +58,7 @@ import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspa
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
+import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
 import { parseGoalWakeDirective, useGoalWake } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useOptimizationWorkspaceController } from "./hooks/use-optimization-workspace-controller";
@@ -157,7 +158,6 @@ import {
   requestAgentDesktopAction,
   requestChatAttachmentImport,
   refreshProjects,
-  repairUnityMcpBridge,
   setAppSessionToken,
   retrySubAgent,
   updatePermission,
@@ -287,7 +287,7 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [doctorMessage, setDoctorMessage] = useState("");
-  const [repairingUnityBridge, setRepairingUnityBridge] = useState(false);
+  const [doctorMessageTone, setDoctorMessageTone] = useState<"ok" | "warn" | "danger">("ok");
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
@@ -661,6 +661,11 @@ export default function App() {
     deleteTargetId,
     setDeleteTargetId,
     chatSidebar,
+    chatRecoveries,
+    chatPersistenceBlocked,
+    resolvingChatStorageConflict,
+    resolveChatStorageConflict,
+    reloadChatStorageState,
     touchChat,
     updateChat,
     updateChatIfRevision,
@@ -937,6 +942,7 @@ export default function App() {
     refresh,
     refreshRuntimeRuns,
     loadCheckpoints,
+    reloadChatStorageState,
   });
   const currentModelInfo = useMemo(
     () => {
@@ -2606,6 +2612,7 @@ export default function App() {
   async function loadDoctor(target = endpoint) {
     setLoadingDoctor(true);
     setDoctorMessage("");
+    setDoctorMessageTone("ok");
     try {
       let targetEndpoint = target;
       if (!runtimeConnected && target === endpoint) {
@@ -2625,36 +2632,33 @@ export default function App() {
     }
   }
 
-  async function repairUnityBridgeFromDoctor(target = endpoint) {
-    setRepairingUnityBridge(true);
-    setDoctorMessage("");
-    setError("");
-    try {
-      let targetEndpoint = target;
-      if (!runtimeConnected && target === endpoint) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
-          return;
-        }
-        targetEndpoint = readyEndpoint;
+  async function refreshDoctorAndChatRecovery() {
+    if (chatPersistenceBlocked || chatRecoveries.length > 0) {
+      try {
+        await reloadChatStorageState();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
       }
-      const payload = await repairUnityMcpBridge(targetEndpoint, {
-        projectPath: activeProjectPath || undefined,
-        allowUnityRelaunch: true,
-        waitSeconds: 120,
-        closeTimeoutSeconds: 60,
-      });
-      const failedPhase = payload.phases.find((phase) => phase.status === "error" || phase.status === "warning");
-      const suffix = failedPhase && !payload.ok ? `: ${failedPhase.message}` : "";
-      await loadDoctor(targetEndpoint);
-      await refreshWithRetry(targetEndpoint);
-      setDoctorMessage(payload.ok ? `Unity bridge ${payload.status}` : `Unity bridge needs action${suffix}`);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRepairingUnityBridge(false);
     }
+    await loadDoctor();
   }
+
+  const { fixingCheckId, lastFixResult, fixCheck } = useDoctorFixController({
+    endpoint,
+    projectPath: activeProjectPath,
+    onRefresh: async (result) => {
+      if (result.checkId === "session.storage") {
+        await reloadChatStorageState();
+      }
+      await loadDoctor();
+      await refreshWithRetry(endpoint);
+    },
+    onMessage: (message, tone) => {
+      setDoctorMessage(message);
+      setDoctorMessageTone(tone);
+    },
+    onError: setError,
+  });
 
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
@@ -2757,10 +2761,20 @@ export default function App() {
               report={doctorReport}
               loading={loadingDoctor}
               message={doctorMessage}
-              repairingUnityBridge={repairingUnityBridge}
+              messageTone={doctorMessageTone}
+              fixingCheckId={fixingCheckId}
+              lastFixResult={lastFixResult}
+              chatRecoveries={chatRecoveries}
+              chatPersistenceBlocked={chatPersistenceBlocked}
+              resolvingChatStorageConflict={resolvingChatStorageConflict}
               exportingSupportBundle={exportingSupportBundle}
-              onRefresh={() => void loadDoctor()}
-              onRepairUnityBridge={() => void repairUnityBridgeFromDoctor()}
+              onRefresh={() => void refreshDoctorAndChatRecovery()}
+              onFix={(checkId, mode) => void fixCheck(checkId, mode)}
+              onResolveChatConflict={() => {
+                void resolveChatStorageConflict().catch((cause) => {
+                  setError(cause instanceof Error ? cause.message : String(cause));
+                });
+              }}
               onOpenSettings={() => openSettingsSection("general")}
               onExportSupportBundle={() => void createSupportBundle()}
               onCopy={() => {
@@ -2769,7 +2783,10 @@ export default function App() {
                 }
                 void navigator.clipboard
                   .writeText(JSON.stringify(doctorReport, null, 2))
-                  .then(() => setDoctorMessage(t("doctor.copiedSummary")))
+                  .then(() => {
+                    setDoctorMessage(t("doctor.copiedSummary"));
+                    setDoctorMessageTone("ok");
+                  })
                   .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
               }}
               formatPayload={formatPayload}

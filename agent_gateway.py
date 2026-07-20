@@ -55,6 +55,8 @@ RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
 RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
+PROJECT_CHAT_CHECKPOINT_TARGET = "vrcforge_repair_project_chat_store"
+PROJECT_CHAT_CHECKPOINT_MEMBER = ".vrcforge/chat-transcripts.json"
 LOCAL_STATE_CHECKPOINT_TARGETS = {
     "vrcforge_import_skill_package",
     "vrcforge_export_skill_package",
@@ -70,6 +72,7 @@ CHECKPOINT_ARCHIVE_BYTES_PER_MB = 1024 * 1024
 CHECKPOINT_ARCHIVE_MAX_SIZE_MB_LIMIT = 1024 * 1024
 CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB = 10 * 1024
 CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT = 2
+CHECKPOINT_RECORD_SCHEMA = "vrcforge.checkpoint.v1"
 AUTO_APPROVAL_MANUAL_SHELL_COMMANDS = {
     "del",
     "erase",
@@ -112,12 +115,64 @@ class AgentGatewayError(RuntimeError):
         self.status_code = status_code
 
 
+def _split_lf_jsonl_lines(data: bytes, *, keepends: bool = False) -> list[bytes]:
+    """Split JSONL only on its LF record delimiter, never on VT/FF."""
+
+    if not data:
+        return []
+    chunks = data.split(b"\n")
+    lines = [chunk + b"\n" if keepends else chunk for chunk in chunks[:-1]]
+    if chunks[-1]:
+        lines.append(chunks[-1])
+    return lines
+
+
+def _load_strict_json(text: str) -> Any:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant is not supported: {value}")
+
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite JSON number is not supported: {value}")
+        return parsed
+
+    try:
+        return json.loads(text, parse_constant=reject_constant, parse_float=parse_finite_float)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds the supported limit") from exc
+
+
+def _checkpoint_record_state(payload: Any) -> str:
+    """Return valid, unknown_schema, or invalid for one checkpoint record."""
+
+    if not isinstance(payload, dict):
+        return "invalid"
+    schema = payload.get("schema")
+    if schema is not None and (not isinstance(schema, str) or not schema.strip()):
+        return "invalid"
+    if isinstance(schema, str) and schema != CHECKPOINT_RECORD_SCHEMA:
+        return "unknown_schema"
+    # Versionless legacy records and the current schema share these durable
+    # fields. They are required by listing, restore selection, and audit UI.
+    return (
+        "valid"
+        if all(
+            isinstance(payload.get(field), str) and bool(str(payload.get(field)).strip())
+            for field in ("id", "createdAt", "targetTool", "status")
+        )
+        else "invalid"
+    )
+
+
 @dataclass
 class AgentGatewayConfig:
     enabled: bool = False
     require_token: bool = True
     token: str = ""
     approval_token: str = ""
+    token_created_at: str = ""
+    token_rotated_at: str = ""
     allow_write_requests: bool = True
     allow_roslyn_advanced: bool = False
     approval_timeout_seconds: int = 600
@@ -192,6 +247,7 @@ WRAPPER_ONLY_WRITE_TARGETS = {
     "vrcforge_avatar_encryption_addon_remove",
     "vrcforge_configure_optimizer_component",
     "vrcforge_install_vpm_package",
+    "vrcforge_repair_project_chat_store",
 }
 AVATAR_ENCRYPTION_TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
@@ -1586,10 +1642,19 @@ class AgentGateway:
         self._runtime_stream_context = threading.local()
         # 审计 JSONL 追加锁：见 append_audit。
         self._audit_append_lock = threading.Lock()
+        # User-authored Skill CRUD and Doctor quarantine operate on the same
+        # directory tree.  Keep that domain separate from the broad gateway
+        # state lock so a repair cannot act on a stale manifest snapshot.
+        self._user_skill_lock = threading.RLock()
         # Checkpoint archives, their JSONL projection, and storage relocation
         # form one consistency domain. Creation calls pruning recursively, so
         # this must be re-entrant.
         self._checkpoint_storage_lock = threading.RLock()
+        # The host replaces this with the writer lock for project chat
+        # transcripts. Checkpoint operations always acquire storage first and
+        # this lock second; chat writers must never enter checkpoint storage
+        # while holding their writer lock.
+        self._project_chat_checkpoint_lock = threading.RLock()
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
@@ -1605,6 +1670,13 @@ class AgentGateway:
             self._desktop_action_payloads.clear()
             self._desktop_action_results.clear()
             self._computer_use_turn_grants.clear()
+
+    def bind_project_chat_checkpoint_lock(self, lock: Any) -> None:
+        """Share the host's project-chat writer lock with checkpoint I/O."""
+
+        if lock is None or not hasattr(lock, "__enter__") or not hasattr(lock, "__exit__"):
+            raise ValueError("project chat checkpoint lock must be a context manager")
+        self._project_chat_checkpoint_lock = lock
 
     @property
     def agent_memory_log_path(self) -> Path:
@@ -1679,6 +1751,9 @@ class AgentGateway:
 
             if not raw.get("token"):
                 raw["token"] = secrets.token_urlsafe(32)
+                now = utc_now_iso()
+                raw["token_created_at"] = now
+                raw["token_rotated_at"] = now
                 changed = True
             if not raw.get("approval_token"):
                 raw["approval_token"] = secrets.token_urlsafe(32)
@@ -1698,6 +1773,8 @@ class AgentGateway:
                 "computer_use_ever_enabled": False,
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
+                "token_created_at": "",
+                "token_rotated_at": "",
             }
             for key, value in defaults.items():
                 if key not in raw:
@@ -1709,6 +1786,8 @@ class AgentGateway:
                 require_token=bool(raw.get("require_token", True)),
                 token=str(raw.get("token") or ""),
                 approval_token=str(raw.get("approval_token") or ""),
+                token_created_at=str(raw.get("token_created_at") or ""),
+                token_rotated_at=str(raw.get("token_rotated_at") or ""),
                 allow_write_requests=bool(raw.get("allow_write_requests", True)),
                 allow_roslyn_advanced=bool(raw.get("allow_roslyn_advanced", False)),
                 approval_timeout_seconds=int(raw.get("approval_timeout_seconds", 600)),
@@ -1731,30 +1810,40 @@ class AgentGateway:
             return config
 
     def save_config(self, config: AgentGatewayConfig) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "enabled": bool(config.enabled),
-            "require_token": bool(config.require_token),
-            "token": config.token or secrets.token_urlsafe(32),
-            "approval_token": config.approval_token or secrets.token_urlsafe(32),
-            "allow_write_requests": bool(config.allow_write_requests),
-            "allow_roslyn_advanced": bool(config.allow_roslyn_advanced),
-            "approval_timeout_seconds": int(config.approval_timeout_seconds),
-            "execution_mode": normalize_execution_mode(config.execution_mode),
-            "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
-            "developer_options_enabled": bool(config.developer_options_enabled),
-            "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
-            "computer_use_enabled": bool(config.computer_use_enabled),
-            "computer_use_ever_enabled": bool(config.computer_use_ever_enabled),
-            "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
-                config.checkpoint_archive_max_size_mb
-            ),
-            "checkpoint_archive_dir": normalize_checkpoint_archive_dir(
-                config.checkpoint_archive_dir
-            ),
-        }
-        atomic_write_json(self.config_path, payload)
-        self._sync_checkpoint_store_override(config)
+        with self._lock:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            if not config.token:
+                now = utc_now_iso()
+                config.token = secrets.token_urlsafe(32)
+                config.token_created_at = config.token_created_at or now
+                config.token_rotated_at = config.token_rotated_at or now
+            if not config.approval_token:
+                config.approval_token = secrets.token_urlsafe(32)
+            payload = {
+                "enabled": bool(config.enabled),
+                "require_token": bool(config.require_token),
+                "token": config.token,
+                "approval_token": config.approval_token,
+                "token_created_at": str(config.token_created_at or ""),
+                "token_rotated_at": str(config.token_rotated_at or ""),
+                "allow_write_requests": bool(config.allow_write_requests),
+                "allow_roslyn_advanced": bool(config.allow_roslyn_advanced),
+                "approval_timeout_seconds": int(config.approval_timeout_seconds),
+                "execution_mode": normalize_execution_mode(config.execution_mode),
+                "roslyn_risk_acknowledged": bool(config.roslyn_risk_acknowledged),
+                "developer_options_enabled": bool(config.developer_options_enabled),
+                "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
+                "computer_use_enabled": bool(config.computer_use_enabled),
+                "computer_use_ever_enabled": bool(config.computer_use_ever_enabled),
+                "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
+                    config.checkpoint_archive_max_size_mb
+                ),
+                "checkpoint_archive_dir": normalize_checkpoint_archive_dir(
+                    config.checkpoint_archive_dir
+                ),
+            }
+            atomic_write_json(self.config_path, payload)
+            self._sync_checkpoint_store_override(config)
 
     def _sync_checkpoint_store_override(self, config: AgentGatewayConfig) -> None:
         """根据配置里的迁移目录刷新内存覆盖路径，供 checkpoint_store_dir 读取。"""
@@ -1916,38 +2005,47 @@ class AgentGateway:
         }
 
     def create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
-        skills = self._load_user_skills()
-        skill = self._normalize_user_skill(payload)
-        skill_id = str(skill["name"])
-        self._ensure_user_skill_can_use_id(skill_id, skills)
-        self._save_user_skill(skill)
-        self.append_audit({"event": "user_skill_created", "skill": skill_id})
-        return {"ok": True, "skill": skill, **self.build_skill_registry()}
+        with self._user_skill_lock:
+            skills = self._load_user_skills()
+            skill = self._normalize_user_skill(payload)
+            skill_id = str(skill["name"])
+            self._ensure_user_skill_can_use_id(skill_id, skills)
+            self._save_user_skill(skill)
+            self.append_audit({"event": "user_skill_created", "skill": skill_id})
+            return {"ok": True, "skill": skill, **self.build_skill_registry()}
 
     def update_user_skill(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        skill_id = normalize_skill_id(skill_id)
-        skills = self._load_user_skills()
-        for index, existing in enumerate(skills):
-            if existing.get("name") == skill_id:
-                next_payload = {**existing, **payload, "name": skill_id}
-                skills[index] = self._normalize_user_skill(next_payload, existing_id=skill_id)
-                self._save_user_skill(skills[index])
-                self.append_audit({"event": "user_skill_updated", "skill": skill_id})
-                return {"ok": True, "skill": skills[index], **self.build_skill_registry()}
-        raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+        with self._user_skill_lock:
+            skill_id = normalize_skill_id(skill_id)
+            skills = self._load_user_skills()
+            for index, existing in enumerate(skills):
+                if existing.get("name") == skill_id:
+                    next_payload = {**existing, **payload, "name": skill_id}
+                    skills[index] = self._normalize_user_skill(next_payload, existing_id=skill_id)
+                    self._save_user_skill(skills[index])
+                    self.append_audit({"event": "user_skill_updated", "skill": skill_id})
+                    return {"ok": True, "skill": skills[index], **self.build_skill_registry()}
+            raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
 
     def delete_user_skill(self, skill_id: str) -> dict[str, Any]:
-        skill_id = normalize_skill_id(skill_id)
-        skills = self._load_user_skills()
-        kept = [skill for skill in skills if skill.get("name") != skill_id]
-        if len(kept) == len(skills):
-            raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
-        skill_dir = self.user_skills_dir / skill_id
-        if _path_is_link_like(skill_dir):
-            raise AgentGatewayError(f"Refusing to delete a linked user skill directory: {skill_id}", status_code=400)
-        remove_tree(skill_dir)
-        self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
-        return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
+        with self._user_skill_lock:
+            skill_id = normalize_skill_id(skill_id)
+            skills = self._load_user_skills()
+            kept = [skill for skill in skills if skill.get("name") != skill_id]
+            if len(kept) == len(skills):
+                raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+            skill_dir = self.user_skills_dir / skill_id
+            if _path_is_link_like(skill_dir):
+                raise AgentGatewayError(f"Refusing to delete a linked user skill directory: {skill_id}", status_code=400)
+            remove_tree(skill_dir)
+            self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
+            return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
+
+    @property
+    def user_skill_lock(self) -> threading.RLock:
+        """Shared lock for host-owned Skill maintenance transactions."""
+
+        return self._user_skill_lock
 
     def build_health(self) -> dict[str, Any]:
         config = self.ensure_config()
@@ -4955,14 +5053,21 @@ class AgentGateway:
             or params.get("disable_auto_approval")
             or params.get("disableAutoApproval")
         )
+        never_auto_approve = bool(
+            params.get("never_auto_approve")
+            or params.get("neverAutoApprove")
+        )
         execution_mode = normalize_execution_mode(config.execution_mode)
         full_permission_auto = execution_mode == "roslyn_full_auto"
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
-        requires_explicit_for_mode = (
-            requires_explicit_approval
-            or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
-        ) and not full_permission_auto
+        requires_explicit_for_mode = never_auto_approve or (
+            (
+                requires_explicit_approval
+                or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
+            )
+            and not full_permission_auto
+        )
         explicit_approval_reason = str(
             params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
@@ -4987,7 +5092,7 @@ class AgentGateway:
             requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
         )
-        if full_permission_auto and (
+        if full_permission_auto and not never_auto_approve and (
             requires_explicit_approval or auto_policy_reason or risk_escalation_reason
         ):
             self.append_audit(
@@ -5198,6 +5303,7 @@ class AgentGateway:
 
         checkpoint: dict[str, Any] | None = None
         recovery: dict[str, Any] | None = None
+        no_write_conflict = False
         try:
             user_constraints = self.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -5208,17 +5314,38 @@ class AgentGateway:
             requires_checkpoint = not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
             )
-            if requires_checkpoint:
+            if requires_checkpoint and target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
+                # Keep the digest-bound checkpoint and the repair handler in
+                # one writer-locked critical section. This prevents a newer
+                # chat save from landing between snapshot verification and
+                # quarantine, while preserving storage -> chat lock order.
                 with self._checkpoint_storage_lock:
-                    checkpoint = self._create_pre_write_checkpoint(approval, arguments)
-                    if checkpoint:
-                        approval["checkpoint"] = checkpoint
-                        if checkpoint.get("ok") is not True:
-                            checkpoint["blocking"] = True
-                            raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
-                        recovery = self._start_apply_recovery(approval, arguments, checkpoint)
-            result = write_handler.handler(arguments)
+                    with self._project_chat_checkpoint_lock:
+                        checkpoint = self._create_pre_write_checkpoint(approval, arguments)
+                        if checkpoint:
+                            approval["checkpoint"] = checkpoint
+                            if checkpoint.get("ok") is not True:
+                                checkpoint["blocking"] = True
+                                raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                            recovery = self._start_apply_recovery(approval, arguments, checkpoint)
+                        result = write_handler.handler(arguments)
+            else:
+                if requires_checkpoint:
+                    with self._checkpoint_storage_lock:
+                        checkpoint = self._create_pre_write_checkpoint(approval, arguments)
+                        if checkpoint:
+                            approval["checkpoint"] = checkpoint
+                            if checkpoint.get("ok") is not True:
+                                checkpoint["blocking"] = True
+                                raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                            recovery = self._start_apply_recovery(approval, arguments, checkpoint)
+                result = write_handler.handler(arguments)
             if isinstance(result, dict) and result.get("ok") is False:
+                no_write_conflict = bool(
+                    target_tool == PROJECT_CHAT_CHECKPOINT_TARGET
+                    and result.get("status") == "conflict"
+                    and result.get("changed") is False
+                )
                 message = (
                     result.get("error")
                     or result.get("message")
@@ -5285,8 +5412,8 @@ class AgentGateway:
             if recovery:
                 self._finish_apply_recovery(
                     recovery,
-                    status="needs_recovery",
-                    resolution="write_failed_after_checkpoint",
+                    status="not_applied" if no_write_conflict else "needs_recovery",
+                    resolution="no_write_snapshot_conflict" if no_write_conflict else "write_failed_after_checkpoint",
                     error=str(exc),
                 )
             payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
@@ -5375,6 +5502,206 @@ class AgentGateway:
     def list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._checkpoint_storage_lock:
             return self._list_checkpoints_locked(params)
+
+    def inspect_checkpoint_storage(self) -> dict[str, Any]:
+        """Inspect checkpoint persistence without mutating it.
+
+        Doctor uses this instead of ``list_checkpoints`` because the normal
+        projection intentionally skips malformed JSONL rows.  The response is
+        deliberately path-free; local paths and malformed row contents belong
+        in the local quarantine evidence, never in diagnostics/UI payloads.
+        """
+
+        with self._checkpoint_storage_lock:
+            return self._inspect_checkpoint_storage_locked()
+
+    def _inspect_checkpoint_storage_locked(self) -> dict[str, Any]:
+        store_dir = self.checkpoint_store_dir
+        log_path = self.checkpoint_log_path
+        issues: list[str] = []
+
+        try:
+            if store_dir.exists():
+                if _path_is_link_like(store_dir) or not store_dir.is_dir():
+                    issues.append("unsafe_store_directory")
+            else:
+                issues.append("missing_store_directory")
+        except OSError:
+            issues.append("unreadable_store_directory")
+
+        raw = b""
+        valid_count = 0
+        invalid_count = 0
+        unknown_schema_count = 0
+        if log_path.exists():
+            try:
+                if _path_is_link_like(log_path) or not log_path.is_file():
+                    issues.append("unsafe_checkpoint_log")
+                else:
+                    raw = log_path.read_bytes()
+                    for index, raw_line in enumerate(_split_lf_jsonl_lines(raw)):
+                        if not raw_line.strip():
+                            continue
+                        try:
+                            payload = _load_strict_json(raw_line.decode("utf-8-sig" if index == 0 else "utf-8"))
+                        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                            invalid_count += 1
+                            continue
+                        state = _checkpoint_record_state(payload)
+                        if state == "valid":
+                            valid_count += 1
+                        elif state == "unknown_schema":
+                            unknown_schema_count += 1
+                        else:
+                            invalid_count += 1
+            except OSError:
+                issues.append("unreadable_checkpoint_log")
+        if invalid_count:
+            issues.append("malformed_checkpoint_rows")
+        if unknown_schema_count:
+            issues.append("unknown_checkpoint_schema")
+
+        status = "error" if any(
+            issue in {"unsafe_store_directory", "unreadable_store_directory", "unsafe_checkpoint_log", "unreadable_checkpoint_log"}
+            for issue in issues
+        ) else "warning" if issues else "ok"
+        return {
+            "ok": status != "error",
+            "schema": "vrcforge.checkpoint_storage.inspect.v1",
+            "status": status,
+            "issues": issues,
+            "storeDirectoryExists": store_dir.is_dir() if store_dir.exists() else False,
+            "logExists": log_path.is_file() if log_path.exists() else False,
+            "validRowCount": valid_count,
+            "invalidRowCount": invalid_count,
+            "unknownSchemaCount": unknown_schema_count,
+            "snapshot": hashlib.sha256(raw).hexdigest(),
+            "fixable": not any(issue.startswith("unsafe_") or issue.startswith("unreadable_") for issue in issues),
+        }
+
+    def repair_checkpoint_storage(self, *, expected_snapshot: str = "") -> dict[str, Any]:
+        """Repair app-owned checkpoint persistence under its consistency lock.
+
+        Missing directories are recreated.  Malformed rows are copied to a
+        content-addressed quarantine sidecar before the valid JSONL projection
+        is atomically rewritten.  Nothing is deleted and a stale inspection
+        snapshot fails closed.
+        """
+
+        with self._checkpoint_storage_lock:
+            before = self._inspect_checkpoint_storage_locked()
+            if expected_snapshot and not hmac.compare_digest(str(before["snapshot"]), str(expected_snapshot)):
+                return {
+                    "ok": False,
+                    "schema": "vrcforge.checkpoint_storage.repair.v1",
+                    "status": "busy",
+                    "changed": False,
+                    "reason": "snapshot_changed",
+                    "before": before,
+                    "after": before,
+                }
+            if not before.get("fixable"):
+                return {
+                    "ok": False,
+                    "schema": "vrcforge.checkpoint_storage.repair.v1",
+                    "status": "needs_user_action",
+                    "changed": False,
+                    "reason": "unsafe_or_unreadable_storage",
+                    "before": before,
+                    "after": before,
+                }
+
+            changed = False
+            store_dir = self.checkpoint_store_dir
+            if not store_dir.exists():
+                store_dir.mkdir(parents=True, exist_ok=False)
+                fsync_directory_best_effort(store_dir.parent)
+                changed = True
+
+            log_path = self.checkpoint_log_path
+            raw = log_path.read_bytes() if log_path.exists() else b""
+            valid_lines: list[bytes] = []
+            invalid_lines: list[bytes] = []
+            for index, raw_line in enumerate(_split_lf_jsonl_lines(raw, keepends=True)):
+                candidate = raw_line.rstrip(b"\r\n")
+                if not candidate.strip():
+                    valid_lines.append(raw_line)
+                    continue
+                try:
+                    payload = _load_strict_json(candidate.decode("utf-8-sig" if index == 0 else "utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    invalid_lines.append(raw_line)
+                    continue
+                if _checkpoint_record_state(payload) in {"valid", "unknown_schema"}:
+                    valid_lines.append(raw_line)
+                else:
+                    invalid_lines.append(raw_line)
+
+            quarantine_id = ""
+            if invalid_lines:
+                invalid_bytes = b"".join(invalid_lines)
+                quarantine_id = hashlib.sha256(invalid_bytes).hexdigest()[:16]
+                quarantine_dir = self.audit_dir / "quarantine"
+                quarantine_dir.mkdir(parents=True, exist_ok=True)
+                quarantine_path = quarantine_dir / f"checkpoints.invalid.{quarantine_id}.jsonl"
+                if os.path.lexists(quarantine_path):
+                    if (
+                        _path_is_link_like(quarantine_path)
+                        or not quarantine_path.is_file()
+                        or quarantine_path.read_bytes() != invalid_bytes
+                    ):
+                        return {
+                            "ok": False,
+                            "schema": "vrcforge.checkpoint_storage.repair.v1",
+                            "status": "conflict",
+                            "changed": changed,
+                            "reason": "quarantine_collision",
+                            "quarantineId": quarantine_id,
+                            "before": before,
+                            "after": self._inspect_checkpoint_storage_locked(),
+                        }
+                else:
+                    temporary = quarantine_path.with_name(f".{quarantine_path.name}.{secrets.token_hex(8)}.tmp")
+                    with temporary.open("xb") as handle:
+                        handle.write(invalid_bytes)
+                        flush_and_fsync(handle)
+                    temporary.replace(quarantine_path)
+                    fsync_directory_best_effort(quarantine_dir)
+                    if _path_is_link_like(quarantine_path) or quarantine_path.read_bytes() != invalid_bytes:
+                        return {
+                            "ok": False,
+                            "schema": "vrcforge.checkpoint_storage.repair.v1",
+                            "status": "conflict",
+                            "changed": changed,
+                            "reason": "quarantine_verification_failed",
+                            "quarantineId": quarantine_id,
+                            "before": before,
+                            "after": self._inspect_checkpoint_storage_locked(),
+                        }
+
+                repaired_bytes = b"".join(valid_lines)
+                if repaired_bytes and not repaired_bytes.endswith((b"\n", b"\r")):
+                    repaired_bytes += b"\n"
+                temporary = log_path.with_name(f".{log_path.name}.{secrets.token_hex(8)}.tmp")
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with temporary.open("xb") as handle:
+                    handle.write(repaired_bytes)
+                    flush_and_fsync(handle)
+                temporary.replace(log_path)
+                fsync_directory_best_effort(log_path.parent)
+                changed = True
+
+            after = self._inspect_checkpoint_storage_locked()
+            after_ok = after.get("status") == "ok"
+            return {
+                "ok": after_ok,
+                "schema": "vrcforge.checkpoint_storage.repair.v1",
+                "status": "repaired" if changed and after_ok else "healthy" if after_ok else "needs_user_action",
+                "changed": changed,
+                "quarantineId": quarantine_id,
+                "before": before,
+                "after": after,
+            }
 
     def _list_checkpoints_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -6065,6 +6392,8 @@ class AgentGateway:
             return available
         if checkpoint.get("strategy") == "local_state_archive":
             return self._preview_local_state_checkpoint(checkpoint)
+        if checkpoint.get("strategy") == "project_chat_archive":
+            return self._preview_project_chat_checkpoint(checkpoint)
         if checkpoint.get("strategy") == "archive":
             return self._preview_archive_checkpoint(checkpoint)
         git_root = Path(str(checkpoint["gitRoot"]))
@@ -6095,9 +6424,13 @@ class AgentGateway:
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
-        local_state_restore = checkpoint.get("strategy") == "local_state_archive"
+        local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
         if local_state_restore:
-            payload = self._restore_local_state_checkpoint(checkpoint)
+            payload = (
+                self._restore_project_chat_checkpoint(checkpoint)
+                if checkpoint.get("strategy") == "project_chat_archive"
+                else self._restore_local_state_checkpoint(checkpoint)
+            )
         elif checkpoint.get("strategy") == "archive":
             payload = self._restore_archive_checkpoint(checkpoint)
         else:
@@ -6165,6 +6498,7 @@ class AgentGateway:
             return None
         checkpoint_id = f"ckpt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         base_record = {
+            "schema": CHECKPOINT_RECORD_SCHEMA,
             "id": checkpoint_id,
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
@@ -6197,6 +6531,9 @@ class AgentGateway:
             )
             self._append_checkpoint(record)
             return record
+        if target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
+            record["expectedSourceDigest"] = str(arguments.get("expectedDigest") or "").strip().lower()
+            return self._create_project_chat_checkpoint(project_root, record)
 
         if self.checkpoint_prepare_handler is not None:
             try:
@@ -6301,6 +6638,84 @@ class AgentGateway:
                 "checkpointRef": checkpoint_ref,
                 "createdCommit": created_commit,
                 "statusBefore": [line for line in status_before["stdout"].splitlines() if line.strip()] if status_before["ok"] else [],
+            }
+        )
+        record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
+        self._append_checkpoint(record)
+        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
+        return record
+
+    def _create_project_chat_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+        """Archive only the project-owned chat store, never the whole hidden directory."""
+
+        with self._project_chat_checkpoint_lock:
+            return self._create_project_chat_checkpoint_locked(project_root, record)
+
+    def _create_project_chat_checkpoint_locked(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+        """Create a project-chat archive while holding the host writer lock."""
+
+        checkpoint_id = str(record["id"])
+        archive_dir = self.checkpoint_store_dir / self._checkpoint_project_key(project_root)
+        archive_path = archive_dir / f"{checkpoint_id}.zip"
+        temp_path = archive_path.with_suffix(".zip.tmp")
+        source = project_root / Path(*PurePosixPath(PROJECT_CHAT_CHECKPOINT_MEMBER).parts)
+        source_existed = source.exists()
+        source_bytes = b""
+        try:
+            hidden_root = source.parent
+            if (os.path.lexists(hidden_root) and _path_is_link_like(hidden_root)) or (
+                os.path.lexists(source) and _path_is_link_like(source)
+            ):
+                raise ValueError("Project chat checkpoint refuses linked or reparse-point paths.")
+            if source_existed:
+                if not source.is_file():
+                    raise ValueError("Project chat store is not a regular file.")
+                source_bytes = source.read_bytes()
+            expected_digest = str(record.get("expectedSourceDigest") or "")
+            current_digest = hashlib.sha256(source_bytes).hexdigest() if source_existed else ""
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_digest) or not source_existed or current_digest != expected_digest:
+                raise ValueError("Project chat store changed after the approval snapshot; retry recovery from a fresh scan.")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if temp_path.exists():
+                temp_path.unlink()
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+                if source_existed:
+                    archive.writestr(PROJECT_CHAT_CHECKPOINT_MEMBER, source_bytes)
+            fsync_file_path(temp_path)
+            os.replace(temp_path, archive_path)
+            fsync_directory_best_effort(archive_path.parent)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            record.update(
+                {
+                    "ok": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "strategy": "project_chat_archive",
+                    "archivePath": str(archive_path),
+                    "pathspecs": [PROJECT_CHAT_CHECKPOINT_MEMBER],
+                    "sourceExisted": source_existed,
+                    "error": f"Project chat checkpoint failed: {exc}",
+                }
+            )
+            self._append_checkpoint(record)
+            return record
+
+        record.update(
+            {
+                "ok": True,
+                "status": "ready",
+                "strategy": "project_chat_archive",
+                "archivePath": str(archive_path),
+                "pathspecs": [PROJECT_CHAT_CHECKPOINT_MEMBER],
+                "sourceExisted": source_existed,
+                "sourceDigest": hashlib.sha256(source_bytes).hexdigest() if source_existed else "",
+                "fileCount": int(source_existed),
+                "uncompressedBytes": len(source_bytes),
             }
         )
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
@@ -6473,7 +6888,7 @@ class AgentGateway:
         if archive_path.name != f"{checkpoint_id}.zip":
             raise ValueError("Checkpoint archive filename does not match checkpoint id.")
 
-        if expected_strategy == "archive":
+        if expected_strategy in {"archive", "project_chat_archive"}:
             project_root_text = str(checkpoint.get("projectRoot") or "").strip()
             if not project_root_text:
                 raise ValueError("Checkpoint project root is missing.")
@@ -6500,6 +6915,106 @@ class AgentGateway:
         ):
             raise ValueError(f"Unsafe archive member: {name}")
         return member.as_posix()
+
+    def _project_chat_checkpoint_source(self, checkpoint: dict[str, Any]) -> Path:
+        project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve()
+        hidden_root = project_root / ".vrcforge"
+        raw_source = hidden_root / "chat-transcripts.json"
+        if (os.path.lexists(hidden_root) and _path_is_link_like(hidden_root)) or (
+            os.path.lexists(raw_source) and _path_is_link_like(raw_source)
+        ):
+            raise ValueError("Project chat checkpoint target is linked or a reparse point.")
+        source = raw_source.resolve()
+        if not is_path_within(source, project_root) or source.parent != hidden_root.resolve():
+            raise ValueError("Project chat checkpoint target is unsafe.")
+        return source
+
+    def _read_project_chat_checkpoint_bytes(self, checkpoint: dict[str, Any]) -> bytes | None:
+        archive_path = self._resolve_checkpoint_archive_path(checkpoint, "project_chat_archive")
+        expected_exists = checkpoint.get("sourceExisted") is True
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            if archive.testzip() is not None:
+                raise ValueError("archive CRC validation failed")
+            members = [info for info in archive.infolist() if not info.is_dir()]
+            expected_names = [PROJECT_CHAT_CHECKPOINT_MEMBER] if expected_exists else []
+            if [info.filename for info in members] != expected_names:
+                raise ValueError("Project chat checkpoint members do not match metadata.")
+            if not expected_exists:
+                return None
+            data = archive.read(PROJECT_CHAT_CHECKPOINT_MEMBER)
+        digest = str(checkpoint.get("sourceDigest") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("Project chat checkpoint digest verification failed.")
+        return data
+
+    def _preview_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        with self._project_chat_checkpoint_lock:
+            return self._preview_project_chat_checkpoint_locked(checkpoint)
+
+    def _preview_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        try:
+            source = self._project_chat_checkpoint_source(checkpoint)
+            archived = self._read_project_chat_checkpoint_bytes(checkpoint)
+            current = source.read_bytes() if source.is_file() else None
+            changed = [] if current == archived else [
+                f"{'A' if archived is None else 'D' if current is None else 'M'}\t{PROJECT_CHAT_CHECKPOINT_MEMBER}"
+            ]
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "changedFiles": changed,
+                "workingTreeStatus": changed,
+                "rollbackCoverageAudit": self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview"),
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
+
+    def _restore_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        with self._project_chat_checkpoint_lock:
+            return self._restore_project_chat_checkpoint_locked(checkpoint)
+
+    def _restore_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        try:
+            source = self._project_chat_checkpoint_source(checkpoint)
+            archived = self._read_project_chat_checkpoint_bytes(checkpoint)
+            restored: list[str] = []
+            deleted: list[str] = []
+            if archived is None:
+                if source.exists():
+                    source.unlink()
+                    fsync_directory_best_effort(source.parent)
+                    deleted.append(PROJECT_CHAT_CHECKPOINT_MEMBER)
+            else:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                temporary = source.with_name(f".{source.name}.{secrets.token_hex(8)}.restore.tmp")
+                try:
+                    with temporary.open("xb") as handle:
+                        handle.write(archived)
+                        flush_and_fsync(handle)
+                    os.replace(temporary, source)
+                    fsync_directory_best_effort(source.parent)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                restored.append(PROJECT_CHAT_CHECKPOINT_MEMBER)
+                digest = hashlib.sha256(archived).hexdigest()
+                quarantine = source.with_name(f"{source.name}.vrcforge-quarantine-{digest[:16]}")
+                if quarantine.exists() and not _path_is_link_like(quarantine) and quarantine.is_file():
+                    if hashlib.sha256(quarantine.read_bytes()).hexdigest() == digest:
+                        quarantine.unlink()
+                        fsync_directory_best_effort(quarantine.parent)
+            return {
+                "ok": True,
+                "checkpoint": checkpoint,
+                "restoredFileCount": len(restored),
+                "restoredFiles": restored,
+                "deletedFileCount": len(deleted),
+                "deletedFiles": deleted,
+                "cleaned": deleted,
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "checkpoint": checkpoint, "error": f"Project chat restore failed: {exc}"}
 
     def _preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
@@ -6714,6 +7229,8 @@ class AgentGateway:
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
         if checkpoint.get("strategy") == "local_state_archive":
             return self._build_local_state_rollback_coverage_audit(checkpoint, phase, restore_payload)
+        if checkpoint.get("strategy") == "project_chat_archive":
+            return self._build_project_chat_rollback_coverage_audit(checkpoint, phase, restore_payload)
         touches_assets = self._checkpoint_touches_top_level(checkpoint, "Assets")
         touches_packages = self._checkpoint_touches_top_level(checkpoint, "Packages")
         touches_project_settings = self._checkpoint_touches_top_level(checkpoint, "ProjectSettings")
@@ -6941,6 +7458,60 @@ class AgentGateway:
             ],
         }
 
+    def _build_project_chat_rollback_coverage_audit(
+        self,
+        checkpoint: dict[str, Any],
+        phase: str,
+        restore_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        covered = pathspecs == [PROJECT_CHAT_CHECKPOINT_MEMBER]
+        checks = [
+            {
+                "id": "project_chat_transcript_store",
+                "title": "Project chat transcript store",
+                "status": "covered" if covered else "missing",
+                "pathspec": PROJECT_CHAT_CHECKPOINT_MEMBER,
+                "covers": ["the exact project-owned chat transcript bytes and missing-file state"],
+            }
+        ]
+        todos: list[dict[str, Any]] = []
+        if phase == "restore":
+            checks.append(
+                {
+                    "id": "project_chat_restore_applied",
+                    "title": "Project chat restore applied",
+                    "status": "passed" if restore_payload.get("ok") else "missing",
+                    "restoredFileCount": len(ensure_string_list(restore_payload.get("restoredFiles"))),
+                    "deletedFileCount": len(ensure_string_list(restore_payload.get("deletedFiles"))),
+                }
+            )
+        else:
+            todos.append(
+                {
+                    "id": "preview_or_restore_project_chat_checkpoint",
+                    "status": "todo",
+                    "required": True,
+                    "reason": "Preview or restore the exact project chat file checkpoint to verify rollback.",
+                    "tools": ["vrcforge_preview_restore_checkpoint", "vrcforge_restore_checkpoint"],
+                }
+            )
+        blocking_gaps = [] if covered else ["project_chat_transcript_store"]
+        return {
+            "ok": covered,
+            "schema": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+            "phase": phase,
+            "gateStatus": "blocked" if blocking_gaps else ("todo" if todos else "ready"),
+            "pathspecs": pathspecs,
+            "checks": checks,
+            "blockingGaps": blocking_gaps,
+            "todos": todos,
+            "caveats": [
+                "This checkpoint covers only the project chat transcript store; it does not collect other hidden project data.",
+                "Content-addressed recovery artifacts remain local evidence unless an exact rollback cleanup removes the matching quarantine copy.",
+            ],
+        }
+
     def _checkpoint_framework_package_snapshot(self, project_root: Path | None) -> dict[str, Any]:
         packages: dict[str, Any] = {
             key: {
@@ -7126,6 +7697,16 @@ class AgentGateway:
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint is unreadable: {exc}"}
             return {"ok": True}
+        if checkpoint.get("strategy") == "project_chat_archive":
+            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+            if pathspecs != [PROJECT_CHAT_CHECKPOINT_MEMBER]:
+                return {"ok": False, "checkpoint": checkpoint, "error": "Project chat checkpoint metadata is incomplete."}
+            try:
+                self._project_chat_checkpoint_source(checkpoint)
+                self._read_project_chat_checkpoint_bytes(checkpoint)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "checkpoint": checkpoint, "error": f"Project chat checkpoint is unreadable: {exc}"}
+            return {"ok": True}
         if checkpoint.get("strategy") == "archive":
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
             try:
@@ -7156,10 +7737,12 @@ class AgentGateway:
         return {"ok": True}
 
     def _append_checkpoint(self, record: dict[str, Any]) -> None:
-        self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            flush_and_fsync(handle)
+        with self._checkpoint_storage_lock:
+            self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_jsonl_append_boundary_locked(self.checkpoint_log_path)
+            with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                flush_and_fsync(handle)
         self._maybe_record_adjustment_checkpoint(record)
 
     def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
@@ -7223,12 +7806,17 @@ class AgentGateway:
         if not self.checkpoint_log_path.exists():
             return []
         entries: list[dict[str, Any]] = []
-        for line in self.checkpoint_log_path.read_text(encoding="utf-8").splitlines():
+        try:
+            lines = _split_lf_jsonl_lines(self.checkpoint_log_path.read_bytes())
+        except OSError:
+            return []
+        for index, raw_line in enumerate(lines):
             try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
+                line = raw_line.decode("utf-8-sig" if index == 0 else "utf-8")
+                payload = _load_strict_json(line)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 continue
-            if isinstance(payload, dict):
+            if _checkpoint_record_state(payload) == "valid":
                 entries.append(payload)
         return list(reversed(entries[-max(1, min(limit, 1000)) :]))
 
@@ -8217,7 +8805,7 @@ class AgentGateway:
                 "kind": "checkpoint_restore",
                 "approvalRequired": True,
                 "preWriteCheckpointRequired": False,
-                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE, *LOCAL_STATE_CHECKPOINT_SCOPE],
+                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE, *LOCAL_STATE_CHECKPOINT_SCOPE, PROJECT_CHAT_CHECKPOINT_MEMBER],
                 "restoreTool": "vrcforge_restore_checkpoint",
                 "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
                 "postRestoreValidationRequired": True,
@@ -8250,6 +8838,19 @@ class AgentGateway:
                 "stateRoots": ["VRCForge skill package store", "projected user skills"],
                 "postRestoreValidationRequired": True,
                 "note": "Community skill package writes are checkpointed as VRCForge local app state before mutation.",
+            }
+        if handler.name == PROJECT_CHAT_CHECKPOINT_TARGET:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "project_chat_archive",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": True,
+                "checkpointScope": [PROJECT_CHAT_CHECKPOINT_MEMBER],
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "postRestoreValidationRequired": True,
+                "note": "Project chat repair snapshots only the exact transcript file and never adds hidden chat data to Git.",
             }
         return {
             "schema": ROLLBACK_POLICY_SCHEMA,
@@ -8291,9 +8892,12 @@ class AgentGateway:
                 **entry,
             }
         )
-        self.runtime_run_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.runtime_run_log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._lock:
+            self.runtime_run_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_jsonl_append_boundary_locked(self.runtime_run_log_path)
+            with self.runtime_run_log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+                flush_and_fsync(log_file)
 
     def _append_jsonl(self, path: Path, schema: str, entry: dict[str, Any]) -> dict[str, Any]:
         safe_entry = redact_sensitive(
@@ -8307,18 +8911,36 @@ class AgentGateway:
         )
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_jsonl_append_boundary_locked(path)
             with path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
-                log_file.flush()
-                os.fsync(log_file.fileno())
+                flush_and_fsync(log_file)
         return safe_entry
+
+    @staticmethod
+    def _ensure_jsonl_append_boundary_locked(path: Path) -> None:
+        """Keep a crash-truncated tail from consuming the next valid event."""
+
+        try:
+            if not path.exists() or path.stat().st_size == 0:
+                return
+            with path.open("r+b") as handle:
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) not in {b"\n", b"\r"}:
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(b"\n")
+                    flush_and_fsync(handle)
+        except OSError:
+            # The following append remains authoritative and will surface its
+            # own I/O failure.  This helper must not hide it.
+            return
 
     def _read_jsonl(self, path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
         with self._lock:
             if not path.exists():
                 return []
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                lines = path.read_bytes().splitlines()
             except OSError:
                 return []
         if limit <= 0:
@@ -8326,10 +8948,11 @@ class AgentGateway:
         else:
             selected_lines = lines[-max(1, min(limit, 5000)) :]
         events: list[dict[str, Any]] = []
-        for line in selected_lines:
+        for raw_line in selected_lines:
             try:
+                line = raw_line.decode("utf-8")
                 payload = json.loads(line)
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(payload, dict):
                 events.append(payload)
@@ -11325,6 +11948,12 @@ def kill_process_tree(process: subprocess.Popen) -> None:
             creationflags=creationflags,
             check=False,
         )
+        # Some managed Windows hosts reject taskkill even for a child process
+        # (for example with "ERROR: Call cancelled").  Do not then wait until
+        # the command timeout: TerminateProcess the supervised parent as a
+        # best-effort fallback.  The normal taskkill tree path remains first.
+        if process.poll() is None:
+            process.kill()
         return
     process.kill()
 

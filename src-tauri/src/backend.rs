@@ -363,6 +363,7 @@ pub(crate) fn start_backend_in_background(
         .env("VRCFORGE_LOG_DIR", user_data.join("logs"))
         .env("VRCFORGE_ARTIFACTS_DIR", user_data.join("artifacts"))
         .env("VRCFORGE_DASHBOARD_DIR", root.join("dashboard"))
+        .env("VRCFORGE_DESKTOP_VERSION", env!("CARGO_PKG_VERSION"))
         .env(
             "VRCFORGE_SETTINGS_PATH",
             user_data.join("config").join("settings.json"),

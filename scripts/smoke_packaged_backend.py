@@ -19,7 +19,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "vrcforge.packaged_backend_smoke.v1"
+SCHEMA = "vrcforge.packaged_backend_smoke.v2"
 ORIGIN = "tauri://localhost"
 REQUIRED_SUPPORT_MEMBERS = {
     "metadata.json",
@@ -119,6 +119,149 @@ def request_json(
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected a JSON object from {path}")
     return payload
+
+
+def inspect_doctor_report(report: Any) -> dict[str, Any]:
+    """Validate the Doctor wire contract and derive its semantic exit code."""
+    empty_summary = {
+        "okCount": 0,
+        "warningCount": 0,
+        "errorCount": 0,
+        "unknownCount": 0,
+    }
+    result: dict[str, Any] = {
+        "valid": False,
+        "errorFree": False,
+        "expectedExitCode": 2,
+        "summary": empty_summary,
+        "statuses": [],
+    }
+    if not isinstance(report, dict) or report.get("schema") != "vrcforge.doctor.v1":
+        return result
+    summary = report.get("summary")
+    checks = report.get("checks")
+    if not isinstance(summary, dict) or not isinstance(checks, list):
+        return result
+
+    normalized: dict[str, int] = {}
+    for key in empty_summary:
+        value = summary.get(key)
+        if type(value) is not int or value < 0:
+            return result
+        normalized[key] = value
+
+    status_keys = {
+        "ok": "okCount",
+        "warning": "warningCount",
+        "error": "errorCount",
+        "unknown": "unknownCount",
+    }
+    computed = {key: 0 for key in empty_summary}
+    seen_ids: set[str] = set()
+    statuses: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            return result
+        check_id = check.get("id")
+        status = check.get("status")
+        fixable = check.get("fixable")
+        if (
+            not isinstance(check_id, str)
+            or not check_id.strip()
+            or check_id in seen_ids
+            or status not in status_keys
+            or type(fixable) is not bool
+        ):
+            return result
+        seen_ids.add(check_id)
+        statuses.append(status)
+        computed[status_keys[status]] += 1
+    if normalized != computed:
+        return result
+
+    expected_exit = (
+        2
+        if normalized["errorCount"] > 0
+        else 1
+        if normalized["warningCount"] > 0 or normalized["unknownCount"] > 0
+        else 0
+    )
+    valid = type(report.get("ok")) is bool and report.get("ok") is (expected_exit != 2)
+    return {
+        "valid": valid,
+        "errorFree": valid and expected_exit in {0, 1},
+        "expectedExitCode": expected_exit,
+        "summary": normalized,
+        "statuses": statuses,
+    }
+
+
+def evaluate_packaged_doctor(report: Any) -> tuple[bool, dict[str, Any]]:
+    contract = inspect_doctor_report(report)
+    checks = report.get("checks") if isinstance(report, dict) and isinstance(report.get("checks"), list) else []
+    checks_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    install_integrity = checks_by_id.get("desktop.install_integrity", {})
+    install_detail = (
+        install_integrity.get("detail")
+        if isinstance(install_integrity, dict) and isinstance(install_integrity.get("detail"), dict)
+        else {}
+    )
+    degraded = "doctor.degraded" in checks_by_id
+    ok = bool(
+        contract["valid"]
+        and contract["errorFree"]
+        and not degraded
+        and isinstance(install_integrity, dict)
+        and install_integrity.get("status") == "ok"
+        and install_detail.get("schemaValid") is True
+        and install_detail.get("manifestVersionMatched") is True
+        and install_detail.get("versionFileMatched") is True
+    )
+    return ok, {
+        "schema": report.get("schema") if isinstance(report, dict) else None,
+        "reportValid": contract["valid"],
+        "errorFree": contract["errorFree"],
+        "summary": contract["summary"],
+        "degraded": degraded,
+        "installIntegrityStatus": install_integrity.get("status") if isinstance(install_integrity, dict) else None,
+        "schemaValid": install_detail.get("schemaValid"),
+        "manifestVersionMatched": install_detail.get("manifestVersionMatched"),
+        "versionFileMatched": install_detail.get("versionFileMatched"),
+        "fileChecks": install_detail.get("fileChecks"),
+    }
+
+
+def evaluate_packaged_cli_doctor(payload: Any, semantic_exit_code: int) -> tuple[bool, dict[str, Any]]:
+    report = payload.get("report") if isinstance(payload, dict) and isinstance(payload.get("report"), dict) else {}
+    contract = inspect_doctor_report(report)
+    payload_exit = payload.get("exitCode") if isinstance(payload, dict) else None
+    payload_summary = payload.get("summary") if isinstance(payload, dict) else None
+    expected_exit = contract["expectedExitCode"]
+    ok = bool(
+        contract["valid"]
+        and contract["errorFree"]
+        and expected_exit in {0, 1}
+        and semantic_exit_code == expected_exit
+        and payload_exit == expected_exit
+        and payload_summary == contract["summary"]
+        and payload.get("schema") == "vrcforge.cli-doctor.v1"
+        and payload.get("error") is None
+    )
+    return ok, {
+        "schema": payload.get("schema") if isinstance(payload, dict) else None,
+        "reportSchema": report.get("schema"),
+        "reportValid": contract["valid"],
+        "errorFree": contract["errorFree"],
+        "semanticExitCode": semantic_exit_code,
+        "payloadExitCode": payload_exit,
+        "expectedExitCode": expected_exit,
+        "summary": payload_summary,
+        "error": payload.get("error") if isinstance(payload, dict) else None,
+    }
 
 
 def wait_for_bootstrap(
@@ -306,11 +449,15 @@ def main() -> int:
     bootstrap_ok = False
     proof_index_ok = False
     support_bundle_ok = False
+    doctor_ok = False
+    cli_doctor_ok = False
     portable_mode = False
     support_bundle_path = ""
     bootstrap_evidence: dict[str, Any] = {}
     proof_evidence: dict[str, Any] = {}
     bundle_evidence: dict[str, Any] = {}
+    doctor_evidence: dict[str, Any] = {}
+    cli_doctor_evidence: dict[str, Any] = {}
     cleanup: dict[str, Any] = {"ok": False, "portReleased": False}
 
     try:
@@ -384,6 +531,39 @@ def main() -> int:
             "count": proof_index.get("count"),
         }
 
+        doctor = request_json(base_url, token, "GET", "/api/app/doctor")
+        doctor_ok, doctor_evidence = evaluate_packaged_doctor(doctor)
+
+        cli_doctor = subprocess.run(
+            [
+                str(backend_exe),
+                "--cli",
+                "--endpoint",
+                base_url,
+                "--token",
+                token,
+                "--json",
+                "doctor",
+            ],
+            cwd=str(packaged_root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30.0,
+            creationflags=creationflags,
+        )
+        try:
+            cli_doctor_payload = json.loads(cli_doctor.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("packaged CLI Doctor did not emit valid JSON") from exc
+        cli_doctor_ok, cli_doctor_evidence = evaluate_packaged_cli_doctor(
+            cli_doctor_payload,
+            cli_doctor.returncode,
+        )
+
         bundle_response = request_json(
             base_url,
             token,
@@ -426,6 +606,10 @@ def main() -> int:
         assertions.append("packaged optimizer proof index contract did not pass")
     if not support_bundle_ok:
         assertions.append("packaged support bundle contract did not pass")
+    if not doctor_ok:
+        assertions.append("packaged Doctor install-integrity contract did not pass")
+    if not cli_doctor_ok:
+        assertions.append("packaged CLI Doctor self-test did not pass")
     if not cleanup.get("ok"):
         assertions.append("packaged backend did not stop cleanly")
     assertions = list(dict.fromkeys(assertions))
@@ -439,6 +623,8 @@ def main() -> int:
         "bootstrapOk": bootstrap_ok,
         "proofIndexOk": proof_index_ok,
         "supportBundleOk": support_bundle_ok,
+        "doctorOk": doctor_ok,
+        "cliDoctorOk": cli_doctor_ok,
         "supportBundlePath": support_bundle_path,
         "payloadZip": str(payload_zip),
         "payloadZipSha256": payload_zip_sha256,
@@ -448,6 +634,8 @@ def main() -> int:
         "bootstrap": bootstrap_evidence,
         "proofIndex": proof_evidence,
         "supportBundle": bundle_evidence,
+        "doctor": doctor_evidence,
+        "cliDoctor": cli_doctor_evidence,
         "cleanup": cleanup,
         "assertions": assertions,
     }

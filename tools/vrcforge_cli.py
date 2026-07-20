@@ -16,6 +16,8 @@ from typing import Any, Callable, TextIO
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8757"
 PLAN_SCHEMA = "vrcforge.cli_plan.v1"
+DOCTOR_CLI_SCHEMA = "vrcforge.cli-doctor.v1"
+DOCTOR_REPORT_SCHEMA = "vrcforge.doctor.v1"
 SKILL_WORKFLOW_SCHEMA = "vrcforge.skill-package.workflow.v1"
 SKILL_LOCK_VALIDATION_SCHEMA = "vrcforge.skill-lock-validation.v1"
 DEFAULT_SKILL_MIN_VRCFORGE_VERSION = "1.3.0"
@@ -179,8 +181,252 @@ def maybe_execute_approval(
     return client.request("POST", f"/api/app/agent/approvals/{urllib.parse.quote(approval_id)}/approve")
 
 
-def command_doctor(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
-    return client.request("GET", "/api/app/doctor")
+def _doctor_summary(report: Any) -> dict[str, int]:
+    if not isinstance(report, dict) or report.get("schema") != DOCTOR_REPORT_SCHEMA:
+        raise CliError("Runtime returned an unsupported Doctor report schema.")
+    summary = report.get("summary")
+    checks = report.get("checks")
+    if not isinstance(summary, dict) or not isinstance(checks, list):
+        raise CliError("Runtime returned an incomplete Doctor report.")
+    normalized: dict[str, int] = {}
+    for key in ("okCount", "warningCount", "errorCount", "unknownCount"):
+        value = summary.get(key, 0 if key == "okCount" else None)
+        if type(value) is not int or value < 0:
+            raise CliError(f"Runtime returned an invalid Doctor summary field: {key}.")
+        normalized[key] = value
+    seen_ids: set[str] = set()
+    computed = {"okCount": 0, "warningCount": 0, "errorCount": 0, "unknownCount": 0}
+    status_keys = {
+        "ok": "okCount",
+        "warning": "warningCount",
+        "error": "errorCount",
+        "unknown": "unknownCount",
+    }
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            raise CliError(f"Runtime returned an invalid Doctor check at index {index}.")
+        check_id = check.get("id")
+        status = check.get("status")
+        fixable = check.get("fixable", False)
+        if not isinstance(check_id, str) or not check_id.strip() or check_id in seen_ids:
+            raise CliError(f"Runtime returned an invalid Doctor check id at index {index}.")
+        if status not in {"ok", "warning", "error", "unknown"}:
+            raise CliError(f"Runtime returned an invalid Doctor status for {check_id}.")
+        if type(fixable) is not bool:
+            raise CliError(f"Runtime returned an invalid Doctor fixable flag for {check_id}.")
+        seen_ids.add(check_id)
+        computed[status_keys[status]] += 1
+    if normalized != computed:
+        raise CliError("Runtime returned Doctor summary counts that do not match its checks.")
+    return normalized
+
+
+def _doctor_exit_code(summary: dict[str, int]) -> int:
+    if summary["errorCount"] > 0:
+        return 2
+    if summary["warningCount"] > 0 or summary["unknownCount"] > 0:
+        return 1
+    return 0
+
+
+def _doctor_envelope(
+    *,
+    fix_requested: bool,
+    mode: str,
+    initial_report: dict[str, Any] | None = None,
+    fixes: list[dict[str, Any]] | None = None,
+    report: dict[str, Any] | None = None,
+    summary: dict[str, int] | None = None,
+    error: dict[str, str] | None = None,
+    exit_code: int,
+) -> dict[str, Any]:
+    return {
+        "ok": exit_code == 0,
+        "schema": DOCTOR_CLI_SCHEMA,
+        "fixRequested": fix_requested,
+        "mode": mode,
+        "initialReport": initial_report,
+        "fixes": fixes or [],
+        "report": report,
+        "summary": summary,
+        "error": error,
+        "exitCode": exit_code,
+    }
+
+
+def _doctor_error_envelope(
+    code: str,
+    message: str,
+    *,
+    fix_requested: bool,
+    mode: str,
+    initial_report: dict[str, Any] | None = None,
+    fixes: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], int]:
+    exit_code = 2
+    return (
+        _doctor_envelope(
+            fix_requested=fix_requested,
+            mode=mode,
+            initial_report=initial_report,
+            fixes=fixes,
+            error={"code": code, "message": message},
+            exit_code=exit_code,
+        ),
+        exit_code,
+    )
+
+
+def command_doctor(
+    client: VRCForgeClient,
+    args: argparse.Namespace,
+    stdin: TextIO,
+    stdout: TextIO,
+) -> tuple[dict[str, Any], int]:
+    fix_requested = bool(args.fix)
+    mode = "force" if args.force else "safe"
+    if args.force and not fix_requested:
+        return _doctor_error_envelope(
+            "invalid_arguments",
+            "Doctor --force requires --fix.",
+            fix_requested=fix_requested,
+            mode=mode,
+        )
+    if fix_requested and args.json and not args.yes:
+        return _doctor_error_envelope(
+            "confirmation_required",
+            "Doctor --json --fix requires --yes so stdout remains valid JSON.",
+            fix_requested=fix_requested,
+            mode=mode,
+        )
+    if fix_requested and not args.yes and not confirm(
+        f"This runs VRCForge Doctor {mode} repair rules. Server-side approval and checkpoint policy still applies.",
+        "FIX",
+        stdin,
+        stdout,
+    ):
+        return _doctor_error_envelope(
+            "cancelled",
+            "Doctor repair was cancelled.",
+            fix_requested=fix_requested,
+            mode=mode,
+        )
+
+    try:
+        initial_report = client.request("GET", "/api/app/doctor")
+    except CliError as exc:
+        return _doctor_error_envelope(
+            "transport_error",
+            str(exc),
+            fix_requested=fix_requested,
+            mode=mode,
+        )
+    try:
+        initial_summary = _doctor_summary(initial_report)
+    except CliError as exc:
+        return _doctor_error_envelope(
+            "schema_error",
+            str(exc),
+            fix_requested=fix_requested,
+            mode=mode,
+            initial_report=initial_report if isinstance(initial_report, dict) else None,
+        )
+
+    if not fix_requested:
+        exit_code = _doctor_exit_code(initial_summary)
+        return (
+            _doctor_envelope(
+                fix_requested=False,
+                mode=mode,
+                initial_report=initial_report,
+                report=initial_report,
+                summary=initial_summary,
+                exit_code=exit_code,
+            ),
+            exit_code,
+        )
+
+    fixes: list[dict[str, Any]] = []
+    for check in initial_report["checks"]:
+        if check["status"] == "ok" or check["fixable"] is not True:
+            continue
+        check_id = check["id"]
+        path = f"/api/app/doctor/fix/{urllib.parse.quote(check_id, safe='')}"
+        try:
+            result = client.request("POST", path, {"mode": mode})
+        except CliError as exc:
+            return _doctor_error_envelope(
+                "fix_transport_error",
+                str(exc),
+                fix_requested=True,
+                mode=mode,
+                initial_report=initial_report,
+                fixes=fixes,
+            )
+        valid_statuses = {
+            "healthy",
+            "repaired",
+            "queued_for_approval",
+            "needs_user_action",
+            "failed",
+            "busy",
+            "unsupported",
+        }
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "vrcforge.doctor_fix.v1"
+            or result.get("checkId") != check_id
+            or result.get("mode") != mode
+            or result.get("status") not in valid_statuses
+            or type(result.get("ok")) is not bool
+            or type(result.get("changed")) is not bool
+            or not isinstance(result.get("phases"), list)
+        ):
+            return _doctor_error_envelope(
+                "fix_schema_error",
+                f"Runtime returned an invalid Doctor fix result for {check_id}.",
+                fix_requested=True,
+                mode=mode,
+                initial_report=initial_report,
+                fixes=fixes,
+            )
+        fixes.append({"checkId": check_id, "result": result})
+
+    try:
+        final_report = client.request("GET", "/api/app/doctor")
+    except CliError as exc:
+        return _doctor_error_envelope(
+            "transport_error",
+            str(exc),
+            fix_requested=True,
+            mode=mode,
+            initial_report=initial_report,
+            fixes=fixes,
+        )
+    try:
+        final_summary = _doctor_summary(final_report)
+    except CliError as exc:
+        return _doctor_error_envelope(
+            "schema_error",
+            str(exc),
+            fix_requested=True,
+            mode=mode,
+            initial_report=initial_report,
+            fixes=fixes,
+        )
+    exit_code = _doctor_exit_code(final_summary)
+    return (
+        _doctor_envelope(
+            fix_requested=True,
+            mode=mode,
+            initial_report=initial_report,
+            fixes=fixes,
+            report=final_report,
+            summary=final_summary,
+            exit_code=exit_code,
+        ),
+        exit_code,
+    )
 
 
 def command_provider_test(client: VRCForgeClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -753,6 +999,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor = sub.add_parser("doctor")
+    doctor.add_argument("--fix", action="store_true", help="Run fixable non-healthy Doctor checks, then re-check.")
+    doctor.add_argument("--force", action="store_true", help="Request force mode; requires --fix.")
+    doctor.add_argument("--yes", action="store_true", help="Confirm the Doctor executor without a terminal prompt.")
+    doctor.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Print full JSON output (also accepted before the doctor command).",
+    )
     doctor.set_defaults(handler=command_doctor)
 
     provider = sub.add_parser("provider")
@@ -894,15 +1149,19 @@ def run(argv: list[str] | None = None, client: VRCForgeClient | None = None, std
     args = build_parser().parse_args(argv)
     client = client or VRCForgeClient(args.endpoint, args.token or default_token(), args.timeout)
     handler = getattr(args, "handler")
-    if handler in {command_apply_request, command_rollback_request}:
+    if handler is command_doctor:
+        payload, exit_code = handler(client, args, stdin, stdout)
+    elif handler in {command_apply_request, command_rollback_request}:
         payload = handler(client, args, stdin, stdout)
+        exit_code = 0
     else:
         payload = handler(client, args)
+        exit_code = 0
     if args.json:
         write_json(payload, stdout)
     else:
         write_summary(payload, stdout)
-    return 0
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

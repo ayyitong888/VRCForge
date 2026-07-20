@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
@@ -68,6 +68,24 @@ export async function fetchDoctor(endpoint: string): Promise<DoctorReport> {
     });
   }
   return requestJson<DoctorReport>(`${endpoint}/api/app/doctor`);
+}
+
+export async function fixDoctorCheck(
+  endpoint: string,
+  checkId: string,
+  request: { mode?: DoctorFixMode; projectPath?: string } = {},
+): Promise<DoctorFixResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DoctorFixResult>("fix_doctor_check", {
+      request: { checkId, ...request, timeoutMs: 120000 },
+    });
+  }
+  return requestJson<DoctorFixResult>(`${endpoint}/api/app/doctor/fix/${encodeURIComponent(checkId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    timeoutMs: 120000,
+  });
 }
 
 export async function repairUnityMcpBridge(

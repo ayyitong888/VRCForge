@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -10,7 +11,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -22,6 +23,7 @@ from agent_gateway import (
     RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
     SHELL_RUNNER_NATIVE,
     SHELL_RUNNER_POWERSHELL,
+    kill_process_tree,
     native_shell_argv,
     resolve_powershell_executable,
 )
@@ -225,12 +227,363 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual({chat["id"] for chat in read_response.json()["chats"]}, {"temp-chat", "project-chat"})
 
-                response = client.post("/api/app/chats", json={"chats": [chats[0]]})
+                response = client.post(
+                    "/api/app/chats",
+                    json={"chats": [chats[0]], "sourceRevisions": read_response.json()["sources"]},
+                )
                 self.assertEqual(response.status_code, 200)
                 self.assertFalse(project_path.exists())
                 read_response = client.get("/api/app/chats", params=[("projectPath", str(project))])
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
+
+    def test_chat_restore_isolates_corrupt_project_source_and_blocks_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            chats = [
+                {"id": "app-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "healthy"}]},
+                {"id": "project-chat", "projectPath": str(project), "items": [{"id": "u2", "type": "user", "text": "project"}]},
+            ]
+            with TestClient(dashboard_server.app) as client:
+                created = client.post("/api/app/chats", json={"chats": chats})
+                self.assertEqual(created.status_code, 200)
+                project_path = project / ".vrcforge" / "chat-transcripts.json"
+                damaged = b'{"version":1,"chats":['
+                project_path.write_bytes(damaged)
+                before_mtime = project_path.stat().st_mtime_ns
+
+                restored = client.get("/api/app/chats", params=[("projectPath", str(project))])
+
+                self.assertEqual(restored.status_code, 200)
+                payload = restored.json()
+                self.assertEqual([chat["id"] for chat in payload["chats"]], ["app-chat"])
+                self.assertTrue(payload["writeBlocked"])
+                self.assertEqual(payload["recoveries"][0]["scope"], "project")
+                self.assertEqual(payload["recoveries"][0]["reason"], "invalid_json")
+                self.assertNotIn(str(project), json.dumps(payload["recoveries"]))
+                self.assertEqual(project_path.read_bytes(), damaged)
+                self.assertEqual(project_path.stat().st_mtime_ns, before_mtime)
+
+                blocked = client.post(
+                    "/api/app/chats",
+                    json={"chats": [chats[0]], "sourceRevisions": payload["sources"]},
+                )
+                self.assertEqual(blocked.status_code, 409)
+                self.assertEqual(blocked.json()["detail"]["code"], "chat_store_recovery_required")
+                self.assertEqual(project_path.read_bytes(), damaged)
+
+    def test_chat_save_rejects_stale_source_revision(self) -> None:
+        chat = {"id": "app-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "one"}]}
+        with TestClient(dashboard_server.app) as client:
+            created = client.post("/api/app/chats", json={"chats": [chat]})
+            self.assertEqual(created.status_code, 200)
+            restored = client.get("/api/app/chats").json()
+            app_path = Path(restored["path"])
+            replacement = json.dumps(
+                {"version": 1, "chats": [{**chat, "items": [{"id": "u2", "type": "user", "text": "newer"}]}]},
+                ensure_ascii=False,
+            )
+            app_path.write_text(replacement, encoding="utf-8")
+
+            response = client.post(
+                "/api/app/chats",
+                json={"chats": [chat], "sourceRevisions": restored["sources"]},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"]["code"], "chat_store_snapshot_changed")
+            self.assertEqual(app_path.read_text(encoding="utf-8"), replacement)
+
+    def test_chat_save_rejects_missing_revision_for_existing_source(self) -> None:
+        chat = {"id": "app-chat", "projectPath": "", "items": [{"id": "u1", "type": "user", "text": "one"}]}
+        with TestClient(dashboard_server.app) as client:
+            created = client.post("/api/app/chats", json={"chats": [chat]})
+            self.assertEqual(created.status_code, 200)
+            app_path = Path(created.json()["path"])
+            original = app_path.read_bytes()
+
+            response = client.post("/api/app/chats", json={"chats": [{**chat, "title": "unversioned"}]})
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"]["code"], "chat_store_snapshot_changed")
+            self.assertEqual(app_path.read_bytes(), original)
+
+    def test_chat_get_includes_every_healthy_project_from_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            chat = {
+                "id": "indexed-project-chat",
+                "projectPath": str(project),
+                "items": [{"id": "u1", "type": "user", "text": "keep"}],
+            }
+            with TestClient(dashboard_server.app) as client:
+                created = client.post("/api/app/chats", json={"chats": [chat]})
+                self.assertEqual(created.status_code, 200)
+
+                restored = client.get("/api/app/chats")
+
+            self.assertEqual(restored.status_code, 200)
+            self.assertEqual([item["id"] for item in restored.json()["chats"]], ["indexed-project-chat"])
+            project_sources = [source for source in restored.json()["sources"] if source.get("scope") == "project"]
+            self.assertEqual(len(project_sources), 1)
+            self.assertTrue(project_sources[0]["exists"])
+
+    def test_chat_save_deletes_last_chat_from_healthy_unindexed_project_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            store = project / ".vrcforge" / "chat-transcripts.json"
+            store.parent.mkdir(parents=True)
+            chat = {
+                "id": "unindexed-project-chat",
+                "projectPath": str(project),
+                "items": [{"id": "u1", "type": "user", "text": "delete me"}],
+            }
+            store.write_text(
+                json.dumps({"version": 1, "scope": "project", "chats": [chat]}),
+                encoding="utf-8",
+            )
+
+            with TestClient(dashboard_server.app) as client:
+                loaded = client.get("/api/app/chats", params=[("projectPath", str(project))])
+                self.assertEqual([item["id"] for item in loaded.json()["chats"]], [chat["id"]])
+                saved = client.post(
+                    "/api/app/chats",
+                    json={"chats": [], "sourceRevisions": loaded.json()["sources"]},
+                )
+                reloaded = client.get("/api/app/chats", params=[("projectPath", str(project))])
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertFalse(store.exists())
+            self.assertEqual(reloaded.status_code, 200)
+            self.assertEqual(reloaded.json()["chats"], [])
+
+    def test_chat_save_moves_last_chat_out_of_healthy_unindexed_project_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            store = project / ".vrcforge" / "chat-transcripts.json"
+            store.parent.mkdir(parents=True)
+            chat = {
+                "id": "move-project-chat",
+                "projectPath": str(project),
+                "items": [{"id": "u1", "type": "user", "text": "move me"}],
+            }
+            store.write_text(
+                json.dumps({"version": 1, "scope": "project", "chats": [chat]}),
+                encoding="utf-8",
+            )
+
+            with TestClient(dashboard_server.app) as client:
+                loaded = client.get("/api/app/chats", params=[("projectPath", str(project))])
+                moved = {**loaded.json()["chats"][0], "projectPath": ""}
+                saved = client.post(
+                    "/api/app/chats",
+                    json={"chats": [moved], "sourceRevisions": loaded.json()["sources"]},
+                )
+                reloaded = client.get("/api/app/chats", params=[("projectPath", str(project))])
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertFalse(store.exists())
+            self.assertEqual([item["id"] for item in reloaded.json()["chats"]], [chat["id"]])
+            self.assertEqual(reloaded.json()["chats"][0]["projectPath"], "")
+
+    def test_chat_save_rolls_back_all_sources_when_index_commit_fails_after_project_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            chat = {
+                "id": "transaction-chat",
+                "projectPath": str(project),
+                "items": [{"id": "u1", "type": "user", "text": "move atomically"}],
+            }
+            with TestClient(dashboard_server.app) as client:
+                created = client.post("/api/app/chats", json={"chats": [chat]})
+                self.assertEqual(created.status_code, 200)
+                loaded = client.get("/api/app/chats", params=[("projectPath", str(project))]).json()
+                app_path = Path(loaded["path"])
+                project_path = project / ".vrcforge" / "chat-transcripts.json"
+                index_path = app_path.parent / "chat-projects.json"
+                before = {path: path.read_bytes() for path in (app_path, project_path, index_path)}
+                moved = {**loaded["chats"][0], "projectPath": ""}
+                real_atomic_write = dashboard_server.atomic_write_text
+
+                def fail_index_write(path: Path, content: str) -> None:
+                    if path == index_path:
+                        raise OSError("injected index failure")
+                    real_atomic_write(path, content)
+
+                with patch("dashboard_server.atomic_write_text", side_effect=fail_index_write):
+                    failed = client.post(
+                        "/api/app/chats",
+                        json={"chats": [moved], "sourceRevisions": loaded["sources"]},
+                    )
+
+            self.assertEqual(failed.status_code, 500)
+            self.assertIn("restored", failed.json()["detail"])
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertFalse(any(path.name.endswith(".tmp") for path in app_path.parent.iterdir()))
+            self.assertFalse(any(path.name.endswith(".tmp") for path in project_path.parent.iterdir()))
+
+    def test_chat_project_root_rejects_parent_symlink_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            actual_parent = root / "actual"
+            project = actual_parent / "AvatarProject"
+            project.mkdir(parents=True)
+            linked_parent = root / "linked"
+            try:
+                linked_parent.symlink_to(actual_parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink creation is unavailable: {exc}")
+
+            self.assertIsNone(dashboard_server.resolve_chat_project_root(str(linked_parent / project.name)))
+            self.assertIsNone(dashboard_server.project_chat_transcripts_path(str(linked_parent / project.name)))
+            self.assertIsNotNone(dashboard_server.resolve_chat_project_root(str(project)))
+
+    def test_project_chat_source_overrides_embedded_project_path_and_never_touches_other_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_a = Path(temp_dir) / "ProjectA"
+            project_b = Path(temp_dir) / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            store_a = project_a / ".vrcforge" / "chat-transcripts.json"
+            store_b = project_b / ".vrcforge" / "chat-transcripts.json"
+            store_a.parent.mkdir()
+            store_b.parent.mkdir()
+            embedded = {
+                "id": "bound-to-source",
+                "projectPath": str(project_b),
+                "items": [{"id": "u1", "type": "user", "text": "owned by A"}],
+            }
+            store_a.write_text(json.dumps({"version": 1, "scope": "project", "chats": [embedded]}), encoding="utf-8")
+            store_b.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "scope": "project",
+                        "chats": [
+                            {
+                                "id": "project-b-sentinel",
+                                "projectPath": str(project_b),
+                                "items": [{"id": "b1", "type": "user", "text": "do not touch"}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before_b = store_b.read_bytes()
+
+            with TestClient(dashboard_server.app) as client:
+                loaded = client.get("/api/app/chats", params=[("projectPath", str(project_a))])
+                self.assertEqual(loaded.status_code, 200)
+                self.assertEqual(loaded.json()["chats"][0]["projectPath"], str(project_a.resolve()))
+                saved = client.post(
+                    "/api/app/chats",
+                    json={"chats": loaded.json()["chats"], "sourceRevisions": loaded.json()["sources"]},
+                )
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(json.loads(store_a.read_text(encoding="utf-8"))["chats"][0]["projectPath"], str(project_a.resolve()))
+            self.assertEqual(store_b.read_bytes(), before_b)
+
+    def test_divergent_cross_source_chat_id_blocks_get_and_direct_post_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            project.mkdir()
+            app_path = dashboard_server.chat_transcripts_path()
+            index_path = dashboard_server.chat_project_index_path()
+            project_path = project / ".vrcforge" / "chat-transcripts.json"
+            app_path.parent.mkdir(parents=True, exist_ok=True)
+            project_path.parent.mkdir()
+            app_chat = {"id": "duplicate-id", "items": [{"id": "a1", "type": "user", "text": "app"}]}
+            project_chat = {
+                "id": "duplicate-id",
+                "projectPath": str(project),
+                "items": [{"id": "p1", "type": "user", "text": "project"}],
+            }
+            app_path.write_text(json.dumps({"version": 1, "chats": [app_chat]}), encoding="utf-8")
+            project_path.write_text(
+                json.dumps({"version": 1, "scope": "project", "chats": [project_chat]}),
+                encoding="utf-8",
+            )
+            index_path.write_text(json.dumps({"version": 1, "projectPaths": [str(project)]}), encoding="utf-8")
+            before = {path: path.read_bytes() for path in (app_path, project_path, index_path)}
+
+            with TestClient(dashboard_server.app) as client:
+                loaded = client.get("/api/app/chats")
+                self.assertEqual(loaded.status_code, 200)
+                self.assertTrue(loaded.json()["writeBlocked"])
+                self.assertTrue(
+                    any(item.get("reason") == "duplicate_chat_id_conflict" for item in loaded.json()["recoveries"])
+                )
+                blocked = client.post(
+                    "/api/app/chats",
+                    json={"chats": loaded.json()["chats"], "sourceRevisions": loaded.json()["sources"]},
+                )
+
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(blocked.json()["detail"]["code"], "chat_store_duplicate_id_conflict")
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_unavailable_indexed_project_blocks_writes_but_ad_hoc_query_does_not(self) -> None:
+        missing_project = str(Path(self.tuning_store_dir.name) / "missing-project")
+        index_path = dashboard_server.chat_project_index_path()
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps({"version": 1, "projectPaths": [missing_project]}), encoding="utf-8")
+
+        with TestClient(dashboard_server.app) as client:
+            indexed = client.get("/api/app/chats")
+            self.assertTrue(indexed.json()["writeBlocked"])
+            self.assertTrue(any(item.get("reason") == "project_unavailable" for item in indexed.json()["recoveries"]))
+
+            index_path.write_text(json.dumps({"version": 1, "projectPaths": []}), encoding="utf-8")
+            ad_hoc = client.get("/api/app/chats", params=[("projectPath", missing_project)])
+
+        self.assertEqual(ad_hoc.status_code, 200)
+        self.assertFalse(ad_hoc.json()["writeBlocked"])
+        unavailable = [item for item in ad_hoc.json()["sources"] if item.get("reason") == "project_unavailable"]
+        self.assertEqual(len(unavailable), 1)
+        self.assertFalse(unavailable[0]["indexed"])
+        self.assertEqual(ad_hoc.json()["recoveries"], [])
+
+    def test_chat_get_quarantines_exponent_overflow_instead_of_returning_500(self) -> None:
+        app_path = dashboard_server.chat_transcripts_path()
+        app_path.parent.mkdir(parents=True, exist_ok=True)
+        app_path.write_text(
+            '{"version":1,"chats":[{"id":"overflow","items":[],"future":1e999}]}',
+            encoding="utf-8",
+        )
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.get("/api/app/chats")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["chats"], [])
+        self.assertFalse(app_path.exists())
+        self.assertTrue(any(item["reason"] == "invalid_json" for item in response.json()["recoveries"]))
+
+    def test_chat_get_blocks_oversized_record_count_without_loading_unsavable_state(self) -> None:
+        app_path = dashboard_server.chat_transcripts_path()
+        app_path.parent.mkdir(parents=True, exist_ok=True)
+        chats = [
+            {
+                "id": f"chat-{index}",
+                "items": [{"id": f"u-{index}", "type": "user", "text": "keep"}],
+            }
+            for index in range(dashboard_server.CHAT_TRANSCRIPTS_MAX_CHATS + 1)
+        ]
+        app_path.write_text(json.dumps({"version": 1, "chats": chats}), encoding="utf-8")
+
+        with TestClient(dashboard_server.app) as client:
+            response = client.get("/api/app/chats")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["chats"], [])
+        self.assertTrue(response.json()["writeBlocked"])
+        self.assertEqual(response.json()["recoveries"][0]["reason"], "record_limit_exceeded")
+        self.assertTrue(app_path.exists())
 
     def test_chat_transcripts_filter_unstarted_empty_chats_on_write_and_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,13 +672,25 @@ class DashboardServerTests(unittest.TestCase):
                             {
                                 "id": "a1",
                                 "name": "hello.txt",
+                                "size": 5,
+                                "type": "text/plain",
                                 "payloadHash": payload_hash,
                                 "payloadKind": "text",
                             }
                         ],
                     },
                     {"id": "stream-old", "type": "streaming", "clientTurnId": "old-turn", "text": ""},
-                    {"id": "agent-1", "type": "agent", "response": {"reply": "done"}},
+                    {
+                        "id": "agent-1",
+                        "type": "agent",
+                        "response": {
+                            "plan": {
+                                "summary": "done",
+                                "planner": "test",
+                                "shellNeeded": False,
+                            }
+                        },
+                    },
                 ],
             }
         ]
@@ -2889,7 +3254,7 @@ class DashboardServerTests(unittest.TestCase):
         config.approval_token = "doctor-approval-secret"
         dashboard_server.AGENT_GATEWAY.save_config(config)
         original_project_path = dashboard_server.DASHBOARD_STATE.selected_project_path
-        private_project_path = r"C:\Users\xiao123\PrivateAvatarProjects\DoctorLeakTest"
+        private_project_path = r"C:\Users\TestUser\PrivateAvatarProjects\DoctorLeakTest"
         dashboard_server.DASHBOARD_STATE.selected_project_path = private_project_path
 
         try:
@@ -2912,6 +3277,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("unity.project_root", check_ids)
         self.assertIn("provider.test", check_ids)
         self.assertIn("checkpoint.backend", check_ids)
+        self.assertIn("session.storage", check_ids)
+        self.assertIn("app.config", check_ids)
+        self.assertIn("security.gateway_token_age", check_ids)
+        self.assertIn("desktop.install_integrity", check_ids)
         self.assertIn("external.security_contract", check_ids)
         self.assertTrue(payload["sections"])
         provider_check = next(item for item in payload["checks"] if item["id"] == "provider.test")
@@ -2926,8 +3295,688 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("approval_token", serialized)
         self.assertNotIn("api_key", serialized)
 
+    def test_generic_doctor_fix_endpoint_uses_registered_service(self) -> None:
+        service = Mock()
+        service.fix.return_value = {
+            "ok": True,
+            "schema": "vrcforge.doctor_fix.v1",
+            "checkId": "unity.mcp.package",
+            "mode": "safe",
+            "status": "healthy",
+            "changed": False,
+            "phases": [],
+        }
+        with patch("dashboard_server.app_doctor_service", return_value=service):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/doctor/fix/unity.mcp.package",
+                    json={"mode": "safe", "projectPath": r"C:\Unity\SelectedAvatar"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["schema"], "vrcforge.doctor_fix.v1")
+        service.fix.assert_called_once_with(
+            "unity.mcp.package",
+            "safe",
+            {"selected_project_path": r"C:\Unity\SelectedAvatar"},
+        )
+
+    def test_generic_doctor_fix_endpoint_emits_terminal_audit_for_service_errors(self) -> None:
+        service = Mock()
+        service.fix.side_effect = [
+            dashboard_server.DoctorServiceError(409, "approval required"),
+            dashboard_server.DoctorServiceError(500, "repair failed"),
+        ]
+        with (
+            patch("dashboard_server.app_doctor_service", return_value=service),
+            patch("dashboard_server.emit_log_async", new_callable=AsyncMock) as emit_log,
+        ):
+            with TestClient(dashboard_server.app) as client:
+                warning = client.post("/api/app/doctor/fix/test.warning", json={"mode": "safe"})
+                error = client.post("/api/app/doctor/fix/test.error", json={"mode": "safe"})
+
+        self.assertEqual(warning.status_code, 409)
+        self.assertEqual(error.status_code, 500)
+        terminal = [
+            call
+            for call in emit_log.await_args_list
+            if len(call.args) >= 3 and call.args[2] == "Doctor repair was not applied."
+        ]
+        self.assertEqual([call.args[0] for call in terminal], ["warn", "error"])
+
+    def test_generic_doctor_fix_endpoint_maps_every_terminal_status_to_audit_level(self) -> None:
+        statuses = ("healthy", "repaired", "queued_for_approval", "needs_user_action", "failed", "error")
+        service = Mock()
+        service.fix.side_effect = [
+            {"status": status, "changed": status == "repaired"}
+            for status in statuses
+        ]
+        with (
+            patch("dashboard_server.app_doctor_service", return_value=service),
+            patch("dashboard_server.emit_log_async", new_callable=AsyncMock) as emit_log,
+        ):
+            with TestClient(dashboard_server.app) as client:
+                for status in statuses:
+                    response = client.post(f"/api/app/doctor/fix/test.{status}", json={"mode": "safe"})
+                    self.assertEqual(response.status_code, 200)
+
+        terminal = [
+            call
+            for call in emit_log.await_args_list
+            if len(call.args) >= 3 and call.args[2] in {"Doctor repair finished.", "Doctor repair requires follow-up."}
+        ]
+        self.assertEqual(
+            [call.args[0] for call in terminal],
+            ["success", "success", "warn", "warn", "error", "error"],
+        )
+
+    def test_session_storage_doctor_uses_request_scoped_active_project(self) -> None:
+        service = Mock()
+        service.fix.return_value = {
+            "ok": True,
+            "schema": "vrcforge.doctor_fix.v1",
+            "checkId": "session.storage",
+            "mode": "safe",
+            "status": "healthy",
+            "changed": False,
+            "phases": [],
+        }
+        with patch("dashboard_server.app_doctor_service", return_value=service):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/doctor/fix/session.storage",
+                    json={"mode": "safe", "projectPath": r"C:\Unity\ActiveAvatar"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        service.fix.assert_called_once_with(
+            "session.storage",
+            "safe",
+            {"selected_project_path": r"C:\Unity\ActiveAvatar"},
+        )
+
+    def test_doctor_package_repair_never_bypasses_supervised_request_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "Avatar"
+            project.mkdir()
+            with (
+                patch("dashboard_server.request_package_install_sync", return_value={"ok": True, "status": "pending"}) as request_install,
+                patch("dashboard_server.install_vpm_package_sync") as direct_install,
+            ):
+                for mode in ("safe", "force"):
+                    result = dashboard_server._repair_unity_package_doctor(
+                        {"selected_project_path": str(project)},
+                        mode,
+                        dashboard_server.PhaseLog(),
+                    )
+                    self.assertEqual(result["status"], "queued_for_approval")
+                    self.assertFalse(result["changed"])
+
+            self.assertEqual(request_install.call_count, 2)
+            for call in request_install.call_args_list:
+                self.assertEqual(call.args[0]["packageId"], "com.coplaydev.unity-mcp")
+                self.assertTrue(call.args[0]["requiresExplicitApproval"])
+                self.assertTrue(call.args[0]["neverAutoApprove"])
+                self.assertEqual(call.kwargs["agent_name"], "doctor")
+            direct_install.assert_not_called()
+
+    def test_doctor_package_repair_reports_unexpected_execution_honestly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "Avatar"
+            project.mkdir()
+            with patch(
+                "dashboard_server.request_package_install_sync",
+                return_value={"ok": True, "status": "executed"},
+            ):
+                result = dashboard_server._repair_unity_package_doctor(
+                    {"selected_project_path": str(project)},
+                    "safe",
+                    dashboard_server.PhaseLog(),
+                )
+
+        self.assertEqual(result, {"status": "repaired", "changed": True})
+
+    def test_doctor_package_repair_does_not_deduplicate_unavailable_project_paths(self) -> None:
+        pending = {
+            "id": "pending-1",
+            "status": "pending",
+            "targetTool": "vrcforge_install_vpm_package",
+            "arguments": {"projectPath": r"Z:\missing-one", "packageId": "com.coplaydev.unity-mcp"},
+        }
+        phases = dashboard_server.PhaseLog()
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", return_value=[pending]) as approvals,
+            patch("dashboard_server.request_package_install_sync") as request_install,
+        ):
+            result = dashboard_server._repair_unity_package_doctor(
+                {"selected_project_path": r"Z:\missing-two"},
+                "safe",
+                phases,
+            )
+
+        self.assertEqual(result, {"status": "needs_user_action", "changed": False})
+        self.assertEqual(phases.snapshot()[0]["id"], "project_unavailable")
+        approvals.assert_not_called()
+        request_install.assert_not_called()
+
+    def test_doctor_package_repair_reuses_only_same_project_and_package_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_a = Path(temp_dir) / "ProjectA"
+            project_b = Path(temp_dir) / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            pending = {
+                "id": "pending-a",
+                "status": "pending",
+                "targetTool": "vrcforge_install_vpm_package",
+                "agentName": "doctor",
+                "requiresExplicitApproval": True,
+                "autoApprovalBlocked": True,
+                "arguments": {
+                    "projectPath": str(project_a),
+                    "packageId": "com.coplaydev.unity-mcp",
+                    "repository": "",
+                    "preferredManager": "",
+                    "includePrerelease": False,
+                },
+            }
+            with (
+                patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", return_value=[pending]),
+                patch(
+                    "dashboard_server.request_package_install_sync",
+                    return_value={"ok": True, "status": "pending"},
+                ) as request_install,
+            ):
+                matching = dashboard_server._repair_unity_package_doctor(
+                    {"selected_project_path": str(project_a)},
+                    "safe",
+                    dashboard_server.PhaseLog(),
+                )
+                different_project = dashboard_server._repair_unity_package_doctor(
+                    {"selected_project_path": str(project_b)},
+                    "safe",
+                    dashboard_server.PhaseLog(),
+                )
+
+            self.assertEqual(matching["status"], "queued_for_approval")
+            self.assertEqual(different_project["status"], "queued_for_approval")
+            request_install.assert_called_once()
+            self.assertEqual(request_install.call_args.args[0]["projectPath"], str(project_b))
+
+    def test_doctor_package_repair_does_not_reuse_semantically_different_pending_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "Project"
+            project.mkdir()
+            canonical = {
+                "id": "pending-doctor-package",
+                "status": "pending",
+                "targetTool": "vrcforge_install_vpm_package",
+                "agentName": "doctor",
+                "requiresExplicitApproval": True,
+                "autoApprovalBlocked": True,
+                "arguments": {
+                    "projectPath": str(project),
+                    "packageId": "com.coplaydev.unity-mcp",
+                    "repository": "",
+                    "preferredManager": "",
+                    "includePrerelease": False,
+                },
+            }
+            mutations = (
+                ("agent_name", lambda item: item.update({"agentName": "user"})),
+                ("explicit_approval", lambda item: item.update({"requiresExplicitApproval": False})),
+                ("auto_approval_policy", lambda item: item.update({"autoApprovalBlocked": False})),
+                (
+                    "repository",
+                    lambda item: item["arguments"].update(
+                        {"repository": "https://packages.example.invalid/index.json"}
+                    ),
+                ),
+                ("preferred_manager", lambda item: item["arguments"].update({"preferredManager": "vrc-get"})),
+                ("prerelease", lambda item: item["arguments"].update({"includePrerelease": True})),
+            )
+            for label, mutate in mutations:
+                with self.subTest(label=label):
+                    pending = json.loads(json.dumps(canonical))
+                    mutate(pending)
+                    with (
+                        patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", return_value=[pending]),
+                        patch(
+                            "dashboard_server.request_package_install_sync",
+                            return_value={"ok": True, "status": "pending"},
+                        ) as request_install,
+                    ):
+                        result = dashboard_server._repair_unity_package_doctor(
+                            {"selected_project_path": str(project)},
+                            "safe",
+                            dashboard_server.PhaseLog(),
+                        )
+
+                    self.assertEqual(result["status"], "queued_for_approval")
+                    request_install.assert_called_once()
+
+    def test_cached_doctor_service_reloads_runtime_settings_on_every_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            service = dashboard_server.app_doctor_service()
+            with patch("dashboard_server.RUNTIME_SETTINGS_PATH", path):
+                path.write_text('{"llm":{"provider":"ollama"}}', encoding="utf-8")
+                healthy = service.detect("app.runtime_settings")
+
+                damaged = b'{"unity_mcp":{"retry_backoff_seconds":1e999}}'
+                path.write_bytes(damaged)
+                broken = service.detect("app.runtime_settings")
+                self.assertEqual(path.read_bytes(), damaged)
+
+                path.write_text('{"llm":{"provider":"ollama"},"unity_mcp":{"port":8125}}', encoding="utf-8")
+                restored = service.detect("app.runtime_settings")
+
+            self.assertEqual(healthy["status"], "ok")
+            self.assertEqual(broken["status"], "error")
+            self.assertEqual(broken["detail"]["code"], "invalid_json")
+            self.assertEqual(restored["status"], "ok")
+
+    def test_doctor_security_context_tracks_disabled_approval_auto_and_full_modes(self) -> None:
+        package_service = Mock()
+        package_service.load_registry.return_value = {"governance": {}}
+        package_service.list_installed.return_value = []
+        cases = (
+            ("disabled", "disabled", False, False, False, False, "ok", "ok"),
+            ("approval", "approval", True, True, False, False, "ok", "ok"),
+            ("auto", "auto", True, True, True, False, "warning", "warning"),
+            ("full", "roslyn_full_auto", True, True, True, True, "warning", "warning"),
+            ("full-write-disabled", "roslyn_full_auto", True, False, False, False, "ok", "ok"),
+        )
+        for case, mode, enabled, allow_write, broad, full, external_status, process_status in cases:
+            with self.subTest(case=case):
+                config = SimpleNamespace(
+                    execution_mode=mode,
+                    enabled=enabled,
+                    allow_write_requests=allow_write,
+                    developer_options_enabled=False,
+                    require_token=True,
+                    token="x" * 32,
+                    token_created_at="",
+                    token_rotated_at="",
+                )
+                with (
+                    patch.object(dashboard_server.AGENT_GATEWAY, "ensure_config", return_value=config),
+                    patch("dashboard_server.build_agentic_app_health", return_value={}),
+                    patch("dashboard_server.skill_package_service", return_value=package_service),
+                ):
+                    context = dashboard_server.build_doctor_service_context()
+
+                external = context["security"]["external_writes"]
+                process = context["security"]["process_exec"]
+                self.assertEqual(external["broadPermissions"], broad)
+                self.assertEqual(external["fullPermission"], full)
+                self.assertEqual(process["fullPermission"], full)
+                self.assertEqual(
+                    dashboard_server.DoctorService(context).detect("security.external_writes")["status"],
+                    external_status,
+                )
+                self.assertEqual(
+                    dashboard_server.DoctorService(context).detect("security.process_exec")["status"],
+                    process_status,
+                )
+                self.assertEqual(
+                    dashboard_server.DoctorService(context).detect("security.bind_auth")["status"],
+                    "ok",
+                )
+                self.assertEqual(
+                    dashboard_server.DoctorService(context).detect("security.mcp_exposure")["status"],
+                    "ok",
+                )
+
+    def test_package_request_propagates_doctor_never_auto_policy(self) -> None:
+        plan = {
+            "ok": True,
+            "canExecuteCommandInstall": True,
+            "projectPath": r"C:\Unity\Avatar",
+            "packageId": "com.coplaydev.unity-mcp",
+            "repository": "",
+            "package": {},
+        }
+        with (
+            patch("dashboard_server.package_install_plan_sync", return_value=plan),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY,
+                "create_apply_request",
+                return_value={"ok": True, "status": "pending"},
+            ) as create_request,
+        ):
+            result = dashboard_server.request_package_install_sync(
+                {
+                    "projectPath": r"C:\Unity\Avatar",
+                    "packageId": "com.coplaydev.unity-mcp",
+                    "requiresExplicitApproval": True,
+                    "neverAutoApprove": True,
+                },
+                agent_name="doctor",
+            )
+
+        self.assertEqual(result["status"], "pending")
+        request = create_request.call_args.args[0]
+        self.assertTrue(request["requires_explicit_approval"])
+        self.assertTrue(request["never_auto_approve"])
+        self.assertEqual(request["agent_name"], "doctor")
+        self.assertTrue(create_request.call_args.kwargs["internal_wrapper"])
+
+    def test_doctor_project_chat_repair_queues_digest_bound_manual_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            store_path = project / ".vrcforge" / "chat-transcripts.json"
+            store_path.parent.mkdir(parents=True)
+            store_path.write_bytes(b'{"chats":[')
+            project_key = dashboard_server.normalize_chat_project_key(str(project))
+            suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            target = dashboard_server.SessionStoreTarget(
+                f"session.chat.project.{suffix}",
+                store_path,
+                "project_owned",
+                "json",
+            )
+            with (
+                patch("dashboard_server._session_store_targets", return_value=[target]),
+                patch.object(
+                    dashboard_server.AGENT_GATEWAY,
+                    "create_apply_request",
+                    return_value={"ok": True, "status": "pending"},
+                ) as create_request,
+            ):
+                phases = dashboard_server.PhaseLog()
+                result = dashboard_server._repair_session_storage_doctor(
+                    {"selected_project_path": str(project)},
+                    "safe",
+                    phases,
+                )
+
+            self.assertEqual(result["status"], "queued_for_approval")
+            request = create_request.call_args.args[0]
+            self.assertEqual(request["target_tool"], "vrcforge_repair_project_chat_store")
+            self.assertEqual(request["arguments"]["storeId"], target.store_id)
+            self.assertEqual(request["arguments"]["expectedDigest"], hashlib.sha256(b'{"chats":[').hexdigest())
+            self.assertTrue(request["requires_explicit_approval"])
+            self.assertTrue(request["never_auto_approve"])
+            self.assertTrue(create_request.call_args.kwargs["internal_wrapper"])
+            detail = phases.snapshot()[0]["detail"]
+            self.assertEqual(detail["detectedInvalidCount"], 1)
+            self.assertEqual(detail["approvalQueuedInvalidCount"], 1)
+            self.assertEqual(detail["invalidQuarantinedCount"], 0)
+
+    def test_doctor_repairs_parseable_chat_document_with_invalid_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "chat-transcripts.json"
+            original = b'{"version":1,"chats":{}}'
+            store_path.write_bytes(original)
+            target = dashboard_server.SessionStoreTarget(
+                "session.chat.app",
+                store_path,
+                "app_owned",
+                "json",
+                required_list_field="chats",
+            )
+            with patch("dashboard_server._session_store_targets", return_value=[target]):
+                detected = dashboard_server._detect_session_storage_doctor({})
+                phases = dashboard_server.PhaseLog()
+                repaired = dashboard_server._repair_session_storage_doctor({}, "safe", phases)
+
+            self.assertEqual(detected["status"], "error")
+            self.assertEqual(detected["detail"]["appRepairCount"], 1)
+            self.assertEqual(repaired["status"], "repaired")
+            self.assertTrue(repaired["changed"])
+            self.assertFalse(store_path.exists())
+            detail = phases.snapshot()[0]["detail"]
+            self.assertEqual(detail["detectedInvalidCount"], 1)
+            self.assertEqual(detail["invalidQuarantinedCount"], 1)
+            digest = hashlib.sha256(original).hexdigest()[:16]
+            self.assertEqual(
+                store_path.with_name(f"{store_path.name}.vrcforge-quarantine-{digest}").read_bytes(),
+                original,
+            )
+
+    def test_doctor_fix_does_not_report_unsupported_session_store_as_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "future-result.json"
+            store_path.write_text('{"schema":"future.v9","payload":{}}', encoding="utf-8")
+            target = dashboard_server.SessionStoreTarget(
+                "session.future-result",
+                store_path,
+                "app_owned",
+                "json",
+                ("known.v1",),
+            )
+            with patch("dashboard_server._session_store_targets", return_value=[target]):
+                phases = dashboard_server.PhaseLog()
+                result = dashboard_server._repair_session_storage_doctor({}, "safe", phases)
+
+            self.assertEqual(result, {"status": "needs_user_action", "changed": False})
+            self.assertEqual(phases.snapshot()[0]["status"], "warning")
+            self.assertEqual(phases.snapshot()[0]["detail"]["unresolvedCount"], 1)
+            self.assertTrue(store_path.exists())
+
+    def test_doctor_project_chat_repair_reuses_matching_pending_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            store_path = project / ".vrcforge" / "chat-transcripts.json"
+            store_path.parent.mkdir(parents=True)
+            original = b'{"chats":['
+            store_path.write_bytes(original)
+            project_key = dashboard_server.normalize_chat_project_key(str(project))
+            suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            target = dashboard_server.SessionStoreTarget(
+                f"session.chat.project.{suffix}", store_path, "project_owned", "json"
+            )
+            pending = {
+                "id": "approval-existing",
+                "status": "pending",
+                "targetTool": "vrcforge_repair_project_chat_store",
+                "arguments": {
+                    "storeId": target.store_id,
+                    "expectedDigest": hashlib.sha256(original).hexdigest(),
+                },
+            }
+            with (
+                patch("dashboard_server._session_store_targets", return_value=[target]),
+                patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", return_value=[pending]),
+                patch.object(dashboard_server.AGENT_GATEWAY, "create_apply_request") as create_request,
+            ):
+                result = dashboard_server._repair_session_storage_doctor({}, "safe", dashboard_server.PhaseLog())
+
+            self.assertEqual(result["status"], "queued_for_approval")
+            create_request.assert_not_called()
+
+    def test_approved_project_chat_repair_is_digest_bound_and_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            store_path = project / ".vrcforge" / "chat-transcripts.json"
+            store_path.parent.mkdir(parents=True)
+            original = b'{"chats":['
+            store_path.write_bytes(original)
+            project_key = dashboard_server.normalize_chat_project_key(str(project))
+            suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            store_id = f"session.chat.project.{suffix}"
+
+            result = dashboard_server.repair_project_chat_store_sync(
+                {
+                    "projectRoot": str(project),
+                    "expectedDigest": hashlib.sha256(original).hexdigest(),
+                    "storeId": store_id,
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "quarantined")
+            self.assertFalse(store_path.exists())
+            backup = store_path.with_name(
+                f"{store_path.name}.vrcforge-backup-{hashlib.sha256(original).hexdigest()[:16]}"
+            )
+            self.assertEqual(backup.read_bytes(), original)
+
+            repeated = dashboard_server.repair_project_chat_store_sync(
+                {
+                    "projectRoot": str(project),
+                    "expectedDigest": hashlib.sha256(original).hexdigest(),
+                    "storeId": store_id,
+                }
+            )
+            self.assertTrue(repeated["ok"])
+            self.assertEqual(repeated["status"], "already_repaired")
+
+    def test_repeated_project_chat_approval_fails_stale_checkpoint_without_false_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            for name in ("Assets", "Packages", "ProjectSettings", ".vrcforge"):
+                (project / name).mkdir(parents=True)
+            store_path = project / ".vrcforge" / "chat-transcripts.json"
+            original = b'{"chats":['
+            store_path.write_bytes(original)
+            gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
+            gateway.register_write_handler(
+                "vrcforge_repair_project_chat_store",
+                "Repair project chat store.",
+                "medium",
+                dashboard_server.repair_project_chat_store_sync,
+            )
+            project_key = dashboard_server.normalize_chat_project_key(str(project))
+            suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            arguments = {
+                "projectRoot": str(project),
+                "projectPath": str(project),
+                "expectedDigest": hashlib.sha256(original).hexdigest(),
+                "storeId": f"session.chat.project.{suffix}",
+            }
+            with patch("dashboard_server.AGENT_GATEWAY", gateway):
+                requests = [
+                    gateway.create_apply_request(
+                        {
+                            "target_tool": "vrcforge_repair_project_chat_store",
+                            "arguments": arguments,
+                            "never_auto_approve": True,
+                        },
+                        internal_wrapper=True,
+                    )
+                    for _ in range(2)
+                ]
+                executions = []
+                for request in requests:
+                    approval_id = request["approval"]["id"]
+                    gateway.approve(approval_id)
+                    executions.append(gateway.apply_approved({"approvalId": approval_id}))
+
+            self.assertEqual([item["status"] for item in executions], ["applied", "failed"], executions)
+            self.assertEqual(executions[0]["result"]["status"], "quarantined")
+            self.assertIn("changed after the approval snapshot", executions[1]["error"])
+            active = gateway.list_interrupted_apply_recoveries({"includeResolved": False})
+            self.assertEqual(active["count"], 0)
+            self.assertFalse(active["blockingWrites"])
+
+    def test_project_chat_snapshot_conflict_after_checkpoint_closes_nonblocking_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "AvatarProject"
+            for name in ("Assets", "Packages", "ProjectSettings", ".vrcforge"):
+                (project / name).mkdir(parents=True)
+            store_path = project / ".vrcforge" / "chat-transcripts.json"
+            original = b'{"chats":['
+            concurrent = b'{"chats":[{"id":"newer-save"}]}'
+            store_path.write_bytes(original)
+            gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
+            gateway.register_write_handler(
+                "vrcforge_repair_project_chat_store",
+                "Repair project chat store.",
+                "medium",
+                dashboard_server.repair_project_chat_store_sync,
+            )
+            project_key = dashboard_server.normalize_chat_project_key(str(project))
+            suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            arguments = {
+                "projectRoot": str(project),
+                "projectPath": str(project),
+                "expectedDigest": hashlib.sha256(original).hexdigest(),
+                "storeId": f"session.chat.project.{suffix}",
+            }
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_repair_project_chat_store",
+                    "arguments": arguments,
+                    "never_auto_approve": True,
+                },
+                internal_wrapper=True,
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            create_checkpoint = gateway._create_pre_write_checkpoint
+
+            def checkpoint_then_change(approval: dict, supplied: dict) -> dict | None:
+                checkpoint = create_checkpoint(approval, supplied)
+                store_path.write_bytes(concurrent)
+                return checkpoint
+
+            with (
+                patch("dashboard_server.AGENT_GATEWAY", gateway),
+                patch.object(gateway, "_create_pre_write_checkpoint", side_effect=checkpoint_then_change),
+            ):
+                execution = gateway.apply_approved({"approvalId": approval_id})
+
+            self.assertFalse(execution["ok"])
+            self.assertEqual(execution["status"], "failed")
+            self.assertEqual(execution["error"], "snapshot_changed")
+            self.assertEqual(store_path.read_bytes(), concurrent)
+            active = gateway.list_interrupted_apply_recoveries({"includeResolved": False})
+            self.assertEqual(active["count"], 0)
+            self.assertFalse(active["blockingWrites"])
+            all_recoveries = gateway.list_interrupted_apply_recoveries({"includeResolved": True})
+            no_write = [
+                item
+                for item in all_recoveries["recoveries"]
+                if item.get("resolution") == "no_write_snapshot_conflict"
+            ]
+            self.assertEqual(len(no_write), 1)
+            self.assertEqual(no_write[0]["status"], "not_applied")
+            self.assertFalse(no_write[0]["blockingWrites"])
+
+    def test_skill_quarantine_rejects_changed_manifest_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
+            manifest = gateway.user_skills_dir / "broken-skill" / "SKILL.md"
+            manifest.parent.mkdir(parents=True)
+            original = b"broken-before"
+            manifest.write_bytes(original)
+            candidate = {
+                "storagePath": str(manifest),
+                "manifestDigest": hashlib.sha256(original).hexdigest(),
+            }
+            manifest.write_bytes(b"changed-after-scan")
+
+            with patch("dashboard_server.AGENT_GATEWAY", gateway):
+                changed = dashboard_server._quarantine_broken_user_skill(candidate)
+
+            self.assertFalse(changed)
+            self.assertEqual(manifest.read_bytes(), b"changed-after-scan")
+
+    def test_skill_registry_read_failure_never_reports_doctor_fix_as_healthy(self) -> None:
+        package_service = Mock()
+        package_service.list_installed.side_effect = OSError("registry unavailable")
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_skill_registry", return_value={"skills": []}),
+            patch("dashboard_server.skill_package_service", return_value=package_service),
+        ):
+            result = dashboard_server.app_doctor_service().fix("skills.registry", "safe")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "needs_user_action")
+        self.assertEqual(result["after"]["status"], "error")
+
     def test_app_doctor_degrades_when_diagnostics_fail(self) -> None:
-        with patch("dashboard_server.build_app_doctor_report", side_effect=RuntimeError("doctor exploded")):
+        with patch(
+            "dashboard_server.build_app_doctor_report",
+            side_effect=RuntimeError(
+                "doctor exploded at https://alice:cleartext@example.invalid/v1?token=query-secret afterwards"
+            ),
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.get("/api/app/doctor")
 
@@ -2941,6 +3990,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(check_by_id["desktop.runtime"]["status"], "ok")
         self.assertEqual(check_by_id["doctor.degraded"]["status"], "warning")
         self.assertIn("doctor exploded", check_by_id["doctor.degraded"]["message"])
+        serialized = json.dumps(payload)
+        self.assertNotIn("alice", serialized)
+        self.assertNotIn("cleartext", serialized)
+        self.assertNotIn("query-secret", serialized)
+        self.assertIn("https://example.invalid", serialized)
 
     def test_debug_diagnostics_toggle_records_unified_redacted_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4344,6 +5398,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(result["cancelled"])
         self.assertFalse(result["timedOut"])
         self.assertLess(result["durationSeconds"], 5)
+
+    def test_windows_process_tree_kill_falls_back_when_taskkill_is_rejected(self) -> None:
+        process = Mock()
+        process.pid = 4242
+        process.poll.side_effect = [None, None]
+        with (
+            patch("agent_gateway.os.name", "nt"),
+            patch("agent_gateway.subprocess.run", return_value=SimpleNamespace(returncode=1)) as taskkill,
+        ):
+            kill_process_tree(process)
+
+        taskkill.assert_called_once()
+        process.kill.assert_called_once_with()
 
     def test_native_shell_argv_accepts_plain_commands_only(self) -> None:
         argv = native_shell_argv("git --no-pager status --short")
@@ -8953,6 +10020,12 @@ namespace VRCForge.Editor
         self.assertIn('Get-StreamSha256 -Stream $guardStream', publish_script)
         self.assertIn("check_third_party_licenses.ps1", build_script)
         self.assertIn("check_coplaydev_mcp_license.ps1", build_script)
+        self.assertIn('schema = "vrcforge.payload-integrity.v1"', build_script)
+        self.assertIn('Join-Path $payloadRoot "payload-integrity.json"', build_script)
+        self.assertLess(build_script.index("payload-integrity.json"), build_script.index("Compress-Archive"))
+        self.assertIn("smoke_packaged_backend.py", build_script)
+        self.assertLess(build_script.index("smoke_packaged_backend.py"), build_script.index("$offlineInstaller ="))
+        self.assertIn('schema = "vrcforge.packaged_backend_smoke.v2"', build_script)
         self.assertIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
         self.assertIn("Install-UvRuntime", build_script)
         self.assertIn("uv-x86_64-pc-windows-msvc.zip", build_script)
@@ -9460,6 +10533,96 @@ namespace VRCForge.Editor
             finally:
                 dashboard_server.CONFIG_PATH = original_config_path
                 dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+
+    def test_provider_config_save_preserves_invalid_source_in_verified_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_config_path = dashboard_server.CONFIG_PATH
+            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
+            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
+            invalid = b'{"api": invalid}\xff'
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_bytes(invalid)
+            digest = hashlib.sha256(invalid).hexdigest()
+            dashboard_server.CONFIG_PATH = config_path
+            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
+                provider="ollama",
+                api_key="",
+                base_url="http://127.0.0.1:11434/v1",
+                model="qwen3",
+            )
+            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
+            try:
+                self.assertEqual(dashboard_server.load_config_document(), {})
+                self.assertEqual(config_path.read_bytes(), invalid)
+
+                dashboard_server.save_dashboard_config_document()
+
+                backup = config_path.with_name(f"config.json.backup-{digest}.bak")
+                self.assertEqual(backup.read_bytes(), invalid)
+                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["api"]["provider"], "ollama")
+            finally:
+                dashboard_server.CONFIG_PATH = original_config_path
+                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
+
+    def test_provider_config_save_rejects_corrupt_existing_backup_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_config_path = dashboard_server.CONFIG_PATH
+            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
+            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
+            original = b'{"api":{"provider":"ollama"}}'
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_bytes(original)
+            digest = hashlib.sha256(original).hexdigest()
+            backup = config_path.with_name(f"config.json.backup-{digest}.bak")
+            backup.write_bytes(b"wrong-backup-bytes")
+            dashboard_server.CONFIG_PATH = config_path
+            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
+                provider="openai",
+                api_key="",
+                base_url="",
+                model="gpt-5",
+            )
+            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
+            try:
+                with self.assertRaises(OSError):
+                    dashboard_server.save_dashboard_config_document()
+                self.assertEqual(config_path.read_bytes(), original)
+                self.assertEqual(backup.read_bytes(), b"wrong-backup-bytes")
+            finally:
+                dashboard_server.CONFIG_PATH = original_config_path
+                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
+
+    def test_provider_config_save_rejects_symlink_backup_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_config_path = dashboard_server.CONFIG_PATH
+            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
+            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
+            original = b'{"api":{"provider":"ollama"}}'
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_bytes(original)
+            digest = hashlib.sha256(original).hexdigest()
+            backup = config_path.with_name(f"config.json.backup-{digest}.bak")
+            try:
+                backup.symlink_to(config_path)
+            except OSError as exc:
+                self.skipTest(f"File symlinks are unavailable: {exc}")
+            dashboard_server.CONFIG_PATH = config_path
+            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
+                provider="openai", api_key="", base_url="", model="gpt-5"
+            )
+            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
+            try:
+                with self.assertRaises(OSError):
+                    dashboard_server.save_dashboard_config_document()
+                self.assertEqual(config_path.read_bytes(), original)
+                self.assertTrue(backup.is_symlink())
+            finally:
+                dashboard_server.CONFIG_PATH = original_config_path
+                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
 
     @patch("dashboard_server.fetch_provider_models")
     def test_api_models_endpoint_reads_models_from_draft_config(self, mock_fetch_provider_models) -> None:

@@ -157,6 +157,7 @@ fn main() {
             fetch_chats,
             fetch_diagnostics,
             fetch_doctor,
+            fix_doctor_check,
             fetch_external_agent_connectors,
             fetch_optimization_proof,
             fetch_optimization_proofs,
