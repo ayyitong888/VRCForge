@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -119,6 +120,15 @@ def request_json(
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected a JSON object from {path}")
     return payload
+
+
+def bounded_runtime_probe_timeout(value: float) -> float:
+    """Give Doctor/support probes time to finish while keeping CI bounded."""
+
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        normalized = 60.0
+    return max(30.0, min(normalized, 120.0))
 
 
 def inspect_doctor_report(report: Any) -> dict[str, Any]:
@@ -531,7 +541,14 @@ def main() -> int:
             "count": proof_index.get("count"),
         }
 
-        doctor = request_json(base_url, token, "GET", "/api/app/doctor")
+        runtime_probe_timeout = bounded_runtime_probe_timeout(args.timeout)
+        doctor = request_json(
+            base_url,
+            token,
+            "GET",
+            "/api/app/doctor",
+            timeout=runtime_probe_timeout,
+        )
         doctor_ok, doctor_evidence = evaluate_packaged_doctor(doctor)
 
         cli_doctor = subprocess.run(
@@ -552,7 +569,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30.0,
+            timeout=runtime_probe_timeout,
             creationflags=creationflags,
         )
         try:
@@ -570,7 +587,7 @@ def main() -> int:
             "POST",
             "/api/app/support-bundle",
             {"includeFullPaths": False, "logLimit": 50},
-            timeout=30.0,
+            timeout=runtime_probe_timeout,
         )
         support_bundle_path = str(bundle_response.get("bundlePath") or "")
         bundle_path = Path(support_bundle_path).resolve() if support_bundle_path else Path()

@@ -138,6 +138,15 @@ def test_packaged_cli_doctor_never_accepts_semantic_exit_two() -> None:
     assert evidence["errorFree"] is False
 
 
+def test_packaged_runtime_probe_timeout_is_long_enough_but_bounded() -> None:
+    smoke = load_script("smoke_packaged_backend.py")
+
+    assert smoke.bounded_runtime_probe_timeout(1) == 30.0
+    assert smoke.bounded_runtime_probe_timeout(60) == 60.0
+    assert smoke.bounded_runtime_probe_timeout(600) == 120.0
+    assert smoke.bounded_runtime_probe_timeout(float("nan")) == 60.0
+
+
 def test_payload_zip_rejects_traversal_and_duplicate_members() -> None:
     smoke = load_script("smoke_payload_zip_unpack.py")
     infos = [
