@@ -219,13 +219,8 @@ class UserConstraintsSnapshot:
 RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
 # 有界 agentic 循环每轮的最大步数——这是「安全兜底」而非主要终止条件。
 # 真正的终止靠模型/规划自决：拿到终止答复、发起写入审批、命中重复动作即停。
-# 这个上限只在模型抽风、停不下来时兜底。对标主流 agent CLI 的做法：
-#   - Codex CLI：每轮工具调用默认不设上限，靠模型给出最终消息自然结束（单轮可达
-#     数十次工具调用）；只有可选的 --max-turns 限制对话轮数。
-#   - OpenCode(sst)：`steps` 字段不配则不限，一直迭代到模型自己停或用户打断。
-#   - OpenClaw：可配的 max-iterations 兜底，社区推荐 15-20（多数任务 <10 步即完成），
-#     复杂研究类 25-30，并配合「到顶就向用户求助」而不是静默中止。
-# 取 25：落在 OpenClaw 复杂任务区间，远高于常见任务步数，又不至于无界烧 token/刷审批。
+# 这个上限只在规划器停不下来时兜底。25 步为复杂的只读调查保留足够空间，
+# 同时限制无界 token 消耗、重复工具调用和审批噪声；常规任务应在此之前自然结束。
 # 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
 RUNTIME_AGENT_MAX_STEPS = 25
 RUNTIME_BLOCKED_SKILLS = {
@@ -2713,8 +2708,7 @@ class AgentGateway:
                 break
         else:
             # 跑满 RUNTIME_AGENT_MAX_STEPS 都没自然终止 → 命中安全兜底上限。
-            # 对标 OpenCode 的「到顶强制总结」/ OpenClaw 的「到顶向用户求助」：
-            # 不静默收尾，下面在 reply 里诚实告知「到步数上限、先汇报、可继续」。
+            # 不静默收尾：在 reply 里诚实告知「到步数上限、先汇报、可继续」。
             cap_reached = True
 
         reasoning_trace = ensure_dict(reasoning_trace)
@@ -10459,7 +10453,7 @@ class AgentGateway:
             "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
             "写操作类工具会进入审批流程，可以放心规划；"
             "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
-            # 自纠回环（对标 Codex/OpenClaw 的 tool-error recovery）：失败要读错误、修正后重试或换路，绝不假装成功。
+            # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
             "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
             "先读懂错误原因；能靠改参数解决就用『不同的参数』重试（不要原样重复同一个调用），"
             "换个工具或思路能绕过就绕过；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
