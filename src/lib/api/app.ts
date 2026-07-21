@@ -202,7 +202,10 @@ export async function cancelDeveloperOptionsChallenge(
 
 export async function updateAdvancedSettings(
   endpoint: string,
-  settings: Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled"> & {
+  settings: Pick<
+    AdvancedSettingsState,
+    "developerOptionsEnabled" | "computerUseEnabled" | "backgroundGoalNotificationsEnabled"
+  > & {
     developerChallengeId?: string;
   },
 ): Promise<{ ok: boolean; schema: string; settings: AdvancedSettingsState }> {

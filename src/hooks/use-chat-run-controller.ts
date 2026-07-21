@@ -29,6 +29,7 @@ import {
 } from "../lib/api";
 
 export const MAX_QUEUED_TURNS = 8;
+export const MAX_BACKGROUND_TURNS = 2;
 
 export type QueuedTurn = {
   id: string;
@@ -73,6 +74,11 @@ export type RunSingleTurnOptions = {
   onFailure?: (message: string) => void;
 };
 
+type InternalRunSingleTurnOptions = RunSingleTurnOptions & {
+  background?: boolean;
+  abortController?: AbortController;
+};
+
 export type PrepareTurnContextInput = {
   endpoint: string;
   chatId: string;
@@ -101,6 +107,7 @@ type UseChatRunControllerParams = {
   startRuntime: () => Promise<string | null>;
   refresh: (target?: string) => Promise<void>;
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
+  refreshBackgroundGoals: () => void;
   handleRuntimeSessionFailure: (message: string) => void;
   setError: (message: string) => void;
   prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
@@ -120,6 +127,7 @@ export function useChatRunController({
   startRuntime,
   refresh,
   refreshRuntimeRuns,
+  refreshBackgroundGoals,
   handleRuntimeSessionFailure,
   setError,
   prepareTurnContext,
@@ -135,6 +143,7 @@ export function useChatRunController({
   const stopRequestedRef = useRef(false);
   const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
+  const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
 
   function isRunning() {
     return sendingRef.current;
@@ -162,6 +171,24 @@ export function useChatRunController({
       items[index] = { ...item, text: `${item.text}${delta.textDelta}` };
       return { ...chat, items };
     });
+  }
+
+  function clearTurnTransientItems(chatId: string, clientTurnId: string, userItemId: string): boolean {
+    const chat = getChatById(chatId);
+    if (!chat?.items.some(
+      (item) => item.id === userItemId
+        || (item.type === "streaming" && item.clientTurnId === clientTurnId),
+    )) {
+      return false;
+    }
+    updateChat(chatId, (current) => ({
+      ...touchChat(current),
+      items: current.items.filter(
+        (item) => item.id !== userItemId
+          && !(item.type === "streaming" && item.clientTurnId === clientTurnId),
+      ),
+    }));
+    return true;
   }
 
   async function submitTurn(turn: QueuedTurn): Promise<SubmitTurnResult> {
@@ -255,19 +282,45 @@ export function useChatRunController({
     }
   }
 
-  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: RunSingleTurnOptions): Promise<boolean> {
-    const startedAt = Date.now();
+  async function runBackgroundTurn(chatId: string, turn: QueuedTurn): Promise<boolean> {
+    if (
+      !turn.goalDelivery?.deliveryId
+      || backgroundTurnAbortRefs.current.has(turn.id)
+      || backgroundTurnAbortRefs.current.size >= MAX_BACKGROUND_TURNS
+    ) {
+      return false;
+    }
     const abortController = new AbortController();
+    backgroundTurnAbortRefs.current.set(turn.id, abortController);
+    try {
+      const chat = getChatById(chatId);
+      return await runSingleTurn(chatId, turn, {
+        background: true,
+        abortController,
+        baseItems: stripTransientConversationItems(chat?.items || []),
+        sessionId: turn.sessionId || chat?.sessionId || undefined,
+      });
+    } finally {
+      backgroundTurnAbortRefs.current.delete(turn.id);
+    }
+  }
+
+  async function runSingleTurn(chatId: string, turn: QueuedTurn, options?: InternalRunSingleTurnOptions): Promise<boolean> {
+    const startedAt = Date.now();
+    const background = options?.background === true;
+    const abortController = options?.abortController || new AbortController();
     let userItemId = "";
-    activeTurnAbortRef.current = abortController;
-    setCurrentTurn({
-      clientTurnId: turn.id,
-      text: turn.text,
-      startedAt,
-      providerLabel: turn.providerLabel,
-      model: turn.model,
-      computerUseRequested: turn.computerUseRequested,
-    });
+    if (!background) {
+      activeTurnAbortRef.current = abortController;
+      setCurrentTurn({
+        clientTurnId: turn.id,
+        text: turn.text,
+        startedAt,
+        providerLabel: turn.providerLabel,
+        model: turn.model,
+        computerUseRequested: turn.computerUseRequested,
+      });
+    }
     try {
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
@@ -331,35 +384,37 @@ export function useChatRunController({
         createdAt: new Date(startedAt).toISOString(),
       };
       const message = turn.text;
-      streamingTurnChatRef.current.set(turn.id, chatId);
-      updateChat(chatId, (current) => {
-        const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
-        const storedUserItem: ConversationItem = {
-          ...userItem,
-          attachments: (userItem.attachments || []).map((attachment) => {
-            const reference = persistAttachmentReference(attachment, attachmentPayloads);
-            return {
-              ...attachment,
-              payloadHash: reference.payloadHash,
-              payloadKind: reference.payloadKind,
-            };
-          }),
-        };
-        return {
-          ...touchChat(current),
-          sessionId: chatSessionId,
-          title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
-          attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
-          items: [
-            ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
-              (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
-            ),
-            storedUserItem,
-            streamingItem,
-          ],
-        };
-      });
-      const computerUseGrant = turn.computerUseRequested
+      if (!background) {
+        streamingTurnChatRef.current.set(turn.id, chatId);
+        updateChat(chatId, (current) => {
+          const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
+          const storedUserItem: ConversationItem = {
+            ...userItem,
+            attachments: (userItem.attachments || []).map((attachment) => {
+              const reference = persistAttachmentReference(attachment, attachmentPayloads);
+              return {
+                ...attachment,
+                payloadHash: reference.payloadHash,
+                payloadKind: reference.payloadKind,
+              };
+            }),
+          };
+          return {
+            ...touchChat(current),
+            sessionId: chatSessionId,
+            title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+            attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+            items: [
+              ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
+                (item) => item.id !== userItem.id && item.id !== turn.goalDelivery?.agentItemId,
+              ),
+              storedUserItem,
+              streamingItem,
+            ],
+          };
+        });
+      }
+      const computerUseGrant = !background && turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {
             sessionId: chatSessionId || undefined,
             clientTurnId: turn.id,
@@ -376,12 +431,78 @@ export function useChatRunController({
         contextLimit: turn.contextLimit,
         clientTurnId: turn.id,
         goalDeliveryId: turn.goalDelivery?.deliveryId,
-        computerUseRequested: Boolean(turn.computerUseRequested),
+        computerUseRequested: !background && Boolean(turn.computerUseRequested),
         computerUseGrantId: computerUseGrant?.grantId,
         computerUseVisualTheme: turn.computerUseVisualTheme,
         computerUseVisualAccent: turn.computerUseVisualAccent,
       });
+      const providerUnavailable = response.backgroundGoalSkipped === true
+        && response.status === "provider_unreachable"
+        && Boolean(response.providerWarningKey);
+      const backgroundCapacityDeferred = response.backgroundGoalDeferred === true
+        && response.status === "background_capacity";
+      if (
+        (providerUnavailable || backgroundCapacityDeferred)
+        && Boolean(turn.goalDelivery?.deliveryId)
+        && response.goalDeliveryId === turn.goalDelivery?.deliveryId
+      ) {
+        const transientRemoved = clearTurnTransientItems(chatId, turn.id, userItem.id);
+        if (transientRemoved && persistChatsNow) {
+          await persistChatsNow().catch(() => undefined);
+        }
+        refreshBackgroundGoals();
+        await Promise.allSettled([
+          refresh(targetEndpoint),
+          refreshRuntimeRuns(false, targetEndpoint),
+        ]);
+        return false;
+      }
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      if (background) {
+        const responseItemId = turn.goalDelivery?.agentItemId || response.turnId || response.turn_id;
+        updateChat(chatId, (current) => {
+          const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
+          const storedUserItem: ConversationItem = {
+            ...userItem,
+            attachments: (userItem.attachments || []).map((attachment) => {
+              const reference = persistAttachmentReference(attachment, attachmentPayloads);
+              return {
+                ...attachment,
+                payloadHash: reference.payloadHash,
+                payloadKind: reference.payloadKind,
+              };
+            }),
+          };
+          return {
+            ...touchChat(current),
+            sessionId: current.sessionId || response.sessionId || response.session_id || chatSessionId,
+            title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+            attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+            items: [
+              ...current.items.filter(
+                (item) => item.id !== userItem.id
+                  && item.id !== responseItemId
+                  && !(item.type === "streaming" && item.clientTurnId === turn.id),
+              ),
+              storedUserItem,
+              {
+                id: responseItemId,
+                type: "agent",
+                response,
+                elapsedSeconds,
+                providerLabel: turn.providerLabel,
+                model: turn.model,
+                createdAt: new Date().toISOString(),
+              },
+            ],
+          };
+        });
+        await Promise.allSettled([
+          refresh(targetEndpoint),
+          refreshRuntimeRuns(false, targetEndpoint),
+        ]);
+        return true;
+      }
       let midTurnCompactionApplied = false;
       updateChat(chatId, (current) => ({
         ...applyRuntimeResponseToChat(current),
@@ -509,6 +630,18 @@ export function useChatRunController({
       }
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
+      if (background) {
+        const transientRemoved = clearTurnTransientItems(chatId, turn.id, userItemId);
+        if (transientRemoved && persistChatsNow) {
+          await persistChatsNow().catch(() => undefined);
+        }
+        refreshBackgroundGoals();
+        await Promise.allSettled([
+          refresh(endpoint),
+          refreshRuntimeRuns(false, endpoint),
+        ]);
+        return false;
+      }
       if (options?.restoreOnFailure) {
         const snapshot = options.restoreOnFailure;
         updateChat(chatId, (current) => ({
@@ -546,11 +679,13 @@ export function useChatRunController({
         );
         return items.length === current.items.length ? current : { ...current, items };
       });
-      if (activeTurnAbortRef.current === abortController) {
-        activeTurnAbortRef.current = null;
+      if (!background) {
+        if (activeTurnAbortRef.current === abortController) {
+          activeTurnAbortRef.current = null;
+        }
+        setCurrentTurn(null);
       }
       streamingTurnChatRef.current.delete(turn.id);
-      setCurrentTurn(null);
     }
   }
 
@@ -579,6 +714,7 @@ export function useChatRunController({
     isRunning,
     submitTurn,
     runTurnNow,
+    runBackgroundTurn,
     stopCurrentRun,
     applyRuntimeDelta,
   };

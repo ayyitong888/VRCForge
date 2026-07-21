@@ -20,6 +20,7 @@ export type AdvancedSettingsState = {
   developerOptionsEverEnabled: boolean;
   computerUseEnabled: boolean;
   computerUseEverEnabled: boolean;
+  backgroundGoalNotificationsEnabled: boolean;
   roslynFullAutoEverEnabled: boolean;
 };
 
@@ -453,6 +454,10 @@ export type AgentRuntimeResponse = {
   turnId: string;
   clientTurnId?: string;
   goalDeliveryId?: string;
+  backgroundGoalSkipped?: boolean;
+  backgroundGoalDeferred?: boolean;
+  status?: string;
+  providerWarningKey?: string;
   approval_id?: string;
   approvalId?: string;
   observe: Record<string, unknown>;
@@ -694,11 +699,43 @@ export type AgentGoal = {
   createdAt?: string;
   updatedAt?: string;
   wakeAt?: string;
+  eligibleAt?: string;
   wakeEveryMinutes?: number;
   lastWokenAt?: string;
   wakeCount?: number;
   revision?: number;
   blockedReason?: string;
+};
+
+export type AgentGoalUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+  cost?: number;
+  currency?: string;
+  costUnavailableReason?: string;
+  bounded?: boolean;
+};
+
+export type AgentGoalBackgroundAcknowledgement = {
+  deliveryId: string;
+  expectedRevision: number;
+};
+
+export type AgentGoalRenderedRecap = AgentGoalBackgroundAcknowledgement & {
+  recapRevision: number;
+};
+
+export type AgentGoalProviderWarning = {
+  warningKey: string;
+  provider?: string;
+  status?: string;
+  count: number;
+  revision?: number;
+  acknowledgedRevision?: number;
+  lastSeenAt?: string;
+  acknowledgedAt?: string;
 };
 
 export type AgentGoalDelivery = {
@@ -723,10 +760,52 @@ export type AgentGoalDelivery = {
   response?: AgentRuntimeResponse | null;
   error?: string;
   retryAt?: string;
+  eligibleAt?: string;
+  state?: string;
+  terminal?: boolean;
+  attempt?: number;
+  maxAttempts?: number;
+  failureClass?: string;
+  failureLabel?: string;
+  retryable?: boolean;
+  phase?: string;
+  phaseStartedAt?: string;
+  phaseDeadlineAt?: string;
+  blockedKind?: "approval" | "question" | string;
+  blockedReason?: string;
+  approvalId?: string;
+  questionId?: string;
+  questionReminderAt?: string;
+  questionReminderSentAt?: string;
+  noticeUnread?: boolean;
+  noticeAcknowledgedAt?: string;
+  recapRevision?: number;
+  recapSeenRevision?: number;
+  recapSeenAt?: string;
+  toastRevision?: number;
+  toastSentRevision?: number;
+  toastSentAt?: string;
+  usage?: AgentGoalUsage;
   createdAt?: string;
   updatedAt?: string;
   completedAt?: string;
   materializedAt?: string;
+  failedAt?: string;
+  deniedAt?: string;
+  blockedAt?: string;
+  parkedAt?: string;
+};
+
+export type AgentGoalBackgroundState = {
+  ok: boolean;
+  schema: string;
+  chatId?: string;
+  recent: AgentGoalDelivery[];
+  deliveries: AgentGoalDelivery[];
+  unread: AgentGoalDelivery[];
+  unreadByChat: Record<string, number>;
+  totalUnread: number;
+  providerWarnings?: AgentGoalProviderWarning[];
 };
 
 export type AgentProgress = {

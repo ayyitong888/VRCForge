@@ -100,6 +100,7 @@ pub(crate) struct DesktopPermissionRequest {
 pub(crate) struct DesktopAdvancedSettingsUpdateRequest {
     developer_options_enabled: bool,
     computer_use_enabled: bool,
+    background_goal_notifications_enabled: Option<bool>,
     developer_challenge_id: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
@@ -609,6 +610,7 @@ pub async fn fetch_advanced_settings(
 pub(crate) fn advanced_settings_update_body(
     developer_options_enabled: bool,
     computer_use_enabled: bool,
+    background_goal_notifications_enabled: Option<bool>,
     developer_challenge_id: Option<String>,
 ) -> serde_json::Value {
     let mut body = serde_json::Map::from_iter([
@@ -621,6 +623,12 @@ pub(crate) fn advanced_settings_update_body(
             serde_json::Value::Bool(computer_use_enabled),
         ),
     ]);
+    if let Some(enabled) = background_goal_notifications_enabled {
+        body.insert(
+            "backgroundGoalNotificationsEnabled".to_string(),
+            serde_json::Value::Bool(enabled),
+        );
+    }
     if let Some(challenge_id) = developer_challenge_id {
         body.insert(
             "developerChallengeId".to_string(),
@@ -641,6 +649,7 @@ pub async fn update_advanced_settings(
             Some(advanced_settings_update_body(
                 request.developer_options_enabled,
                 request.computer_use_enabled,
+                request.background_goal_notifications_enabled,
                 request.developer_challenge_id,
             )),
             request.timeout_ms,
@@ -1972,6 +1981,35 @@ pub async fn fetch_recoverable_agent_goal_deliveries(
 }
 
 #[tauri::command]
+pub async fn fetch_agent_goal_background_state(
+    request: DesktopAgentListRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!(
+                "/api/app/agent/goals/background{}",
+                agent_list_query(&request)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn acknowledge_agent_goal_background_state(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/goals/background/ack", request, 30_000)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn materialize_agent_goal_delivery(
     request: DesktopIdJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
@@ -1984,6 +2022,25 @@ pub async fn materialize_agent_goal_delivery(
             ),
             Some(request.body),
             request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn defer_agent_goal_delivery(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/goals/deliveries/{}/defer",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
         )
         .map(sanitize_webview_response)
     })

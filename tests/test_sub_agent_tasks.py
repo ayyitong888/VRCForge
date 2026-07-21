@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from background_goal_runtime import RuntimeLaneBudget
 from sub_agent_tasks import (
     SUB_AGENT_LOG_SCHEMA,
     SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT,
@@ -252,6 +253,58 @@ def test_sub_agent_registry_clamps_configured_concurrency_to_hard_limit(tmp_path
 
     assert registry.max_concurrent == SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT
     assert registry.list_tasks()["maxConcurrent"] == SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT
+
+
+def test_shared_runtime_lane_reserves_interactive_headroom(tmp_path):
+    release = threading.Event()
+
+    def handler(_payload: dict[str, object], _cancel_event: threading.Event) -> dict[str, object]:
+        release.wait(3)
+        return {"ok": True, "summaryText": "done"}
+
+    lanes = RuntimeLaneBudget()
+    assert lanes.acquire("background", "goal-a") is True
+    assert lanes.acquire("background", "goal-b") is True
+    assert lanes.acquire("background", "goal-c") is False
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": handler},
+        max_concurrent=5,
+        lane_budget=lanes,
+    )
+    task_ids: list[str] = []
+    try:
+        for index in range(3):
+            created = registry.create_task(
+                role="project_index_review",
+                task=f"scan {index}",
+                display_name=f"Worker {index}",
+            )
+            task_ids.append(created["task"]["id"])
+        assert lanes.snapshot()["total"] == 5
+        with pytest.raises(RuntimeError, match="Shared runtime concurrency limit"):
+            registry.create_task(
+                role="project_index_review",
+                task="blocked only at total cap",
+                display_name="Worker blocked",
+            )
+
+        assert lanes.release("goal-a") is True
+        created = registry.create_task(
+            role="project_index_review",
+            task="interactive slot after one background release",
+            display_name="Worker 4",
+        )
+        task_ids.append(created["task"]["id"])
+        assert lanes.snapshot()["total"] == 5
+    finally:
+        release.set()
+        for task_id in task_ids:
+            _wait_for_status(registry, task_id, {"completed", "failed", "cancelled"})
+        lanes.release("goal-b")
+
+    assert lanes.snapshot()["total"] == 0
 
 
 def test_completed_task_and_result_rehydrate_with_immutable_owner(tmp_path):

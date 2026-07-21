@@ -25,6 +25,7 @@ from agent_gateway import (
     SHELL_RUNNER_POWERSHELL,
     kill_process_tree,
     native_shell_argv,
+    redact_background_goal_persistence,
     resolve_powershell_executable,
 )
 from skill_packages import SkillPackageError, SkillPackageService
@@ -1435,6 +1436,7 @@ class DashboardServerTests(unittest.TestCase):
                     "developerOptionsEverEnabled": False,
                     "computerUseEnabled": False,
                     "computerUseEverEnabled": False,
+                    "backgroundGoalNotificationsEnabled": True,
                     "roslynFullAutoEverEnabled": False,
                 },
             )
@@ -2156,6 +2158,32 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(goals[0]["status"], "completed")
         self.assertEqual(goals[0]["title"], "Finish avatar QA")
 
+    def test_runtime_run_status_never_marks_explicitly_incomplete_plans_completed(self) -> None:
+        for next_step, expected in (
+            ("context_compaction_required", "blocked"),
+            ("await_user_instruction", "blocked"),
+            ("paused", "blocked"),
+            ("loop_suppressed", "failed"),
+            ("done", "completed"),
+        ):
+            with self.subTest(next_step=next_step):
+                status = AgentGateway._runtime_turn_run_status(
+                    top_plan={"nextStep": next_step},
+                    shell_payload=None,
+                    skill_payload=None,
+                    write_payload=None,
+                    approval_id="",
+                )
+                self.assertEqual(status, expected)
+        failed_before_pause = AgentGateway._runtime_turn_run_status(
+            top_plan={"nextStep": "paused"},
+            shell_payload=None,
+            skill_payload={"ok": False, "status": "failed"},
+            write_payload=None,
+            approval_id="",
+        )
+        self.assertEqual(failed_before_pause, "failed")
+
     def test_agent_goal_wake_lifecycle_and_cross_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2219,6 +2247,251 @@ class DashboardServerTests(unittest.TestCase):
             reopened_goals = {goal["goalId"]: goal for goal in reopened.list_agent_goals(limit=10)["goals"]}
             self.assertEqual(reopened_goals[one_shot["goalId"]]["wakeCount"], 1)
             self.assertEqual(reopened_goals[one_shot["goalId"]]["wakeAt"], "")
+
+    def test_timed_out_wake_worker_rearms_after_its_thread_exits(self) -> None:
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        with TestClient(dashboard_server.app) as client:
+            created = client.post(
+                "/api/app/agent/goals",
+                json={"title": "Slow wake", "chatId": "chat-slow-wake", "wakeAt": past},
+            ).json()["goal"]
+            original_wake = dashboard_server.AGENT_GATEWAY.wake_agent_goal
+
+            def slow_wake(*args, **kwargs):
+                time.sleep(0.05)
+                return original_wake(*args, **kwargs)
+
+            with (
+                patch.object(dashboard_server.AGENT_GATEWAY, "wake_agent_goal", side_effect=slow_wake),
+                patch("dashboard_server.PHASE_TIMEOUT_SECONDS", {"wake": 0.01}),
+            ):
+                response = client.post(
+                    f"/api/app/agent/goals/{created['goalId']}/wake",
+                    json={"chatId": "chat-slow-wake"},
+                )
+                self.assertEqual(response.status_code, 504)
+                time.sleep(0.15)
+
+            deliveries = dashboard_server.AGENT_GATEWAY._goal_store.project_deliveries()
+            delivery = next(
+                item for item in deliveries.values() if item.get("chatId") == "chat-slow-wake"
+            )
+            self.assertEqual(delivery["status"], "interrupted")
+            self.assertEqual(delivery["failureLabel"], "watchdog_wake_timeout")
+            self.assertFalse(delivery["consumeRetry"])
+
+    def test_claimed_goal_handoff_can_be_released_without_consuming_retry(self) -> None:
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        with TestClient(dashboard_server.app) as client:
+            goal = client.post(
+                "/api/app/agent/goals",
+                json={"title": "Deferred handoff", "chatId": "chat-handoff", "wakeAt": past},
+            ).json()["goal"]
+            claimed = client.post(
+                f"/api/app/agent/goals/{goal['goalId']}/wake",
+                json={"chatId": "chat-handoff"},
+            ).json()["delivery"]
+            released = client.post(
+                f"/api/app/agent/goals/deliveries/{claimed['deliveryId']}/defer",
+                json={"expectedRevision": claimed["revision"]},
+            )
+
+        self.assertEqual(released.status_code, 200)
+        delivery = released.json()["delivery"]
+        self.assertEqual(delivery["status"], "interrupted")
+        self.assertEqual(delivery["failureLabel"], "client_handoff_deferred")
+        self.assertFalse(delivery["consumeRetry"])
+        self.assertEqual(delivery["attempt"], 1)
+
+    def test_linked_approval_terminal_state_is_gateway_authoritative(self) -> None:
+        for outcome in ("rejected", "revision_requested", "applied", "failed"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                gateway = AgentGateway(root / "config.json", root / "audit")
+                gateway.register_write_handler(
+                    "vrcforge_test_linked_write",
+                    "Test linked write.",
+                    "high",
+                    lambda _arguments, result=outcome: (
+                        {"ok": False, "error": "bounded failure"}
+                        if result == "failed"
+                        else {"ok": True, "status": "applied"}
+                    ),
+                )
+                past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                goal = gateway.create_agent_goal(
+                    {"title": f"Linked {outcome}", "chatId": "chat-approval", "wakeAt": past}
+                )["goal"]
+                woken = gateway.wake_agent_goal(goal["goalId"])
+                delivery_id = woken["delivery"]["deliveryId"]
+                gateway.begin_agent_goal_delivery(
+                    delivery_id,
+                    {"clientTurnId": woken["delivery"]["clientTurnId"]},
+                )
+                request = gateway.create_apply_request(
+                    {
+                        "target_tool": "vrcforge_test_linked_write",
+                        "arguments": {},
+                        "never_auto_approve": True,
+                        "goalDeliveryId": delivery_id,
+                    }
+                )
+                approval_id = request["approval"]["id"]
+                gateway.block_agent_goal_delivery(
+                    delivery_id,
+                    kind="approval",
+                    reference=approval_id,
+                    response={"approvalId": approval_id},
+                )
+                if outcome == "rejected":
+                    terminal = gateway.reject(approval_id)["goalDelivery"]
+                    expected_status = "denied"
+                elif outcome == "revision_requested":
+                    terminal = gateway.request_approval_revision(
+                        approval_id,
+                        reason="change requested",
+                    )["goalDelivery"]
+                    expected_status = "denied"
+                else:
+                    gateway.approve(approval_id)
+                    with patch.object(gateway, "_create_pre_write_checkpoint", return_value=None):
+                        execution = gateway.apply_approved({"approvalId": approval_id})
+                    terminal = execution["goalDelivery"]
+                    expected_status = "completed" if outcome == "applied" else "failed"
+                self.assertEqual(terminal["delivery"]["status"], expected_status)
+                self.assertEqual(gateway.reconcile_agent_goal_watchdogs()["deliveries"], [])
+
+    def test_linked_approval_scope_error_restores_waiting_delivery_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as project_a, tempfile.TemporaryDirectory() as project_b:
+            past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+            with TestClient(dashboard_server.app) as client:
+                goal = dashboard_server.AGENT_GATEWAY.create_agent_goal(
+                    {
+                        "title": "Approval scope retry",
+                        "chatId": "chat-approval-scope",
+                        "projectRoot": project_a,
+                        "wakeAt": past,
+                    }
+                )["goal"]
+                woken = dashboard_server.AGENT_GATEWAY.wake_agent_goal(goal["goalId"])
+                delivery_id = woken["delivery"]["deliveryId"]
+                dashboard_server.AGENT_GATEWAY.begin_agent_goal_delivery(
+                    delivery_id,
+                    {"clientTurnId": woken["delivery"]["clientTurnId"]},
+                )
+                approval = dashboard_server.AGENT_GATEWAY._new_approval(
+                    "test-agent",
+                    "vrcforge_test_linked_write",
+                    {"projectRoot": project_a},
+                    "bounded test",
+                    {},
+                    "high",
+                    goal_delivery_id=delivery_id,
+                )
+                dashboard_server.AGENT_GATEWAY.block_agent_goal_delivery(
+                    delivery_id,
+                    kind="approval",
+                    reference=approval["id"],
+                    response={"approvalId": approval["id"]},
+                )
+
+                rejected = client.post(
+                    f"/api/app/agent/approvals/{approval['id']}/approve",
+                    json={"expectedProjectRoot": project_b, "globalOnly": False},
+                )
+
+            self.assertEqual(rejected.status_code, 409)
+            current = dashboard_server.AGENT_GATEWAY._goal_store.project_deliveries()[delivery_id]
+            self.assertEqual(current["status"], "blocked")
+            self.assertFalse(current["approvalPendingResolution"])
+            self.assertEqual(dashboard_server.AGENT_GATEWAY._approvals[approval["id"]]["status"], "pending")
+            self.assertEqual(dashboard_server.RUNTIME_LANE_BUDGET.snapshot()["total"], 0)
+
+    def test_linked_approval_revision_broadcasts_terminal_background_state(self) -> None:
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        goal = dashboard_server.AGENT_GATEWAY.create_agent_goal(
+            {"title": "Approval revision", "chatId": "chat-approval-revision", "wakeAt": past}
+        )["goal"]
+        woken = dashboard_server.AGENT_GATEWAY.wake_agent_goal(goal["goalId"])
+        delivery_id = woken["delivery"]["deliveryId"]
+        dashboard_server.AGENT_GATEWAY.begin_agent_goal_delivery(
+            delivery_id,
+            {"clientTurnId": woken["delivery"]["clientTurnId"]},
+        )
+        approval = dashboard_server.AGENT_GATEWAY._new_approval(
+            "test-agent",
+            "vrcforge_test_linked_write",
+            {},
+            "bounded test",
+            {},
+            "high",
+            goal_delivery_id=delivery_id,
+        )
+        dashboard_server.AGENT_GATEWAY.block_agent_goal_delivery(
+            delivery_id,
+            kind="approval",
+            reference=approval["id"],
+            response={"approvalId": approval["id"]},
+        )
+
+        broadcast = AsyncMock()
+        with patch("dashboard_server.broadcast_background_goal_state", new=broadcast):
+            payload = asyncio.run(
+                dashboard_server.app_agent_request_approval_revision(
+                    approval["id"],
+                    dashboard_server.AgentApprovalRevisionRequest(reason="change requested"),
+                )
+            )
+
+        self.assertEqual(payload["approval"]["status"], "revision_requested")
+        self.assertEqual(payload["goalDelivery"]["delivery"]["status"], "denied")
+        self.assertEqual(
+            dashboard_server.AGENT_GATEWAY._goal_store.project_deliveries()[delivery_id]["status"],
+            "denied",
+        )
+        broadcast.assert_awaited_once_with({})
+
+    def test_restart_closes_unrecoverable_linked_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+            goal = gateway.create_agent_goal(
+                {
+                    "title": "Restart approval",
+                    "chatId": "chat-restart-approval",
+                    "wakeAt": past,
+                    "wakeEveryMinutes": 5,
+                }
+            )["goal"]
+            woken = gateway.wake_agent_goal(goal["goalId"])
+            delivery_id = woken["delivery"]["deliveryId"]
+            gateway.begin_agent_goal_delivery(
+                delivery_id,
+                {"clientTurnId": woken["delivery"]["clientTurnId"]},
+            )
+            approval = gateway._new_approval(
+                "test-agent",
+                "vrcforge_test_linked_write",
+                {},
+                "bounded test",
+                {},
+                "high",
+                goal_delivery_id=delivery_id,
+            )
+            gateway.block_agent_goal_delivery(
+                delivery_id,
+                kind="approval",
+                reference=approval["id"],
+                response={"approvalId": approval["id"]},
+            )
+
+            reopened = AgentGateway(root / "config.json", root / "audit")
+            recovery = reopened.reconcile_agent_goal_watchdogs()
+
+            self.assertEqual(recovery["deliveries"][-1]["status"], "failed")
+            self.assertEqual(recovery["deliveries"][-1]["failureLabel"], "approval_recovery_required")
+            self.assertEqual(reopened._project_agent_goals()[goal["goalId"]]["wakeCount"], 1)
 
     def test_agent_goal_projection_keeps_creation_fields_beyond_legacy_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2425,6 +2698,79 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(goal["wakeAt"], "")
         self.assertEqual(goal["wakeCount"], 1)
 
+    def test_background_goal_pending_approval_is_denied_not_green_and_acknowledged(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                (workspace_path / directory).mkdir()
+            target = workspace_path / "Assets" / "background-goal.txt"
+            past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+            with TestClient(dashboard_server.app) as client:
+                created = client.post(
+                    "/api/app/agent/goals",
+                    json={"title": "Guarded write", "chatId": "chat-background-denied", "wakeAt": past},
+                )
+                goal_id = created.json()["goal"]["goalId"]
+                woken = client.post(
+                    f"/api/app/agent/goals/{goal_id}/wake",
+                    json={"chatId": "chat-background-denied"},
+                )
+                delivery = woken.json()["delivery"]
+                plan = {
+                    "summary": "Request the guarded write.",
+                    "reply": "This write requires approval.",
+                    "planner": "test",
+                    "nextStep": "done",
+                }
+                with patch.object(dashboard_server.AGENT_GATEWAY, "_plan_agent_turn", return_value=plan):
+                    runtime = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": delivery["resumePrompt"],
+                            "clientTurnId": delivery["clientTurnId"],
+                            "goalDeliveryId": delivery["deliveryId"],
+                            "shell_command": "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8",
+                            "workspace_root": workspace,
+                            "cwd": workspace,
+                        },
+                    )
+
+                self.assertEqual(runtime.status_code, 200)
+                approval_id = runtime.json()["shell"]["approval_id"]
+                before_reject = client.get("/api/app/agent/goals/background").json()
+                blocked = next(item for item in before_reject["recent"] if item["deliveryId"] == delivery["deliveryId"])
+                self.assertEqual(blocked["status"], "blocked")
+                self.assertEqual(blocked["blockedKind"], "approval")
+                self.assertEqual(blocked["approvalId"], approval_id)
+                self.assertNotEqual(blocked["status"], "completed")
+                run_sidecar = (
+                    dashboard_server.AGENT_GATEWAY.audit_dir
+                    / "agent-goal-runs"
+                    / f"{delivery['deliveryId']}.json"
+                ).read_text(encoding="utf-8")
+                self.assertNotIn(workspace_path.name, run_sidecar)
+
+                rejected = client.post(f"/api/app/agent/approvals/{approval_id}/reject")
+                denied_state = client.get("/api/app/agent/goals/background").json()
+                acknowledged = client.post(
+                    "/api/app/agent/goals/background/ack",
+                    json={"chatId": "chat-background-denied", "deliveryIds": [delivery["deliveryId"]]},
+                )
+                projected = client.get("/api/app/agent/goals").json()["goals"]
+
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.json()["goalDelivery"]["delivery"]["status"], "denied")
+        denied = next(item for item in denied_state["recent"] if item["deliveryId"] == delivery["deliveryId"])
+        self.assertEqual(denied["status"], "denied")
+        self.assertTrue(denied["noticeUnread"])
+        self.assertEqual(denied_state["unreadByChat"]["chat-background-denied"], 1)
+        self.assertEqual(acknowledged.status_code, 200)
+        self.assertEqual(acknowledged.json()["totalUnread"], 0)
+        goal = next(item for item in projected if item["goalId"] == goal_id)
+        self.assertEqual(goal["wakeAt"], "")
+        self.assertEqual(goal["wakeCount"], 1)
+        self.assertFalse(target.exists())
+
     def test_sub_agent_routes_persist_parent_handoff_and_merge_revision(self) -> None:
         original_registry = dashboard_server.SUB_AGENT_REGISTRY
         with tempfile.TemporaryDirectory() as tmp:
@@ -2560,6 +2906,55 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(answered.status_code, 200)
         self.assertEqual(answered.json()["question"]["selectedOptionId"], "actual")
         self.assertEqual(after_answer.json()["count"], 0)
+
+    def test_answered_goal_question_recovers_after_interrupted_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+            goal = gateway.create_agent_goal(
+                {"title": "Resume after answer", "chatId": "chat-question", "wakeAt": past}
+            )["goal"]
+            woken = gateway.wake_agent_goal(goal["goalId"])
+            delivery_id = woken["delivery"]["deliveryId"]
+            gateway.begin_agent_goal_delivery(
+                delivery_id,
+                {"clientTurnId": woken["delivery"]["clientTurnId"]},
+            )
+            question = gateway.create_agent_question(
+                {
+                    "question": "Which bounded option should continue?",
+                    "options": ["First", "Second"],
+                    "goalDeliveryId": delivery_id,
+                }
+            )["question"]
+            gateway.block_agent_goal_delivery(
+                delivery_id,
+                kind="question",
+                reference=question["questionId"],
+                response={"questionId": question["questionId"]},
+            )
+            marker = "sk-" + "1145141919810"
+            local_path = "C:\\Users\\PrivateName\\secret.txt"
+            with patch.object(gateway, "resolve_agent_goal_question", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    gateway.answer_agent_question(
+                        question["questionId"],
+                        {"answer": f"Use {marker} from {local_path}"},
+                    )
+
+            reopened = AgentGateway(root / "config.json", root / "audit")
+            resumed = reopened.answer_agent_question(question["questionId"], {})
+            self.assertTrue(resumed["idempotent"])
+            self.assertEqual(resumed["goalDelivery"]["delivery"]["status"], "interrupted")
+            durable_text = (root / "audit").read_text(encoding="utf-8") if (root / "audit").is_file() else ""
+            durable_text += "\n".join(
+                path.read_text(encoding="utf-8", errors="replace")
+                for path in (root / "audit").rglob("*")
+                if path.is_file()
+            )
+            self.assertNotIn(marker, durable_text)
+            self.assertNotIn("PrivateName", durable_text)
 
     def test_agent_questions_require_at_least_two_options(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -4775,6 +5170,156 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
         self.assertEqual(payload["plan"]["reply"], "Request cancelled.")
+
+    def test_background_runtime_propagates_provider_failure_while_interactive_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.llm_plan_fn = Mock(side_effect=ConnectionError("provider unavailable"))
+
+            interactive = gateway.runtime_message({"message": "hello"})
+            self.assertEqual(interactive["plan"]["planner"], "deterministic-local")
+
+            with self.assertRaises(ConnectionError):
+                gateway.runtime_message(
+                    {
+                        "message": "resume the background goal",
+                        "goalDeliveryId": "goal-delivery-provider-failure",
+                        "_backgroundGoalRun": True,
+                    }
+                )
+
+    def test_background_provider_probe_treats_http_error_as_reachable_but_connection_failure_as_offline(self) -> None:
+        unavailable = dashboard_server.urllib.error.HTTPError(
+            "http://127.0.0.1:11434/api/tags",
+            503,
+            "temporarily unavailable",
+            hdrs=None,
+            fp=None,
+        )
+        with patch("dashboard_server.urllib.request.urlopen", side_effect=unavailable):
+            self.assertTrue(
+                dashboard_server.probe_background_goal_provider(
+                    "local",
+                    "http://127.0.0.1:11434",
+                )
+            )
+        with patch("dashboard_server.urllib.request.urlopen", side_effect=ConnectionError("offline")):
+            self.assertFalse(
+                dashboard_server.probe_background_goal_provider(
+                    "local",
+                    "http://127.0.0.1:11434",
+                )
+            )
+
+    def test_background_goal_persistence_redacts_standalone_credentials_and_paths(self) -> None:
+        fake_credential = "sk-" + "a" * 16
+        private_path = "C:\\Users\\ProbeUser\\private\\result.txt"
+        payload = redact_background_goal_persistence(
+            {
+                "detail": f"provider returned {fake_credential} at {private_path}",
+                "cwd": "private-workspace-name",
+                "api_key": fake_credential,
+            }
+        )
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn(fake_credential, serialized)
+        self.assertNotIn("ProbeUser", serialized)
+        self.assertNotIn("private-workspace-name", serialized)
+        self.assertIn("<redacted>", serialized)
+        self.assertIn("<path redacted>", serialized)
+
+    def test_runtime_loop_suppresses_only_three_identical_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def fail_tool(_params: dict) -> dict:
+                raise RuntimeError("bounded failure")
+
+            gateway.register_tool("vrcforge_test_bounded_failure", "Test failure.", "read/debug", fail_tool)
+            repeated_plan = {
+                "summary": "retry the failed read",
+                "reply": "retrying",
+                "planner": "test",
+                "nextStep": "call_skill",
+                "skillNeeded": True,
+                "skillTool": "vrcforge_test_bounded_failure",
+                "skillParams": {"value": 1},
+                "continueLoop": True,
+            }
+
+            with patch.object(gateway, "_plan_agent_turn", return_value=repeated_plan):
+                payload = gateway.runtime_message({"message": "exercise bounded failure"})
+
+        self.assertEqual(len(payload["steps"]), 3)
+        self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
+        self.assertEqual(payload["plan"]["loopSuppression"]["consecutive"], 3)
+        self.assertEqual(payload["plan"]["loopSuppression"]["failureClass"], "tool_error")
+        self.assertNotIn("value", payload["plan"]["loopSuppression"])
+
+    def test_runtime_loop_does_not_suppress_distinct_failed_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def fail_tool(_params: dict) -> dict:
+                raise RuntimeError("bounded failure")
+
+            gateway.register_tool("vrcforge_test_distinct_failure", "Test failure.", "read/debug", fail_tool)
+            plans = [
+                {
+                    "summary": "try a distinct input",
+                    "reply": "retrying",
+                    "planner": "test",
+                    "nextStep": "call_skill",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_test_distinct_failure",
+                    "skillParams": {"value": value},
+                    "continueLoop": True,
+                }
+                for value in (1, 2, 3)
+            ]
+            plans.append(
+                {
+                    "summary": "stopped honestly",
+                    "reply": "The attempted inputs failed.",
+                    "planner": "test",
+                    "nextStep": "done",
+                }
+            )
+
+            with patch.object(gateway, "_plan_agent_turn", side_effect=plans):
+                payload = gateway.runtime_message({"message": "exercise distinct failures"})
+
+        self.assertEqual(len(payload["steps"]), 3)
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertNotIn("loopSuppression", payload["plan"])
+
+    def test_agent_question_keeps_goal_delivery_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            created = gateway.create_agent_question(
+                {
+                    "question": "Which avatar should this goal use?",
+                    "options": ["First avatar", "Second avatar"],
+                    "goalDeliveryId": "goal-delivery-question-link",
+                }
+            )
+
+        self.assertEqual(created["question"]["goalDeliveryId"], "goal-delivery-question-link")
+        with TestClient(dashboard_server.app) as client:
+            response = client.post(
+                "/api/app/agent/questions",
+                json={
+                    "question": "Which avatar should this background goal use?",
+                    "options": ["First avatar", "Second avatar"],
+                    "goalDeliveryId": "goal-delivery-question-api-link",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["question"]["goalDeliveryId"], "goal-delivery-question-api-link")
 
     def test_agent_runtime_queue_records_request(self) -> None:
         with TestClient(dashboard_server.app) as client:

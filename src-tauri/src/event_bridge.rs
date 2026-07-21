@@ -176,6 +176,7 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
         "advancedSettings"
             | "agentApprovals"
             | "agentDesktopActions"
+            | "agentGoalBackground"
             | "agentGoals"
             | "agentMemory"
             | "agentProgress"
@@ -191,4 +192,22 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
             | "subAgentTasks"
             | "unity_status"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{desktop_backend_event_allowed, sanitize_backend_event};
+
+    #[test]
+    fn background_goal_signal_is_allowed_without_forwarding_payload_details() {
+        assert!(desktop_backend_event_allowed("agentGoalBackground"));
+        let sanitized = sanitize_backend_event(serde_json::json!({
+            "type": "agentGoalBackground",
+            "timestamp": "2026-07-21T00:00:00Z",
+            "payload": {"error": "private", "response": "private"}
+        }))
+        .expect("background goal event should be forwarded");
+        assert_eq!(sanitized["type"], "agentGoalBackground");
+        assert!(sanitized.get("payload").is_none());
+    }
 }

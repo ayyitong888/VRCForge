@@ -145,6 +145,7 @@ export function SidebarChat({
   title,
   meta,
   active = false,
+  unreadCount = 0,
   indent = false,
   pinned = false,
   renaming = false,
@@ -159,6 +160,7 @@ export function SidebarChat({
   title: string;
   meta?: string;
   active?: boolean;
+  unreadCount?: number;
   indent?: boolean;
   pinned?: boolean;
   renaming?: boolean;
@@ -205,6 +207,15 @@ export function SidebarChat({
       <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left">
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>
+        {unreadCount > 0 ? (
+          <span
+            className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground"
+            data-background-goal-unread={unreadCount}
+            aria-label={t("goal.backgroundUnread", { count: unreadCount })}
+          >
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        ) : null}
         {meta ? <span className="shrink-0 text-xs text-muted-foreground/75 group-hover:hidden">{meta}</span> : null}
       </button>
       {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60 group-hover:hidden" /> : null}

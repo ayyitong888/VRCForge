@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 export type ChatHistoryEntry = {
   role: "user" | "agent";
@@ -430,6 +430,61 @@ export async function materializeAgentGoalDelivery(
       body: JSON.stringify(payload),
     },
   );
+}
+
+export async function deferAgentGoalDelivery(
+  endpoint: string,
+  deliveryId: string,
+  payload: { expectedRevision?: number } = {},
+): Promise<{ ok: boolean; schema?: string; delivery: AgentGoalDelivery }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("defer_agent_goal_delivery", {
+      request: { id: deliveryId, body: payload, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(
+    `${endpoint}/api/app/agent/goals/deliveries/${encodeURIComponent(deliveryId)}/defer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 30000,
+    },
+  );
+}
+
+export async function fetchAgentGoalBackgroundState(
+  endpoint: string,
+  chatId = "",
+): Promise<AgentGoalBackgroundState> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("fetch_agent_goal_background_state", {
+      request: { chatId, timeoutMs: 30000 },
+    });
+  }
+  const query = chatId ? `?chatId=${encodeURIComponent(chatId)}` : "";
+  return requestJson(`${endpoint}/api/app/agent/goals/background${query}`, { timeoutMs: 30000 });
+}
+
+export async function acknowledgeAgentGoalBackgroundState(
+  endpoint: string,
+  payload: {
+    chatId: string;
+    kind: "recap" | "toast" | "provider";
+    deliveries: AgentGoalBackgroundAcknowledgement[];
+  },
+): Promise<AgentGoalBackgroundState> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("acknowledge_agent_goal_background_state", {
+      request: { body: payload, timeoutMs: 30000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/agent/goals/background/ack`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 30000,
+  });
 }
 
 export async function fetchAgentProgress(

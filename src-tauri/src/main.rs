@@ -66,6 +66,7 @@ fn main() {
     #[cfg(windows)]
     configure_webview2_accessibility();
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(BackendState::new())
         .setup(|app| {
             let open_chat_item =
@@ -109,6 +110,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             acknowledge_sub_agent_handoff,
+            acknowledge_agent_goal_background_state,
             abort_chat_attachment_upload,
             append_chat_attachment_upload,
             apply_adjustment_checkpoint,
@@ -134,6 +136,7 @@ fn main() {
             delete_adjustment_checkpoint,
             delete_agent_memory,
             delete_agent_progress,
+            defer_agent_goal_delivery,
             delete_skill,
             desktop_runtime_snapshot,
             export_interrupted_apply_incident_bundle,
@@ -142,6 +145,7 @@ fn main() {
             fetch_agent_approvals,
             fetch_agent_desktop_actions,
             fetch_agent_goals,
+            fetch_agent_goal_background_state,
             fetch_recoverable_agent_goal_deliveries,
             fetch_agent_memory,
             fetch_due_agent_goals,
@@ -765,15 +769,21 @@ mod tests {
     #[test]
     fn advanced_settings_body_only_adds_challenge_when_present() {
         assert_eq!(
-            advanced_settings_update_body(true, false, Some("challenge-123".to_string())),
+            advanced_settings_update_body(
+                true,
+                false,
+                Some(true),
+                Some("challenge-123".to_string())
+            ),
             serde_json::json!({
                 "developerOptionsEnabled": true,
                 "computerUseEnabled": false,
+                "backgroundGoalNotificationsEnabled": true,
                 "developerChallengeId": "challenge-123",
             }),
         );
         assert_eq!(
-            advanced_settings_update_body(false, false, None),
+            advanced_settings_update_body(false, false, None, None),
             serde_json::json!({
                 "developerOptionsEnabled": false,
                 "computerUseEnabled": false,

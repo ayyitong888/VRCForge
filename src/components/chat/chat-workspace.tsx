@@ -1,7 +1,7 @@
 import { AlertTriangle, Loader2, MonitorUp, X } from "lucide-react";
 import { useMemo, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
+import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -14,6 +14,7 @@ import type {
 } from "../../lib/chat-types";
 import { AttachmentStrip, Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
+import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard, UserImageAttachments } from "./conversation-card";
 
 export type QueuedChatTurn = {
@@ -51,6 +52,11 @@ export function ChatWorkspace({
   conversation,
   queued,
   agentQuestions,
+  backgroundGoalDeliveries,
+  backgroundGoalProviderWarnings,
+  onBackgroundGoalCatchUpRendered,
+  onBackgroundGoalProviderWarningsRendered,
+  onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
   conversationEndRef,
   onConversationMouseUp,
@@ -98,6 +104,11 @@ export function ChatWorkspace({
   conversation: ConversationItem[];
   queued: QueuedChatTurn[];
   agentQuestions: AgentQuestion[];
+  backgroundGoalDeliveries: AgentGoalDelivery[];
+  backgroundGoalProviderWarnings: AgentGoalProviderWarning[];
+  onBackgroundGoalCatchUpRendered: (recaps: AgentGoalRenderedRecap[]) => void;
+  onBackgroundGoalProviderWarningsRendered: (warnings: AgentGoalBackgroundAcknowledgement[]) => void;
+  onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
@@ -163,6 +174,15 @@ export function ChatWorkspace({
               <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          <div className="mb-3">
+            <BackgroundGoalCatchUpCard
+              deliveries={backgroundGoalDeliveries}
+              providerWarnings={backgroundGoalProviderWarnings}
+              onRendered={onBackgroundGoalCatchUpRendered}
+              onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
+              onDismiss={onBackgroundGoalCatchUpDismiss}
+            />
+          </div>
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {composer(false)}
         </div>
@@ -178,6 +198,13 @@ export function ChatWorkspace({
         onScroll={onConversationScroll}
       >
         <div className="mx-auto max-w-3xl space-y-7">
+          <BackgroundGoalCatchUpCard
+            deliveries={backgroundGoalDeliveries}
+            providerWarnings={backgroundGoalProviderWarnings}
+            onRendered={onBackgroundGoalCatchUpRendered}
+            onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
+            onDismiss={onBackgroundGoalCatchUpDismiss}
+          />
           {conversation.map((item) => {
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             return (

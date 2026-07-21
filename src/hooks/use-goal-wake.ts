@@ -1,21 +1,17 @@
 import { useEffect, useRef } from "react";
+import type { AgentGoal, AgentGoalDelivery } from "../lib/api";
 import {
-  AgentGoal,
-  AgentGoalDelivery,
+  deferAgentGoalDelivery,
   fetchDueAgentGoals,
   fetchRecoverableAgentGoalDeliveries,
   materializeAgentGoalDelivery,
   wakeAgentGoal,
 } from "../lib/api";
 
-/**
- * Goal 唤醒轮询：网关负责"哪些 goal 到点了"的持久判定，
- * 这个 hook 只负责在运行时在线时定期询问、消费一次唤醒，
- * 然后把 resumePrompt 交回 App 走既有的可见运行队列。
- * 每个周期最多唤醒一个 goal，避免重启后积压的计划一次性打爆运行队列。
- */
-const GOAL_WAKE_POLL_INTERVAL_MS = 60_000;
-const GOAL_WAKE_INITIAL_DELAY_MS = 5_000;
+const GOAL_WAKE_POLL_INTERVAL_MS = 5_000;
+const GOAL_WAKE_INITIAL_DELAY_MS = 1_000;
+const GOAL_WAKE_MAX_PARALLEL = 2;
+const GOAL_WAKE_FETCH_LIMIT = 12;
 
 function parseGoalWakeMinutes(raw: string, unit: string): number {
   const magnitude = Number(raw);
@@ -26,12 +22,6 @@ function parseGoalWakeMinutes(raw: string, unit: string): number {
   return magnitude * multiplier;
 }
 
-/**
- * 解析 /goal 标题尾部的唤醒指令：
- * - "… +30m" / "… +2h"         → 一次性 wakeAt（自现在起偏移）
- * - "… every 30m" / "every 2h" → 周期 wakeEveryMinutes
- * 未命中时原样返回标题，不带调度字段；间隔合法性由网关兜底校验。
- */
 export function parseGoalWakeDirective(raw: string): {
   title: string;
   wakeAt?: string;
@@ -47,8 +37,6 @@ export function parseGoalWakeDirective(raw: string): {
     const minutes = parseGoalWakeMinutes(oneShot[2], oneShot[3]);
     const wakeTimestamp = Date.now() + minutes * 60_000;
     if (!Number.isFinite(wakeTimestamp) || Math.abs(wakeTimestamp) > 8.64e15) {
-      // Preserve directive recognition and force a gateway 400 instead of
-      // silently storing an invalid/overflowing suffix as part of the title.
       return { title: oneShot[1].trim(), wakeAt: "invalid-goal-wake-interval" };
     }
     return {
@@ -63,24 +51,48 @@ type UseGoalWakeParams = {
   endpoint: string;
   runtimeConnected: boolean;
   chatAvailable: boolean;
-  sending: boolean;
   onGoalDelivery: (
     goal: AgentGoal | null,
     delivery: AgentGoalDelivery,
   ) => "persisted" | "retry" | Promise<"persisted" | "retry">;
 };
 
+function eligibleTimestamp(item: AgentGoal | AgentGoalDelivery): number {
+  const candidates = [
+    item.eligibleAt,
+    "retryAt" in item ? item.retryAt : undefined,
+    "scheduledFor" in item ? item.scheduledFor : undefined,
+    "wakeAt" in item ? item.wakeAt : undefined,
+    item.createdAt,
+  ];
+  for (const value of candidates) {
+    const timestamp = Date.parse(String(value || ""));
+    if (Number.isFinite(timestamp)) {
+      return timestamp;
+    }
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function compareEligible(left: AgentGoal | AgentGoalDelivery, right: AgentGoal | AgentGoalDelivery): number {
+  const byTime = eligibleTimestamp(left) - eligibleTimestamp(right);
+  if (byTime !== 0) {
+    return byTime;
+  }
+  const leftId = "deliveryId" in left ? left.deliveryId : left.goalId;
+  const rightId = "deliveryId" in right ? right.deliveryId : right.goalId;
+  return String(leftId || "").localeCompare(String(rightId || ""));
+}
+
 export function useGoalWake({
   endpoint,
   runtimeConnected,
   chatAvailable,
-  sending,
   onGoalDelivery,
 }: UseGoalWakeParams) {
-  const busyRef = useRef(false);
-  const sendingRef = useRef(sending);
+  const schedulingRef = useRef(false);
+  const activeDeliveryIdsRef = useRef(new Set<string>());
   const onGoalDeliveryRef = useRef(onGoalDelivery);
-  sendingRef.current = sending;
   onGoalDeliveryRef.current = onGoalDelivery;
 
   useEffect(() => {
@@ -90,8 +102,18 @@ export function useGoalWake({
     let cancelled = false;
 
     async function persistAndAcknowledge(goal: AgentGoal | null, delivery: AgentGoalDelivery) {
-      const result = await onGoalDeliveryRef.current(goal, delivery);
+      let result: "persisted" | "retry" = "retry";
+      try {
+        result = await onGoalDeliveryRef.current(goal, delivery);
+      } catch {
+        result = "retry";
+      }
       if (result !== "persisted" || cancelled) {
+        if (result === "retry") {
+          await deferAgentGoalDelivery(endpoint, delivery.deliveryId, {
+            expectedRevision: delivery.revision,
+          });
+        }
         return false;
       }
       await materializeAgentGoalDelivery(endpoint, delivery.deliveryId, {
@@ -100,48 +122,78 @@ export function useGoalWake({
       return true;
     }
 
+    function launchDelivery(goal: AgentGoal | null, delivery: AgentGoalDelivery): boolean {
+      const deliveryId = String(delivery.deliveryId || "").trim();
+      if (
+        !deliveryId
+        || activeDeliveryIdsRef.current.has(deliveryId)
+        || activeDeliveryIdsRef.current.size >= GOAL_WAKE_MAX_PARALLEL
+      ) {
+        return false;
+      }
+      activeDeliveryIdsRef.current.add(deliveryId);
+      void (async () => {
+        try {
+          await persistAndAcknowledge(goal, delivery);
+        } catch {
+          // Durable eligibility and delivery state are retried by a later tick.
+        } finally {
+          activeDeliveryIdsRef.current.delete(deliveryId);
+        }
+      })();
+      return true;
+    }
+
     async function tick() {
-      if (cancelled || busyRef.current || sendingRef.current) {
+      if (cancelled || schedulingRef.current) {
         return;
       }
-      busyRef.current = true;
+      let availableSlots = GOAL_WAKE_MAX_PARALLEL - activeDeliveryIdsRef.current.size;
+      if (availableSlots <= 0) {
+        return;
+      }
+      schedulingRef.current = true;
       try {
-        const recoverable = await fetchRecoverableAgentGoalDeliveries(endpoint, { limit: 1 });
-        const completed = recoverable.deliveries?.[0];
-        if (completed?.deliveryId) {
-          await persistAndAcknowledge(null, completed);
-          return;
-        }
-        if (!chatAvailable) {
-          return;
-        }
-        const due = await fetchDueAgentGoals(endpoint, { limit: 3 });
-        const goal = due.goals?.[0];
-        if (!goal?.goalId || cancelled || sendingRef.current) {
-          return;
-        }
-        const woken = await wakeAgentGoal(endpoint, goal.goalId, {
-          sessionId: goal.sessionId || undefined,
-          chatId: goal.chatId || undefined,
-          projectRoot: goal.projectRoot || undefined,
+        const recoverable = await fetchRecoverableAgentGoalDeliveries(endpoint, {
+          limit: GOAL_WAKE_FETCH_LIMIT,
         });
-        if (!woken.delivery?.deliveryId) {
+        for (const completed of [...(recoverable.deliveries || [])].sort(compareEligible)) {
+          if (availableSlots <= 0) {
+            break;
+          }
+          if (launchDelivery(null, completed)) {
+            availableSlots -= 1;
+          }
+        }
+        if (!chatAvailable || availableSlots <= 0) {
           return;
         }
-        await persistAndAcknowledge(woken.goal || goal, woken.delivery);
+        const due = await fetchDueAgentGoals(endpoint, { limit: GOAL_WAKE_FETCH_LIMIT });
+        for (const goal of [...(due.goals || [])].sort(compareEligible)) {
+          if (availableSlots <= 0 || cancelled) {
+            break;
+          }
+          if (!goal?.goalId) {
+            continue;
+          }
+          const woken = await wakeAgentGoal(endpoint, goal.goalId, {
+            sessionId: goal.sessionId || undefined,
+            chatId: goal.chatId || undefined,
+            projectRoot: goal.projectRoot || undefined,
+          });
+          if (woken.delivery?.deliveryId && launchDelivery(woken.goal || goal, woken.delivery)) {
+            availableSlots -= 1;
+          }
+        }
       } catch {
-        // 静默：网关不可达或并发唤醒冲突（409）都留给下一个周期重试。
+        // The next fine-grained tick retries transient gateway or claim conflicts.
       } finally {
-        busyRef.current = false;
+        schedulingRef.current = false;
       }
     }
 
-    const initialTimer = window.setTimeout(() => {
-      void tick();
-    }, GOAL_WAKE_INITIAL_DELAY_MS);
-    const timer = window.setInterval(() => {
-      void tick();
-    }, GOAL_WAKE_POLL_INTERVAL_MS);
+    const initialTimer = window.setTimeout(() => void tick(), GOAL_WAKE_INITIAL_DELAY_MS);
+    const timer = window.setInterval(() => void tick(), GOAL_WAKE_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearTimeout(initialTimer);

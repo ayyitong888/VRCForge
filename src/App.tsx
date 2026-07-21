@@ -59,7 +59,8 @@ import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-cont
 import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
-import { parseGoalWakeDirective, useGoalWake } from "./hooks/use-goal-wake";
+import { useBackgroundGoalRuns } from "./hooks/use-background-goal-runs";
+import { parseGoalWakeDirective } from "./hooks/use-goal-wake";
 import { useProjectManagement } from "./hooks/use-project-management";
 import { useOptimizationWorkspaceController } from "./hooks/use-optimization-workspace-controller";
 import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
@@ -224,6 +225,8 @@ export default function App() {
   const [developerOptionsEverEnabled, setDeveloperOptionsEverEnabled] = useState(false);
   const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [computerUseEverEnabled, setComputerUseEverEnabled] = useState(false);
+  const [backgroundGoalNotificationsEnabled, setBackgroundGoalNotificationsEnabled] = useState(true);
+  const [backgroundGoalRefreshSignal, setBackgroundGoalRefreshSignal] = useState(0);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
     try {
@@ -725,6 +728,7 @@ export default function App() {
     isRunning: isChatRunActive,
     submitTurn,
     runTurnNow,
+    runBackgroundTurn,
     stopCurrentRun,
     applyRuntimeDelta,
   } = useChatRunController({
@@ -740,6 +744,7 @@ export default function App() {
     startRuntime,
     refresh,
     refreshRuntimeRuns: (includeEvents, target) => refreshRuntimeRunsRef.current(includeEvents, target),
+    refreshBackgroundGoals: () => setBackgroundGoalRefreshSignal((current) => current + 1),
     handleRuntimeSessionFailure,
     setError,
     prepareTurnContext,
@@ -792,14 +797,25 @@ export default function App() {
     setError,
   });
   refreshRuntimeRunsRef.current = refreshRuntimeRuns;
-  useGoalWake({
+  const {
+    state: backgroundGoalState,
+    onCatchUpRendered: onBackgroundGoalCatchUpRendered,
+    onProviderWarningsRendered: onBackgroundGoalProviderWarningsRendered,
+    dismissCatchUp: dismissBackgroundGoalCatchUp,
+  } = useBackgroundGoalRuns({
     endpoint,
     runtimeConnected,
     chatAvailable,
-    sending,
+    ownerChatVisible:
+      activeView === "chat"
+      && Boolean(activeChatId)
+      && (!showOnboarding || onboardingMinimized),
+    activeChatId,
+    refreshSignal: backgroundGoalRefreshSignal,
+    notificationsEnabled: backgroundGoalNotificationsEnabled,
     onGoalDelivery: async (goal, delivery) => {
       const targetChat = chats.find((chat) => chat.id === delivery.chatId);
-      if (!targetChat || chatRunSending || compacting) {
+      if (!targetChat || compacting) {
         return "retry";
       }
       // 唤醒后的续跑走原聊天的可见运行队列，不能误投到当前打开的聊天。
@@ -859,8 +875,8 @@ export default function App() {
           agentItemId: delivery.agentItemId,
         },
       };
-      const result = await submitTurn(turn);
-      if (result === "queue_full" || result === "failed") {
+      const succeeded = await runBackgroundTurn(targetChat.id, turn);
+      if (!succeeded) {
         return "retry";
       }
       try {
@@ -1250,6 +1266,7 @@ export default function App() {
     setDeveloperOptionsEverEnabled(settings.developerOptionsEverEnabled);
     setComputerUseEnabled(settings.computerUseEnabled);
     setComputerUseEverEnabled(settings.computerUseEverEnabled);
+    setBackgroundGoalNotificationsEnabled(settings.backgroundGoalNotificationsEnabled !== false);
   }, [bootstrap?.advancedSettings]);
 
   useEffect(() => {
@@ -1329,6 +1346,7 @@ export default function App() {
     const runtimeEvents = new Set([
       "agentApprovals",
       "agentDesktopActions",
+      "agentGoalBackground",
       "agentGoals",
       "agentMemory",
       "agentProgress",
@@ -1387,6 +1405,9 @@ export default function App() {
       }
       if (runtimeEvents.has(eventType)) {
         scheduleRuntimeRefresh();
+      }
+      if (eventType === "agentGoalBackground") {
+        setBackgroundGoalRefreshSignal((current) => current + 1);
       }
       if (eventType === "subAgentTasks") {
         scheduleSubAgentRefresh();
@@ -1765,12 +1786,19 @@ export default function App() {
   }
 
   async function saveAdvancedSettings(
-    next: Partial<Pick<AdvancedSettingsState, "developerOptionsEnabled" | "computerUseEnabled">> & {
+    next: Partial<
+      Pick<
+        AdvancedSettingsState,
+        "developerOptionsEnabled" | "computerUseEnabled" | "backgroundGoalNotificationsEnabled"
+      >
+    > & {
       developerChallengeId?: string;
     },
   ) {
     const nextDeveloperOptionsEnabled = next.developerOptionsEnabled ?? developerOptionsEnabled;
     const nextComputerUseEnabled = nextDeveloperOptionsEnabled && (next.computerUseEnabled ?? computerUseEnabled);
+    const nextBackgroundGoalNotificationsEnabled =
+      next.backgroundGoalNotificationsEnabled ?? backgroundGoalNotificationsEnabled;
     setSavingAdvancedSettings(true);
     setError("");
     try {
@@ -1785,6 +1813,7 @@ export default function App() {
       const payload = await updateAdvancedSettings(targetEndpoint, {
         developerOptionsEnabled: nextDeveloperOptionsEnabled,
         computerUseEnabled: nextComputerUseEnabled,
+        backgroundGoalNotificationsEnabled: nextBackgroundGoalNotificationsEnabled,
         developerChallengeId: next.developerChallengeId,
       });
       const settings = payload.settings;
@@ -1792,6 +1821,7 @@ export default function App() {
       setDeveloperOptionsEverEnabled(settings.developerOptionsEverEnabled);
       setComputerUseEnabled(settings.computerUseEnabled);
       setComputerUseEverEnabled(settings.computerUseEverEnabled);
+      setBackgroundGoalNotificationsEnabled(settings.backgroundGoalNotificationsEnabled !== false);
       setBootstrap((current) => (current ? { ...current, advancedSettings: settings } : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2675,6 +2705,7 @@ export default function App() {
           loadingProjects={loadingProjects}
           projectItems={projectItems}
           chatSidebar={chatSidebar}
+          backgroundGoalUnreadByChat={backgroundGoalState?.unreadByChat || {}}
           emptyProjectState={emptyProjectState}
           collapsedProjects={collapsedProjects}
           temporaryChatsCollapsed={Boolean(collapsedProjects[TEMP_CHATS_COLLAPSE_KEY])}
@@ -2915,6 +2946,7 @@ export default function App() {
               developerOptionsEverEnabled={developerOptionsEverEnabled}
               computerUseEnabled={computerUseEnabled}
               computerUseEverEnabled={computerUseEverEnabled}
+              backgroundGoalNotificationsEnabled={backgroundGoalNotificationsEnabled}
               savingAdvancedSettings={savingAdvancedSettings}
               permission={permission ?? null}
               loading={loading}
@@ -2965,6 +2997,9 @@ export default function App() {
                 })
               }
               onComputerUseChange={(enabled) => void saveAdvancedSettings({ computerUseEnabled: enabled })}
+              onBackgroundGoalNotificationsChange={(enabled) =>
+                void saveAdvancedSettings({ backgroundGoalNotificationsEnabled: enabled })
+              }
               onSwitchMode={(mode) => void switchMode(mode)}
               onRestartOnboarding={restartOnboarding}
               onLocaleChange={(code) => void setLocale(code)}
@@ -3031,6 +3066,15 @@ export default function App() {
               conversation={conversation}
               queued={visibleQueued}
               agentQuestions={hasAgentRuntimeScope ? agentQuestions : []}
+              backgroundGoalDeliveries={
+                activeChatId
+                  ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
+                  : []
+              }
+              backgroundGoalProviderWarnings={backgroundGoalState?.providerWarnings || []}
+              onBackgroundGoalCatchUpRendered={onBackgroundGoalCatchUpRendered}
+              onBackgroundGoalProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
+              onBackgroundGoalCatchUpDismiss={dismissBackgroundGoalCatchUp}
               onAnswerQuestion={answerRuntimeQuestion}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}

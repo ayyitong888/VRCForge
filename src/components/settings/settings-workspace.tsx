@@ -18,6 +18,7 @@ import { EXECUTION_MODES, executionModeLabel, permissionVisualState } from "../.
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { BackgroundGoalSettings } from "./background-goal-settings";
 import { CheckpointStoragePanel } from "./checkpoint-storage-panel";
 import { DeveloperOptionsControl } from "./developer-options-control";
 import { DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
@@ -32,6 +33,7 @@ type SettingsWorkspaceProps = {
   developerOptionsEverEnabled: boolean;
   computerUseEnabled: boolean;
   computerUseEverEnabled: boolean;
+  backgroundGoalNotificationsEnabled: boolean;
   savingAdvancedSettings: boolean;
   permission: PermissionState | null;
   loading: boolean;
@@ -76,6 +78,7 @@ type SettingsWorkspaceProps = {
   onSectionChange: (section: SettingsSection) => void;
   onDeveloperOptionsChange: (enabled: boolean, developerChallengeId?: string) => Promise<void> | void;
   onComputerUseChange: (enabled: boolean) => void;
+  onBackgroundGoalNotificationsChange: (enabled: boolean) => void;
   onSwitchMode: (mode: ExecutionMode) => void;
   onRestartOnboarding: () => void;
   onLocaleChange: (code: string) => void;
@@ -118,6 +121,7 @@ export function SettingsWorkspace({
   developerOptionsEverEnabled,
   computerUseEnabled,
   computerUseEverEnabled,
+  backgroundGoalNotificationsEnabled,
   savingAdvancedSettings,
   permission,
   loading,
@@ -162,6 +166,7 @@ export function SettingsWorkspace({
   onSectionChange,
   onDeveloperOptionsChange,
   onComputerUseChange,
+  onBackgroundGoalNotificationsChange,
   onSwitchMode,
   onRestartOnboarding,
   onLocaleChange,
@@ -246,6 +251,15 @@ export function SettingsWorkspace({
                   </button>
                 ))}
               </div>
+            </section>
+
+            <section className="mt-10">
+              <BackgroundGoalSettings
+                enabled={backgroundGoalNotificationsEnabled}
+                saving={savingAdvancedSettings}
+                runtimeConnected={runtimeConnected}
+                onChange={onBackgroundGoalNotificationsChange}
+              />
             </section>
 
             <section className="mt-10">

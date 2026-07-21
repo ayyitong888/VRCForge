@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from background_goal_runtime import RuntimeLaneBudget
+
 
 SUB_AGENT_SCHEMA = "vrcforge.sub_agent_task.v2"
 SUB_AGENT_LIST_SCHEMA = "vrcforge.sub_agent_tasks.v2"
@@ -80,11 +82,13 @@ class SubAgentTaskRegistry:
         handlers: dict[str, SubAgentHandler],
         max_concurrent: int = 3,
         reconcile_on_init: bool = True,
+        lane_budget: RuntimeLaneBudget | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
         self.handlers = dict(handlers)
         self.max_concurrent = max(1, min(int(max_concurrent), SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT))
+        self._lane_budget = lane_budget
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -163,6 +167,8 @@ class SubAgentTaskRegistry:
             if self._running_count_locked() >= self.max_concurrent:
                 raise RuntimeError(f"Sub-agent concurrency limit reached ({self.max_concurrent}).")
             task_id = f"sub_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+            if self._lane_budget is not None and not self._lane_budget.acquire("interactive", task_id):
+                raise RuntimeError("Shared runtime concurrency limit reached.")
             sub_task = SubAgentTask(
                 id=task_id,
                 role=role_id,
@@ -175,23 +181,28 @@ class SubAgentTaskRegistry:
                 params=copy.deepcopy(params or {}),
                 retry_of=str(retry_of or "").strip(),
             )
-            sub_task = self._commit_task_event_locked(
-                None,
-                sub_task,
-                "created",
-                {"role": role_id, "task": task_text, "retryOf": sub_task.retry_of},
-            )
-            event = threading.Event()
-            self._cancel_events[task_id] = event
-            worker = threading.Thread(
-                target=self._run_task,
-                args=(task_id,),
-                daemon=True,
-                name=f"vrcforge-sub-agent-{task_id}",
-            )
-            self._threads[task_id] = worker
-            worker.start()
-            return {"ok": True, "task": self._serialize_task(sub_task)}
+            try:
+                sub_task = self._commit_task_event_locked(
+                    None,
+                    sub_task,
+                    "created",
+                    {"role": role_id, "task": task_text, "retryOf": sub_task.retry_of},
+                )
+                event = threading.Event()
+                self._cancel_events[task_id] = event
+                worker = threading.Thread(
+                    target=self._run_task,
+                    args=(task_id,),
+                    daemon=True,
+                    name=f"vrcforge-sub-agent-{task_id}",
+                )
+                self._threads[task_id] = worker
+                worker.start()
+                return {"ok": True, "task": self._serialize_task(sub_task)}
+            except Exception:
+                if self._lane_budget is not None:
+                    self._lane_budget.release(task_id)
+                raise
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         with self._lock:
@@ -316,6 +327,13 @@ class SubAgentTaskRegistry:
         return events
 
     def _run_task(self, task_id: str) -> None:
+        try:
+            self._run_task_body(task_id)
+        finally:
+            if self._lane_budget is not None:
+                self._lane_budget.release(task_id)
+
+    def _run_task_body(self, task_id: str) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
             cancel_event = self._cancel_events.get(task_id)

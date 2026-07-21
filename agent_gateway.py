@@ -33,6 +33,11 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
 from agent_goal_store import AgentGoalStore, AgentGoalStoreError
+from background_goal_runtime import (
+    RepeatedFailureGuard,
+    classify_runtime_plan_outcome,
+    classify_runtime_step_failure,
+)
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -182,6 +187,7 @@ class AgentGatewayConfig:
     developer_options_ever_enabled: bool = False
     computer_use_enabled: bool = False
     computer_use_ever_enabled: bool = False
+    background_goal_notifications_enabled: bool = True
     checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     checkpoint_archive_dir: str = ""
 
@@ -1766,6 +1772,7 @@ class AgentGateway:
                 "developer_options_ever_enabled": False,
                 "computer_use_enabled": False,
                 "computer_use_ever_enabled": False,
+                "background_goal_notifications_enabled": True,
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
                 "token_created_at": "",
@@ -1792,6 +1799,9 @@ class AgentGateway:
                 developer_options_ever_enabled=bool(raw.get("developer_options_ever_enabled", False)),
                 computer_use_enabled=bool(raw.get("computer_use_enabled", False)),
                 computer_use_ever_enabled=bool(raw.get("computer_use_ever_enabled", False)),
+                background_goal_notifications_enabled=bool(
+                    raw.get("background_goal_notifications_enabled", True)
+                ),
                 checkpoint_archive_max_size_mb=normalize_checkpoint_archive_max_size_mb(
                     raw.get("checkpoint_archive_max_size_mb")
                 ),
@@ -1830,6 +1840,9 @@ class AgentGateway:
                 "developer_options_ever_enabled": bool(config.developer_options_ever_enabled),
                 "computer_use_enabled": bool(config.computer_use_enabled),
                 "computer_use_ever_enabled": bool(config.computer_use_ever_enabled),
+                "background_goal_notifications_enabled": bool(
+                    config.background_goal_notifications_enabled
+                ),
                 "checkpoint_archive_max_size_mb": normalize_checkpoint_archive_max_size_mb(
                     config.checkpoint_archive_max_size_mb
                 ),
@@ -2361,6 +2374,7 @@ class AgentGateway:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+        goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._runtime_computer_use_context.session_id = session_id
         self._runtime_computer_use_context.turn_id = turn_id
         self._runtime_computer_use_context.client_turn_id = client_turn_id
@@ -2396,6 +2410,7 @@ class AgentGateway:
                 "sessionId": session_id,
                 "turnId": turn_id,
                 "clientTurnId": client_turn_id,
+                "goalDeliveryId": goal_delivery_id,
                 "messageSummary": summarize_text(message),
                 "attachmentCount": len(attachments),
                 "provider": params.get("provider") or "",
@@ -2434,7 +2449,8 @@ class AgentGateway:
                     "imageCount": vision_payload.get("imageCount") or 0,
                 }
             )
-        seen_actions: set[tuple[str, str]] = set()
+        successful_actions: set[tuple[str, str]] = set()
+        repeated_failure_guard = RepeatedFailureGuard()
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
         write_payload: dict[str, Any] | None = None
@@ -2598,10 +2614,12 @@ class AgentGateway:
                 # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
                 break
 
-            # 防重复：同一动作本轮已经跑过 → 停，避免死循环。
-            if action_key in seen_actions:
+            # A successful action is never replayed within the same turn. A
+            # failed action may be retried, but only until the bounded failure
+            # guard observes the same tool, arguments, and failure class three
+            # times in succession.
+            if action_key in successful_actions:
                 break
-            seen_actions.add(action_key)
 
             step_tool = ""
             if action_kind == "shell":
@@ -2614,6 +2632,7 @@ class AgentGateway:
                         "session_id": session_id,
                         "turn_id": turn_id,
                         "client_turn_id": client_turn_id,
+                        "goalDeliveryId": goal_delivery_id,
                         "reason": plan.get("summary") or "Agent shell step",
                     },
                     agent_name=agent_name,
@@ -2632,7 +2651,10 @@ class AgentGateway:
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
                 step_payload = self._execute_write_request(
-                    step_tool, ensure_dict(plan.get("writeParams")), agent_name
+                    step_tool,
+                    ensure_dict(plan.get("writeParams")),
+                    agent_name,
+                    goal_delivery_id=goal_delivery_id,
                 )
                 write_payload = step_payload
                 loop_state.append(
@@ -2648,6 +2670,8 @@ class AgentGateway:
                 step_params = ensure_dict(plan.get("skillParams"))
                 if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
                     step_params.setdefault("sessionId", session_id)
+                    if goal_delivery_id:
+                        step_params.setdefault("goalDeliveryId", goal_delivery_id)
                     if project_root:
                         step_params.setdefault("projectRoot", project_root)
                 if step_tool == "vrcforge_agent_desktop_action":
@@ -2693,6 +2717,41 @@ class AgentGateway:
                     "status": step_payload.get("status") or "",
                 }
             )
+
+            step_failure_class = runtime_step_failure_class(step_payload)
+            if step_failure_class:
+                if action_kind == "shell":
+                    failure_arguments: Any = {
+                        "command": command,
+                        "cwd": params.get("cwd"),
+                        "workspaceRoot": params.get("workspace_root") or params.get("workspaceRoot"),
+                    }
+                elif action_kind == "write":
+                    failure_arguments = ensure_dict(plan.get("writeParams"))
+                else:
+                    failure_arguments = step_params
+                if repeated_failure_guard.record_failure(
+                    step_tool,
+                    failure_arguments,
+                    step_failure_class,
+                ):
+                    suppression = repeated_failure_guard.snapshot()
+                    steps[-1]["loopSuppressed"] = True
+                    steps[-1]["failureClass"] = step_failure_class
+                    last_plan = {
+                        **plan,
+                        "summary": "Repeated tool failure was suppressed.",
+                        "reply": (
+                            "VRCForge stopped after the same tool call failed three times. "
+                            "Review the reported error or change the inputs before retrying."
+                        ),
+                        "nextStep": "loop_suppressed",
+                        "loopSuppression": suppression,
+                    }
+                    break
+            else:
+                repeated_failure_guard.record_success()
+                successful_actions.add(action_key)
 
             step_approval = str(
                 step_payload.get("approval_id") or step_payload.get("approvalId") or ""
@@ -2754,6 +2813,8 @@ class AgentGateway:
         }
         if client_turn_id:
             turn["clientTurnId"] = client_turn_id
+        if goal_delivery_id:
+            turn["goalDeliveryId"] = goal_delivery_id
         if attachments:
             turn["attachments"] = attachments
         if vision_payload is not None:
@@ -2802,12 +2863,19 @@ class AgentGateway:
                 "writeStatus": write_payload.get("status") if write_payload else "none",
                 "contextUsage": context_usage,
                 "contextCompaction": runtime_compaction_audit_view(runtime_compaction),
+                "goalDeliveryId": goal_delivery_id,
             }
         )
         self._append_runtime_run(
             self._runtime_run_from_turn(
                 event="runtime_turn_completed",
-                status="cancelled" if str(top_plan.get("nextStep") or "") == "cancelled" else "completed",
+                status=self._runtime_turn_run_status(
+                    top_plan=top_plan,
+                    shell_payload=shell_payload,
+                    skill_payload=skill_payload,
+                    write_payload=write_payload,
+                    approval_id=approval_id,
+                ),
                 agent_name=agent_name,
                 session_id=session_id,
                 turn_id=turn_id,
@@ -2837,6 +2905,8 @@ class AgentGateway:
         }
         if client_turn_id:
             payload["clientTurnId"] = client_turn_id
+        if goal_delivery_id:
+            payload["goalDeliveryId"] = goal_delivery_id
         if attachments:
             payload["attachments"] = attachments
         if vision_payload is not None:
@@ -2874,6 +2944,8 @@ class AgentGateway:
         tool_name: str,
         params: dict[str, Any],
         agent_name: str,
+        *,
+        goal_delivery_id: str = "",
     ) -> dict[str, Any]:
         """Route an avatar/Unity write through the supervised tool path.
 
@@ -2895,6 +2967,7 @@ class AgentGateway:
                         "arguments": params,
                         "reason": f"Agent proposed supervised write: {tool_name}",
                         "agent_name": agent_name,
+                        "goalDeliveryId": goal_delivery_id,
                         "requires_explicit_approval": True,
                         "disable_auto_approval": True,
                         "explicit_approval_reason": (
@@ -3143,6 +3216,7 @@ class AgentGateway:
             "sessionId": session_id,
             "turnId": turn_id,
             "clientTurnId": client_turn_id,
+            "goalDeliveryId": str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or ""),
             "messageSummary": summarize_text(message),
             "attachmentCount": len(attachments),
             "provider": params.get("provider") or "",
@@ -3169,6 +3243,55 @@ class AgentGateway:
         if context_compaction:
             record["contextCompaction"] = context_compaction
         return record
+
+    @staticmethod
+    def _runtime_turn_run_status(
+        *,
+        top_plan: dict[str, Any],
+        shell_payload: dict[str, Any] | None,
+        skill_payload: dict[str, Any] | None,
+        write_payload: dict[str, Any] | None,
+        approval_id: str,
+    ) -> str:
+        plan_outcome, _plan_label = classify_runtime_plan_outcome(top_plan)
+        if plan_outcome == "cancelled":
+            return "cancelled"
+        payloads = [
+            ensure_dict(payload)
+            for payload in (shell_payload, skill_payload, write_payload)
+            if isinstance(payload, dict)
+        ]
+        statuses = {
+            str(payload.get("status") or "").strip().lower().replace("-", "_")
+            for payload in payloads
+        }
+        failure_classes = {classify_runtime_step_failure(payload) for payload in payloads}
+        if "permission_denied" in failure_classes:
+            return "denied"
+        if statuses & {"denied", "rejected", "permission_denied"}:
+            return "denied"
+        if statuses & {"failed", "failure", "error", "unavailable", "timeout", "timed_out"}:
+            return "failed"
+        if any(payload.get("ok") is False for payload in payloads):
+            return "failed"
+        blocked_statuses = {
+            "blocked",
+            "pending",
+            "pending_approval",
+            "approval_required",
+            "needs_input",
+            "waiting_for_approval",
+            "waiting_for_answer",
+        }
+        if statuses & blocked_statuses:
+            return "blocked"
+        if approval_id and not statuses & {"applied", "executed", "completed", "success"}:
+            return "blocked"
+        if plan_outcome == "failed":
+            return "failed"
+        if plan_outcome == "parked":
+            return "blocked"
+        return "completed"
 
     def request_runtime_cancel(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -3602,6 +3725,7 @@ class AgentGateway:
             "developerOptionsEverEnabled": bool(config.developer_options_ever_enabled),
             "computerUseEnabled": bool(config.computer_use_enabled and config.developer_options_enabled),
             "computerUseEverEnabled": bool(config.computer_use_ever_enabled),
+            "backgroundGoalNotificationsEnabled": bool(config.background_goal_notifications_enabled),
             "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
         }
 
@@ -3610,6 +3734,7 @@ class AgentGateway:
         *,
         developer_options_enabled: bool,
         computer_use_enabled: bool,
+        background_goal_notifications_enabled: bool | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             config = self.ensure_config()
@@ -3620,6 +3745,10 @@ class AgentGateway:
             config.computer_use_enabled = bool(computer_use_enabled and config.developer_options_enabled)
             if config.computer_use_enabled:
                 config.computer_use_ever_enabled = True
+            if background_goal_notifications_enabled is not None:
+                config.background_goal_notifications_enabled = bool(
+                    background_goal_notifications_enabled
+                )
             self.save_config(config)
             updated = self.advanced_settings_state(config)
         self.append_audit(
@@ -4500,19 +4629,412 @@ class AgentGateway:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
         return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", **payload}
 
-    def complete_agent_goal_delivery(self, delivery_id: str, response: dict[str, Any]) -> dict[str, Any]:
+    def record_agent_goal_delivery_phase(self, delivery_id: str, phase: str) -> dict[str, Any]:
         try:
-            delivery = self._goal_store.complete_delivery(delivery_id, response)
+            delivery = self._goal_store.mark_delivery_phase(delivery_id, phase)
         except AgentGoalStoreError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
         return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
 
-    def fail_agent_goal_delivery(self, delivery_id: str, error: str) -> dict[str, Any]:
+    def complete_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        response: dict[str, Any],
+        *,
+        context_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
-            delivery = self._goal_store.fail_delivery(delivery_id, error)
+            delivery = self._goal_store.complete_delivery(
+                delivery_id,
+                ensure_dict(redact_background_goal_persistence(response)),
+                context_usage=context_usage,
+            )
         except AgentGoalStoreError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
         return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def fail_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        error: Any,
+        *,
+        failure_class: str = "",
+        failure_label: str = "",
+        retryable: bool | None = None,
+        context_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.fail_delivery(
+                delivery_id,
+                error,
+                failure_class=failure_class,
+                failure_label=failure_label,
+                retryable=retryable,
+                context_usage=context_usage,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def skip_unreachable_agent_goal_provider(
+        self,
+        delivery_id: str,
+        *,
+        provider: str = "",
+        base_url: str = "",
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.skip_provider_unreachable(
+                delivery_id,
+                provider=provider,
+                base_url=base_url,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def defer_agent_goal_delivery_capacity(self, delivery_id: str) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.defer_delivery_capacity(delivery_id)
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def defer_agent_goal_delivery_wake_timeout(self, delivery_id: str) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.defer_delivery_capacity(
+                delivery_id,
+                rearm_seconds=5,
+                failure_class="timeout",
+                failure_label="watchdog_wake_timeout",
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def defer_agent_goal_delivery_handoff(
+        self,
+        delivery_id: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.defer_delivery_capacity(
+                delivery_id,
+                rearm_seconds=5,
+                failure_class="handoff",
+                failure_label="client_handoff_deferred",
+                expected_revision=expected_revision,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def park_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        *,
+        reason: str,
+        failure_class: str,
+        context_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.park_delivery(
+                delivery_id,
+                reason=reason,
+                failure_class=failure_class,
+                context_usage=context_usage,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def drain_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        *,
+        phase: str,
+        failure_label: str,
+        error: str,
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.mark_delivery_draining(
+                delivery_id,
+                phase,
+                failure_label,
+                error,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def finish_agent_goal_delivery_drain(
+        self,
+        delivery_id: str,
+        *,
+        retryable: bool,
+        failure_class: str,
+        error: str,
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.finish_delivery_drain(
+                delivery_id,
+                retryable,
+                failure_class,
+                error,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def block_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        *,
+        kind: str,
+        reference: str,
+        response: dict[str, Any],
+        context_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if kind == "approval":
+                delivery = self._goal_store.block_delivery_for_approval(
+                    delivery_id,
+                    reference,
+                    response=ensure_dict(redact_background_goal_persistence(response)),
+                    context_usage=context_usage,
+                )
+            elif kind == "question":
+                delivery = self._goal_store.block_delivery_for_question(
+                    delivery_id,
+                    reference,
+                    response=ensure_dict(redact_background_goal_persistence(response)),
+                    context_usage=context_usage,
+                )
+            else:
+                raise AgentGatewayError("Goal delivery block kind is invalid.")
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def mark_agent_goal_approval_phase(self, approval_id: str, phase: str) -> dict[str, Any] | None:
+        try:
+            delivery = self._goal_store.mark_by_approval_phase(approval_id, phase)
+        except AgentGoalStoreError as exc:
+            if exc.status_code == 404:
+                return None
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def restore_agent_goal_approval_wait(self, approval_id: str) -> dict[str, Any] | None:
+        """Reconcile a failed approval transition without leaving an apply lease behind."""
+
+        with self._lock:
+            approval = self._approvals.get(str(approval_id or "").strip())
+            if not approval or not str(approval.get("goalDeliveryId") or "").strip():
+                return None
+            status = str(approval.get("status") or "").strip().lower()
+            if status in {"rejected", "expired", "revision_requested", "applied", "failed"}:
+                return self.reconcile_linked_agent_goal_approval(approval_id)
+            try:
+                delivery = self._goal_store.restore_approval_wait(approval_id)
+            except AgentGoalStoreError as exc:
+                if exc.status_code == 404:
+                    return None
+                raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+            return {
+                "ok": True,
+                "schema": "vrcforge.agent_goal_delivery.v1",
+                "delivery": redact_sensitive(delivery),
+            }
+
+    def agent_goal_delivery_for_approval(self, approval_id: str) -> dict[str, Any] | None:
+        delivery = self._goal_store.delivery_for_approval(approval_id)
+        if delivery is None:
+            return None
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def resolve_agent_goal_approval(self, approval_id: str, execution: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            delivery = self._goal_store.resolve_delivery_approval(
+                approval_id,
+                ensure_dict(redact_background_goal_persistence(execution)),
+            )
+        except AgentGoalStoreError as exc:
+            if exc.status_code == 404:
+                return None
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def deny_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        *,
+        reason: str = "",
+        approval_reference: str = "",
+    ) -> dict[str, Any]:
+        try:
+            delivery = self._goal_store.deny_delivery(
+                delivery_id,
+                reason=reason,
+                approval_reference=approval_reference,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def deny_agent_goal_approval(self, approval_id: str, *, reason: str = "") -> dict[str, Any] | None:
+        try:
+            delivery = self._goal_store.deny_by_approval(approval_id, reason=reason)
+        except AgentGoalStoreError as exc:
+            if exc.status_code == 404:
+                return None
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def reconcile_linked_agent_goal_approval(self, approval_id: str) -> dict[str, Any] | None:
+        """Project a terminal approval state into its linked durable delivery."""
+
+        with self._lock:
+            approval = self._approvals.get(str(approval_id or "").strip())
+            if not approval or not str(approval.get("goalDeliveryId") or "").strip():
+                return None
+            status = str(approval.get("status") or "").strip().lower()
+            if status in {"rejected", "expired", "revision_requested"}:
+                return self.deny_agent_goal_approval(
+                    str(approval.get("id") or approval_id),
+                    reason="approval_denied" if status == "rejected" else "approval_recovery_required",
+                )
+            if status not in {"applied", "failed"}:
+                return self.agent_goal_delivery_for_approval(str(approval.get("id") or approval_id))
+            execution: dict[str, Any] = {
+                "ok": status == "applied",
+                "status": status,
+                "approvalId": str(approval.get("id") or approval_id),
+            }
+            if status == "applied":
+                execution["summary"] = summarize_text(str(approval.get("resultSummary") or ""), 500)
+                checkpoint_id = str(ensure_dict(approval.get("checkpoint")).get("id") or "")
+                if checkpoint_id:
+                    execution["checkpointId"] = checkpoint_id
+            else:
+                execution["error"] = "Approved action did not complete successfully."
+            return self.resolve_agent_goal_approval(str(approval.get("id") or approval_id), execution)
+
+    def _attach_linked_goal_resolution(
+        self,
+        payload: dict[str, Any],
+        approval: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not str(approval.get("goalDeliveryId") or "").strip():
+            return payload
+        try:
+            resolved = self.reconcile_linked_agent_goal_approval(str(approval.get("id") or ""))
+        except Exception:  # noqa: BLE001 - a later reconciliation must remain fail closed.
+            payload["goalDeliveryResolutionPending"] = True
+            return payload
+        if resolved is not None:
+            payload["goalDelivery"] = resolved
+        return payload
+
+    def resolve_agent_goal_question(
+        self,
+        question_id: str,
+        *,
+        continuation_prompt: str = "",
+    ) -> dict[str, Any] | None:
+        try:
+            safe_continuation_prompt = str(
+                redact_background_goal_persistence(continuation_prompt) or ""
+            )
+            delivery = self._goal_store.resolve_delivery_question(
+                question_id,
+                continuation_prompt=safe_continuation_prompt,
+            )
+        except AgentGoalStoreError as exc:
+            if exc.status_code == 404:
+                return None
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
+
+    def reconcile_agent_goal_watchdogs(self, *, finalize_orphans: bool = False) -> dict[str, Any]:
+        draining = self._goal_store.reconcile_phase_watchdogs()
+        deliveries: list[dict[str, Any]] = list(draining)
+        if finalize_orphans:
+            deliveries = []
+            for delivery in draining:
+                phase = str(delivery.get("phase") or "")
+                deliveries.append(
+                    self._goal_store.finish_delivery_drain(
+                        str(delivery.get("deliveryId") or ""),
+                        phase != "apply",
+                        "timeout",
+                        f"Abandoned {phase or 'runtime'} phase was closed during startup recovery.",
+                    )
+                )
+        approval_deliveries: list[dict[str, Any]] = []
+        for approval_id, approval in list(self._approvals.items()):
+            if str(approval.get("status") or "").strip().lower() not in {
+                "rejected",
+                "expired",
+                "revision_requested",
+                "applied",
+                "failed",
+            }:
+                continue
+            previous = self.agent_goal_delivery_for_approval(approval_id)
+            previous_delivery = ensure_dict(ensure_dict(previous).get("delivery"))
+            resolved = self.reconcile_linked_agent_goal_approval(approval_id)
+            resolved_delivery = ensure_dict(ensure_dict(resolved).get("delivery"))
+            if resolved_delivery and (
+                not previous_delivery
+                or int(resolved_delivery.get("revision") or 0)
+                != int(previous_delivery.get("revision") or 0)
+            ):
+                approval_deliveries.append(resolved_delivery)
+        missing_approvals = self._goal_store.reconcile_missing_approvals(set(self._approvals))
+        reminders = self._goal_store.emit_due_question_reminders()
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal_watchdogs.v1",
+            "deliveries": [
+                redact_sensitive(delivery)
+                for delivery in [*deliveries, *approval_deliveries, *missing_approvals]
+            ],
+            "reminders": [redact_sensitive(delivery) for delivery in reminders],
+        }
+
+    def tick_agent_goal_question_reminders(self) -> dict[str, Any]:
+        reminders = self._goal_store.emit_due_question_reminders()
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal_question_reminders.v1",
+            "reminders": [redact_sensitive(delivery) for delivery in reminders],
+            "count": len(reminders),
+        }
+
+    def agent_goal_background_state(self, *, chat_id: str = "") -> dict[str, Any]:
+        return {
+            "ok": True,
+            **redact_sensitive(self._goal_store.background_state(chat_id)),
+        }
+
+    def acknowledge_agent_goal_background_state(
+        self,
+        *,
+        chat_id: str,
+        delivery_ids: list[Any] | None = None,
+        kind: str = "recap",
+    ) -> dict[str, Any]:
+        try:
+            state = self._goal_store.acknowledge_background_notifications(
+                chat_id,
+                delivery_ids,
+                kind=kind,
+            )
+        except AgentGoalStoreError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+        return {"ok": True, **redact_sensitive(state)}
 
     def list_recoverable_agent_goal_deliveries(self, *, limit: int = 20, chat_id: str = "") -> dict[str, Any]:
         deliveries = self._goal_store.list_recoverable(limit=limit, chat_id=chat_id)
@@ -4692,9 +5214,22 @@ class AgentGateway:
             "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
             "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
             "owner": summarize_text(str(params.get("owner") or "agent"), 80),
+            "goalDeliveryId": str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
         }
         self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
         return {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
+
+    @staticmethod
+    def _question_continuation_prompt(question: dict[str, Any]) -> str:
+        question_text = summarize_text(str(question.get("question") or "Pending question"), 1000)
+        answer_text = summarize_text(str(question.get("answer") or ""), 1000)
+        selected_option_id = summarize_text(str(question.get("selectedOptionId") or ""), 120)
+        return (
+            "Continue the same scheduled goal after the user answered a pending question.\n"
+            f"Question: {question_text}\n"
+            f"User answer: {answer_text or selected_option_id or 'No text provided.'}\n"
+            "Resume the unfinished work under the existing constraints and do not repeat completed steps."
+        )
 
     def answer_agent_question(self, question_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -4706,17 +5241,44 @@ class AgentGateway:
             raise AgentGatewayError(f"Question was not found: {question_id}", status_code=404)
         existing = current[question_id]
         self._require_agent_item_scope(existing, params, label="Question")
+        goal_delivery_id = str(existing.get("goalDeliveryId") or "").strip()
+        if str(existing.get("status") or "") == "answered":
+            payload: dict[str, Any] = {"ok": True, "question": existing, "idempotent": True}
+            if goal_delivery_id:
+                payload["goalDelivery"] = self.resolve_agent_goal_question(
+                    question_id,
+                    continuation_prompt=self._question_continuation_prompt(existing),
+                )
+            return payload
+        selected_option_id = summarize_text(
+            str(params.get("selectedOptionId") or params.get("optionId") or ""),
+            120,
+        )
+        answer_text = summarize_text(str(params.get("answer") or params.get("value") or ""), 1000)
+        if not answer_text and selected_option_id:
+            for option in ensure_list(existing.get("options")):
+                if not isinstance(option, dict) or str(option.get("id") or "") != selected_option_id:
+                    continue
+                answer_text = summarize_text(str(option.get("value") or option.get("label") or ""), 1000)
+                break
+        answer_text = str(redact_background_goal_persistence(answer_text) or "")
         event = {
             "event": "question_answered",
             "status": "answered",
             "questionId": question_id,
-            "answer": summarize_text(str(params.get("answer") or params.get("value") or ""), 1000),
-            "selectedOptionId": summarize_text(str(params.get("selectedOptionId") or params.get("optionId") or ""), 120),
+            "answer": answer_text,
+            "selectedOptionId": selected_option_id,
             "projectRoot": str(params.get("projectRoot") or existing.get("projectRoot") or ""),
             "sessionId": str(params.get("sessionId") or existing.get("sessionId") or ""),
         }
         self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
-        return {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
+        payload = {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
+        if goal_delivery_id:
+            payload["goalDelivery"] = self.resolve_agent_goal_question(
+                question_id,
+                continuation_prompt=self._question_continuation_prompt(payload["question"]),
+            )
+        return payload
 
     def list_agent_questions(self, *, limit: int = 50, project_root: str = "", session_id: str = "", include_answered: bool = False) -> dict[str, Any]:
         questions = list(self._project_agent_questions(include_answered=include_answered).values())
@@ -5085,6 +5647,7 @@ class AgentGateway:
             user_constraints=user_constraints,
             requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
+            goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
         )
         if full_permission_auto and not never_auto_approve and (
             requires_explicit_approval or auto_policy_reason or risk_escalation_reason
@@ -5193,6 +5756,11 @@ class AgentGateway:
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
+                if self._reconcile_unrecoverable_linked_approval(approval_id):
+                    raise AgentGatewayError(
+                        "Approval could not be recovered after the runtime restarted; the linked goal now needs review.",
+                        status_code=409,
+                    )
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
 
             approval = self._refresh_approval_expiry(approval)
@@ -5379,7 +5947,7 @@ class AgentGateway:
             payload = {"ok": True, "status": "applied", "approval": approval, "result": result}
             if checkpoint:
                 payload["checkpoint"] = checkpoint
-            return payload
+            return self._attach_linked_goal_resolution(payload, approval)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 approval["status"] = "failed"
@@ -5413,7 +5981,7 @@ class AgentGateway:
             payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
             if checkpoint:
                 payload["checkpoint"] = checkpoint
-            return payload
+            return self._attach_linked_goal_resolution(payload, approval)
         finally:
             with self._lock:
                 self._in_flight_apply_writes.pop(approval_id, None)
@@ -9507,6 +10075,7 @@ class AgentGateway:
             user_constraints=self.read_user_constraints(),
             requires_explicit_approval=bool(auto_manual_reason),
             explicit_approval_reason=auto_manual_reason,
+            goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
         )
         with self._lock:
             stored = self._approvals.get(approval["id"])
@@ -9640,6 +10209,7 @@ class AgentGateway:
             loop_state,
             context_usage=context_usage,
             reasoning_trace=reasoning_trace,
+            propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
         )
         if llm_plan is not None:
             return llm_plan
@@ -9969,6 +10539,7 @@ class AgentGateway:
         loop_state: list[dict[str, Any]] | None = None,
         context_usage: dict[str, Any] | None = None,
         reasoning_trace: dict[str, Any] | None = None,
+        propagate_provider_errors: bool = False,
     ) -> dict[str, Any] | None:
         plan_fn = self.llm_plan_fn
         if plan_fn is None:
@@ -9984,7 +10555,9 @@ class AgentGateway:
             response_text, provider_usage = normalize_llm_plan_result(raw_response)
             self._record_llm_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
             payload = parse_llm_plan_response(response_text)
-        except Exception:  # noqa: BLE001 - LLM 失败时静默回退到本地规划。
+        except Exception:  # noqa: BLE001 - interactive runs keep the local fallback.
+            if propagate_provider_errors:
+                raise
             return None
         if not isinstance(payload, dict):
             return None
@@ -11080,6 +11653,7 @@ class AgentGateway:
         user_constraints: UserConstraintsSnapshot | None = None,
         requires_explicit_approval: bool = False,
         explicit_approval_reason: str = "",
+        goal_delivery_id: str = "",
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         config = self.ensure_config()
@@ -11104,6 +11678,8 @@ class AgentGateway:
             approval["requiresExplicitApproval"] = True
             approval["autoApprovalBlocked"] = True
             approval["explicitApprovalReason"] = explicit_approval_reason or "This write request requires explicit user approval."
+        if goal_delivery_id:
+            approval["goalDeliveryId"] = goal_delivery_id
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)
@@ -11147,6 +11723,11 @@ class AgentGateway:
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
+                if self._reconcile_unrecoverable_linked_approval(approval_id):
+                    raise AgentGatewayError(
+                        "Approval could not be recovered after the runtime restarted; the linked goal now needs review.",
+                        status_code=409,
+                    )
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
             self._ensure_approval_scope(
                 approval,
@@ -11178,7 +11759,12 @@ class AgentGateway:
                     "messageSummary": summarize_text(str(approval.get("reason") or "")),
                 }
             )
-            return {"ok": True, "approval": redact_sensitive(dict(approval))}
+            payload: dict[str, Any] = {"ok": True, "approval": redact_sensitive(dict(approval))}
+            if status == "rejected" and str(approval.get("goalDeliveryId") or "").strip():
+                denied = self.deny_agent_goal_approval(approval_id, reason="approval_denied")
+                if denied is not None:
+                    payload["goalDelivery"] = denied
+            return payload
 
     def request_approval_revision(
         self,
@@ -11222,7 +11808,12 @@ class AgentGateway:
                     "messageSummary": summarize_text(note or reason),
                 }
             )
-            return {"ok": True, "approval": redact_sensitive(dict(approval))}
+            payload: dict[str, Any] = {"ok": True, "approval": redact_sensitive(dict(approval))}
+            if str(approval.get("goalDeliveryId") or "").strip():
+                denied = self.deny_agent_goal_approval(approval_id, reason="approval_recovery_required")
+                if denied is not None:
+                    payload["goalDelivery"] = denied
+            return payload
 
     def _refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:
         if approval.get("status") != "pending":
@@ -11235,6 +11826,13 @@ class AgentGateway:
 
     def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
         return None
+
+    def _reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
+        linked = self._goal_store.delivery_for_approval(approval_id)
+        if linked is None:
+            return False
+        self._goal_store.reconcile_missing_approvals(set(self._approvals))
+        return True
 
 
 def create_agent_mcp_app(gateway: AgentGateway):
@@ -12212,6 +12810,12 @@ def parse_frontmatter_block(block: str) -> dict[str, Any]:
     return payload
 
 
+def runtime_step_failure_class(payload: Any) -> str:
+    """Return one bounded failure class for a runtime tool step."""
+
+    return classify_runtime_step_failure(payload)
+
+
 def strip_simple_yaml_scalar(value: str) -> Any:
     text = value.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
@@ -12481,6 +13085,14 @@ _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN = re.compile(
     r"(?i)\b(api[_ -]?key|token|authorization|password|secret)\b\s*[:=]\s*[^\s,;]+"
 )
 _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]+")
+_PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN = re.compile(
+    r"\b(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
+    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})",
+    re.IGNORECASE,
+)
+_PLANNER_TOOL_OBSERVATION_JWT_PATTERN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
 _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\s,;]+", re.IGNORECASE)
 _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s,;]+)")
 
@@ -12527,6 +13139,8 @@ def _sanitize_planner_tool_observation_text(value: Any, limit: int = RUNTIME_PLA
     text = "" if value is None else str(value)
     text = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", text)
+    text = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", text)
+    text = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", text)
     return summarize_text(text, limit)
@@ -12622,6 +13236,65 @@ def redact_sensitive(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
     return value
+
+
+_BACKGROUND_GOAL_SECRET_FIELDS = {
+    "token",
+    "app_token",
+    "artifact_sig",
+    "artifact_signature",
+    "artifact_token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "approval_token",
+    "refresh_token",
+    "secret",
+    "user_constraints",
+    "userconstraints",
+    "_vrcforge_user_constraints",
+}
+_BACKGROUND_GOAL_PATH_FIELDS = {
+    "cwd",
+    "directory",
+    "file",
+    "path",
+    "project_path",
+    "project_root",
+    "projectpath",
+    "projectroot",
+    "workspace_path",
+    "workspace_root",
+    "workspacepath",
+    "workspaceroot",
+}
+
+
+def redact_background_goal_persistence(value: Any, *, depth: int = 0) -> Any:
+    """Redact blocked background output before it enters durable run state."""
+
+    if depth >= 8:
+        return "<truncated>"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:64]:
+            key_text = str(key)
+            lowered = key_text.lower()
+            if lowered in _BACKGROUND_GOAL_SECRET_FIELDS:
+                result[key_text] = "<redacted>"
+            elif lowered in _BACKGROUND_GOAL_PATH_FIELDS and isinstance(item, str) and item:
+                result[key_text] = "<path redacted>"
+            else:
+                result[key_text] = redact_background_goal_persistence(item, depth=depth + 1)
+        return result
+    if isinstance(value, list):
+        return [redact_background_goal_persistence(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, str):
+        return _sanitize_planner_tool_observation_text(value, 2_000)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _sanitize_planner_tool_observation_text(value, 240)
 
 
 def parse_iso_datetime(value: str) -> datetime | None:

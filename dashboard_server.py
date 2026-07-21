@@ -61,6 +61,12 @@ from agent_gateway import (
 )
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from backend_owner_lease import BackendOwnerLease
+from background_goal_delivery import BackgroundGoalDeliveryCoordinator, BackgroundGoalDeliveryError
+from background_goal_runtime import (
+    PHASE_TIMEOUT_SECONDS,
+    ProviderPreflightCache,
+    RuntimeLaneBudget,
+)
 from chat_attachment_vault import (
     ARCHIVE_MAX_BYTES,
     INSPECTION_SCHEMA as CHAT_ATTACHMENT_INSPECTION_SCHEMA,
@@ -1003,6 +1009,28 @@ class AgentGoalDeliveryMaterializeRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentGoalDeliveryDeferRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalBackgroundAcknowledgeItem(BaseModel):
+    delivery_id: str = Field(alias="deliveryId")
+    expected_revision: int | None = Field(default=None, alias="expectedRevision")
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentGoalBackgroundAcknowledgeRequest(BaseModel):
+    chat_id: str = Field(alias="chatId")
+    delivery_ids: list[str] = Field(default_factory=list, alias="deliveryIds")
+    deliveries: list[AgentGoalBackgroundAcknowledgeItem] = Field(default_factory=list)
+    kind: Literal["recap", "toast", "provider"] = "recap"
+
+    model_config = {"populate_by_name": True}
+
+
 class AgentProgressItemRequest(BaseModel):
     id: str | None = None
     progress_id: str | None = Field(default=None, alias="progressId")
@@ -1017,6 +1045,7 @@ class AgentProgressItemRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
 
     model_config = {"populate_by_name": True}
 
@@ -1027,6 +1056,7 @@ class AgentProgressReplaceRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
 
     model_config = {"populate_by_name": True}
 
@@ -1041,6 +1071,7 @@ class AgentQuestionCreateRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
 
     model_config = {"populate_by_name": True}
 
@@ -1104,6 +1135,10 @@ class AgentPermissionRequest(BaseModel):
 class AdvancedSettingsRequest(BaseModel):
     developer_options_enabled: bool = Field(default=False, alias="developerOptionsEnabled")
     computer_use_enabled: bool = Field(default=False, alias="computerUseEnabled")
+    background_goal_notifications_enabled: bool | None = Field(
+        default=None,
+        alias="backgroundGoalNotificationsEnabled",
+    )
     developer_challenge_id: str | None = Field(default=None, alias="developerChallengeId", max_length=128)
 
     model_config = {"populate_by_name": True}
@@ -1569,6 +1604,8 @@ CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
 STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
+BACKGROUND_GOAL_MONITOR_TASK: asyncio.Task[None] | None = None
+BACKGROUND_GOAL_WAKE_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
@@ -1578,6 +1615,48 @@ AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
 )
+RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
+BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
+    lambda provider, base_url: probe_background_goal_provider(provider, base_url)
+)
+
+
+async def broadcast_background_goal_state(_state: dict[str, Any]) -> None:
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals())
+    await EVENT_BUS.broadcast("agentGoalBackground", AGENT_GATEWAY.agent_goal_background_state())
+
+
+BACKGROUND_GOAL_COORDINATOR = BackgroundGoalDeliveryCoordinator(
+    gateway=AGENT_GATEWAY,
+    lane_budget=RUNTIME_LANE_BUDGET,
+    preflight=BACKGROUND_GOAL_PREFLIGHT,
+    on_state_change=broadcast_background_goal_state,
+)
+
+
+async def drain_timed_out_goal_wake(worker: asyncio.Task[dict[str, Any]]) -> None:
+    try:
+        payload = await worker
+    except BaseException:
+        return
+    delivery = ensure_dict(payload.get("delivery")) if isinstance(payload, dict) else {}
+    delivery_id = str(delivery.get("deliveryId") or "")
+    if not delivery_id:
+        return
+    try:
+        state = await asyncio.to_thread(
+            AGENT_GATEWAY.defer_agent_goal_delivery_wake_timeout,
+            delivery_id,
+        )
+        await broadcast_background_goal_state(state)
+    except Exception as exc:  # noqa: BLE001 - startup recovery remains the final fallback.
+        emit_log("warn", "agent", "Timed-out goal wake drain had a warning.", {"error": str(exc)})
+
+
+def track_timed_out_goal_wake(worker: asyncio.Task[dict[str, Any]]) -> None:
+    drain_task = asyncio.create_task(drain_timed_out_goal_wake(worker))
+    BACKGROUND_GOAL_WAKE_DRAIN_TASKS.add(drain_task)
+    drain_task.add_done_callback(BACKGROUND_GOAL_WAKE_DRAIN_TASKS.discard)
 BACKEND_OWNER_LEASE = BackendOwnerLease(lambda: AGENT_GATEWAY.audit_dir / "backend-owner.lock")
 DESKTOP_CAPTURE_DIR = AGENT_GATEWAY_AUDIT_DIR / "desktop-captures"
 DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
@@ -1594,6 +1673,7 @@ SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
     handlers=build_sub_agent_role_handlers(AGENT_GATEWAY),
     max_concurrent=5,
     reconcile_on_init=False,
+    lane_budget=RUNTIME_LANE_BUDGET,
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -1725,6 +1805,7 @@ async def authorize_local_requests(request: Request, call_next):
 @app.on_event("startup")
 async def on_startup() -> None:
     global STATUS_MONITOR_TASK
+    global BACKGROUND_GOAL_MONITOR_TASK
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
@@ -1738,6 +1819,10 @@ async def on_startup() -> None:
             emit_log("warn", "subagent", "Sub-agent startup reconciliation had a warning.", {"error": str(exc)})
         try:
             await asyncio.to_thread(AGENT_GATEWAY.reconcile_stale_agent_goal_deliveries)
+            await asyncio.to_thread(
+                AGENT_GATEWAY.reconcile_agent_goal_watchdogs,
+                finalize_orphans=True,
+            )
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
             emit_log("warn", "agent", "Goal delivery startup reconciliation had a warning.", {"error": str(exc)})
     if desktop_executor_enabled():
@@ -1751,6 +1836,8 @@ async def on_startup() -> None:
         save_dashboard_api_config(DASHBOARD_API_CONFIG)
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
         STATUS_MONITOR_TASK = asyncio.create_task(status_monitor_loop())
+    if BACKGROUND_GOAL_MONITOR_TASK is None or BACKGROUND_GOAL_MONITOR_TASK.done():
+        BACKGROUND_GOAL_MONITOR_TASK = asyncio.create_task(background_goal_monitor_loop())
     load_project_snapshot_cache()
 
     await emit_log_async(
@@ -1769,6 +1856,7 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global STATUS_MONITOR_TASK
+    global BACKGROUND_GOAL_MONITOR_TASK
     global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
@@ -1794,6 +1882,19 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         STATUS_MONITOR_TASK = None
+    if BACKGROUND_GOAL_MONITOR_TASK is not None:
+        BACKGROUND_GOAL_MONITOR_TASK.cancel()
+        try:
+            await BACKGROUND_GOAL_MONITOR_TASK
+        except asyncio.CancelledError:
+            pass
+        BACKGROUND_GOAL_MONITOR_TASK = None
+    wake_drains = list(BACKGROUND_GOAL_WAKE_DRAIN_TASKS)
+    for task in wake_drains:
+        task.cancel()
+    if wake_drains:
+        await asyncio.gather(*wake_drains, return_exceptions=True)
+    BACKGROUND_GOAL_WAKE_DRAIN_TASKS.clear()
     AGENT_MCP_CONTEXT = None
     AGENT_MCP_MOUNT.app = None
     AGENT_MCP_APP = None
@@ -2265,10 +2366,15 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
         if trace_downgraded:
             DIAGNOSTIC_LOGGER.update_config(log_level="debug")
         try:
-            payload = AGENT_GATEWAY.update_advanced_settings(
-                developer_options_enabled=request.developer_options_enabled,
-                computer_use_enabled=request.computer_use_enabled,
-            )
+            update_fields: dict[str, Any] = {
+                "developer_options_enabled": request.developer_options_enabled,
+                "computer_use_enabled": request.computer_use_enabled,
+            }
+            if request.background_goal_notifications_enabled is not None:
+                update_fields["background_goal_notifications_enabled"] = (
+                    request.background_goal_notifications_enabled
+                )
+            payload = AGENT_GATEWAY.update_advanced_settings(**update_fields)
         except Exception:
             if trace_downgraded:
                 try:
@@ -2299,95 +2405,71 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    goal_delivery_started = False
     verified_context_limit = verified_runtime_context_limit(runtime_request)
+    runtime_params = agent_runtime_request_payload(runtime_request, verified_context_limit)
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.require_computer_use_enabled()
         if runtime_request.goal_delivery_id:
-            delivery_start = AGENT_GATEWAY.begin_agent_goal_delivery(
-                runtime_request.goal_delivery_id,
-                {
+            provider, base_url = background_goal_provider_endpoint(runtime_request)
+            payload = await BACKGROUND_GOAL_COORDINATOR.execute(
+                delivery_id=runtime_request.goal_delivery_id,
+                begin_params={
                     "clientTurnId": runtime_request.client_turn_id,
                     "provider": runtime_request.provider,
                     "providerLabel": runtime_request.provider_label,
                     "model": runtime_request.model,
                 },
+                runtime_params=runtime_params,
+                agent_name=runtime_request.agent_name,
+                provider=provider,
+                base_url=base_url,
             )
-            cached_response = delivery_start.get("response")
-            if delivery_start.get("cached") and isinstance(cached_response, dict):
-                payload = {**cached_response, "goalDeliveryId": runtime_request.goal_delivery_id}
-                await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
-                return payload
-            goal_delivery_started = True
-        payload = await asyncio.to_thread(
-            AGENT_GATEWAY.runtime_message,
-            {
-                "session_id": runtime_request.session_id,
-                "clientTurnId": runtime_request.client_turn_id,
-                "goalDeliveryId": runtime_request.goal_delivery_id,
-                "message": runtime_request.message,
-                "attachments": runtime_request.attachments,
-                "shell_command": runtime_request.shell_command,
-                "skill_tool": runtime_request.skill_tool,
-                "skill_params": runtime_request.skill_params,
-                "cwd": runtime_request.cwd,
-                "workspace_root": runtime_request.workspace_root,
-                "projectPath": runtime_request.project_path,
-                "projectRoot": runtime_request.project_root,
-                "provider": runtime_request.provider,
-                "providerLabel": runtime_request.provider_label,
-                "model": runtime_request.model,
-                "_contextCompactionLimit": verified_context_limit,
-                "history": runtime_request.history,
-                "_computerUseRequested": runtime_request.computer_use_requested,
-                "_computerUseGrantId": runtime_request.computer_use_grant_id,
-                "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
-                "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
-            },
-            agent_name=runtime_request.agent_name,
-        )
-        if runtime_request.goal_delivery_id:
-            payload = {**payload, "goalDeliveryId": runtime_request.goal_delivery_id}
-            persisted_delivery_payload = dict(payload)
-            # Runtime summaries are transient replacement material for the
-            # renderer. Goal delivery sidecars retain the original chat and
-            # never persist compaction prose.
-            persisted_delivery_payload.pop("contextCompaction", None)
-            persisted_delivery_payload.pop("context_compaction", None)
-            await asyncio.to_thread(
-                AGENT_GATEWAY.complete_agent_goal_delivery,
-                runtime_request.goal_delivery_id,
-                persisted_delivery_payload,
+        else:
+            payload = await asyncio.to_thread(
+                AGENT_GATEWAY.runtime_message,
+                runtime_params,
+                agent_name=runtime_request.agent_name,
             )
+    except BackgroundGoalDeliveryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except AgentGatewayError as exc:
-        if runtime_request.goal_delivery_id and goal_delivery_started:
-            try:
-                await asyncio.to_thread(
-                    AGENT_GATEWAY.fail_agent_goal_delivery,
-                    runtime_request.goal_delivery_id,
-                    str(exc),
-                )
-            except AgentGatewayError:
-                pass
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        if runtime_request.goal_delivery_id and goal_delivery_started:
-            try:
-                await asyncio.to_thread(
-                    AGENT_GATEWAY.fail_agent_goal_delivery,
-                    runtime_request.goal_delivery_id,
-                    str(exc),
-                )
-            except AgentGatewayError:
-                pass
-        raise
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
     await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=payload.get("sessionId") or payload.get("session_id") or ""))
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     if runtime_request.goal_delivery_id:
-        await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals())
+        await broadcast_background_goal_state({})
     return payload
+
+
+def agent_runtime_request_payload(
+    runtime_request: AgentRuntimeMessageRequest,
+    verified_context_limit: int | None,
+) -> dict[str, Any]:
+    return {
+        "session_id": runtime_request.session_id,
+        "clientTurnId": runtime_request.client_turn_id,
+        "goalDeliveryId": runtime_request.goal_delivery_id,
+        "message": runtime_request.message,
+        "attachments": runtime_request.attachments,
+        "shell_command": runtime_request.shell_command,
+        "skill_tool": runtime_request.skill_tool,
+        "skill_params": runtime_request.skill_params,
+        "cwd": runtime_request.cwd,
+        "workspace_root": runtime_request.workspace_root,
+        "projectPath": runtime_request.project_path,
+        "projectRoot": runtime_request.project_root,
+        "provider": runtime_request.provider,
+        "providerLabel": runtime_request.provider_label,
+        "model": runtime_request.model,
+        "_contextCompactionLimit": verified_context_limit,
+        "history": runtime_request.history,
+        "_computerUseRequested": runtime_request.computer_use_requested,
+        "_computerUseGrantId": runtime_request.computer_use_grant_id,
+        "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
+        "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
+    }
 
 
 def verified_runtime_context_limit(runtime_request: AgentRuntimeMessageRequest) -> int | None:
@@ -2413,6 +2495,31 @@ def verified_runtime_context_limit(runtime_request: AgentRuntimeMessageRequest) 
     if requested_provider != configured_provider or requested_model != configured_model:
         return None
     return runtime_request.context_limit
+
+
+def probe_background_goal_provider(provider: str, base_url: str) -> bool:
+    """Perform a bounded loopback reachability check without sending a prompt."""
+
+    target = str(base_url or "").rstrip("/")
+    _ = provider
+    request = urllib.request.Request(target, method="GET", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - caller admits loopback URLs only.
+            status = int(getattr(response, "status", 200) or 200)
+            return 100 <= status <= 599
+    except urllib.error.HTTPError as exc:
+        # Any bounded client response proves the local listener is reachable.
+        return 100 <= int(exc.code or 0) <= 599
+    except (OSError, TimeoutError, urllib.error.URLError, ValueError):
+        return False
+
+
+def background_goal_provider_endpoint(runtime_request: AgentRuntimeMessageRequest) -> tuple[str, str]:
+    configured = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    requested_provider = normalize_provider_name(runtime_request.provider or configured.provider)
+    if requested_provider != normalize_provider_name(configured.provider):
+        return requested_provider, ""
+    return requested_provider, str(configured.base_url or "")
 
 
 @app.post("/api/app/agent/computer-use/grants")
@@ -2678,8 +2785,9 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
 
 @app.post("/api/app/agent/goals/{goal_id}/wake")
 async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> dict[str, Any]:
-    try:
-        payload = AGENT_GATEWAY.wake_agent_goal(
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            AGENT_GATEWAY.wake_agent_goal,
             goal_id,
             {
                 "sessionId": request.session_id,
@@ -2687,6 +2795,18 @@ async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> di
                 "projectRoot": request.project_root,
             },
         )
+    )
+    try:
+        payload = await asyncio.wait_for(
+            asyncio.shield(worker),
+            timeout=PHASE_TIMEOUT_SECONDS["wake"],
+        )
+    except TimeoutError as exc:
+        track_timed_out_goal_wake(worker)
+        raise HTTPException(status_code=504, detail="Background goal wake timed out.") from exc
+    except asyncio.CancelledError:
+        track_timed_out_goal_wake(worker)
+        raise
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals(limit=30, session_id=request.session_id or ""))
@@ -2715,6 +2835,34 @@ def app_recoverable_agent_goal_deliveries(limit: int = 20, chatId: str = "") -> 
     return AGENT_GATEWAY.list_recoverable_agent_goal_deliveries(limit=limit, chat_id=chatId)
 
 
+@app.get("/api/app/agent/goals/background")
+def app_agent_goal_background_state(chatId: str = "") -> dict[str, Any]:
+    return AGENT_GATEWAY.agent_goal_background_state(chat_id=chatId)
+
+
+@app.post("/api/app/agent/goals/background/ack")
+async def app_acknowledge_agent_goal_background_state(
+    request: AgentGoalBackgroundAcknowledgeRequest,
+) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.acknowledge_agent_goal_background_state(
+            chat_id=request.chat_id,
+            delivery_ids=[
+                {
+                    "deliveryId": item.delivery_id,
+                    "expectedRevision": item.expected_revision,
+                }
+                for item in request.deliveries
+            ]
+            or request.delivery_ids,
+            kind=request.kind,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentGoalBackground", payload)
+    return payload
+
+
 @app.post("/api/app/agent/goals/deliveries/{delivery_id}/materialized")
 async def app_materialize_agent_goal_delivery(
     delivery_id: str,
@@ -2727,6 +2875,22 @@ async def app_materialize_agent_goal_delivery(
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return payload
+
+
+@app.post("/api/app/agent/goals/deliveries/{delivery_id}/defer")
+async def app_defer_agent_goal_delivery(
+    delivery_id: str,
+    request: AgentGoalDeliveryDeferRequest,
+) -> dict[str, Any]:
+    try:
+        payload = AGENT_GATEWAY.defer_agent_goal_delivery_handoff(
+            delivery_id,
+            expected_revision=request.expected_revision,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await broadcast_background_goal_state({})
     return payload
 
 
@@ -2767,6 +2931,7 @@ async def app_replace_agent_progress(request: AgentProgressReplaceRequest) -> di
                 "sessionId": request.session_id,
                 "projectPath": request.project_path,
                 "projectRoot": request.project_root,
+                "goalDeliveryId": request.goal_delivery_id,
             }
         )
     except AgentGatewayError as exc:
@@ -2791,6 +2956,7 @@ async def app_create_agent_progress(request: AgentProgressItemRequest) -> dict[s
                 "sessionId": request.session_id,
                 "projectPath": request.project_path,
                 "projectRoot": request.project_root,
+                "goalDeliveryId": request.goal_delivery_id,
             }
         )
     except AgentGatewayError as exc:
@@ -2853,6 +3019,7 @@ async def app_create_agent_question(request: AgentQuestionCreateRequest) -> dict
                 "sessionId": request.session_id,
                 "projectPath": request.project_path,
                 "projectRoot": request.project_root,
+                "goalDeliveryId": request.goal_delivery_id,
             }
         )
     except AgentGatewayError as exc:
@@ -2878,6 +3045,8 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    if payload.get("goalDelivery") is not None:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -3006,7 +3175,10 @@ async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> di
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if denied_goal is not None:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -3204,26 +3376,60 @@ async def app_agent_approve_and_execute(
     expected_project_root = (request.expected_project_root if request else "") or ""
     global_only = bool(request.global_only if request else True)
 
-    def approve_and_execute() -> dict[str, Any]:
-        approved = AGENT_GATEWAY.approve(
+    def approve() -> dict[str, Any]:
+        return AGENT_GATEWAY.approve(
             approval_id,
             expected_project_root=expected_project_root,
             global_only=global_only,
         )
-        execution = None
-        approval = approved.get("approval") if isinstance(approved, dict) else None
-        if isinstance(approval, dict) and approved.get("ok"):
-            if approval.get("targetTool") == "vrcforge_shell_execute":
-                execution = AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
-            else:
-                execution = AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
-        return {"ok": bool(approved.get("ok")), "approval": approved.get("approval"), "execution": execution}
 
-    try:
-        payload = await asyncio.to_thread(approve_and_execute)
-    except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    def execute_approved(approved: dict[str, Any]) -> dict[str, Any]:
+        approval = approved.get("approval") if isinstance(approved, dict) else None
+        if not isinstance(approval, dict) or not approved.get("ok"):
+            return {}
+        if approval.get("targetTool") == "vrcforge_shell_execute":
+            return AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
+        return AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+
+    linked = await asyncio.to_thread(AGENT_GATEWAY.agent_goal_delivery_for_approval, approval_id)
+    linked_delivery = ensure_dict((linked or {}).get("delivery"))
+    linked_delivery_id = str(linked_delivery.get("deliveryId") or "")
+
+    if linked_delivery_id:
+        try:
+            approved, execution = await BACKGROUND_GOAL_COORDINATOR.execute_approved_action(
+                delivery_id=linked_delivery_id,
+                approval_id=approval_id,
+                approve_operation=approve,
+                execute_operation=execute_approved,
+            )
+        except BackgroundGoalDeliveryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        except AgentGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        payload = {
+            "ok": bool(approved.get("ok")),
+            "approval": approved.get("approval"),
+            "execution": execution,
+        }
+        payload["goalDelivery"] = ensure_dict(execution).get("goalDelivery") or linked
+    else:
+        def approve_and_execute() -> dict[str, Any]:
+            approved = approve()
+            execution = execute_approved(approved)
+            return {
+                "ok": bool(approved.get("ok")),
+                "approval": approved.get("approval"),
+                "execution": execution or None,
+            }
+
+        try:
+            payload = await asyncio.to_thread(approve_and_execute)
+        except AgentGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if linked_delivery_id:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -3240,7 +3446,10 @@ async def app_agent_reject(
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if denied_goal is not None:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -3256,7 +3465,10 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if denied_goal is not None:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -8391,6 +8603,10 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
         await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_agent_desktop_action":
         await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
+    elif tool_name == "vrcforge_apply_approved":
+        await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+        if isinstance(payload, dict) and payload.get("goalDelivery") is not None:
+            await broadcast_background_goal_state({})
     return payload
 
 
@@ -8420,6 +8636,8 @@ async def reject_agent_approval(approval_id: str, request: Request) -> dict[str,
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    if payload.get("goalDelivery") is not None:
+        await broadcast_background_goal_state({})
     return payload
 
 
@@ -13811,6 +14029,17 @@ async def status_monitor_loop() -> None:
             )
 
         await asyncio.sleep(DASHBOARD_STATE.status_push_interval_seconds)
+
+
+async def background_goal_monitor_loop() -> None:
+    while True:
+        try:
+            payload = await asyncio.to_thread(AGENT_GATEWAY.reconcile_agent_goal_watchdogs)
+            if payload.get("deliveries") or payload.get("reminders"):
+                await broadcast_background_goal_state({})
+        except Exception as exc:  # noqa: BLE001 - monitoring must not interrupt the core runtime.
+            emit_log("warn", "agent", "Background goal monitor check had a warning.", {"error": str(exc)})
+        await asyncio.sleep(30)
 
 
 def unity_http_base(settings: Settings) -> str:

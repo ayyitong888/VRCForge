@@ -51,6 +51,7 @@ type AppSidebarProps = {
   loadingProjects: boolean;
   projectItems: SidebarProjectItem[];
   chatSidebar: SidebarChatGroupsWithTimes;
+  backgroundGoalUnreadByChat: Record<string, number>;
   emptyProjectState?: { name?: string; meta?: string } | null;
   collapsedProjects: Record<string, boolean>;
   temporaryChatsCollapsed: boolean;
@@ -97,6 +98,7 @@ export function AppSidebar({
   loadingProjects,
   projectItems,
   chatSidebar,
+  backgroundGoalUnreadByChat,
   emptyProjectState,
   collapsedProjects,
   temporaryChatsCollapsed,
@@ -276,6 +278,7 @@ export function AppSidebar({
                           title={chat.title || t("sidebar.newChat")}
                           meta={chatSidebar.times.get(chat.id) || ""}
                           active={activeView === "chat" && chat.id === activeChatId}
+                          unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                           indent
                           pinned={chat.pinned}
                           renaming={renamingChatId === chat.id}
@@ -309,6 +312,7 @@ export function AppSidebar({
                 title={chat.title || t("sidebar.newChat")}
                 meta={chatSidebar.times.get(chat.id) || ""}
                 active={activeView === "chat" && chat.id === activeChatId}
+                unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                 pinned={chat.pinned}
                 renaming={renamingChatId === chat.id}
                 renameDraft={renameDraft}
