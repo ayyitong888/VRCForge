@@ -373,6 +373,23 @@ pub(crate) struct DesktopIdJsonBodyRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopMemoryReviewCandidateRequest {
+    id: String,
+    action: String,
+    body: serde_json::Value,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopMemoryReviewQueryRequest {
+    scope: Option<String>,
+    project_root: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentListRequest {
     limit: Option<u64>,
@@ -1475,6 +1492,44 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     }
 }
 
+pub(crate) fn memory_review_query(request: &DesktopMemoryReviewQueryRequest) -> String {
+    let mut query = Vec::new();
+    append_query_param(&mut query, "scope", &request.scope);
+    append_query_param(&mut query, "projectRoot", &request.project_root);
+    if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    }
+}
+
+pub(crate) fn memory_review_candidate_path(id: &str, action: &str) -> Result<String, String> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 512 || matches!(id, "." | "..") {
+        return Err("Invalid Memory Review candidate ID.".to_string());
+    }
+    let action = action.trim().to_ascii_lowercase();
+    if !matches!(
+        action.as_str(),
+        "accept" | "reject" | "defer" | "erase" | "undo" | "read"
+    ) {
+        return Err("Unsupported Memory Review candidate action.".to_string());
+    }
+    Ok(format!(
+        "/api/app/agent/memory/review/candidates/{}/{}",
+        percent_encode_query_component(id),
+        action
+    ))
+}
+
+pub(crate) fn bounded_memory_review_run_timeout(timeout_ms: Option<u64>) -> u64 {
+    // Three bounded provider attempts can each consume five minutes, with
+    // policy backoff between attempts. Keep the desktop transport alive
+    // longer than that server-side bound so a late durable commit is never
+    // reported to the user as a client timeout.
+    timeout_ms.unwrap_or(1_200_000).clamp(1_000, 1_200_000)
+}
+
 #[tauri::command]
 pub fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/avatars", request, 60_000)
@@ -2197,6 +2252,211 @@ pub async fn clear_agent_memory(
         post_json_body_command("/api/app/agent/memory/clear", request, 60_000)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn fetch_agent_memory_review(
+    request: DesktopMemoryReviewQueryRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "GET",
+            format!(
+                "/api/app/agent/memory/review{}",
+                memory_review_query(&request)
+            ),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_memory_review_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn update_agent_memory_review(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "POST",
+            "/api/app/agent/memory/review/config".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_memory_review_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn run_agent_memory_review(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        let timeout_ms = bounded_memory_review_run_timeout(request.timeout_ms);
+        backend_json_request_with_error_envelope(
+            "POST",
+            "/api/app/agent/memory/review/run".to_string(),
+            Some(request.body),
+            Some(timeout_ms),
+        )
+        .map(sanitize_memory_review_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_agent_memory_review(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "POST",
+            "/api/app/agent/memory/review/cancel".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_memory_review_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn mutate_agent_memory_review_candidate(
+    request: DesktopMemoryReviewCandidateRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    let path = memory_review_candidate_path(&request.id, &request.action)
+        .map_err(BackendJsonErrorEnvelope::transport)?;
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "POST",
+            path,
+            Some(request.body),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_memory_review_response)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod memory_review_transport_tests {
+    use super::{
+        bounded_memory_review_run_timeout, memory_review_candidate_path, memory_review_query,
+        DesktopMemoryReviewCandidateRequest, DesktopMemoryReviewQueryRequest,
+    };
+
+    #[test]
+    fn review_query_has_a_narrow_encoded_contract() {
+        let request: DesktopMemoryReviewQueryRequest = serde_json::from_value(serde_json::json!({
+            "scope": "project",
+            "projectRoot": "D:\\VR Projects\\Avatar?one#two",
+            "timeoutMs": 30000
+        }))
+        .expect("review query should deserialize");
+        assert_eq!(
+            memory_review_query(&request),
+            "?scope=project&projectRoot=D%3A%5CVR%20Projects%5CAvatar%3Fone%23two"
+        );
+        assert!(
+            serde_json::from_value::<DesktopMemoryReviewQueryRequest>(serde_json::json!({
+                "scope": "user",
+                "limit": 100
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_path_encodes_opaque_ids_and_rejects_path_actions() {
+        assert_eq!(
+            memory_review_candidate_path("candidate/../next?x=1#tail", "accept")
+                .expect("opaque ID should be encoded"),
+            "/api/app/agent/memory/review/candidates/candidate%2F..%2Fnext%3Fx%3D1%23tail/accept"
+        );
+        assert!(memory_review_candidate_path("..", "accept").is_err());
+        assert!(memory_review_candidate_path("candidate", "accept/undo").is_err());
+        assert!(memory_review_candidate_path("candidate", "publish").is_err());
+    }
+
+    #[test]
+    fn candidate_body_keeps_frontend_camel_case_fields_unchanged() {
+        let request: DesktopMemoryReviewCandidateRequest =
+            serde_json::from_value(serde_json::json!({
+                "id": "candidate_123",
+                "action": "accept",
+                "body": {
+                    "expectedRevision": 7,
+                    "projectRoot": "D:\\Projects\\Avatar",
+                    "editedText": "keep this"
+                },
+                "timeoutMs": 30000
+            }))
+            .expect("candidate mutation should deserialize");
+        assert_eq!(request.body["expectedRevision"], 7);
+        assert_eq!(request.body["projectRoot"], "D:\\Projects\\Avatar");
+        assert_eq!(request.body["editedText"], "keep this");
+        assert!(request.body.get("expected_revision").is_none());
+    }
+
+    #[test]
+    fn review_run_timeout_covers_bounded_provider_retries() {
+        assert_eq!(bounded_memory_review_run_timeout(None), 1_200_000);
+        assert_eq!(
+            bounded_memory_review_run_timeout(Some(9_999_999)),
+            1_200_000
+        );
+        assert_eq!(bounded_memory_review_run_timeout(Some(999_999)), 999_999);
+        assert_eq!(bounded_memory_review_run_timeout(Some(45_000)), 45_000);
+        assert_eq!(bounded_memory_review_run_timeout(Some(1)), 1_000);
+    }
+
+    #[test]
+    fn all_review_commands_are_registered_once() {
+        let main_source = include_str!("main.rs");
+        for command in [
+            "fetch_agent_memory_review",
+            "update_agent_memory_review",
+            "run_agent_memory_review",
+            "cancel_agent_memory_review",
+            "mutate_agent_memory_review_candidate",
+        ] {
+            assert_eq!(
+                main_source.matches(command).count(),
+                1,
+                "{command} must be registered exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_candidate_sanitizer_is_wired_only_to_memory_review_commands() {
+        let source = include_str!("commands.rs");
+        let start = source
+            .find("pub async fn fetch_agent_memory_review")
+            .expect("memory review command block must exist");
+        let end = source[start..]
+            .find("mod memory_review_transport_tests")
+            .map(|relative| start + relative)
+            .expect("memory review command block must stay bounded");
+        let review_commands = &source[start..end];
+
+        assert_eq!(
+            review_commands
+                .matches(".map(sanitize_memory_review_response)")
+                .count(),
+            5,
+            "every memory review response path must use the scoped sanitizer"
+        );
+        assert_eq!(
+            source[..end]
+                .matches("sanitize_memory_review_response")
+                .count(),
+            5,
+            "ordinary desktop responses must retain the global sanitizer"
+        );
+    }
 }
 
 #[tauri::command]

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from background_goal_runtime import RuntimeLaneBudget
+from memory_review_runtime import MemoryReviewIdleGate
 from sub_agent_tasks import (
     SUB_AGENT_LOG_SCHEMA,
     SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT,
@@ -48,6 +49,67 @@ def test_sub_agent_registry_runs_records_and_retries(tmp_path):
     retried = registry.retry_task(task_id, display_name="Kikyo")
     assert retried["ok"] is True
     assert retried["task"]["displayName"] == "Kikyo"
+
+
+def test_interactive_lane_signal_never_inverts_registry_and_idle_commit_locks(
+    tmp_path: Path,
+) -> None:
+    budget = RuntimeLaneBudget()
+    gate = MemoryReviewIdleGate()
+    budget.set_interactive_acquire_callback(gate.signal_activity)
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={
+            "project_index_review": lambda _payload, _cancel: {
+                "ok": True,
+                "summaryText": "done",
+            }
+        },
+        lane_budget=budget,
+    )
+    generation = gate.try_acquire(lambda: "", lambda: None)
+    assert generation is not None
+    commit_entered = threading.Event()
+    allow_commit = threading.Event()
+    commit_finished = threading.Event()
+    create_finished = threading.Event()
+    results: dict[str, object] = {}
+
+    def commit() -> None:
+        def critical_section() -> None:
+            commit_entered.set()
+            assert allow_commit.wait(timeout=5)
+            with registry._lock:  # noqa: SLF001 - exact lock-order regression.
+                pass
+
+        results["commit"] = gate.run_if_current(generation, critical_section)
+        commit_finished.set()
+
+    def create() -> None:
+        results["create"] = registry.create_task(
+            role="project_index_review",
+            task="scan",
+            display_name="Worker",
+        )
+        create_finished.set()
+
+    commit_thread = threading.Thread(target=commit)
+    create_thread = threading.Thread(target=create)
+    commit_thread.start()
+    assert commit_entered.wait(timeout=2)
+    create_thread.start()
+    assert not create_finished.wait(timeout=0.1)
+    allow_commit.set()
+    commit_thread.join(timeout=5)
+    create_thread.join(timeout=5)
+
+    assert not commit_thread.is_alive()
+    assert not create_thread.is_alive()
+    assert commit_finished.is_set()
+    assert create_finished.is_set()
+    assert results["commit"] is True
+    assert isinstance(results["create"], dict)
 
 
 def test_sub_agent_registry_cancel_sets_event(tmp_path):

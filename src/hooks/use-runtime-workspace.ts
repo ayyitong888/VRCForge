@@ -64,6 +64,8 @@ export function useRuntimeWorkspace({
   const [agentProgress, setAgentProgress] = useState<AgentProgress[]>([]);
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
+  const [memoryReviewUnreadCount, setMemoryReviewUnreadCount] = useState(0);
+  const [memoryReviewNeedsAttention, setMemoryReviewNeedsAttention] = useState(false);
   const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const runtimeRefreshSeqRef = useRef(0);
@@ -219,6 +221,8 @@ export function useRuntimeWorkspace({
       setAgentProgress([]);
       setAgentQuestions([]);
       setAgentMemory([]);
+      setMemoryReviewUnreadCount(0);
+      setMemoryReviewNeedsAttention(false);
       setAgentApprovals(null);
       setWorkspaceStateError("");
       return;
@@ -249,6 +253,8 @@ export function useRuntimeWorkspace({
       setAgentProgress(snapshot.progress?.items ?? []);
       setAgentQuestions(snapshot.questions?.questions ?? []);
       setAgentMemory(snapshot.memory?.memories ?? []);
+      setMemoryReviewUnreadCount(Math.max(0, Number(snapshot.memoryReview?.unreadCount) || 0));
+      setMemoryReviewNeedsAttention(snapshot.memoryReview?.needsAttention === true);
       setRuntimeRunsError("");
       setWorkspaceStateError("");
     } catch (cause) {
@@ -340,6 +346,8 @@ export function useRuntimeWorkspace({
     agentProgress,
     agentQuestions,
     agentMemory,
+    memoryReviewUnreadCount,
+    memoryReviewNeedsAttention,
     workspaceStateError,
     runtimeNotice,
     setRuntimeNotice,

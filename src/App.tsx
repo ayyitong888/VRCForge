@@ -227,6 +227,7 @@ export default function App() {
   const [computerUseEverEnabled, setComputerUseEverEnabled] = useState(false);
   const [backgroundGoalNotificationsEnabled, setBackgroundGoalNotificationsEnabled] = useState(true);
   const [backgroundGoalRefreshSignal, setBackgroundGoalRefreshSignal] = useState(0);
+  const [memoryReviewRefreshSignal, setMemoryReviewRefreshSignal] = useState(0);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
     try {
@@ -772,6 +773,8 @@ export default function App() {
     agentProgress,
     agentQuestions,
     agentMemory,
+    memoryReviewUnreadCount,
+    memoryReviewNeedsAttention,
     workspaceStateError,
     runtimeNotice,
     setRuntimeNotice,
@@ -1349,6 +1352,7 @@ export default function App() {
       "agentGoalBackground",
       "agentGoals",
       "agentMemory",
+      "agentMemoryReview",
       "agentProgress",
       "agentQuestions",
       "agentPermission",
@@ -1408,6 +1412,9 @@ export default function App() {
       }
       if (eventType === "agentGoalBackground") {
         setBackgroundGoalRefreshSignal((current) => current + 1);
+      }
+      if (eventType === "agentMemoryReview") {
+        setMemoryReviewRefreshSignal((current) => current + 1);
       }
       if (eventType === "subAgentTasks") {
         scheduleSubAgentRefresh();
@@ -2980,6 +2987,7 @@ export default function App() {
               loadingConnectors={loadingConnectors}
               connectorMessage={connectorMessage}
               selectedProjectPath={activeProjectPath}
+              memoryReviewRefreshSignal={memoryReviewRefreshSignal}
               isDesktop={isTauriRuntime()}
               checkpointArchiveLimitInput={checkpointArchiveLimitInput}
               agentNotes={agentNotes}
@@ -3141,6 +3149,8 @@ export default function App() {
               agentGoals={agentGoals}
               agentProgress={hasAgentRuntimeScope ? agentProgress : []}
               agentMemory={agentMemory}
+              memoryReviewUnreadCount={memoryReviewUnreadCount}
+              memoryReviewNeedsAttention={memoryReviewNeedsAttention}
               desktopActions={desktopActions}
               desktopBridge={desktopBridge}
               workspaceStateError={workspaceStateError}

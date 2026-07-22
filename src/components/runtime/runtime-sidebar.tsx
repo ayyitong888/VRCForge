@@ -41,6 +41,8 @@ export function RightRuntimeSidebar({
   agentGoals,
   agentProgress,
   agentMemory,
+  memoryReviewUnreadCount,
+  memoryReviewNeedsAttention,
   desktopActions,
   desktopBridge,
   workspaceStateError,
@@ -99,6 +101,8 @@ export function RightRuntimeSidebar({
   agentGoals: AgentGoal[];
   agentProgress: AgentProgress[];
   agentMemory: AgentMemory[];
+  memoryReviewUnreadCount: number;
+  memoryReviewNeedsAttention: boolean;
   desktopActions: AgentDesktopAction[];
   desktopBridge?: DesktopBridgeStatus | null;
   workspaceStateError: string;
@@ -332,12 +336,24 @@ export function RightRuntimeSidebar({
           </RuntimeSection>
         ) : null}
 
-        {agentMemory.length ? (
+        {agentMemory.length || memoryReviewUnreadCount || memoryReviewNeedsAttention ? (
           <RuntimeSection
             title={t("workspace.memory")}
             collapsed={rightRuntimeSectionsCollapsed.memory}
             onToggle={() => toggleRightRuntimeSection("memory")}
-            count={<Badge tone="muted">{formatCount(agentMemory.length)}</Badge>}
+            count={(
+              <div className="flex items-center gap-1">
+                <Badge tone="muted">{formatCount(agentMemory.length)}</Badge>
+                {memoryReviewUnreadCount ? (
+                  <Badge tone="warn" title={t("settings.memoryReviewUnreadCount", { count: memoryReviewUnreadCount })}>
+                    {formatCount(memoryReviewUnreadCount)}
+                  </Badge>
+                ) : null}
+                {memoryReviewNeedsAttention ? (
+                  <Badge tone="danger" title={t("settings.memoryReviewRunFailed")}>!</Badge>
+                ) : null}
+              </div>
+            )}
           >
             <div className="space-y-0.5">
               {agentMemory.slice(0, 6).map((memory) => (

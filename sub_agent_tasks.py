@@ -166,9 +166,17 @@ class SubAgentTaskRegistry:
         with self._lock:
             if self._running_count_locked() >= self.max_concurrent:
                 raise RuntimeError(f"Sub-agent concurrency limit reached ({self.max_concurrent}).")
-            task_id = f"sub_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
-            if self._lane_budget is not None and not self._lane_budget.acquire("interactive", task_id):
+        task_id = f"sub_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        lane_acquired = False
+        if self._lane_budget is not None:
+            lane_acquired = self._lane_budget.acquire("interactive", task_id)
+            if not lane_acquired:
                 raise RuntimeError("Shared runtime concurrency limit reached.")
+        with self._lock:
+            if self._running_count_locked() >= self.max_concurrent:
+                if lane_acquired and self._lane_budget is not None:
+                    self._lane_budget.release(task_id)
+                raise RuntimeError(f"Sub-agent concurrency limit reached ({self.max_concurrent}).")
             sub_task = SubAgentTask(
                 id=task_id,
                 role=role_id,

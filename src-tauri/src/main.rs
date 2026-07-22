@@ -125,6 +125,7 @@ fn main() {
             check_skills,
             clear_agent_memory,
             cancel_agent_desktop_action,
+            cancel_agent_memory_review,
             compact_agent_history,
             create_adjustment_checkpoint,
             create_agent_goal,
@@ -148,6 +149,7 @@ fn main() {
             fetch_agent_goal_background_state,
             fetch_recoverable_agent_goal_deliveries,
             fetch_agent_memory,
+            fetch_agent_memory_review,
             fetch_due_agent_goals,
             fetch_agent_notes,
             fetch_agent_progress,
@@ -180,6 +182,7 @@ fn main() {
             install_external_agent_connector,
             issue_computer_use_turn_grant,
             merge_sub_agent,
+            mutate_agent_memory_review_candidate,
             materialize_agent_goal_delivery,
             overwrite_adjustment_checkpoint,
             plan_avatar_encryption,
@@ -191,6 +194,7 @@ fn main() {
             preview_restore_checkpoint,
             record_agent_run_queued,
             reject_agent_approval,
+            run_agent_memory_review,
             refresh_projects,
             refresh_unity_readiness,
             repair_unity_mcp_bridge,
@@ -221,6 +225,7 @@ fn main() {
             uninstall_external_agent_connector,
             update_adjustment_checkpoint,
             update_advanced_settings,
+            update_agent_memory_review,
             update_agent_goal,
             update_agent_progress,
             wake_agent_goal,
@@ -669,6 +674,10 @@ mod tests {
         );
         assert_eq!(
             sanitize_text_for_webview("request failed with Bearer real-secret"),
+            "[redacted]"
+        );
+        assert_eq!(
+            sanitize_text_for_webview("Remember API_KEY variable naming"),
             "[redacted]"
         );
         assert_eq!(

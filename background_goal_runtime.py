@@ -253,6 +253,23 @@ class RuntimeLaneBudget:
         self._clock = clock
         self._leases: dict[str, _LaneLease] = {}
         self._lock = threading.RLock()
+        self._interactive_acquire_callback: Callable[[str], Any] | None = None
+
+    def set_interactive_acquire_callback(
+        self,
+        callback: Callable[[str], Any] | None,
+    ) -> None:
+        """Observe successful interactive starts without exposing lease data.
+
+        The callback runs after the lane mutation and outside the budget lock,
+        so an idle-only background feature can revoke itself without changing
+        the shared capacity policy or creating a lock-order cycle.
+        """
+
+        if callback is not None and not callable(callback):
+            raise TypeError("interactive acquire callback must be callable")
+        with self._lock:
+            self._interactive_acquire_callback = callback
 
     def acquire(self, lane: str, token: str) -> bool:
         """Acquire immediately or return ``False`` without waiting.
@@ -274,6 +291,7 @@ class RuntimeLaneBudget:
         if not normalized_token:
             raise ValueError("token must not be empty")
 
+        callback: Callable[[str], Any] | None = None
         with self._lock:
             existing = self._leases.get(normalized_token)
             if existing is not None:
@@ -288,7 +306,16 @@ class RuntimeLaneBudget:
                 lane=normalized_lane,
                 acquired_at=float(self._clock()),
             )
-            return "acquired"
+            if normalized_lane == "interactive":
+                callback = self._interactive_acquire_callback
+        if callback is not None:
+            try:
+                callback(normalized_token)
+            except Exception:
+                # Capacity ownership is authoritative once granted. Observer
+                # failures must not strand or reject an interactive caller.
+                pass
+        return "acquired"
 
     def release(self, token: str) -> bool:
         """Release one token immediately; missing tokens are harmless."""

@@ -633,6 +633,13 @@ export type DesktopRuntimeSnapshot = {
   progress?: { items?: AgentProgress[]; count?: number };
   questions?: { questions?: AgentQuestion[]; count?: number };
   memory?: { memories?: AgentMemory[]; count?: number };
+  memoryReview?: {
+    revision?: number;
+    unreadCount?: number;
+    runStatus?: string;
+    needsAttention?: boolean;
+    failureClass?: string;
+  };
 };
 
 export type AgentDesktopAction = {

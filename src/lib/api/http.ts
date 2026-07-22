@@ -93,9 +93,55 @@ export function hasTauriInternals(): boolean {
   return typeof window !== "undefined" && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 }
 
+type BackendJsonErrorEnvelope = {
+  errorType: "backendJsonError";
+  status: number;
+  detail: string;
+};
+
+function parseBackendJsonErrorEnvelope(cause: unknown): BackendJsonErrorEnvelope | null {
+  let candidate = cause;
+  if (typeof candidate === "string" && candidate.length <= 2048 && candidate.trimStart().startsWith("{")) {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  }
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const envelope = candidate as Partial<BackendJsonErrorEnvelope>;
+  if (
+    envelope.errorType !== "backendJsonError"
+    || typeof envelope.status !== "number"
+    || !Number.isInteger(envelope.status)
+    || envelope.status < 0
+    || envelope.status > 599
+    || typeof envelope.detail !== "string"
+  ) {
+    return null;
+  }
+  const detail = envelope.detail.trim().slice(0, 500) || "VRCForge runtime request failed.";
+  return { errorType: "backendJsonError", status: envelope.status, detail };
+}
+
+export function normalizeTauriInvokeError(cause: unknown): unknown {
+  if (cause instanceof ApiError) {
+    return cause;
+  }
+  const envelope = parseBackendJsonErrorEnvelope(cause);
+  if (!envelope) {
+    return cause;
+  }
+  return new ApiError(envelope.detail, envelope.status, envelope.detail);
+}
+
 export function invokeTauriWithAbort<T>(command: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   if (!signal) {
-    return invoke<T>(command, args);
+    return invoke<T>(command, args).catch((error) => {
+      throw normalizeTauriInvokeError(error);
+    });
   }
   if (signal.aborted) {
     return Promise.reject(new ApiError("Request cancelled.", 0));
@@ -124,7 +170,7 @@ export function invokeTauriWithAbort<T>(command: string, args: Record<string, un
         if (!settled) {
           settled = true;
           cleanup();
-          reject(error);
+          reject(normalizeTauriInvokeError(error));
         }
       });
   });

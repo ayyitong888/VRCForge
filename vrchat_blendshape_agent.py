@@ -36,6 +36,10 @@ DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_VERTEX_AI_BASE_URL = ""
 DEFAULT_CUSTOM_BASE_URL = ""
 DEFAULT_LLM_PROVIDER = "gemini"
+DEFAULT_LLM_SYSTEM_INSTRUCTION = (
+    "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown."
+)
+MAX_LLM_OUTPUT_TOKENS = 65_536
 SUPPORTED_LLM_PROVIDERS = (
     "gemini",
     "deepseek",
@@ -108,6 +112,8 @@ class Settings:
     execute_tool_name: str
     export_path: Path
     min_confidence: float
+    llm_system_instruction: str = ""
+    llm_max_output_tokens: int | None = None
 
 
 @dataclass
@@ -1307,6 +1313,21 @@ def request_llm_plan_with_metadata(
     )
 
 
+def llm_system_instruction(settings: Settings) -> str:
+    return str(settings.llm_system_instruction or DEFAULT_LLM_SYSTEM_INSTRUCTION).strip()[:4000]
+
+
+def llm_max_output_tokens(settings: Settings) -> int | None:
+    value = settings.llm_max_output_tokens
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(normalized, MAX_LLM_OUTPUT_TOKENS))
+
+
 def request_gemini_plan(
     settings: Settings,
     prompt: str,
@@ -1337,7 +1358,12 @@ def request_gemini_plan_with_metadata(
 
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     genai_types: Any = None
-    if image_paths or normalize_reasoning_effort(settings.gemini_thinking_level):
+    if (
+        image_paths
+        or normalize_reasoning_effort(settings.gemini_thinking_level)
+        or llm_max_output_tokens(settings) is not None
+        or bool(str(settings.llm_system_instruction or "").strip())
+    ):
         try:
             from google.genai import types as genai_types
         except ImportError as exc:
@@ -1414,7 +1440,12 @@ def request_vertex_ai_plan_with_metadata(
     project, location = resolve_vertex_ai_project_location(settings.llm_base_url)
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     genai_types: Any = None
-    if image_paths or normalize_reasoning_effort(settings.gemini_thinking_level):
+    if (
+        image_paths
+        or normalize_reasoning_effort(settings.gemini_thinking_level)
+        or llm_max_output_tokens(settings) is not None
+        or bool(str(settings.llm_system_instruction or "").strip())
+    ):
         try:
             from google.genai import types as genai_types
         except ImportError as exc:
@@ -1665,9 +1696,8 @@ def _gemini_reasoning_variants(model_id: str) -> list[str]:
     return []
 
 
-# One extension point for current and future providers. Adding xAI, Mistral,
-# Groq, or another configured lane requires a resolver plus a request adapter;
-# unknown/custom providers remain fail-closed.
+# One extension point for configured provider lanes. Each new lane requires a
+# resolver plus a request adapter; unknown/custom providers remain fail-closed.
 REASONING_PROVIDER_VARIANT_RESOLVERS: dict[str, Callable[[str], list[str]]] = {
     "openai": _openai_reasoning_variants,
     "deepseek": _deepseek_reasoning_variants,
@@ -1790,11 +1820,15 @@ def build_openai_compatible_request_payload(settings: Settings, user_content: An
     payload["messages"] = [
         {
             "role": "system",
-            "content": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+            "content": llm_system_instruction(settings),
         },
         {"role": "user", "content": user_content},
     ]
     provider = normalize_provider_name(settings.llm_provider)
+    output_limit = llm_max_output_tokens(settings)
+    if output_limit is not None:
+        token_field = "max_completion_tokens" if model_rejects_fixed_temperature(settings.llm_model) else "max_tokens"
+        payload[token_field] = output_limit
     if active_level and provider == "openai":
         payload["reasoning_effort"] = active_level
     elif active_level and provider == "deepseek":
@@ -1809,8 +1843,8 @@ def build_anthropic_request_payload(settings: Settings, user_content: Any) -> di
 
     payload: dict[str, Any] = {
         "model": settings.llm_model or DEFAULT_ANTHROPIC_MODEL,
-        "max_tokens": ANTHROPIC_RESPONSE_BASE_MAX_TOKENS,
-        "system": "You are a VRChat blendshape planning assistant. Reply with JSON only and no Markdown.",
+        "max_tokens": llm_max_output_tokens(settings) or ANTHROPIC_RESPONSE_BASE_MAX_TOKENS,
+        "system": llm_system_instruction(settings),
         "messages": [{"role": "user", "content": user_content}],
     }
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
@@ -1840,22 +1874,32 @@ def build_gemini_generate_config(settings: Settings, types_module: Any) -> Any |
 
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     if level not in reasoning_effort_variants(settings.llm_provider, settings.llm_model):
-        return None
+        level = ""
     mode = gemini_model_thinking_mode(settings.llm_model)
+    thinking_config: Any | None = None
     if mode == "level":
-        thinking_config = types_module.ThinkingConfig(thinking_level=level)
+        if level:
+            thinking_config = types_module.ThinkingConfig(thinking_level=level)
     elif mode == "budget":
-        budget = GEMINI_25_THINKING_BUDGET_TOKENS[level]
-        if level == "max" and "pro" in bare_provider_model_id(settings.llm_model):
-            budget = 32768
-        thinking_config = types_module.ThinkingConfig(
-            thinking_budget=budget
-        )
-    else:
+        if level:
+            budget = GEMINI_25_THINKING_BUDGET_TOKENS[level]
+            if level == "max" and "pro" in bare_provider_model_id(settings.llm_model):
+                budget = 32768
+            thinking_config = types_module.ThinkingConfig(
+                thinking_budget=budget
+            )
+    output_limit = llm_max_output_tokens(settings)
+    system_instruction = str(settings.llm_system_instruction or "").strip()
+    if thinking_config is None and output_limit is None and not system_instruction:
         return None
-    return types_module.GenerateContentConfig(
-        thinking_config=thinking_config
-    )
+    config: dict[str, Any] = {}
+    if thinking_config is not None:
+        config["thinking_config"] = thinking_config
+    if output_limit is not None:
+        config["max_output_tokens"] = output_limit
+    if system_instruction:
+        config["system_instruction"] = system_instruction[:4000]
+    return types_module.GenerateContentConfig(**config)
 
 
 def request_openai_compatible_plan_with_metadata(

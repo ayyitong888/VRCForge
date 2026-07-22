@@ -24,6 +24,7 @@ import { DeveloperOptionsControl } from "./developer-options-control";
 import { DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
 import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel";
 import { MemorySettingsPanel } from "./memory-settings";
+import { MemoryReviewSettings } from "./memory-review-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 
 type SettingsWorkspaceProps = {
@@ -67,6 +68,7 @@ type SettingsWorkspaceProps = {
   loadingConnectors: boolean;
   connectorMessage: string;
   selectedProjectPath: string;
+  memoryReviewRefreshSignal?: number;
   isDesktop: boolean;
   checkpointArchiveLimitInput: string;
   agentNotes: string;
@@ -155,6 +157,7 @@ export function SettingsWorkspace({
   loadingConnectors,
   connectorMessage,
   selectedProjectPath,
+  memoryReviewRefreshSignal = 0,
   isDesktop,
   checkpointArchiveLimitInput,
   agentNotes,
@@ -453,8 +456,16 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "memory" ? (
-        <section className="pb-6">
-          <MemorySettingsPanel endpoint={endpoint} runtimeConnected={runtimeConnected} selectedProjectPath={selectedProjectPath} />
+        <section className="space-y-8 pb-6">
+          <MemoryReviewSettings
+            endpoint={endpoint}
+            runtimeConnected={runtimeConnected}
+            selectedProjectPath={selectedProjectPath}
+            refreshSignal={memoryReviewRefreshSignal}
+          />
+          <div className="border-t border-border pt-8">
+            <MemorySettingsPanel endpoint={endpoint} runtimeConnected={runtimeConnected} selectedProjectPath={selectedProjectPath} />
+          </div>
         </section>
         ) : null}
 

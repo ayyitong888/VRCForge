@@ -1,12 +1,19 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { dirname, relative, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const cdpPort = Number(process.env.VRCFORGE_MEMORY_PROBE_CDP_PORT || "9348");
 const marker = `MEMORY_RESTART_PROBE_${Date.now()}`;
+const redactionSentinels = [
+  ["s", "k", "-", "1145141919810"].join(""),
+  ["D:", "\\", "private", "\\", `${marker}.txt`].join(""),
+  `https://probe.invalid/path?token=${marker}`,
+];
+const redactionSourceText = `Please remember ${marker} user preference. ${redactionSentinels.join(" ")}`;
 const evidenceRoot = resolve(repoRoot, "artifacts", "actual-app-memory-restart", marker);
 const packagedRoot = resolve(evidenceRoot, "package");
 const exe = resolve(packagedRoot, "VRCForge.exe");
@@ -23,6 +30,14 @@ const memoryLogPath = resolve(
   "agent_gateway",
   "agent-memory.jsonl",
 );
+const reviewStorePath = resolve(
+  userDataRoot,
+  "artifacts",
+  "dashboard",
+  "agent_gateway",
+  "memory-review",
+  "memory-review.json",
+);
 const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 let appSessionToken = "";
@@ -30,7 +45,7 @@ let appSessionToken = "";
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(`Usage: node scripts/diagnose_packaged_memory_restart.mjs
 
-Runs the packaged Memory persistence/isolation/tombstone restart probe.
+Runs the packaged Memory persistence/isolation/tombstone and review restart probe.
 Requires a strict release build whose manifest commit equals pushed origin/main.
 
 Optional environment:
@@ -46,6 +61,103 @@ function addAssertion(report, message) {
   if (!report.assertions.includes(message)) {
     report.assertions.push(message);
   }
+}
+
+function createMemoryReviewProvider() {
+  const requests = [];
+  const rawBodies = [];
+  const candidateBySource = new Map();
+  let failuresRemaining = 0;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString("utf8");
+    rawBodies.push(rawBody);
+    let body = {};
+    try { body = rawBody ? JSON.parse(rawBody) : {}; } catch { body = {}; }
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ object: "list", data: [{ id: "vrcforge-memory-review-probe", object: "model" }] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    let reviewPayload = {};
+    for (const message of [...(Array.isArray(body.messages) ? body.messages : [])].reverse()) {
+      if (typeof message?.content !== "string") continue;
+      try {
+        const parsed = JSON.parse(message.content);
+        if (Array.isArray(parsed?.sources)) {
+          reviewPayload = parsed;
+          break;
+        }
+      } catch {
+        // The dedicated review request contains exactly one JSON user message.
+      }
+    }
+    const sources = Array.isArray(reviewPayload.sources) ? reviewPayload.sources : [];
+    requests.push({
+      method: request.method,
+      url: request.url,
+      model: String(body.model || ""),
+      sourceCount: sources.length,
+      hasTools: Array.isArray(body.tools) && body.tools.length > 0,
+      forcedFailure: failuresRemaining > 0,
+    });
+    if (failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      response.writeHead(503, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "bounded probe failure" } }));
+      return;
+    }
+    const candidates = sources.map((source, index) => {
+      const sourceId = String(source?.sourceId || "");
+      const text = candidateBySource.get(sourceId) || `${marker} reviewed candidate ${index + 1}`;
+      candidateBySource.set(sourceId, text);
+      return {
+        kind: ["preference", "fact", "correction", "decision"].includes(source?.kind)
+          ? source.kind
+          : "preference",
+        text,
+        sourceIds: [sourceId],
+        confidenceFactors: ["explicit_user_intent"],
+      };
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      id: "chatcmpl-memory-review-probe",
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: body.model || "vrcforge-memory-review-probe",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: JSON.stringify({ candidates }) },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+    }));
+  });
+  return {
+    requests,
+    rawBodies,
+    candidateBySource,
+    failNextRequests(count) {
+      failuresRemaining = Math.max(0, Number(count) || 0);
+    },
+    async listen() {
+      await new Promise((resolveListen, rejectListen) => {
+        server.once("error", rejectListen);
+        server.listen(0, "127.0.0.1", resolveListen);
+      });
+      return server.address().port;
+    },
+    close() {
+      return new Promise((resolveClose) => server.close(resolveClose));
+    },
+  };
 }
 
 function escapePowerShellLiteral(value) {
@@ -82,6 +194,51 @@ function sha256File(path) {
     input.on("data", (chunk) => digest.update(chunk));
     input.on("end", () => resolveHash(digest.digest("hex")));
   });
+}
+
+async function snapshotUnityProjectTree(projectRoot) {
+  const manifest = [];
+  for (const topLevel of ["Assets", "Packages", "ProjectSettings"]) {
+    const pending = [resolve(projectRoot, topLevel)];
+    while (pending.length) {
+      const current = pending.pop();
+      const entries = (await readdir(current, { withFileTypes: true }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      if (entries.length === 0) {
+        manifest.push({ path: `${relative(projectRoot, current).replaceAll("\\", "/")}/`, kind: "directory" });
+      }
+      for (const entry of entries) {
+        const path = resolve(current, entry.name);
+        const relativePath = relative(projectRoot, path).replaceAll("\\", "/");
+        if (entry.isDirectory()) {
+          manifest.push({ path: `${relativePath}/`, kind: "directory" });
+          pending.push(path);
+          continue;
+        }
+        if (!entry.isFile()) {
+          throw new Error("Unity project manifest encountered an unsupported filesystem entry.");
+        }
+        const metadata = await stat(path);
+        manifest.push({
+          path: relativePath,
+          kind: "file",
+          size: metadata.size,
+          sha256: await sha256File(path),
+        });
+      }
+    }
+  }
+  return manifest.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function summarizeTreeManifest(manifest) {
+  const serialized = JSON.stringify(manifest);
+  return {
+    entryCount: manifest.length,
+    fileCount: manifest.filter((entry) => entry.kind === "file").length,
+    directoryCount: manifest.filter((entry) => entry.kind === "directory").length,
+    sha256: createHash("sha256").update(serialized).digest("hex"),
+  };
 }
 
 async function prepareManifestBoundPackage(sourceVersion) {
@@ -522,6 +679,48 @@ async function appApi(path, options = {}) {
   }
 }
 
+async function expectAppApiFailure(path, options, expectedStatus) {
+  try {
+    await appApi(path, options);
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (message.startsWith(`${expectedStatus} `)) return message;
+    throw error;
+  }
+  throw new Error(`${path} unexpectedly succeeded; expected HTTP ${expectedStatus}.`);
+}
+
+function stableProbePromotionId(candidateId, acceptedText, generation) {
+  const canonical = JSON.stringify({
+    acceptedText: String(acceptedText).trim().toLowerCase(),
+    candidateId,
+    contract: "vrcforge.memory_review_promotion.v1",
+    generation,
+  });
+  return `memprom_${createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+async function seedPromotionCrashState(candidateId, acceptedText, phase) {
+  const store = JSON.parse(await readFile(reviewStorePath, "utf8"));
+  const candidate = (Array.isArray(store.candidates) ? store.candidates : [])
+    .find((item) => item?.candidateId === candidateId);
+  if (!candidate) throw new Error(`promotion crash seed could not find ${candidateId}`);
+  const generation = Number(candidate.promotionGeneration || 0);
+  const promotionId = stableProbePromotionId(candidateId, acceptedText, generation);
+  if (phase === "after_memory_write" && candidate.promotionId !== promotionId) {
+    throw new Error("after-memory promotion crash seed did not match the durable promotion identity");
+  }
+  candidate.state = "promoting";
+  candidate.promotionId = promotionId;
+  candidate.acceptedText = acceptedText;
+  candidate.memoryId = "";
+  delete candidate.acceptedAt;
+  candidate.updatedAt = new Date().toISOString();
+  store.revision = Number(store.revision || 0) + 1;
+  await writeFile(reviewStorePath, `${JSON.stringify(store)}\n`, "utf8");
+  return { phase, candidateId, promotionId, generation, revision: store.revision };
+}
+
 async function tauriInvoke(cdp, command, args) {
   const envelope = await evalValue(
     cdp,
@@ -541,6 +740,251 @@ async function tauriInvoke(cdp, command, args) {
     throw new Error(`Tauri ${command} failed: ${envelope?.error || "unknown error"}`);
   }
   return envelope.value;
+}
+
+function summarizeReviewSnapshot(payload) {
+  const summarizeUsage = (usage) => ({
+    inputTokens: Number(usage?.inputTokens || 0),
+    outputTokens: Number(usage?.outputTokens || 0),
+    totalTokens: Number(usage?.totalTokens || 0),
+    costUsd: Number(usage?.costUsd || 0),
+    attempts: Number(usage?.attempts || 0),
+    costUpperBoundUsd: Number(usage?.costUpperBoundUsd || 0),
+    costAccounting: String(usage?.costAccounting || ""),
+  });
+  const summarizeCounts = (counts) => Object.fromEntries(
+    Object.entries(counts && typeof counts === "object" ? counts : {})
+      .map(([key, value]) => [String(key), Number(value || 0)])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return {
+    ok: payload?.ok === true,
+    schema: String(payload?.schema || ""),
+    mode: String(payload?.mode || ""),
+    policyVersion: String(payload?.policyVersion || ""),
+    scope: String(payload?.scope || ""),
+    projectBound: Boolean(payload?.projectRoot),
+    requestedProjectBound: Boolean(payload?.requestedProjectRoot),
+    configuredProjectMatches: payload?.configuredProjectMatches !== false,
+    revision: Number(payload?.revision || 0),
+    config: {
+      cadenceMinutes: Number(payload?.cadenceMinutes || 0),
+      inputCharCap: Number(payload?.inputCharCap || 0),
+      tokenCap: Number(payload?.tokenCap || 0),
+      costCapUsd: Number(payload?.costCapUsd || 0),
+      inputCostPerMillionUsd: Number(payload?.inputCostPerMillionUsd || 0),
+      outputCostPerMillionUsd: Number(payload?.outputCostPerMillionUsd || 0),
+      retentionDays: Number(payload?.retentionDays || 0),
+      provider: String(payload?.provider || ""),
+      model: String(payload?.model || ""),
+    },
+    unreadCount: Number(payload?.unreadCount || 0),
+    runState: String(payload?.runStatus?.state || ""),
+    runPhase: String(payload?.runStatus?.phase || ""),
+    runAttempt: Number(payload?.runStatus?.attempt || 0),
+    lastRunStatus: String(payload?.lastRun?.status || ""),
+    lastFailureClass: String(payload?.lastRun?.failureClass || payload?.lastRun?.deferredReason || ""),
+    lastRunNonConsuming: payload?.lastRun?.nonConsuming === true,
+    lastRun: {
+      status: String(payload?.lastRun?.status || ""),
+      phase: String(payload?.lastRun?.phase || ""),
+      failureClass: String(payload?.lastRun?.failureClass || ""),
+      deferredReason: String(payload?.lastRun?.deferredReason || ""),
+      nonConsuming: payload?.lastRun?.nonConsuming === true,
+      attempt: Number(payload?.lastRun?.attempt || 0),
+      eligibleCount: Number(payload?.lastRun?.eligibleCount || 0),
+      candidateCount: Number(payload?.lastRun?.candidateCount || 0),
+      provider: String(payload?.lastRun?.provider || ""),
+      model: String(payload?.lastRun?.model || ""),
+      budget: {
+        inputCharCap: Number(payload?.lastRun?.budget?.inputCharCap || 0),
+        tokenCap: Number(payload?.lastRun?.budget?.tokenCap || 0),
+        costCapUsd: Number(payload?.lastRun?.budget?.costCapUsd || 0),
+      },
+      usage: summarizeUsage(payload?.lastRun?.usage),
+    },
+    providerDisclosure: {
+      paidRun: payload?.providerDisclosure?.paidRun === true,
+      provider: String(payload?.providerDisclosure?.provider || ""),
+      providerLabel: String(payload?.providerDisclosure?.providerLabel || ""),
+      model: String(payload?.providerDisclosure?.model || ""),
+      activeConfigMatches: payload?.providerDisclosure?.activeConfigMatches !== false,
+      cadenceMinutes: Number(payload?.providerDisclosure?.cadenceMinutes || 0),
+      inputCharCap: Number(payload?.providerDisclosure?.inputCharCap || 0),
+      tokenCap: Number(payload?.providerDisclosure?.tokenCap || 0),
+      costCapUsd: Number(payload?.providerDisclosure?.costCapUsd || 0),
+      inputCostPerMillionUsd: Number(payload?.providerDisclosure?.inputCostPerMillionUsd || 0),
+      outputCostPerMillionUsd: Number(payload?.providerDisclosure?.outputCostPerMillionUsd || 0),
+      privacyScope: String(payload?.providerDisclosure?.privacyScope || ""),
+    },
+    usage: summarizeUsage(payload?.usage),
+    shadowSummary: payload?.shadowSummary ? {
+      scope: String(payload.shadowSummary.scope || ""),
+      projectBound: Boolean(payload.shadowSummary.projectRoot),
+      eligibleCount: Number(payload.shadowSummary.eligibleCount || 0),
+      sourceTypeCounts: summarizeCounts(payload.shadowSummary.sourceTypeCounts),
+      reasonCounts: summarizeCounts(payload.shadowSummary.reasonCounts),
+      revision: Number(payload.shadowSummary.revision || 0),
+    } : null,
+    candidates: (Array.isArray(payload?.candidates) ? payload.candidates : []).map((candidate) => ({
+      candidateId: String(candidate?.candidateId || ""),
+      scope: String(candidate?.scope || ""),
+      kind: String(candidate?.kind || ""),
+      proposedText: String(candidate?.proposedText || ""),
+      state: String(candidate?.state || ""),
+      evidenceCount: Number(candidate?.evidenceCount || 0),
+      conflictCount: Number(candidate?.conflictCount || 0),
+      conflictExplanation: String(candidate?.conflictExplanation || "none"),
+      confidenceScore: Number(candidate?.confidenceScore || 0),
+      sourceTypeCounts: summarizeCounts(candidate?.sourceTypeCounts),
+      unread: candidate?.unread === true,
+      eraseOnly: candidate?.eraseOnly === true,
+      provider: String(candidate?.provider || ""),
+      model: String(candidate?.model || ""),
+      usage: summarizeUsage(candidate?.usage),
+    })),
+  };
+}
+
+async function fetchReviewPair(cdp, scope, projectRoot = "") {
+  const query = new URLSearchParams({ scope });
+  if (projectRoot) query.set("projectRoot", projectRoot);
+  const [rest, tauri] = await Promise.all([
+    appApi(`/api/app/agent/memory/review?${query.toString()}`),
+    tauriInvoke(cdp, "fetch_agent_memory_review", {
+      request: { scope, ...(projectRoot ? { projectRoot } : {}), timeoutMs: 30000 },
+    }),
+  ]);
+  return { rest: summarizeReviewSnapshot(rest), tauri: summarizeReviewSnapshot(tauri) };
+}
+
+function assertReviewPair(report, pair, label) {
+  for (const [transport, payload] of Object.entries(pair)) {
+    if (!payload.ok || payload.schema !== "vrcforge.memory_review_snapshot.v1") {
+      addAssertion(report, `${label} ${transport} did not return the Memory Review snapshot contract`);
+    }
+  }
+  if (JSON.stringify(pair.rest) !== JSON.stringify(pair.tauri)) {
+    addAssertion(report, `${label} REST and Tauri Memory Review projections differed`);
+  }
+}
+
+function onlyCandidate(snapshot, expectedState, label) {
+  if (snapshot?.candidates?.length !== 1) {
+    throw new Error(`${label}: expected exactly one candidate, got ${snapshot?.candidates?.length ?? "unknown"}.`);
+  }
+  const candidate = snapshot.candidates[0];
+  if (candidate.state !== expectedState) {
+    throw new Error(`${label}: candidate state ${candidate.state || "<missing>"} did not equal ${expectedState}.`);
+  }
+  return candidate;
+}
+
+async function seedReviewChats({
+  projectBText = `Please remember ${marker} project B preference.`,
+  userText = redactionSourceText,
+} = {}) {
+  const query = new URLSearchParams();
+  query.append("projectPath", projectARoot);
+  query.append("projectPath", projectBRoot);
+  const current = await appApi(`/api/app/chats?${query.toString()}`);
+  const agentResponse = (label) => ({
+    id: `${label}-agent`,
+    type: "agent",
+    response: {
+      ok: true,
+      plan: { summary: "Acknowledged", planner: "packaged-probe", shellNeeded: false, reply: "Acknowledged" },
+    },
+  });
+  const chats = [
+    {
+      id: `${marker}-user-chat`,
+      projectPath: "",
+      items: [
+        { id: `${marker}-user-source`, type: "user", text: userText },
+        agentResponse(`${marker}-user`),
+      ],
+    },
+    {
+      id: `${marker}-project-a-chat`,
+      projectPath: projectARoot,
+      items: [
+        { id: `${marker}-project-a-source`, type: "user", text: `Please remember ${marker} project A preference.` },
+        agentResponse(`${marker}-project-a`),
+      ],
+    },
+    {
+      id: `${marker}-project-b-chat`,
+      projectPath: projectBRoot,
+      items: [
+        { id: `${marker}-project-b-source`, type: "user", text: projectBText },
+        agentResponse(`${marker}-project-b`),
+      ],
+    },
+  ];
+  return appApi("/api/app/chats", {
+    method: "POST",
+    body: { chats, sourceRevisions: Array.isArray(current?.sources) ? current.sources : [] },
+    timeoutMs: 60000,
+  });
+}
+
+async function findTextInTree(root, needle) {
+  const pending = [root];
+  let scannedFiles = 0;
+  let scannedBytes = 0;
+  const matches = [];
+  const unreadable = [];
+  const needleBuffer = Buffer.from(needle, "utf8");
+  while (pending.length) {
+    const current = pending.pop();
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch (error) {
+      unreadable.push({ path: current, reason: String(error?.code || "read_failed") });
+      continue;
+    }
+    for (const entry of entries) {
+      const path = resolve(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+        continue;
+      }
+      if (!entry.isFile()) {
+        unreadable.push({ path, reason: "unsupported_entry" });
+        continue;
+      }
+      scannedFiles += 1;
+      try {
+        let tail = Buffer.alloc(0);
+        let found = false;
+        for await (const chunk of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
+          scannedBytes += chunk.length;
+          const combined = tail.length ? Buffer.concat([tail, chunk]) : chunk;
+          if (combined.includes(needleBuffer)) found = true;
+          const overlap = Math.max(0, needleBuffer.length - 1);
+          tail = overlap
+            ? Buffer.from(combined.subarray(Math.max(0, combined.length - overlap)))
+            : Buffer.alloc(0);
+        }
+        if (found) matches.push(path);
+      } catch (error) {
+        unreadable.push({ path, reason: String(error?.code || "read_failed") });
+      }
+    }
+  }
+  return { scannedFiles, scannedBytes, matches, unreadable };
+}
+
+async function findTextInRoots(roots, needle) {
+  const scans = await Promise.all(roots.map((root) => findTextInTree(root, needle)));
+  return {
+    scannedFiles: scans.reduce((total, scan) => total + scan.scannedFiles, 0),
+    scannedBytes: scans.reduce((total, scan) => total + scan.scannedBytes, 0),
+    matches: scans.flatMap((scan) => scan.matches),
+    unreadable: scans.flatMap((scan) => scan.unreadable),
+  };
 }
 
 function summarizeMemory(memory) {
@@ -770,7 +1214,7 @@ function assertTombstones(report, eventSummary) {
 async function main() {
   await mkdir(evidenceRoot, { recursive: true });
   const report = {
-    schema: "vrcforge.packaged_memory_restart_probe.v1",
+    schema: "vrcforge.packaged_memory_restart_probe.v2",
     marker,
     exe,
     cdpPort,
@@ -784,6 +1228,7 @@ async function main() {
     closures: {},
   };
   let app;
+  let provider;
   try {
     if (!Number.isInteger(cdpPort) || cdpPort < 1024 || cdpPort > 65535 || cdpPort === 8757) {
       throw new Error(`Invalid VRCFORGE_MEMORY_PROBE_CDP_PORT: ${process.env.VRCFORGE_MEMORY_PROBE_CDP_PORT || cdpPort}`);
@@ -803,11 +1248,33 @@ async function main() {
       mkdir(webviewDataRoot, { recursive: true }),
       mkdir(projectARoot, { recursive: true }),
       mkdir(projectBRoot, { recursive: true }),
+      mkdir(resolve(projectARoot, "Assets"), { recursive: true }),
+      mkdir(resolve(projectARoot, "Packages"), { recursive: true }),
+      mkdir(resolve(projectARoot, "ProjectSettings"), { recursive: true }),
+      mkdir(resolve(projectBRoot, "Assets"), { recursive: true }),
+      mkdir(resolve(projectBRoot, "Packages"), { recursive: true }),
+      mkdir(resolve(projectBRoot, "ProjectSettings"), { recursive: true }),
+    ]);
+    const unitySentinels = {
+      projectAAsset: resolve(projectARoot, "Assets", `${marker}.txt`),
+      projectAVersion: resolve(projectARoot, "ProjectSettings", "ProjectVersion.txt"),
+      projectBAsset: resolve(projectBRoot, "Assets", `${marker}.txt`),
+      projectBVersion: resolve(projectBRoot, "ProjectSettings", "ProjectVersion.txt"),
+    };
+    await Promise.all([
+      writeFile(unitySentinels.projectAAsset, `${marker} project A Unity sentinel\n`, "utf8"),
+      writeFile(unitySentinels.projectAVersion, "m_EditorVersion: 2022.3.22f1\n", "utf8"),
+      writeFile(unitySentinels.projectBAsset, `${marker} project B Unity sentinel\n`, "utf8"),
+      writeFile(unitySentinels.projectBVersion, "m_EditorVersion: 2022.3.22f1\n", "utf8"),
     ]);
     report.beforeLaunch = await processSnapshot();
     if (!snapshotIsClear(report.beforeLaunch)) {
       throw new Error(`Preflight found an existing packaged instance or occupied probe port; nothing was terminated: ${JSON.stringify(report.beforeLaunch)}`);
     }
+
+    provider = createMemoryReviewProvider();
+    const providerPort = await provider.listen();
+    report.provider = { port: providerPort, model: "vrcforge-memory-review-probe" };
 
     app = await launchPackagedApp();
     const createRuntime = await assertIsolatedRuntime(sourceVersion, "create launch");
@@ -817,6 +1284,413 @@ async function main() {
       authenticatedHealth: createRuntime,
       renderer: app.renderer,
     };
+    const configuredProvider = await appApi("/api/config", {
+      method: "POST",
+      body: {
+        provider: "custom",
+        api_key: "packaged-memory-review-probe-key",
+        base_url: `http://127.0.0.1:${providerPort}/v1`,
+        model: "vrcforge-memory-review-probe",
+        thinking_level: "",
+      },
+    });
+    report.phases.reviewProviderConfig = {
+      provider: String(configuredProvider?.apiConfig?.provider || ""),
+      model: String(configuredProvider?.apiConfig?.model || ""),
+      baseUrlConfigured: Boolean(configuredProvider?.apiConfig?.base_url || configuredProvider?.apiConfig?.baseUrl),
+    };
+    const seededChats = await seedReviewChats();
+    const unityTreeManifest = {
+      projectA: await snapshotUnityProjectTree(projectARoot),
+      projectB: await snapshotUnityProjectTree(projectBRoot),
+    };
+    report.phases.reviewSources = {
+      appCount: Number(seededChats?.appCount || 0),
+      projectCount: Array.isArray(seededChats?.projectPaths) ? seededChats.projectPaths.length : 0,
+      unityTreeManifest: {
+        projectA: summarizeTreeManifest(unityTreeManifest.projectA),
+        projectB: summarizeTreeManifest(unityTreeManifest.projectB),
+      },
+    };
+    const initialReview = await fetchReviewPair(app.cdp, "project", projectARoot);
+    assertReviewPair(report, initialReview, "initial project A review");
+    const reviewConfig = {
+      mode: "suggest_only",
+      cadenceMinutes: 1440,
+      inputCharCap: 12000,
+      tokenCap: 2048,
+      costCapUsd: 0,
+      inputCostPerMillionUsd: 0,
+      outputCostPerMillionUsd: 0,
+      retentionDays: 30,
+      provider: "custom",
+      model: "vrcforge-memory-review-probe",
+    };
+    const configuredProjectA = await appApi("/api/app/agent/memory/review/config", {
+      method: "POST",
+      body: {
+        ...reviewConfig,
+        scope: "project",
+        projectRoot: projectARoot,
+        expectedRevision: initialReview.rest.revision,
+      },
+    });
+    const concurrentRevisionResults = await Promise.allSettled([
+      appApi("/api/app/agent/memory/review/config", {
+        method: "POST",
+        body: { ...reviewConfig, retentionDays: 31, scope: "project", projectRoot: projectARoot, expectedRevision: configuredProjectA.revision },
+      }),
+      appApi("/api/app/agent/memory/review/config", {
+        method: "POST",
+        body: { ...reviewConfig, retentionDays: 32, scope: "project", projectRoot: projectARoot, expectedRevision: configuredProjectA.revision },
+      }),
+    ]);
+    const concurrentRevisionAccepted = concurrentRevisionResults.filter((result) => result.status === "fulfilled").length;
+    const concurrentRevisionRejected = concurrentRevisionResults.filter((result) => result.status === "rejected").length;
+    if (concurrentRevisionAccepted !== 1 || concurrentRevisionRejected !== 1) {
+      addAssertion(report, "concurrent Memory Review config mutations did not accept exactly one revision");
+    }
+    const afterRevisionRace = await fetchReviewPair(app.cdp, "project", projectARoot);
+    assertReviewPair(report, afterRevisionRace, "project A concurrent revision result");
+    report.phases.concurrentRevision = {
+      accepted: concurrentRevisionAccepted,
+      rejected: concurrentRevisionRejected,
+      revision: afterRevisionRace.rest.revision,
+    };
+    const projectARun = await tauriInvoke(app.cdp, "run_agent_memory_review", {
+      request: {
+        body: {
+          scope: "project",
+          projectRoot: projectARoot,
+          expectedRevision: afterRevisionRace.rest.revision,
+        },
+        timeoutMs: 300000,
+      },
+    });
+    const projectACandidate = onlyCandidate(projectARun, "proposed", "project A review run");
+    const crashPromotionText = `${marker} crash-reconciled review memory`;
+    const editedReviewText = `${marker} edited accepted review memory`;
+
+    app.cdp.close();
+    report.closures.beforePromotionCrash = await closePackagedApp(app);
+    assertGracefulClosure(report, report.closures.beforePromotionCrash, "before promotion crash seed");
+    app = undefined;
+    report.phases.promotionCrashBeforeMemory = await seedPromotionCrashState(
+      projectACandidate.candidateId,
+      crashPromotionText,
+      "before_memory_write",
+    );
+
+    app = await launchPackagedApp();
+    await assertIsolatedRuntime(sourceVersion, "promotion crash before Memory write restart");
+    const recoveredBeforeMemory = await fetchReviewPair(app.cdp, "project", projectARoot);
+    assertReviewPair(report, recoveredBeforeMemory, "promotion crash before-memory recovery");
+    onlyCandidate(recoveredBeforeMemory.rest, "accepted", "promotion crash before-memory recovery");
+    const crashRecoveredMemory = await fetchMemoryPair(app.cdp, projectARoot, "project");
+    if (crashRecoveredMemory.rest.memories.length !== 1 || crashRecoveredMemory.rest.memories[0].text !== crashPromotionText) {
+      addAssertion(report, "before-memory promotion crash did not reconcile exactly one accepted Memory");
+    }
+    const undoneCrashPromotion = await tauriInvoke(app.cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: projectACandidate.candidateId,
+        action: "undo",
+        body: {
+          expectedRevision: recoveredBeforeMemory.rest.revision,
+          projectRoot: projectARoot,
+        },
+        timeoutMs: 60000,
+      },
+    });
+    onlyCandidate(undoneCrashPromotion, "proposed", "promotion crash recovery undo");
+
+    const acceptedProjectA = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(projectACandidate.candidateId)}/accept`,
+      {
+        method: "POST",
+        body: {
+          expectedRevision: undoneCrashPromotion.revision,
+          projectRoot: projectARoot,
+          editedText: editedReviewText,
+        },
+      },
+    );
+    onlyCandidate(acceptedProjectA, "accepted", "project A edited acceptance");
+    const acceptedMemory = await fetchMemoryPair(app.cdp, projectARoot, "project");
+    if (acceptedMemory.rest.memories.length !== 1 || acceptedMemory.rest.memories[0].text !== editedReviewText) {
+      addAssertion(report, "edited Review acceptance did not create exactly one project A Memory record");
+    }
+    report.phases.reviewAccepted = {
+      candidateId: projectACandidate.candidateId,
+      revision: acceptedProjectA.revision,
+      memory: acceptedMemory.rest.memories[0] || null,
+    };
+
+    app.cdp.close();
+    report.closures.beforeAfterMemoryCrash = await closePackagedApp(app);
+    assertGracefulClosure(report, report.closures.beforeAfterMemoryCrash, "before after-memory crash seed");
+    app = undefined;
+    report.phases.promotionCrashAfterMemory = await seedPromotionCrashState(
+      projectACandidate.candidateId,
+      editedReviewText,
+      "after_memory_write",
+    );
+
+    app = await launchPackagedApp();
+    const reviewRestartRuntime = await assertIsolatedRuntime(sourceVersion, "promotion crash after Memory write restart");
+    const persistedProjectA = await fetchReviewPair(app.cdp, "project", projectARoot);
+    assertReviewPair(report, persistedProjectA, "project A review after restart");
+    const persistedCandidate = onlyCandidate(persistedProjectA.rest, "accepted", "project A review after restart");
+    if (persistedCandidate.candidateId !== projectACandidate.candidateId) {
+      addAssertion(report, "project A Review candidate identity changed across restart");
+    }
+    const persistedMemory = await fetchMemoryPair(app.cdp, projectARoot, "project");
+    if (persistedMemory.rest.memories.length !== 1 || persistedMemory.rest.memories[0].text !== editedReviewText) {
+      addAssertion(report, "accepted project A Review memory did not survive restart exactly once");
+    }
+    const undoneProjectA = await tauriInvoke(app.cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: projectACandidate.candidateId,
+        action: "undo",
+        body: {
+          expectedRevision: persistedProjectA.rest.revision,
+          projectRoot: projectARoot,
+        },
+        timeoutMs: 60000,
+      },
+    });
+    onlyCandidate(undoneProjectA, "proposed", "project A undo");
+    const erasedProjectA = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(projectACandidate.candidateId)}/erase`,
+      {
+        method: "POST",
+        body: { expectedRevision: undoneProjectA.revision, projectRoot: projectARoot },
+        timeoutMs: 60000,
+      },
+    );
+    if (erasedProjectA.candidates.length !== 0) addAssertion(report, "project A Review erase left a candidate card");
+
+    const configuredProjectB = await tauriInvoke(app.cdp, "update_agent_memory_review", {
+      request: {
+        body: {
+          ...reviewConfig,
+          scope: "project",
+          projectRoot: projectBRoot,
+          expectedRevision: erasedProjectA.revision,
+        },
+        timeoutMs: 60000,
+      },
+    });
+    const projectBRun = await appApi("/api/app/agent/memory/review/run", {
+      method: "POST",
+      body: {
+        scope: "project",
+        projectRoot: projectBRoot,
+        expectedRevision: configuredProjectB.revision,
+      },
+      timeoutMs: 120000,
+    });
+    const projectBCandidate = onlyCandidate(projectBRun, "proposed", "project B review run");
+    await seedReviewChats({
+      projectBText: `Please remember ${marker} changed project B preference.`,
+    });
+    const staleAcceptSnapshot = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(projectBCandidate.candidateId)}/accept`,
+      {
+        method: "POST",
+        body: { expectedRevision: projectBRun.revision, projectRoot: projectBRoot },
+      },
+    );
+    if (staleAcceptSnapshot.candidates?.[0]?.state !== "expired") {
+      addAssertion(report, "stale candidate acceptance did not return the authoritative expired state");
+    }
+    const invalidatedProjectB = await fetchReviewPair(app.cdp, "project", projectBRoot);
+    assertReviewPair(report, invalidatedProjectB, "project B source invalidation");
+    if (invalidatedProjectB.rest.candidates.length !== 1 || invalidatedProjectB.rest.candidates[0].state !== "expired") {
+      addAssertion(report, "project B source edit did not invalidate the stale candidate");
+    }
+    const projectBRerun = await appApi("/api/app/agent/memory/review/run", {
+      method: "POST",
+      body: {
+        scope: "project",
+        projectRoot: projectBRoot,
+        expectedRevision: invalidatedProjectB.rest.revision,
+      },
+      timeoutMs: 120000,
+    });
+    const replacementProjectB = projectBRerun.candidates.find((candidate) => candidate.state === "proposed");
+    if (!replacementProjectB || projectBRerun.candidates.length !== 2) {
+      throw new Error("project B rerun did not preserve one invalidated card plus one fresh candidate");
+    }
+    const rejectedProjectB = await tauriInvoke(app.cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: replacementProjectB.candidateId,
+        action: "reject",
+        body: { expectedRevision: projectBRerun.revision, projectRoot: projectBRoot },
+        timeoutMs: 60000,
+      },
+    });
+    if (!rejectedProjectB.candidates.some((candidate) => candidate.candidateId === replacementProjectB.candidateId && candidate.state === "rejected")) {
+      addAssertion(report, "project B replacement candidate was not rejected");
+    }
+    const erasedReplacementProjectB = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(replacementProjectB.candidateId)}/erase`,
+      {
+        method: "POST",
+        body: { expectedRevision: rejectedProjectB.revision, projectRoot: projectBRoot },
+        timeoutMs: 60000,
+      },
+    );
+    const erasedProjectB = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(projectBCandidate.candidateId)}/erase`,
+      {
+        method: "POST",
+        body: { expectedRevision: erasedReplacementProjectB.revision, projectRoot: projectBRoot },
+        timeoutMs: 60000,
+      },
+    );
+    report.phases.sourceInvalidation = {
+      staleCandidateId: projectBCandidate.candidateId,
+      replacementCandidateId: replacementProjectB.candidateId,
+      finalCandidateCount: erasedProjectB.candidates.length,
+    };
+
+    const configuredUser = await appApi("/api/app/agent/memory/review/config", {
+      method: "POST",
+      body: { ...reviewConfig, scope: "user", expectedRevision: erasedProjectB.revision },
+    });
+    const userRun = await tauriInvoke(app.cdp, "run_agent_memory_review", {
+      request: {
+        body: { scope: "user", expectedRevision: configuredUser.revision },
+        timeoutMs: 120000,
+      },
+    });
+    const userCandidate = onlyCandidate(userRun, "proposed", "user review run");
+    const deferredUser = await appApi(
+      `/api/app/agent/memory/review/candidates/${encodeURIComponent(userCandidate.candidateId)}/defer`,
+      { method: "POST", body: { expectedRevision: userRun.revision } },
+    );
+    onlyCandidate(deferredUser, "deferred", "user candidate deferral");
+    const erasedUser = await tauriInvoke(app.cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: userCandidate.candidateId,
+        action: "erase",
+        body: { expectedRevision: deferredUser.revision },
+        timeoutMs: 60000,
+      },
+    });
+    provider.failNextRequests(3);
+    await expectAppApiFailure(
+      "/api/app/agent/memory/review/run",
+      {
+        method: "POST",
+        body: { scope: "user", expectedRevision: erasedUser.revision },
+        timeoutMs: 300000,
+      },
+      503,
+    );
+    const providerFailureReview = await fetchReviewPair(app.cdp, "user");
+    assertReviewPair(report, providerFailureReview, "provider failure review");
+    if (providerFailureReview.rest.lastRunStatus !== "failed" || !providerFailureReview.rest.lastFailureClass) {
+      addAssertion(report, "provider failure did not remain visible in durable Memory Review status");
+    }
+    report.phases.providerFailure = {
+      runState: providerFailureReview.rest.runState,
+      lastRunStatus: providerFailureReview.rest.lastRunStatus,
+      failureClass: providerFailureReview.rest.lastFailureClass,
+      candidateCount: providerFailureReview.rest.candidates.length,
+    };
+    const scopePairs = {
+      user: await fetchReviewPair(app.cdp, "user"),
+      projectA: await fetchReviewPair(app.cdp, "project", projectARoot),
+      projectB: await fetchReviewPair(app.cdp, "project", projectBRoot),
+    };
+    for (const [scopeName, pair] of Object.entries(scopePairs)) {
+      assertReviewPair(report, pair, `${scopeName} final Review scope`);
+      if (pair.rest.candidates.length !== 0 || pair.rest.unreadCount !== 0) {
+        addAssertion(report, `${scopeName} Review scope was not empty after permanent erase`);
+      }
+    }
+    app.cdp.close();
+    report.closures.afterReviewErase = await closePackagedApp(app);
+    assertGracefulClosure(report, report.closures.afterReviewErase, "after review erase");
+    app = undefined;
+    const erasedTextScans = {
+      priorGeneration: await findTextInRoots([userDataRoot, webviewDataRoot], crashPromotionText),
+      latestGeneration: await findTextInRoots([userDataRoot, webviewDataRoot], editedReviewText),
+    };
+    for (const scan of Object.values(erasedTextScans)) {
+      if (scan.matches.length > 0) {
+        addAssertion(report, "permanently erased Review prose remained in app-owned storage");
+      }
+      if (scan.unreadable.length > 0) {
+        addAssertion(report, "physical erase proof could not read every app-owned storage file");
+      }
+    }
+    const rawProviderBodies = provider.rawBodies.join("\n");
+    const renderedReviewSnapshots = JSON.stringify(scopePairs);
+    const redactionScans = await Promise.all(
+      redactionSentinels.map((sentinel) => findTextInRoots([userDataRoot, webviewDataRoot], sentinel)),
+    );
+    for (let index = 0; index < redactionSentinels.length; index += 1) {
+      if (rawProviderBodies.includes(redactionSentinels[index])) {
+        addAssertion(report, "Memory Review provider request exposed a redaction sentinel");
+      }
+      if (renderedReviewSnapshots.includes(redactionSentinels[index])) {
+        addAssertion(report, "Memory Review WebView projection exposed a redaction sentinel");
+      }
+      if (redactionScans[index].matches.length > 0) {
+        addAssertion(report, "Memory Review persisted a redaction sentinel in app-owned storage");
+      }
+      if (redactionScans[index].unreadable.length > 0) {
+        addAssertion(report, "redaction proof could not read every app-owned storage file");
+      }
+    }
+    if (rawProviderBodies.includes(projectARoot) || rawProviderBodies.includes(projectBRoot)) {
+      addAssertion(report, "Memory Review provider request exposed an exact local project path");
+    }
+    if (provider.requests.length !== 7 || provider.requests.some((request) => request.hasTools)) {
+      addAssertion(report, "Memory Review provider calls were not exactly seven tool-free bounded requests");
+    }
+    const unityTreeAfterReview = {
+      projectA: await snapshotUnityProjectTree(projectARoot),
+      projectB: await snapshotUnityProjectTree(projectBRoot),
+    };
+    const unityTreeUnchanged = JSON.stringify(unityTreeAfterReview) === JSON.stringify(unityTreeManifest);
+    if (!unityTreeUnchanged) {
+      addAssertion(report, "Memory Review changed an isolated Unity project file tree");
+    }
+    report.phases.reviewRestart = {
+      authenticatedHealth: reviewRestartRuntime,
+      candidateCountAfterErase: erasedUser.candidates.length,
+      providerRequests: provider.requests,
+      erasedTextScans: Object.fromEntries(
+        Object.entries(erasedTextScans).map(([name, scan]) => [name, {
+          scannedFiles: scan.scannedFiles,
+          scannedBytes: scan.scannedBytes,
+          matchCount: scan.matches.length,
+          unreadableCount: scan.unreadable.length,
+        }]),
+      ),
+      redactionScans: redactionScans.map((scan) => ({
+        scannedFiles: scan.scannedFiles,
+        scannedBytes: scan.scannedBytes,
+        matchCount: scan.matches.length,
+        unreadableCount: scan.unreadable.length,
+      })),
+      scopePairs,
+      unityTreeUnchanged,
+      unityTreeManifest: {
+        projectA: summarizeTreeManifest(unityTreeAfterReview.projectA),
+        projectB: summarizeTreeManifest(unityTreeAfterReview.projectB),
+      },
+    };
+
+    app = await launchPackagedApp();
+    report.phases.afterReviewEraseRestart = await assertIsolatedRuntime(
+      sourceVersion,
+      "after review erase restart",
+    );
+
     const userText = `${marker} user memory`;
     const projectAText = `${marker} project A memory`;
     const projectBText = `${marker} project B isolation sentinel`;
@@ -1036,11 +1910,75 @@ async function main() {
     const afterTombstoneRestart = await captureMemoryMatrix(app.cdp);
     report.phases.afterTombstoneRestart = afterTombstoneRestart;
     assertEmptyMatrix(report, afterTombstoneRestart, "after tombstone restart");
-
+    const finalReviewScopes = {
+      user: await fetchReviewPair(app.cdp, "user"),
+      projectA: await fetchReviewPair(app.cdp, "project", projectARoot),
+      projectB: await fetchReviewPair(app.cdp, "project", projectBRoot),
+    };
+    for (const [scopeName, pair] of Object.entries(finalReviewScopes)) {
+      assertReviewPair(report, pair, `${scopeName} Review scope after later restarts`);
+      if (pair.rest.candidates.length !== 0 || pair.rest.unreadCount !== 0) {
+        addAssertion(report, `${scopeName} Review candidate revived after later restart`);
+      }
+    }
     app.cdp.close();
     report.closures.final = await closePackagedApp(app);
     assertGracefulClosure(report, report.closures.final, "after final restart");
     app = undefined;
+
+    const finalErasedTextScans = {
+      priorGeneration: await findTextInRoots([userDataRoot, webviewDataRoot], crashPromotionText),
+      latestGeneration: await findTextInRoots([userDataRoot, webviewDataRoot], editedReviewText),
+    };
+    for (const scan of Object.values(finalErasedTextScans)) {
+      if (scan.matches.length > 0) {
+        addAssertion(report, "permanently erased Review prose reappeared after later restart");
+      }
+      if (scan.unreadable.length > 0) {
+        addAssertion(report, "restart erase proof could not read every app-owned storage file");
+      }
+    }
+    const finalRedactionScans = await Promise.all(
+      redactionSentinels.map((sentinel) => findTextInRoots([userDataRoot, webviewDataRoot], sentinel)),
+    );
+    for (const scan of finalRedactionScans) {
+      if (scan.matches.length > 0) {
+        addAssertion(report, "redaction sentinel reappeared in app-owned storage after restart");
+      }
+      if (scan.unreadable.length > 0) {
+        addAssertion(report, "final redaction proof could not read every app-owned storage file");
+      }
+    }
+    const finalUnityTreeManifest = {
+      projectA: await snapshotUnityProjectTree(projectARoot),
+      projectB: await snapshotUnityProjectTree(projectBRoot),
+    };
+    const finalUnityTreeUnchanged = JSON.stringify(finalUnityTreeManifest) === JSON.stringify(unityTreeManifest);
+    if (!finalUnityTreeUnchanged) {
+      addAssertion(report, "later Memory operations changed an isolated Unity project file tree");
+    }
+    report.phases.reviewAfterLaterRestarts = {
+      scopes: finalReviewScopes,
+      erasedTextScans: Object.fromEntries(
+        Object.entries(finalErasedTextScans).map(([name, scan]) => [name, {
+          scannedFiles: scan.scannedFiles,
+          scannedBytes: scan.scannedBytes,
+          matchCount: scan.matches.length,
+          unreadableCount: scan.unreadable.length,
+        }]),
+      ),
+      redactionScans: finalRedactionScans.map((scan) => ({
+        scannedFiles: scan.scannedFiles,
+        scannedBytes: scan.scannedBytes,
+        matchCount: scan.matches.length,
+        unreadableCount: scan.unreadable.length,
+      })),
+      unityTreeUnchanged: finalUnityTreeUnchanged,
+      unityTreeManifest: {
+        projectA: summarizeTreeManifest(finalUnityTreeManifest.projectA),
+        projectB: summarizeTreeManifest(finalUnityTreeManifest.projectB),
+      },
+    };
 
     report.memoryLog = await readMemoryEventSummary(ids);
     assertTombstones(report, report.memoryLog);
@@ -1057,6 +1995,11 @@ async function main() {
         report.closures.finally = closure;
         assertGracefulClosure(report, closure, "during finally cleanup");
       }
+      if (provider) {
+        await provider.close();
+        report.providerRequests = provider.requests;
+        provider = undefined;
+      }
       report.finalCleanup = await processSnapshot();
       if (!snapshotIsClear(report.finalCleanup)) {
         addAssertion(report, "packaged processes or probe ports remained after final cleanup");
@@ -1068,6 +2011,10 @@ async function main() {
         await forceCloseLaunch(app).catch((forceError) => {
           addAssertion(report, `final scoped cleanup failed: ${String(forceError?.message || forceError)}`);
         });
+      }
+      if (provider) {
+        await provider.close().catch(() => {});
+        provider = undefined;
       }
     }
     report.ok = report.assertions.length === 0;
@@ -1085,7 +2032,7 @@ main().catch(async (error) => {
   await writeFile(
     reportPath,
     `${JSON.stringify({
-      schema: "vrcforge.packaged_memory_restart_probe.v1",
+      schema: "vrcforge.packaged_memory_restart_probe.v2",
       marker,
       ok: false,
       assertions: [`unhandled probe failure: ${String(error?.message || error)}`],

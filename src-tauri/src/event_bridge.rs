@@ -148,7 +148,13 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
     }
     let mut event = serde_json::json!({ "type": event_type });
     if let Some(timestamp) = payload.get("timestamp") {
-        event["timestamp"] = timestamp.clone();
+        if event_type != "agentMemoryReview" {
+            event["timestamp"] = timestamp.clone();
+        } else if timestamp.is_number() {
+            event["timestamp"] = timestamp.clone();
+        } else if let Some(timestamp) = timestamp.as_str() {
+            event["timestamp"] = serde_json::Value::String(timestamp.chars().take(80).collect());
+        }
     }
     if event_type == "agentRuntimeDelta" {
         if let Some(value) = payload.get("sessionId").and_then(|value| value.as_str()) {
@@ -179,6 +185,7 @@ pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
             | "agentGoalBackground"
             | "agentGoals"
             | "agentMemory"
+            | "agentMemoryReview"
             | "agentProgress"
             | "agentQuestions"
             | "agentPermission"
@@ -209,5 +216,42 @@ mod tests {
         .expect("background goal event should be forwarded");
         assert_eq!(sanitized["type"], "agentGoalBackground");
         assert!(sanitized.get("payload").is_none());
+    }
+
+    #[test]
+    fn memory_review_signal_is_allowed_without_forwarding_candidate_content() {
+        assert!(desktop_backend_event_allowed("agentMemoryReview"));
+        let sanitized = sanitize_backend_event(serde_json::json!({
+            "type": "agentMemoryReview",
+            "timestamp": "2026-07-22T00:00:00Z",
+            "candidateText": "private",
+            "source": "private",
+            "revision": 4,
+            "prose": "private",
+            "payload": {
+                "candidateText": "private",
+                "sourceText": "private",
+                "revision": 4
+            }
+        }))
+        .expect("Memory Review event should be forwarded");
+        assert_eq!(
+            sanitized,
+            serde_json::json!({
+                "type": "agentMemoryReview",
+                "timestamp": "2026-07-22T00:00:00Z"
+            })
+        );
+
+        let structured_timestamp = sanitize_backend_event(serde_json::json!({
+            "type": "agentMemoryReview",
+            "timestamp": {"candidateText": "private"},
+            "payload": {"candidateText": "private"}
+        }))
+        .expect("Memory Review signal should remain allowed");
+        assert_eq!(
+            structured_timestamp,
+            serde_json::json!({"type": "agentMemoryReview"})
+        );
     }
 }

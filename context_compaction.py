@@ -179,6 +179,24 @@ class _Redactor:
         return text
 
 
+def redact_context_text(value: Any, *, limit: int | None = None) -> tuple[str, dict[str, int]]:
+    """Apply the context privacy scanner without invoking compaction or a provider.
+
+    Other bounded model-input pipelines use this narrow entry point so path,
+    credential, and avatar identifier handling stays identical to context
+    compaction.  Callers may add stricter domain-specific projection rules,
+    but must not weaken this scan.
+    """
+
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("limit must be a positive integer or None")
+    scanner = _Redactor()
+    text = scanner.redact(str(value or ""))
+    if limit is not None and len(text) > limit:
+        text = text[: max(0, limit - 1)].rstrip() + "…"
+    return text, scanner.report.as_dict()
+
+
 def _canonical_digest(value: Any) -> str:
     encoded = json.dumps(
         value,

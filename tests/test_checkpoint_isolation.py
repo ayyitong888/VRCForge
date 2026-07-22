@@ -79,6 +79,9 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             worker = threading.Thread(target=run_slow_apply, daemon=True)
             worker.start()
             self.assertTrue(entered_write.wait(timeout=30), "slow write handler never started")
+            self.assertFalse(
+                gateway.try_acquire_background_project_read("memory-review-background")
+            )
 
             blocked = gateway.apply_approved({"approval_id": fast_id})
             self.assertFalse(blocked["ok"])
@@ -107,6 +110,153 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertEqual(len(fast_calls), 1)
             checkpoints = gateway.list_checkpoints({"projectRoot": str(project)})
             self.assertEqual(checkpoints["count"], 2)
+
+    def test_background_project_read_lease_blocks_write_registration_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = create_gateway(root)
+            calls: list[dict] = []
+            gateway.register_write_handler(
+                "vrcforge_test_write",
+                "Test write",
+                "high",
+                lambda args: calls.append(args) or {"ok": True},
+            )
+            approval_id = approved_apply_request(gateway, "vrcforge_test_write", project)
+
+            self.assertTrue(
+                gateway.try_acquire_background_project_read("memory-review-background")
+            )
+            blocked = gateway.apply_approved({"approval_id": approval_id})
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["status"], "blocked_background_read")
+            self.assertEqual(calls, [])
+
+            self.assertTrue(
+                gateway.release_background_project_read("memory-review-background")
+            )
+            applied = gateway.apply_approved({"approval_id": approval_id})
+            self.assertTrue(applied["ok"])
+            self.assertEqual(len(calls), 1)
+
+    def test_only_allowlisted_applied_readback_emits_validated_memory_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = create_gateway(root)
+            gateway.register_write_handler(
+                "vrcforge_set_gameobject_active",
+                "Set active",
+                "low",
+                lambda _args: {
+                    "ok": True,
+                    "action": "set_gameobject_active",
+                    "preview": False,
+                    "newActive": False,
+                },
+            )
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_set_gameobject_active",
+                    "arguments": {
+                        "projectRoot": str(project),
+                        "gameObjectPath": "Avatar/Accessories/Hat",
+                        "active": False,
+                    },
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+            self.assertTrue(applied["ok"])
+            applied_event = next(
+                event
+                for event in reversed(gateway.recent_audit_logs(limit=20))
+                if event.get("event") == "approval_applied"
+            )
+            evidence = applied_event["memoryEvidence"]
+            self.assertEqual(evidence["schema"], "vrcforge.memory_evidence.v1")
+            self.assertTrue(evidence["applied"])
+            self.assertTrue(evidence["validated"])
+            self.assertEqual(evidence["sourceId"], approval_id)
+            self.assertNotIn("gameObjectPath", evidence)
+            self.assertRegex(evidence["objectRef"], r"^[0-9a-f]{16}$")
+            self.assertIn(evidence["objectRef"], evidence["summary"])
+
+            same_object = gateway._validated_memory_evidence_for_applied_write(
+                {
+                    "id": "appr_same",
+                    "targetTool": "vrcforge_set_gameobject_active",
+                    "appliedAt": evidence["completedAt"],
+                },
+                {
+                    "projectRoot": str(project),
+                    "game_object_path": "Avatar\\Accessories\\Hat",
+                    "active": True,
+                },
+                {
+                    "ok": True,
+                    "action": "set_gameobject_active",
+                    "preview": False,
+                    "newActive": True,
+                },
+            )
+            other_object = gateway._validated_memory_evidence_for_applied_write(
+                {
+                    "id": "appr_other",
+                    "targetTool": "vrcforge_set_gameobject_active",
+                    "appliedAt": evidence["completedAt"],
+                },
+                {
+                    "projectRoot": str(project),
+                    "gameObjectPath": "Avatar/Accessories/Glasses",
+                    "active": False,
+                },
+                {
+                    "ok": True,
+                    "action": "set_gameobject_active",
+                    "preview": False,
+                    "newActive": False,
+                },
+            )
+            self.assertIsNotNone(same_object)
+            self.assertIsNotNone(other_object)
+            self.assertEqual(same_object["objectRef"], evidence["objectRef"])
+            self.assertNotEqual(same_object["summary"], evidence["summary"])
+            self.assertNotEqual(other_object["objectRef"], evidence["objectRef"])
+            self.assertIsNone(
+                gateway._validated_memory_evidence_for_applied_write(
+                    {
+                        "id": "appr_missing",
+                        "targetTool": "vrcforge_set_gameobject_active",
+                        "appliedAt": evidence["completedAt"],
+                    },
+                    {"projectRoot": str(project), "active": False},
+                    {
+                        "ok": True,
+                        "action": "set_gameobject_active",
+                        "preview": False,
+                        "newActive": False,
+                    },
+                )
+            )
+
+            gateway.register_write_handler(
+                "vrcforge_test_unvalidated",
+                "Unvalidated write",
+                "low",
+                lambda _args: {"ok": True, "validated": True},
+            )
+            generic_id = approved_apply_request(gateway, "vrcforge_test_unvalidated", project)
+            self.assertTrue(gateway.apply_approved({"approval_id": generic_id})["ok"])
+            generic_event = next(
+                event
+                for event in reversed(gateway.recent_audit_logs(limit=20))
+                if event.get("event") == "approval_applied"
+                and event.get("approval", {}).get("id") == generic_id
+            )
+            self.assertNotIn("memoryEvidence", generic_event)
 
     def test_in_flight_registration_is_cleared_when_write_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

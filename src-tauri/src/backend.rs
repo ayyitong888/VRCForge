@@ -41,6 +41,7 @@ pub(crate) const BACKEND_PORT: u16 = 8757;
 pub(crate) const BACKEND_ENDPOINT: &str = "http://127.0.0.1:8757";
 pub(crate) const BACKEND_START_BACKGROUND_WAIT_SECONDS: u64 = 18;
 pub(crate) const DESKTOP_AGENT_MESSAGE_TIMEOUT_MS: u64 = 600_000;
+pub(crate) const BACKEND_REQUEST_MAX_TIMEOUT_MS: u64 = 1_200_000;
 pub(crate) const BACKEND_SESSION_VERIFY_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const BACKEND_SESSION_VERIFY_CACHE_TTL: Duration = Duration::from_secs(15);
 pub(crate) const BACKEND_GRACEFUL_SHUTDOWN_METHOD: &str = "POST";
@@ -52,6 +53,17 @@ pub(crate) const BACKEND_FORCE_EXIT_WAIT: Duration = Duration::from_secs(2);
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static BACKEND_SESSION_VERIFIED_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+pub(crate) fn bounded_backend_request_timeout(
+    timeout_ms: Option<u64>,
+    default_ms: u64,
+) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .unwrap_or(default_ms)
+            .clamp(1_000, BACKEND_REQUEST_MAX_TIMEOUT_MS),
+    )
+}
 
 pub(crate) struct BackendState {
     pub(crate) child: Mutex<Option<Child>>,
@@ -153,6 +165,88 @@ pub(crate) struct AppApiResponse {
     body: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackendJsonErrorEnvelope {
+    error_type: &'static str,
+    status: u16,
+    detail: String,
+}
+
+impl BackendJsonErrorEnvelope {
+    pub(crate) fn transport(detail: impl AsRef<str>) -> Self {
+        Self {
+            error_type: "backendJsonError",
+            status: 0,
+            detail: bounded_backend_error_detail(detail.as_ref()),
+        }
+    }
+}
+
+pub(crate) fn backend_json_error_from_response(
+    status: u16,
+    body: &serde_json::Value,
+) -> BackendJsonErrorEnvelope {
+    BackendJsonErrorEnvelope {
+        error_type: "backendJsonError",
+        status,
+        detail: bounded_backend_error_detail(&webview_error_message(body)),
+    }
+}
+
+pub(crate) fn bounded_backend_error_detail(detail: &str) -> String {
+    let sanitized = sanitize_text_for_webview(detail.trim());
+    let lower = sanitized.to_ascii_lowercase();
+    let bytes = sanitized.as_bytes();
+    let has_drive_path = bytes.windows(3).any(|window| {
+        window[0].is_ascii_alphabetic() && window[1] == b':' && matches!(window[2], b'\\' | b'/')
+    });
+    let sensitive_markers = [
+        "sk-",
+        "client_secret",
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer ",
+        "password=",
+        "password:",
+        "\"password\"",
+        "credential=",
+        "credential:",
+        "\"credential\"",
+        "token=",
+        "token:",
+        "\"token\"",
+        "secret=",
+        "secret:",
+        "\"secret\"",
+        "session=",
+        "session_id",
+        "sessionid",
+        "cookie=",
+        "\"cookie\"",
+    ];
+    if sanitized == "[redacted]"
+        || has_drive_path
+        || sanitized.starts_with("\\\\")
+        || lower.contains("\\users\\")
+        || lower.contains("/users/")
+        || lower.contains("/home/")
+        || sensitive_markers
+            .iter()
+            .any(|marker| lower.contains(marker))
+    {
+        return "[redacted]".to_string();
+    }
+    let bounded = sanitized.chars().take(500).collect::<String>();
+    if bounded.is_empty() {
+        "VRCForge runtime request failed.".to_string()
+    } else {
+        bounded
+    }
+}
+
 pub(crate) fn backend_json_request(
     method: &str,
     path: String,
@@ -216,6 +310,159 @@ where
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(|error| format!("VRCForge runtime worker failed: {error}"))?
+}
+
+/// Status-preserving variant used only by typed IPC surfaces that need to
+/// distinguish a stale revision or a missing resource from transport failure.
+/// The error envelope contains a bounded, sanitized `detail` string rather
+/// than the backend response body.
+pub(crate) fn backend_json_request_with_error_envelope(
+    method: &str,
+    path: String,
+    body: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    let user_data = user_data_dir().map_err(BackendJsonErrorEnvelope::transport)?;
+    let app_session_token =
+        ensure_app_session_token(&user_data).map_err(BackendJsonErrorEnvelope::transport)?;
+    ensure_backend_session_verified(&app_session_token)
+        .map_err(BackendJsonErrorEnvelope::transport)?;
+    let timeout = bounded_backend_request_timeout(timeout_ms, 30_000);
+    let agent = ureq::builder()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(timeout)
+        .redirects(0)
+        .build();
+    let url = format!("{BACKEND_ENDPOINT}{path}");
+    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
+    let send_once = || {
+        let http_request = agent
+            .request(method, &url)
+            .set("Accept", "application/json")
+            .set("Origin", "tauri://localhost")
+            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+            .set("X-VRCForge-Transport-Proof", &transport_proof)
+            .set("Authorization", &format!("Bearer {app_session_token}"));
+        let response = if let Some(body) = body.as_ref() {
+            http_request
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+        } else {
+            http_request.call()
+        };
+        app_api_response_from_ureq(response).map_err(BackendJsonErrorEnvelope::transport)
+    };
+    let mut response = send_once()?;
+    if matches!(response.status, 401 | 403) {
+        clear_backend_session_verify_cache();
+        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            mark_backend_session_verified();
+            response = send_once()?;
+            if matches!(response.status, 401 | 403) {
+                clear_backend_session_verify_cache();
+            }
+        } else {
+            return Err(BackendJsonErrorEnvelope::transport(
+                runtime_session_verification_error(),
+            ));
+        }
+    }
+    if response.ok {
+        Ok(response.body)
+    } else {
+        Err(backend_json_error_from_response(
+            response.status,
+            &response.body,
+        ))
+    }
+}
+
+pub(crate) async fn blocking_backend_json_request_with_error_envelope<F>(
+    operation: F,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope>
+where
+    F: FnOnce() -> Result<serde_json::Value, BackendJsonErrorEnvelope> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            BackendJsonErrorEnvelope::transport(format!("VRCForge runtime worker failed: {error}"))
+        })?
+}
+
+#[cfg(test)]
+mod memory_review_backend_error_tests {
+    use super::{
+        backend_json_error_from_response, bounded_backend_error_detail,
+        bounded_backend_request_timeout, BackendJsonErrorEnvelope,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn typed_backend_transport_preserves_full_review_timeout() {
+        assert_eq!(
+            bounded_backend_request_timeout(Some(1_200_000), 30_000),
+            Duration::from_millis(1_200_000)
+        );
+        assert_eq!(
+            bounded_backend_request_timeout(Some(9_999_999), 30_000),
+            Duration::from_millis(1_200_000)
+        );
+    }
+
+    #[test]
+    fn http_error_envelope_keeps_status_and_only_safe_detail() {
+        let body = serde_json::json!({
+            "detail": "stale revision",
+            "response": "must-not-cross-ipc"
+        });
+        let envelope = backend_json_error_from_response(409, &body);
+        let serialized = serde_json::to_value(&envelope).expect("error envelope should serialize");
+        assert_eq!(serialized["errorType"], "backendJsonError");
+        assert_eq!(serialized["status"], 409);
+        assert_eq!(serialized["detail"], "stale revision");
+        assert!(!serialized.to_string().contains("must-not-cross-ipc"));
+    }
+
+    #[test]
+    fn transport_error_is_status_zero_bounded_and_sanitized() {
+        let envelope = BackendJsonErrorEnvelope::transport(
+            "Authorization: Bearer private-value that must not cross IPC",
+        );
+        let serialized = serde_json::to_value(&envelope).expect("error envelope should serialize");
+        assert_eq!(serialized["status"], 0);
+        assert_eq!(serialized["detail"], "[redacted]");
+
+        let bare_secret_value = ["sk", "-test-value"].concat();
+        let bare_secret = BackendJsonErrorEnvelope::transport(format!(
+            "request rejected for {bare_secret_value}"
+        ));
+        let bare_secret =
+            serde_json::to_value(&bare_secret).expect("secret error envelope should serialize");
+        assert_eq!(bare_secret["detail"], "[redacted]");
+
+        for sensitive in [
+            r"failed while reading D:\private\project\config.json",
+            "request failed at https://example.invalid/path?token=private-value",
+            "password=private-value",
+            "credential: private-value",
+            "session=private-value",
+            "cookie=private-value",
+        ] {
+            assert_eq!(
+                bounded_backend_error_detail(sensitive),
+                "[redacted]",
+                "sensitive error detail crossed the IPC boundary: {sensitive}"
+            );
+        }
+        assert_eq!(
+            bounded_backend_error_detail("Memory Review revision changed."),
+            "Memory Review revision changed."
+        );
+
+        let long = "x".repeat(800);
+        assert_eq!(bounded_backend_error_detail(&long).chars().count(), 500);
+    }
 }
 
 /// Raw-body variant of `backend_json_request` for binary uploads (chat

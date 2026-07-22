@@ -9,4 +9,5 @@ export * from "./api/optimization";
 export * from "./api/sub-agents";
 export * from "./api/skills";
 export * from "./api/agent-runtime";
+export * from "./api/memory-review";
 export * from "./api/checkpoints";
