@@ -1578,6 +1578,7 @@ async function main() {
         timeoutMs: 60000,
       },
     });
+    const providerFailureRequestStart = provider.requests.length;
     provider.failNextRequests(3);
     await expectAppApiFailure(
       "/api/app/agent/memory/review/run",
@@ -1588,6 +1589,16 @@ async function main() {
       },
       503,
     );
+    const providerFailureRequests = provider.requests.slice(providerFailureRequestStart);
+    if (
+      providerFailureRequests.length !== 3
+      || providerFailureRequests.some((request) => !request.forcedFailure)
+    ) {
+      addAssertion(
+        report,
+        "provider failure path did not stop after exactly three failed HTTP requests",
+      );
+    }
     const providerFailureReview = await fetchReviewPair(app.cdp, "user");
     assertReviewPair(report, providerFailureReview, "provider failure review");
     if (providerFailureReview.rest.lastRunStatus !== "failed" || !providerFailureReview.rest.lastFailureClass) {
@@ -1598,6 +1609,8 @@ async function main() {
       lastRunStatus: providerFailureReview.rest.lastRunStatus,
       failureClass: providerFailureReview.rest.lastFailureClass,
       candidateCount: providerFailureReview.rest.candidates.length,
+      httpRequestCount: providerFailureRequests.length,
+      allRequestsForcedFailure: providerFailureRequests.every((request) => request.forcedFailure),
     };
     const scopePairs = {
       user: await fetchReviewPair(app.cdp, "user"),

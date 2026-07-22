@@ -47,6 +47,7 @@ def dedicated_memory_review_settings(settings: Settings, *, token_cap: int) -> S
         gemini_thinking_level="",
         llm_system_instruction=MEMORY_REVIEW_SYSTEM_INSTRUCTION,
         llm_max_output_tokens=token_cap,
+        llm_sdk_max_retries=0,
     )
 
 

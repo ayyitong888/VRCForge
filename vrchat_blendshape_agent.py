@@ -114,6 +114,7 @@ class Settings:
     min_confidence: float
     llm_system_instruction: str = ""
     llm_max_output_tokens: int | None = None
+    llm_sdk_max_retries: int | None = None
 
 
 @dataclass
@@ -1902,6 +1903,17 @@ def build_gemini_generate_config(settings: Settings, types_module: Any) -> Any |
     return types_module.GenerateContentConfig(**config)
 
 
+def _llm_sdk_retry_kwargs(settings: Settings) -> dict[str, int]:
+    """Return an explicit SDK retry override for bounded internal lanes."""
+
+    value = getattr(settings, "llm_sdk_max_retries", None)
+    if value is None:
+        return {}
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("LLM SDK max retries must be a non-negative integer.")
+    return {"max_retries": value}
+
+
 def request_openai_compatible_plan_with_metadata(
     settings: Settings,
     prompt: str,
@@ -1931,7 +1943,11 @@ def request_openai_compatible_plan_with_metadata(
             ],
         ]
 
-    client = OpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
+    client = OpenAI(
+        api_key=settings.llm_api_key or "ollama",
+        base_url=settings.llm_base_url,
+        **_llm_sdk_retry_kwargs(settings),
+    )
     try:
         request_payload = build_openai_compatible_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
@@ -2065,7 +2081,10 @@ def request_anthropic_plan_with_metadata(
             *image_blocks,
         ]
 
-    client = anthropic.Anthropic(api_key=settings.llm_api_key)
+    client = anthropic.Anthropic(
+        api_key=settings.llm_api_key,
+        **_llm_sdk_retry_kwargs(settings),
+    )
     try:
         request_payload = build_anthropic_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
