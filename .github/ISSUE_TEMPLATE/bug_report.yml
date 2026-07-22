@@ -13,8 +13,8 @@ body:
     id: version
     attributes:
       label: VRCForge version
-      description: "Example: 1.3.4 or the commit shown in About/Doctor."
-      placeholder: 1.3.4
+      description: "Example: 1.3.6 or the commit shown in About/Doctor."
+      placeholder: 1.3.6
     validations:
       required: true
   - type: dropdown
