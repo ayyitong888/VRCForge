@@ -4,6 +4,15 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, relative, resolve } from "node:path";
+import {
+  containsTextValue,
+  findTextInRoots,
+  inspectBoundJsonSource,
+  matchesBoundSourceReceipt,
+  partitionScanMatches,
+  serializedJsonContainsText,
+  stringContainsEncodedText,
+} from "./lib/persistence_redaction_scan.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const cdpPort = Number(process.env.VRCFORGE_MEMORY_PROBE_CDP_PORT || "9348");
@@ -14,6 +23,10 @@ const redactionSentinels = [
   `https://probe.invalid/path?token=${marker}`,
 ];
 const redactionSourceText = `Please remember ${marker} user preference. ${redactionSentinels.join(" ")}`;
+const reviewProjectionDisclosure = {
+  rest: redactionSentinels.map(() => 0),
+  tauri: redactionSentinels.map(() => 0),
+};
 const evidenceRoot = resolve(repoRoot, "artifacts", "actual-app-memory-restart", marker);
 const packagedRoot = resolve(evidenceRoot, "package");
 const exe = resolve(packagedRoot, "VRCForge.exe");
@@ -38,6 +51,7 @@ const reviewStorePath = resolve(
   "memory-review",
   "memory-review.json",
 );
+const redactionSourcePath = resolve(userDataRoot, "chat-transcripts.json");
 const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 let appSessionToken = "";
@@ -61,6 +75,49 @@ function addAssertion(report, message) {
   if (!report.assertions.includes(message)) {
     report.assertions.push(message);
   }
+}
+
+function observeReviewProjection(transport, payload) {
+  for (let index = 0; index < redactionSentinels.length; index += 1) {
+    if (containsTextValue(payload, redactionSentinels[index])) {
+      reviewProjectionDisclosure[transport][index] += 1;
+    }
+  }
+}
+
+function redactKnownProbeValues(value, seen = new WeakSet()) {
+  if (typeof value === "string") {
+    if (redactionSentinels.some((sentinel) => stringContainsEncodedText(value, sentinel))) {
+      return "[redacted-probe-value]";
+    }
+    let text = value;
+    for (const sentinel of redactionSentinels) {
+      let encoded = sentinel;
+      for (let depth = 0; depth < 5; depth += 1) {
+        text = text.split(encoded).join("[redacted-probe-value]");
+        encoded = JSON.stringify(encoded).slice(1, -1);
+      }
+    }
+    return text;
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    const redacted = value.map((item) => redactKnownProbeValues(item, seen));
+    seen.delete(value);
+    return redacted;
+  }
+  if (value && typeof value === "object") {
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    const redacted = Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      redactKnownProbeValues(key),
+      redactKnownProbeValues(item, seen),
+    ]));
+    seen.delete(value);
+    return redacted;
+  }
+  return value;
 }
 
 function createMemoryReviewProvider() {
@@ -503,6 +560,37 @@ async function waitForJson(url, timeoutMs = 45000) {
   throw lastError || new Error(`Timed out waiting for ${url}`);
 }
 
+async function waitForCdpPage(timeoutMs = 45000) {
+  const url = `http://127.0.0.1:${cdpPort}/json/list`;
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  let lastTargetTypes = [];
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        const targets = await response.json();
+        lastTargetTypes = Array.isArray(targets)
+          ? targets.map((target) => String(target?.type || "unknown"))
+          : [];
+        const page = Array.isArray(targets)
+          ? targets.find((target) => target?.type === "page" && target?.webSocketDebuggerUrl)
+          : undefined;
+        if (page) return page;
+      } else {
+        lastError = new Error(`${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(150);
+  }
+  const detail = lastTargetTypes.length ? `; targetTypes=${lastTargetTypes.join(",")}` : "";
+  throw new Error(
+    `Timed out waiting for packaged WebView2 page target${detail}; last=${String(lastError || "none")}`,
+  );
+}
+
 function connectCdp(webSocketDebuggerUrl) {
   const ws = new WebSocket(webSocketDebuggerUrl);
   let nextId = 1;
@@ -597,14 +685,10 @@ async function launchPackagedApp() {
     child.once("error", rejectSpawn);
   });
   try {
-    const targets = await Promise.race([
-      waitForJson(`http://127.0.0.1:${cdpPort}/json/list`, 45000),
+    const page = await Promise.race([
+      waitForCdpPage(45000),
       spawnFailure,
     ]);
-    const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-    if (!page) {
-      throw new Error("Packaged WebView2 page target was not found.");
-    }
     const cdp = connectCdp(page.webSocketDebuggerUrl);
     launch.cdp = cdp;
     await cdp.opened;
@@ -669,6 +753,9 @@ async function appApi(path, options = {}) {
       payload = text ? JSON.parse(text) : {};
     } catch {
       payload = { text: text.slice(0, 2000) };
+    }
+    if (path.startsWith("/api/app/agent/memory/review")) {
+      observeReviewProjection("rest", payload);
     }
     if (!response.ok) {
       throw new Error(`${response.status} ${path}: ${JSON.stringify(payload)}`);
@@ -736,6 +823,9 @@ async function tauriInvoke(cdp, command, args) {
       }
     })()`,
   );
+  if (command.includes("agent_memory_review")) {
+    observeReviewProjection("tauri", envelope);
+  }
   if (!envelope?.ok) {
     throw new Error(`Tauri ${command} failed: ${envelope?.error || "unknown error"}`);
   }
@@ -929,62 +1019,80 @@ async function seedReviewChats({
   });
 }
 
-async function findTextInTree(root, needle) {
-  const pending = [root];
-  let scannedFiles = 0;
-  let scannedBytes = 0;
-  const matches = [];
-  const unreadable = [];
-  const needleBuffer = Buffer.from(needle, "utf8");
-  while (pending.length) {
-    const current = pending.pop();
-    let entries;
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch (error) {
-      unreadable.push({ path: current, reason: String(error?.code || "read_failed") });
-      continue;
-    }
-    for (const entry of entries) {
-      const path = resolve(current, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(path);
-        continue;
-      }
-      if (!entry.isFile()) {
-        unreadable.push({ path, reason: "unsupported_entry" });
-        continue;
-      }
-      scannedFiles += 1;
-      try {
-        let tail = Buffer.alloc(0);
-        let found = false;
-        for await (const chunk of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
-          scannedBytes += chunk.length;
-          const combined = tail.length ? Buffer.concat([tail, chunk]) : chunk;
-          if (combined.includes(needleBuffer)) found = true;
-          const overlap = Math.max(0, needleBuffer.length - 1);
-          tail = overlap
-            ? Buffer.from(combined.subarray(Math.max(0, combined.length - overlap)))
-            : Buffer.alloc(0);
-        }
-        if (found) matches.push(path);
-      } catch (error) {
-        unreadable.push({ path, reason: String(error?.code || "read_failed") });
-      }
-    }
-  }
-  return { scannedFiles, scannedBytes, matches, unreadable };
+async function inspectRedactionSource() {
+  const inventory = await inspectBoundJsonSource({
+    filePath: redactionSourcePath,
+    expectedText: redactionSourceText,
+    needles: redactionSentinels,
+    locateSource: (parsed) => {
+      const chat = (Array.isArray(parsed?.chats) ? parsed.chats : [])
+        .find((item) => item?.id === `${marker}-user-chat`);
+      const source = (Array.isArray(chat?.items) ? chat.items : [])
+        .find((item) => item?.id === `${marker}-user-source` && item?.type === "user");
+      return source ? { container: source, key: "text" } : null;
+    },
+  });
+  return {
+    relativePath: relative(evidenceRoot, redactionSourcePath),
+    ...inventory,
+  };
 }
 
-async function findTextInRoots(roots, needle) {
-  const scans = await Promise.all(roots.map((root) => findTextInTree(root, needle)));
+function stableSourceAllowance(before, after, scan, sentinelIndex) {
+  const stable = before.allowSourceMatch
+    && after.allowSourceMatch
+    && Boolean(before.fileSha256)
+    && before.fileSha256 === after.fileSha256;
+  const sourceReceipt = (scan.matchDetails || []).find(
+    (detail) => normalizedPath(detail.path) === normalizedPath(redactionSourcePath),
+  );
+  const expectedProfile = before.expectedOccurrenceProfiles?.[sentinelIndex] || [];
+  const receiptBound = matchesBoundSourceReceipt(
+    sourceReceipt,
+    before.fileSha256,
+    expectedProfile,
+  );
   return {
-    scannedFiles: scans.reduce((total, scan) => total + scan.scannedFiles, 0),
-    scannedBytes: scans.reduce((total, scan) => total + scan.scannedBytes, 0),
-    matches: scans.flatMap((scan) => scan.matches),
-    unreadable: scans.flatMap((scan) => scan.unreadable),
+    stable,
+    receiptBound,
+    sourceReceipt: sourceReceipt ? {
+      sha256: sourceReceipt.sha256,
+      bytes: sourceReceipt.bytes,
+      variantOccurrences: sourceReceipt.variantOccurrences,
+      unexpectedEncodedMatch: sourceReceipt.unexpectedEncodedMatch,
+    } : null,
+    expectedProfile,
+    paths: stable && receiptBound ? [redactionSourcePath] : [],
   };
+}
+
+function summarizeRedactionScan(scan, partition) {
+  return {
+    scannedFiles: scan.scannedFiles,
+    scannedBytes: scan.scannedBytes,
+    matchFiles: scan.matches.map((path) => relative(evidenceRoot, path)),
+    matchReceipts: (scan.matchDetails || []).map((detail) => ({
+      relativePath: relative(evidenceRoot, detail.path),
+      sha256: detail.sha256,
+      bytes: detail.bytes,
+      variantOccurrences: detail.variantOccurrences,
+      unexpectedEncodedMatch: detail.unexpectedEncodedMatch,
+    })),
+    allowedSourceMatchCount: partition.allowedMatches.length,
+    unexpectedMatchFiles: partition.unexpectedMatches.map((path) => relative(evidenceRoot, path)),
+    unreadableCount: scan.unreadable.length,
+  };
+}
+
+function sourcePositiveControlPassed(allowances, partitions) {
+  return allowances.length === redactionSentinels.length
+    && partitions.length === redactionSentinels.length
+    && allowances.every((allowance, index) => (
+      allowance.stable === true
+      && allowance.receiptBound === true
+      && Boolean(allowance.sourceReceipt)
+      && partitions[index].allowedMatches.length === 1
+    ));
 }
 
 function summarizeMemory(memory) {
@@ -1639,26 +1747,50 @@ async function main() {
         addAssertion(report, "physical erase proof could not read every app-owned storage file");
       }
     }
-    const rawProviderBodies = provider.rawBodies.join("\n");
-    const renderedReviewSnapshots = JSON.stringify(scopePairs);
+    const sourceInventoryBefore = await inspectRedactionSource();
     const redactionScans = await Promise.all(
       redactionSentinels.map((sentinel) => findTextInRoots([userDataRoot, webviewDataRoot], sentinel)),
     );
+    const sourceInventoryAfter = await inspectRedactionSource();
+    const sourceAllowances = redactionScans.map(
+      (scan, index) => stableSourceAllowance(
+        sourceInventoryBefore,
+        sourceInventoryAfter,
+        scan,
+        index,
+      ),
+    );
+    const redactionPartitions = redactionScans.map(
+      (scan, index) => partitionScanMatches(scan, sourceAllowances[index].paths),
+    );
+    const sourcePositiveControl = sourcePositiveControlPassed(
+      sourceAllowances,
+      redactionPartitions,
+    );
+    if (!sourcePositiveControl) {
+      addAssertion(report, "redaction source positive control did not bind every sentinel scan");
+    }
     for (let index = 0; index < redactionSentinels.length; index += 1) {
-      if (rawProviderBodies.includes(redactionSentinels[index])) {
+      if (provider.rawBodies.some((body) => serializedJsonContainsText(body, redactionSentinels[index]))) {
         addAssertion(report, "Memory Review provider request exposed a redaction sentinel");
       }
-      if (renderedReviewSnapshots.includes(redactionSentinels[index])) {
+      if (
+        reviewProjectionDisclosure.rest[index] > 0
+        || reviewProjectionDisclosure.tauri[index] > 0
+      ) {
         addAssertion(report, "Memory Review WebView projection exposed a redaction sentinel");
       }
-      if (redactionScans[index].matches.length > 0) {
+      if (redactionPartitions[index].unexpectedMatches.length > 0) {
         addAssertion(report, "Memory Review persisted a redaction sentinel in app-owned storage");
       }
       if (redactionScans[index].unreadable.length > 0) {
         addAssertion(report, "redaction proof could not read every app-owned storage file");
       }
     }
-    if (rawProviderBodies.includes(projectARoot) || rawProviderBodies.includes(projectBRoot)) {
+    if (provider.rawBodies.some(
+      (body) => serializedJsonContainsText(body, projectARoot)
+        || serializedJsonContainsText(body, projectBRoot),
+    )) {
       addAssertion(report, "Memory Review provider request exposed an exact local project path");
     }
     if (provider.requests.length !== 7 || provider.requests.some((request) => request.hasTools)) {
@@ -1676,6 +1808,16 @@ async function main() {
       authenticatedHealth: reviewRestartRuntime,
       candidateCountAfterErase: erasedUser.candidates.length,
       providerRequests: provider.requests,
+      reviewProjectionDisclosure,
+      redactionSourceInventory: {
+        before: sourceInventoryBefore,
+        after: sourceInventoryAfter,
+        allowances: sourceAllowances.map(({ paths, ...allowance }) => ({
+          ...allowance,
+          allowlisted: paths.length === 1,
+        })),
+        positiveControlPassed: sourcePositiveControl,
+      },
       erasedTextScans: Object.fromEntries(
         Object.entries(erasedTextScans).map(([name, scan]) => [name, {
           scannedFiles: scan.scannedFiles,
@@ -1684,12 +1826,9 @@ async function main() {
           unreadableCount: scan.unreadable.length,
         }]),
       ),
-      redactionScans: redactionScans.map((scan) => ({
-        scannedFiles: scan.scannedFiles,
-        scannedBytes: scan.scannedBytes,
-        matchCount: scan.matches.length,
-        unreadableCount: scan.unreadable.length,
-      })),
+      redactionScans: redactionScans.map(
+        (scan, index) => summarizeRedactionScan(scan, redactionPartitions[index]),
+      ),
       scopePairs,
       unityTreeUnchanged,
       unityTreeManifest: {
@@ -1951,12 +2090,40 @@ async function main() {
         addAssertion(report, "restart erase proof could not read every app-owned storage file");
       }
     }
+    const finalSourceInventoryBefore = await inspectRedactionSource();
     const finalRedactionScans = await Promise.all(
       redactionSentinels.map((sentinel) => findTextInRoots([userDataRoot, webviewDataRoot], sentinel)),
     );
-    for (const scan of finalRedactionScans) {
-      if (scan.matches.length > 0) {
+    const finalSourceInventoryAfter = await inspectRedactionSource();
+    const finalSourceAllowances = finalRedactionScans.map(
+      (scan, index) => stableSourceAllowance(
+        finalSourceInventoryBefore,
+        finalSourceInventoryAfter,
+        scan,
+        index,
+      ),
+    );
+    const finalRedactionPartitions = finalRedactionScans.map(
+      (scan, index) => partitionScanMatches(scan, finalSourceAllowances[index].paths),
+    );
+    const finalSourceStillExact = finalSourceInventoryBefore.allowSourceMatch
+      || finalSourceInventoryAfter.allowSourceMatch;
+    const finalSourcePositiveControl = finalSourceStillExact
+      ? sourcePositiveControlPassed(finalSourceAllowances, finalRedactionPartitions)
+      : sourcePositiveControl;
+    if (!finalSourcePositiveControl) {
+      addAssertion(report, "final redaction scan did not retain a valid source positive control");
+    }
+    for (let index = 0; index < finalRedactionScans.length; index += 1) {
+      const scan = finalRedactionScans[index];
+      if (finalRedactionPartitions[index].unexpectedMatches.length > 0) {
         addAssertion(report, "redaction sentinel reappeared in app-owned storage after restart");
+      }
+      if (
+        reviewProjectionDisclosure.rest[index] > 0
+        || reviewProjectionDisclosure.tauri[index] > 0
+      ) {
+        addAssertion(report, "Memory Review WebView projection exposed a redaction sentinel");
       }
       if (scan.unreadable.length > 0) {
         addAssertion(report, "final redaction proof could not read every app-owned storage file");
@@ -1972,6 +2139,17 @@ async function main() {
     }
     report.phases.reviewAfterLaterRestarts = {
       scopes: finalReviewScopes,
+      reviewProjectionDisclosure,
+      redactionSourceInventory: {
+        before: finalSourceInventoryBefore,
+        after: finalSourceInventoryAfter,
+        allowances: finalSourceAllowances.map(({ paths, ...allowance }) => ({
+          ...allowance,
+          allowlisted: paths.length === 1,
+        })),
+        positiveControlMode: finalSourceStillExact ? "current_source" : "initial_receipt",
+        positiveControlPassed: finalSourcePositiveControl,
+      },
       erasedTextScans: Object.fromEntries(
         Object.entries(finalErasedTextScans).map(([name, scan]) => [name, {
           scannedFiles: scan.scannedFiles,
@@ -1980,12 +2158,9 @@ async function main() {
           unreadableCount: scan.unreadable.length,
         }]),
       ),
-      redactionScans: finalRedactionScans.map((scan) => ({
-        scannedFiles: scan.scannedFiles,
-        scannedBytes: scan.scannedBytes,
-        matchCount: scan.matches.length,
-        unreadableCount: scan.unreadable.length,
-      })),
+      redactionScans: finalRedactionScans.map(
+        (scan, index) => summarizeRedactionScan(scan, finalRedactionPartitions[index]),
+      ),
       unityTreeUnchanged: finalUnityTreeUnchanged,
       unityTreeManifest: {
         projectA: summarizeTreeManifest(finalUnityTreeManifest.projectA),
@@ -2031,28 +2206,66 @@ async function main() {
       }
     }
     report.ok = report.assertions.length === 0;
-    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+    let safeReport = redactKnownProbeValues(report);
+    let serializedReport = JSON.stringify(safeReport, null, 2);
+    if (redactionSentinels.some((sentinel) => serializedJsonContainsText(serializedReport, sentinel))) {
+      addAssertion(report, "probe report sanitizer retained a redaction sentinel");
+      report.ok = false;
+      safeReport = {
+        schema: report.schema,
+        marker,
+        ok: false,
+        assertions: redactKnownProbeValues([...report.assertions]),
+        reportContentDropped: true,
+        finalCleanup: redactKnownProbeValues(report.finalCleanup),
+      };
+      serializedReport = JSON.stringify(safeReport, null, 2);
+      if (redactionSentinels.some((sentinel) => serializedJsonContainsText(serializedReport, sentinel))) {
+        safeReport = {
+          schema: report.schema,
+          marker,
+          ok: false,
+          assertions: ["probe report content was dropped after redaction verification failed"],
+          reportContentDropped: true,
+        };
+        serializedReport = JSON.stringify(safeReport, null, 2);
+      }
+    }
+    await writeFile(reportPath, `${serializedReport}\n`, "utf8");
   }
   console.log(reportPath);
   if (!report.ok) {
-    console.error(`Packaged memory restart probe failed: ${report.assertions.join("; ")}`);
+    const safeAssertions = redactKnownProbeValues(report.assertions);
+    console.error(`Packaged memory restart probe failed: ${safeAssertions.join("; ")}`);
     process.exitCode = 1;
   }
 }
 
 main().catch(async (error) => {
   await mkdir(dirname(reportPath), { recursive: true });
-  await writeFile(
-    reportPath,
-    `${JSON.stringify({
+  let failureReport = redactKnownProbeValues({
+    schema: "vrcforge.packaged_memory_restart_probe.v2",
+    marker,
+    ok: false,
+    assertions: [`unhandled probe failure: ${String(error?.message || error)}`],
+    error: String(error?.stack || error),
+  });
+  let serializedFailureReport = JSON.stringify(failureReport, null, 2);
+  if (redactionSentinels.some((sentinel) => serializedJsonContainsText(serializedFailureReport, sentinel))) {
+    failureReport = {
       schema: "vrcforge.packaged_memory_restart_probe.v2",
       marker,
       ok: false,
-      assertions: [`unhandled probe failure: ${String(error?.message || error)}`],
-      error: String(error?.stack || error),
-    }, null, 2)}\n`,
+      assertions: ["unhandled probe failure; report content dropped after redaction verification failed"],
+      reportContentDropped: true,
+    };
+    serializedFailureReport = JSON.stringify(failureReport, null, 2);
+  }
+  await writeFile(
+    reportPath,
+    `${serializedFailureReport}\n`,
     "utf8",
   ).catch(() => {});
-  console.error(error);
+  console.error(redactKnownProbeValues(String(error?.stack || error)));
   process.exit(1);
 });
