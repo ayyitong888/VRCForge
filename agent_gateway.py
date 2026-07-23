@@ -43,6 +43,10 @@ from background_goal_runtime import (
 
 ToolHandler = Callable[[dict[str, Any]], Any]
 RiskLevelResolver = Callable[[dict[str, Any]], str]
+WriteRequestPreparer = Callable[
+    [dict[str, Any], Any],
+    tuple[dict[str, Any], Any],
+]
 
 RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
 RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
@@ -212,6 +216,7 @@ class AgentWriteHandler:
     handler: ToolHandler
     advanced: bool = False
     risk_level_resolver: RiskLevelResolver | None = None
+    request_preparer: WriteRequestPreparer | None = None
 
 
 @dataclass
@@ -1758,6 +1763,7 @@ class AgentGateway:
         handler: ToolHandler,
         advanced: bool = False,
         risk_level_resolver: RiskLevelResolver | None = None,
+        request_preparer: WriteRequestPreparer | None = None,
     ) -> None:
         self._write_handlers[name] = AgentWriteHandler(
             name=name,
@@ -1766,6 +1772,7 @@ class AgentGateway:
             handler=handler,
             advanced=advanced,
             risk_level_resolver=risk_level_resolver,
+            request_preparer=request_preparer,
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -5548,6 +5555,27 @@ class AgentGateway:
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
         user_constraints = self.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        preview = params.get("preview")
+        if write_handler.request_preparer is not None:
+            try:
+                prepared_arguments, prepared_preview = write_handler.request_preparer(
+                    dict(arguments),
+                    preview,
+                )
+            except AgentGatewayError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed authoritative preview must block the request.
+                raise AgentGatewayError(
+                    f"Could not prepare the supervised write request for {target_tool}.",
+                    status_code=500,
+                ) from exc
+            if not isinstance(prepared_arguments, dict):
+                raise AgentGatewayError(
+                    f"Write request preparation returned invalid arguments for {target_tool}.",
+                    status_code=500,
+                )
+            arguments = prepared_arguments
+            preview = prepared_preview
         base_risk_level = normalize_risk_level(write_handler.risk_level)
         effective_risk_level = base_risk_level
         risk_escalation_reason = ""
@@ -5573,7 +5601,6 @@ class AgentGateway:
                     f"These arguments elevate the request from {base_risk_level} to "
                     f"{effective_risk_level} risk and require manual approval in Auto Approve mode."
                 )
-        preview = params.get("preview")
         requires_explicit_approval = bool(
             params.get("requires_explicit_approval")
             or params.get("requiresExplicitApproval")

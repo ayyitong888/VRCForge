@@ -180,7 +180,7 @@ class ShaderAdapterApplyRollbackSmoke:
     def assert_unity_tool(self) -> dict[str, Any]:
         payload = self.request_app_json("POST", "/api/unity/tools", {"projectPath": self.project_root})
         names = {str(name) for name in ensure_list(payload.get("toolNames"))}
-        return {"ok": "vrc_set_material_shader" in names, "toolCount": payload.get("totalTools"), "hasFixtureTool": "vrc_set_material_shader" in names}
+        return {"ok": "vrc_set_material_shader" in names, "toolCount": payload.get("totalTools"), "hasMaterialShaderTool": "vrc_set_material_shader" in names}
 
     def ensure_package(self) -> None:
         if not self.args.package_id:
@@ -307,10 +307,9 @@ class ShaderAdapterApplyRollbackSmoke:
     def apply_shader_switch(self) -> None:
         shader_arguments = {
             "rendererPath": self.target_before.get("renderer_path"),
+            "rendererComponentId": self.target_before.get("renderer_component_id"),
             "slotIndex": int(self.target_before.get("slot_index") or 0),
             "shaderName": self.args.target_shader,
-            "preview": False,
-            "saveAssets": True,
         }
         if self.target_shader_asset_path:
             shader_arguments["shaderAssetPath"] = self.target_shader_asset_path
@@ -322,22 +321,33 @@ class ShaderAdapterApplyRollbackSmoke:
                     "toolName": "vrc_set_material_shader",
                     "arguments": shader_arguments,
                 },
-                "reason": f"Shader adapter proof: switch one {self.args.source_family} material to {self.args.target_family}.",
-                "preview": {
-                    "rendererPath": self.target_before.get("renderer_path"),
-                    "slotIndex": self.target_before.get("slot_index"),
-                    "beforeShader": self.target_before.get("shader_name"),
-                    "afterShader": self.args.target_shader,
-                    "shaderAssetPath": self.target_shader_asset_path,
-                    "rollbackRequired": True,
-                },
+                "reason": f"Supervised shader assignment: switch one {self.args.source_family} material to {self.args.target_family}.",
             }
         )
         approval = ensure_dict(request.get("result", request).get("approval"))
         approval_id = str(approval.get("id") or "")
-        self.step("shader.request_switch", {"ok": bool(approval_id) and approval.get("status") == "pending", "approvalId": approval_id, "targetTool": approval.get("targetTool")})
-        if not approval_id:
-            raise RuntimeError("Shader switch request did not create a pending approval.")
+        approval_preview = ensure_dict(approval.get("preview"))
+        preview_target = ensure_dict(approval_preview.get("target"))
+        preview_bound = (
+            approval_preview.get("schema") == "vrcforge.material_shader_assignment_approval.v1"
+            and bool(approval_preview.get("sharedImpactDigest"))
+            and bool(preview_target.get("materialAssetPath"))
+            and bool(preview_target.get("materialAssetGuid"))
+            and bool(preview_target.get("materialFileDigest"))
+            and bool(preview_target.get("rendererComponentId"))
+            and bool(preview_target.get("rendererComponentType"))
+        )
+        self.step(
+            "shader.request_switch",
+            {
+                "ok": bool(approval_id) and approval.get("status") == "pending" and preview_bound,
+                "approvalId": approval_id,
+                "targetTool": approval.get("targetTool"),
+                "authoritativePreviewBound": preview_bound,
+            },
+        )
+        if not approval_id or not preview_bound:
+            raise RuntimeError("Shader switch request did not create a verified pending approval.")
         applied = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/approve", {})
         execution = ensure_dict(applied.get("execution"))
         checkpoint = ensure_dict(execution.get("checkpoint"))
@@ -599,6 +609,7 @@ class ShaderAdapterApplyRollbackSmoke:
             "targetShaderAssetPath": self.target_shader_asset_path,
             "target": {
                 "rendererPath": self.target_before.get("renderer_path"),
+                "rendererComponentId": self.target_before.get("renderer_component_id"),
                 "slotIndex": self.target_before.get("slot_index"),
                 "materialName": self.target_before.get("material_name"),
             },
@@ -616,6 +627,7 @@ class ShaderAdapterApplyRollbackSmoke:
                 "projectPath": "{{projectPath}}",
                 "avatarPath": "{{avatarPath}}",
                 "rendererPath": self.target_before.get("renderer_path") or "{{rendererPath}}",
+                "rendererComponentId": self.target_before.get("renderer_component_id") or "{{rendererComponentId}}",
                 "slotIndex": self.target_before.get("slot_index"),
             },
             "requirements": {

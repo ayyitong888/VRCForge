@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
@@ -108,12 +106,23 @@ namespace VRCForge.Editor
         {
             var normalizedAvatarPath = NormalizePath(avatarPath);
             var index = new Dictionary<string, MaterialTarget>(StringComparer.OrdinalIgnoreCase);
+            var componentSlots = new HashSet<string>(StringComparer.Ordinal);
             var renderers = Resources.FindObjectsOfTypeAll<Renderer>()
                 .Where(IsSceneObject)
-                .OrderBy(renderer => GetTransformPath(renderer.transform));
+                .Select(renderer => new
+                {
+                    renderer,
+                    identity = RendererComponentIdentity.Create(renderer)
+                })
+                .OrderBy(item => item.identity.scenePath, StringComparer.Ordinal)
+                .ThenBy(item => item.identity.sceneHandle)
+                .ThenBy(item => item.identity.rendererPath, StringComparer.Ordinal)
+                .ThenBy(item => item.identity.componentId, StringComparer.Ordinal);
 
-            foreach (var renderer in renderers)
+            foreach (var rendererEntry in renderers)
             {
+                var renderer = rendererEntry.renderer;
+                var rendererIdentity = rendererEntry.identity;
                 var avatarRoot = FindAvatarRoot(renderer.transform);
                 var rootPath = NormalizePath(GetTransformPath(avatarRoot));
                 if (!string.IsNullOrEmpty(normalizedAvatarPath)
@@ -124,7 +133,7 @@ namespace VRCForge.Editor
                     continue;
                 }
 
-                var rendererPath = GetTransformPath(renderer.transform);
+                var rendererPath = rendererIdentity.rendererPath;
                 var sharedMaterials = renderer.sharedMaterials ?? Array.Empty<Material>();
                 for (var slotIndex = 0; slotIndex < sharedMaterials.Length; slotIndex++)
                 {
@@ -135,16 +144,26 @@ namespace VRCForge.Editor
                     }
 
                     var shaderName = material.shader != null ? material.shader.name : "";
-                    var materialId = StableId("mat", $"{NormalizePath(rendererPath)}|{slotIndex}|{material.name}|{shaderName}");
-                    if (!index.ContainsKey(materialId))
+                    var componentSlot = $"{rendererIdentity.componentId}:{slotIndex}";
+                    if (!componentSlots.Add(componentSlot))
                     {
-                        index.Add(materialId, new MaterialTarget
-                        {
-                            material = material,
-                            rendererPath = rendererPath,
-                            slotIndex = slotIndex
-                        });
+                        throw new InvalidOperationException("Material inventory contains a duplicate renderer component slot.");
                     }
+                    var materialId = MaterialInventoryIdentity.CreateMaterialId(
+                        rendererPath,
+                        slotIndex,
+                        material.name,
+                        shaderName);
+                    if (index.ContainsKey(materialId))
+                    {
+                        throw new InvalidOperationException("Material inventory identifier collision detected.");
+                    }
+                    index.Add(materialId, new MaterialTarget
+                    {
+                        material = material,
+                        rendererPath = rendererPath,
+                        slotIndex = slotIndex
+                    });
                 }
             }
 
@@ -231,16 +250,6 @@ namespace VRCForge.Editor
             }
 
             return string.Join("/", segments);
-        }
-
-        private static string StableId(string prefix, string value)
-        {
-            using (var sha1 = SHA1.Create())
-            {
-                var bytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(NormalizePath(value)));
-                var hex = BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
-                return $"{prefix}_{hex.Substring(0, 16)}";
-            }
         }
 
         private static string NormalizePath(string value)

@@ -77,6 +77,13 @@ from chat_attachment_vault import (
     inspect_image_bytes,
     is_vault_payload_hash,
 )
+from material_shader_assignment import (
+    MaterialShaderAssignmentError,
+    TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
+    bind_authoritative_preview as bind_material_shader_preview,
+    build_preview_arguments as build_material_shader_preview_arguments,
+    build_wrapper_arguments as build_material_shader_wrapper_arguments,
+)
 from context_compaction import ContextCompactionInputError, compact_context
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
@@ -349,6 +356,7 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_setup_outfit",
     "vrc_scan_avatar_performance",
     "vrc_export_vrm",
+    "vrc_set_material_shader",
 ]
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
@@ -10713,12 +10721,16 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
         materials = ensure_list_payload(inventory.get("materials") or [], "shader material inventory")
         overrides = dict(request.category_overrides or {})
         if overrides:
+            ambiguous_material_ids = find_ambiguous_shader_material_ids(inventory)
             for material in materials:
                 if not isinstance(material, dict):
                     continue
                 material_id = str(material.get("material_id") or "")
                 override = overrides.get(material_id)
-                if override in {"skin", "eyes", "hair", "clothes", "accessory", "unknown"}:
+                if (
+                    material_id not in ambiguous_material_ids
+                    and override in {"skin", "eyes", "hair", "clothes", "accessory", "unknown"}
+                ):
                     material["category"] = override
 
         emit_log(
@@ -12015,23 +12027,41 @@ def review_shader_material_vision_sync(request: ShaderVisionReviewRequest) -> di
 
 def apply_shader_category_overrides(inventory: dict[str, Any], overrides: dict[str, str] | None) -> dict[str, Any]:
     valid_categories = {"skin", "eyes", "hair", "clothes", "accessory", "unknown"}
+    ambiguous_material_ids = find_ambiguous_shader_material_ids(inventory)
     for material in inventory.get("materials") or []:
         if not isinstance(material, dict):
             continue
         material_id = str(material.get("material_id") or "")
         override = (overrides or {}).get(material_id)
-        if override in valid_categories:
+        if material_id not in ambiguous_material_ids and override in valid_categories:
             material["category"] = override
     return inventory
 
 
+def find_ambiguous_shader_material_ids(inventory: dict[str, Any]) -> set[str]:
+    counts: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for material in inventory.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        material_id = str(material.get("material_id") or "").strip()
+        if not material_id:
+            continue
+        counts[material_id] = counts.get(material_id, 0) + 1
+        if material.get("material_id_ambiguous") is True:
+            ambiguous.add(material_id)
+    ambiguous.update(material_id for material_id, count in counts.items() if count > 1)
+    return ambiguous
+
+
 def build_shader_material_index(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
+    ambiguous_material_ids = find_ambiguous_shader_material_ids(inventory)
     for material in inventory.get("materials") or []:
         if not isinstance(material, dict):
             continue
         material_id = str(material.get("material_id") or "")
-        if material_id:
+        if material_id and material_id not in ambiguous_material_ids:
             index[material_id] = material
     return index
 
@@ -12043,6 +12073,7 @@ def validate_shader_material_tuning_plan(
     locked_properties: set[str] | None = None,
 ) -> dict[str, Any]:
     material_index = build_shader_material_index(inventory)
+    ambiguous_material_ids = find_ambiguous_shader_material_ids(inventory)
     locked_materials = locked_materials or set()
     locked_properties = locked_properties or set()
     warnings = list(plan.get("warnings") or [])
@@ -12061,6 +12092,8 @@ def validate_shader_material_tuning_plan(
 
         if any(key in change for key in ("shader_property", "property_name", "real_property")):
             skip_reason = "Real shader property names are not accepted; use semantic_property only."
+        elif material_id in ambiguous_material_ids:
+            skip_reason = f"Ambiguous material_id: {material_id}"
         elif not material_id or material_id not in material_index:
             skip_reason = f"Unknown material_id: {material_id}"
         elif material_id in locked_materials:
@@ -17907,6 +17940,72 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.exit_code == 0, "toolName": tool_name, "result": serialize_result(result)}
 
 
+def prepare_unity_mcp_write_request(
+    params: dict[str, Any],
+    caller_preview: Any,
+) -> tuple[dict[str, Any], Any]:
+    params = params or {}
+    tool_name = str(params.get("tool_name") or params.get("toolName") or "").strip()
+    if tool_name != MATERIAL_SHADER_ASSIGNMENT_TOOL:
+        return params, caller_preview
+
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
+    if not isinstance(arguments, dict):
+        raise AgentGatewayError("Material shader arguments are required.", status_code=400)
+
+    project_text = str(params.get("projectPath") or "").strip()
+    project_path = Path(project_text)
+    if not project_text or not project_path.is_absolute():
+        raise AgentGatewayError("projectPath must be an absolute Unity project path.", status_code=400)
+    try:
+        canonical_project_path = project_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AgentGatewayError("projectPath is not an accessible Unity project.", status_code=400) from exc
+    if not canonical_project_path.is_dir() or not (canonical_project_path / "Assets").is_dir():
+        raise AgentGatewayError("projectPath is not an accessible Unity project.", status_code=400)
+
+    canonical_params = copy.deepcopy(params)
+    canonical_params["projectPath"] = str(canonical_project_path)
+    canonical_arguments = copy.deepcopy(arguments)
+    canonical_arguments["expectedProjectPath"] = str(canonical_project_path)
+    canonical_params.pop("params", None)
+    canonical_params["arguments"] = canonical_arguments
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    preview_arguments = build_material_shader_preview_arguments(arguments)
+    preview_arguments["expectedProjectPath"] = str(canonical_project_path)
+    try:
+        result = invoke_unity_mcp(
+            settings,
+            MATERIAL_SHADER_ASSIGNMENT_TOOL,
+            preview_arguments,
+        )
+    except Exception as exc:  # noqa: BLE001 - raw bridge details must not escape the preview boundary.
+        raise AgentGatewayError(
+            "Material shader preview could not be verified against the current project.",
+            status_code=409,
+        ) from exc
+    if result.exit_code != 0:
+        raise AgentGatewayError(
+            "Material shader preview could not be verified against the current project.",
+            status_code=409,
+        )
+    try:
+        return bind_material_shader_preview(canonical_params, extract_tool_result_payload(result))
+    except MaterialShaderAssignmentError as exc:
+        raise AgentGatewayError(
+            "Material shader preview returned an invalid verification receipt.",
+            status_code=409,
+        ) from exc
+
+
+def preview_material_shader_assignment_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_material_shader_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
 ADDON_FRAMEWORKS: dict[str, dict[str, Any]] = {
     "modular_avatar": {
         "label": "Modular Avatar",
@@ -22959,6 +23058,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_material_shader_assignment",
+        "Preview one persistent material shader assignment and its shared impact without writing project files.",
+        "plan/preview",
+        preview_material_shader_assignment_sync,
+    )
     AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", set_skill_package_enabled_sync)
@@ -23235,6 +23340,7 @@ def register_agent_gateway_tools() -> None:
         "Run an allowlisted VRCForge static Unity MCP write tool through the approval and rollback checkpoint boundary.",
         "high",
         unity_mcp_write_sync,
+        request_preparer=prepare_unity_mcp_write_request,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_export_vrm",

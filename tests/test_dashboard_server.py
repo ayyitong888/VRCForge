@@ -11844,6 +11844,30 @@ namespace VRCForge.Editor
         self.assertEqual(validation["validatedChanges"][0]["after"], 0.75)
         self.assertEqual(validation["skippedChanges"][0]["warning"], "Real shader property names are not accepted; use semantic_property only.")
 
+    def test_duplicate_compatible_material_ids_fail_closed_without_breaking_unique_ids(self) -> None:
+        inventory = make_shader_inventory()
+        first = dict(inventory["materials"][0])
+        first["renderer_component_id"] = "1" * 64
+        duplicate = dict(first)
+        duplicate["renderer_component_id"] = "2" * 64
+        duplicate["category"] = "hair"
+        inventory["materials"] = [first, duplicate, inventory["materials"][1]]
+
+        self.assertIn("mat_unsupported", dashboard_server.build_shader_material_index(inventory))
+        self.assertNotIn("mat_skin", dashboard_server.build_shader_material_index(inventory))
+        validation = dashboard_server.validate_shader_material_tuning_plan(
+            plan={
+                "changes": [
+                    {"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.5},
+                ]
+            },
+            inventory=inventory,
+        )
+        self.assertIn("Ambiguous material_id", validation["skippedChanges"][0]["warning"])
+
+        dashboard_server.apply_shader_category_overrides(inventory, {"mat_skin": "eyes"})
+        self.assertEqual([item["category"] for item in inventory["materials"][:2]], ["skin", "hair"])
+
     def test_unity_shader_adapter_source_keeps_poiyomi_and_generic_fallback(self) -> None:
         source = Path("Assets/VRCForge/Editor/ShaderMaterialAdapters.cs").read_text(encoding="utf-8-sig")
 
@@ -11852,20 +11876,85 @@ namespace VRCForge.Editor
         self.assertIn('base("Generic"', source)
         self.assertIn('"_BaseColor"', source)
 
-    def test_shader_fixture_tool_sets_named_shader_with_undo_and_save(self) -> None:
-        source = Path("Assets/VRCForge/Editor/ShaderFixtureTool.cs").read_text(encoding="utf-8-sig")
+    def test_material_shader_tool_has_precondition_impact_and_exact_readback(self) -> None:
+        source = Path("Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(encoding="utf-8-sig")
 
         self.assertIn('name: "vrc_set_material_shader"', source)
+        self.assertIn('"vrcforge.material_shader_assignment.v1"', source)
         self.assertIn("ResolveShader(shaderName, shaderAssetPath)", source)
         self.assertIn("shaderAssetPath", source)
-        self.assertIn("LoadExplicitShaderAtAssetPath(shaderAssetPath)", source)
-        self.assertIn("AssetDatabase.ImportAsset(normalizedPath, ImportAssetOptions.ForceSynchronousImport)", source)
         self.assertIn("AssetDatabase.FindAssets", source)
         self.assertIn("AssetDatabase.LoadAssetAtPath<Shader>", source)
+        self.assertIn("expectedBeforeShader", source)
+        self.assertIn("expectedBeforeShaderAssetPath", source)
+        self.assertIn("expectedBeforeShaderAssetGuid", source)
+        self.assertIn("expectedMaterialAssetPath", source)
+        self.assertIn("expectedMaterialAssetGuid", source)
+        self.assertIn("expectedMaterialFileDigest", source)
+        self.assertIn("expectedSharedImpactDigest", source)
+        self.assertIn("expectedRendererComponentId", source)
+        self.assertIn("rendererSceneGuid", source)
+        self.assertIn("rendererComponentType", source)
+        self.assertIn("rendererComponentIndex", source)
+        self.assertIn("RendererComponentIdentity.Create", source)
+        self.assertIn("expectedProjectPath", source)
+        self.assertIn("MatchesCurrentProject", source)
+        self.assertIn("rendererPath and materialAssetPath cannot be combined", source)
+        self.assertIn("InspectWritableMaterialAsset", source)
+        self.assertIn("AssetDatabase.IsMainAsset", source)
+        self.assertIn('StartsWith("Assets/"', source)
+        self.assertIn("FileAttributes.ReadOnly", source)
+        self.assertIn("FileAttributes.ReparsePoint", source)
+        self.assertIn("ComputeFileSha256", source)
+        self.assertIn("BuildSharedMaterialImpact", source)
+        self.assertIn("ComputeImpactPartitionDigest", source)
+        self.assertIn("ComputeImpactCommitment", source)
+        self.assertIn("sharedImpactDisplayDigest", source)
+        self.assertIn("sharedImpactTailDigest", source)
+        self.assertIn("vrcforge.material_shader_impact.v2", source)
+        self.assertIn("scenePath", source)
+        self.assertIn("sceneGuid", source)
+        self.assertIn("sceneHandle", source)
+        self.assertIn("loadedRendererSlotCount", source)
+        self.assertIn("dependentAssetCount", source)
+        self.assertIn("matchingRenderers.Length > 1", source)
         self.assertIn("Undo.RecordObject", source)
+        self.assertIn("beforeShaderObject != shader", source)
         self.assertIn("target.material.shader = shader", source)
-        self.assertIn("AssetDatabase.SaveAssets", source)
+        self.assertIn("AssetDatabase.SaveAssetIfDirty", source)
+        self.assertIn("EditorUtility.IsDirty", source)
+        self.assertIn("readback.shader == shader", source)
         self.assertIn("rendererPath or materialAssetPath is required", source)
+        self.assertNotIn("AssetDatabase.ImportAsset", source)
+        self.assertNotIn("AssetDatabase.Refresh", source)
+        self.assertNotIn("fixture", source.lower())
+
+        scanner_source = Path("Assets/VRCForge/Editor/ShaderMaterialScanner.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("renderer_component_id", scanner_source)
+        self.assertIn("renderer_scene_guid", scanner_source)
+        self.assertIn("RendererComponentIdentity.Create", scanner_source)
+        self.assertIn("new Dictionary<int, Transform>()", scanner_source)
+        self.assertIn("var rootInstanceId = root.GetInstanceID()", scanner_source)
+        self.assertIn("rendererIdentity.componentId", scanner_source)
+        self.assertIn("MaterialInventoryIdentity.CreateMaterialId", scanner_source)
+        self.assertIn("rendererComponentIds.Add", scanner_source)
+        self.assertIn("material_id_ambiguous", scanner_source)
+        self.assertIn("renderer_id_ambiguous", scanner_source)
+        self.assertIn("ThenBy(root => root.gameObject.scene.handle)", scanner_source)
+        self.assertIn("ThenBy(root => root.GetInstanceID())", scanner_source)
+        self.assertIn("ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot)", scanner_source)
+        identity_source = Path("Assets/VRCForge/Editor/RendererComponentIdentity.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("GlobalObjectId.GetGlobalObjectIdSlow", identity_source)
+        self.assertIn("globalObjectId.identifierType == 0", identity_source)
+        self.assertIn('"instance:" + renderer.GetInstanceID()', identity_source)
+        self.assertIn('"vrcforge.renderer_component.v1"', identity_source)
+        self.assertIn("CreateRendererId(string rendererPath)", identity_source)
+        self.assertIn("string rendererPath,", identity_source)
+        tuning_source = Path("Assets/VRCForge/Editor/MaterialTuningApplier.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("RendererComponentIdentity.Create", tuning_source)
+        self.assertIn("MaterialInventoryIdentity.CreateMaterialId", tuning_source)
+        self.assertIn("componentSlots.Add", tuning_source)
+        self.assertIn("index.ContainsKey(materialId)", tuning_source)
 
     def test_avatar_encryption_public_repo_keeps_only_connector_boundary(self) -> None:
         self.assertFalse(Path("Assets/VRCForge/Editor/AvatarEncryptionTool.cs").exists())
@@ -11884,6 +11973,11 @@ namespace VRCForge.Editor
         self.assertIn("/api/app/package-install/request", source)
         self.assertIn("vrcforge_unity_mcp_write", source)
         self.assertIn("vrc_set_material_shader", source)
+        self.assertIn("vrcforge.material_shader_assignment_approval.v1", source)
+        self.assertIn("authoritativePreviewBound", source)
+        shader_switch_source = source.split("def apply_shader_switch", 1)[1].split("def apply_semantic_tuning", 1)[0]
+        self.assertNotIn('"preview": {', shader_switch_source)
+        self.assertNotIn('"expectedBeforeShader"', shader_switch_source)
         self.assertIn("vrcforge_apply_shader_tuning", source)
         self.assertIn('"projectPath": self.project_root', source)
         self.assertIn("/api/app/doctor/unity-mcp/repair", source)

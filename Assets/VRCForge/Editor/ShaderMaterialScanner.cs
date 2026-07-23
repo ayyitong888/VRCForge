@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
 using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
@@ -74,21 +73,35 @@ namespace VRCForge.Editor
             var materials = new List<MaterialInventoryItem>();
             var rendererCount = 0;
             var sceneNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var rendererComponentIds = new HashSet<string>(StringComparer.Ordinal);
 
-            foreach (var avatarRoot in avatars.OrderBy(GetTransformPath))
+            foreach (var avatarRoot in avatars)
             {
                 sceneNames.Add(avatarRoot.gameObject.scene.name);
                 var renderers = avatarRoot.GetComponentsInChildren<Renderer>(true)
                     .Where(IsSceneObject)
-                    .OrderBy(renderer => GetTransformPath(renderer.transform))
+                    .Where(renderer => ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot))
+                    .Select(renderer => new
+                    {
+                        renderer,
+                        identity = RendererComponentIdentity.Create(renderer)
+                    })
+                    .OrderBy(item => item.identity.rendererPath, StringComparer.Ordinal)
+                    .ThenBy(item => item.identity.componentId, StringComparer.Ordinal)
                     .ToList();
 
-                foreach (var renderer in renderers)
+                foreach (var rendererEntry in renderers)
                 {
+                    var renderer = rendererEntry.renderer;
+                    var rendererIdentity = rendererEntry.identity;
+                    if (!rendererComponentIds.Add(rendererIdentity.componentId))
+                    {
+                        throw new InvalidOperationException("Material inventory contains a duplicate renderer component identity.");
+                    }
                     rendererCount++;
-                    var rendererPath = GetTransformPath(renderer.transform);
+                    var rendererPath = rendererIdentity.rendererPath;
                     var meshName = GetMeshName(renderer);
-                    var rendererId = StableId("renderer", rendererPath);
+                    var rendererId = MaterialInventoryIdentity.CreateRendererId(rendererPath);
                     var sharedMaterials = renderer.sharedMaterials ?? Array.Empty<Material>();
 
                     for (var slotIndex = 0; slotIndex < sharedMaterials.Length; slotIndex++)
@@ -104,9 +117,11 @@ namespace VRCForge.Editor
                         var adapter = ShaderAdapterRegistry.GetAdapter(material);
                         var shaderFamily = adapter != null ? adapter.ShaderFamily : "Unsupported";
                         var category = DetectMaterialCategory(rendererPath, renderer.name, meshName, materialName);
-                        var materialId = StableId(
-                            "mat",
-                            $"{NormalizePath(rendererPath)}|{slotIndex}|{materialName}|{shaderName}");
+                        var materialId = MaterialInventoryIdentity.CreateMaterialId(
+                            rendererPath,
+                            slotIndex,
+                            materialName,
+                            shaderName);
 
                         materials.Add(new MaterialInventoryItem
                         {
@@ -115,6 +130,12 @@ namespace VRCForge.Editor
                             avatar_path = GetTransformPath(avatarRoot),
                             item_path = rendererPath,
                             renderer_id = rendererId,
+                            renderer_component_id = rendererIdentity.componentId,
+                            renderer_component_type = rendererIdentity.componentType,
+                            renderer_component_index = rendererIdentity.componentIndex,
+                            renderer_scene_path = rendererIdentity.scenePath,
+                            renderer_scene_guid = rendererIdentity.sceneGuid,
+                            renderer_scene_handle = rendererIdentity.sceneHandle,
                             renderer_name = renderer.name,
                             renderer_path = rendererPath,
                             mesh_name = meshName,
@@ -130,6 +151,22 @@ namespace VRCForge.Editor
                         });
                     }
                 }
+            }
+
+            var ambiguousMaterialIds = new HashSet<string>(
+                materials.GroupBy(item => item.material_id, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key),
+                StringComparer.OrdinalIgnoreCase);
+            var ambiguousRendererIds = new HashSet<string>(
+                materials.GroupBy(item => item.renderer_id, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Select(item => item.renderer_component_id).Distinct(StringComparer.Ordinal).Count() > 1)
+                    .Select(group => group.Key),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var material in materials)
+            {
+                material.material_id_ambiguous = ambiguousMaterialIds.Contains(material.material_id);
+                material.renderer_id_ambiguous = ambiguousRendererIds.Contains(material.renderer_id);
             }
 
             return new MaterialInventoryPayload
@@ -178,7 +215,7 @@ namespace VRCForge.Editor
         private static List<Transform> ResolveAvatarRoots(string normalizedAvatarPath)
         {
             var renderers = Resources.FindObjectsOfTypeAll<Renderer>().Where(IsSceneObject);
-            var roots = new Dictionary<string, Transform>(StringComparer.OrdinalIgnoreCase);
+            var roots = new Dictionary<int, Transform>();
 
             foreach (var renderer in renderers)
             {
@@ -192,9 +229,10 @@ namespace VRCForge.Editor
                     continue;
                 }
 
-                if (!roots.ContainsKey(path))
+                var rootInstanceId = root.GetInstanceID();
+                if (!roots.ContainsKey(rootInstanceId))
                 {
-                    roots.Add(path, root);
+                    roots.Add(rootInstanceId, root);
                 }
             }
 
@@ -203,7 +241,12 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException($"Could not locate avatar root: {normalizedAvatarPath}");
             }
 
-            return roots.Values.ToList();
+            return roots.Values
+                .OrderBy(root => (root.gameObject.scene.path ?? string.Empty).Replace("\\", "/"), StringComparer.Ordinal)
+                .ThenBy(root => root.gameObject.scene.handle)
+                .ThenBy(root => GetTransformPath(root), StringComparer.Ordinal)
+                .ThenBy(root => root.GetInstanceID())
+                .ToList();
         }
 
         private static bool IsSceneObject(Component component)
@@ -307,16 +350,6 @@ namespace VRCForge.Editor
             return needles.Any(needle => haystack.Contains(needle));
         }
 
-        private static string StableId(string prefix, string value)
-        {
-            using (var sha1 = SHA1.Create())
-            {
-                var bytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(NormalizePath(value)));
-                var hex = BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
-                return $"{prefix}_{hex.Substring(0, 16)}";
-            }
-        }
-
         private static string GetTransformPath(Transform transform)
         {
             var segments = new Stack<string>();
@@ -383,11 +416,19 @@ namespace VRCForge.Editor
         public string avatar_path;
         public string item_path;
         public string renderer_id;
+        public bool renderer_id_ambiguous;
+        public string renderer_component_id;
+        public string renderer_component_type;
+        public int renderer_component_index;
+        public string renderer_scene_path;
+        public string renderer_scene_guid;
+        public int renderer_scene_handle;
         public string renderer_name;
         public string renderer_path;
         public string mesh_name;
         public int slot_index;
         public string material_name;
+        public bool material_id_ambiguous;
         public string shader_name;
         public string shader_family;
         public string category;
