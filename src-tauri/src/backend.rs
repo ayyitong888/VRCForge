@@ -202,7 +202,6 @@ pub(crate) fn bounded_backend_error_detail(detail: &str) -> String {
         window[0].is_ascii_alphabetic() && window[1] == b':' && matches!(window[2], b'\\' | b'/')
     });
     let sensitive_markers = [
-        "sk-",
         "client_secret",
         "access_token",
         "api_key",
@@ -228,6 +227,7 @@ pub(crate) fn bounded_backend_error_detail(detail: &str) -> String {
         "\"cookie\"",
     ];
     if sanitized == "[redacted]"
+        || contains_secret_key_prefix(&sanitized)
         || has_drive_path
         || sanitized.starts_with("\\\\")
         || lower.contains("\\users\\")
@@ -458,6 +458,16 @@ mod memory_review_backend_error_tests {
         assert_eq!(
             bounded_backend_error_detail("Memory Review revision changed."),
             "Memory Review revision changed."
+        );
+        assert_eq!(
+            bounded_backend_error_detail("risk-level: medium"),
+            "risk-level: medium"
+        );
+        assert_eq!(
+            bounded_backend_error_detail(
+                &["risk-level: medium; value=", "sk", "-private-value"].concat()
+            ),
+            "[redacted]"
         );
 
         let long = "x".repeat(800);

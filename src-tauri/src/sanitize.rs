@@ -86,7 +86,7 @@ pub(crate) fn sanitize_memory_review_response(mut value: serde_json::Value) -> s
 pub(crate) fn sanitize_text_for_webview(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
     let has_sensitive_assignment = has_extended_sensitive_assignment(&lower);
-    if lower.contains("sk-")
+    if contains_secret_key_prefix(value)
         || lower.contains("api_key")
         || lower.contains("apikey")
         || lower.contains("configpath")
@@ -98,6 +98,34 @@ pub(crate) fn sanitize_text_for_webview(value: &str) -> String {
         return "[redacted]".to_string();
     }
     value.to_string()
+}
+
+pub(crate) fn contains_secret_key_prefix(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower
+        .match_indices("sk-")
+        .any(|(start, _)| !is_harmless_risk_level_occurrence(&lower, start))
+}
+
+fn is_harmless_risk_level_occurrence(value: &str, secret_prefix_start: usize) -> bool {
+    const SAFE_IDENTIFIER: &str = "risk-level";
+    let Some(identifier_start) = secret_prefix_start.checked_sub(2) else {
+        return false;
+    };
+    let identifier_end = identifier_start + SAFE_IDENTIFIER.len();
+    if value.get(identifier_start..identifier_end) != Some(SAFE_IDENTIFIER) {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let left_boundary =
+        identifier_start == 0 || !is_ascii_identifier_character(bytes[identifier_start - 1]);
+    let right_boundary =
+        identifier_end == bytes.len() || !is_ascii_identifier_character(bytes[identifier_end]);
+    left_boundary && right_boundary
+}
+
+fn is_ascii_identifier_character(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-')
 }
 
 fn has_extended_sensitive_assignment(value: &str) -> bool {
@@ -143,7 +171,7 @@ fn sanitize_memory_candidate_text_for_webview(value: &str) -> String {
 
 fn is_harmless_memory_api_key_reference(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    if lower.contains("sk-")
+    if contains_secret_key_prefix(value)
         || lower.contains("bearer ")
         || lower.contains("authorization")
         || lower.contains("configpath")
@@ -294,7 +322,8 @@ mod memory_review_sanitizer_tests {
 
     #[test]
     fn harmless_candidate_keywords_do_not_split_webview_and_backend_state() {
-        let text = "Remember API_KEY variable naming and credential rotation guidance.";
+        let text =
+            "Remember API_KEY variable naming, risk-level metadata, and credential rotation guidance.";
         assert_eq!(sanitize_text_for_webview(text), "[redacted]");
         let snapshot = serde_json::json!({
             "candidates": [{
@@ -318,6 +347,14 @@ mod memory_review_sanitizer_tests {
             sanitize_text_for_webview(&["sk", "-private-value"].concat()),
             "[redacted]"
         );
+        assert_eq!(
+            sanitize_text_for_webview(&["Value ", "sk", "-private-value"].concat()),
+            "[redacted]"
+        );
+        assert_eq!(
+            sanitize_text_for_webview(&["prefix", "sk", "-private-value"].concat()),
+            "[redacted]"
+        );
         for text in [
             "api_key=private-value",
             "{\"token\":\"private-value\"}",
@@ -326,6 +363,35 @@ mod memory_review_sanitizer_tests {
         ] {
             assert_eq!(sanitize_text_for_webview(text), "[redacted]");
         }
+    }
+
+    #[test]
+    fn harmless_skill_markdown_is_not_redacted_as_a_secret_key() {
+        let markdown = concat!(
+            "---\n",
+            "name: validation-report-extension\n",
+            "permission-mode: read_only\n",
+            "risk-level: medium\n",
+            "entrypoint-tool: vrcforge_run_validation_report\n",
+            "user-invocable: true\n",
+            "disable-model-invocation: false\n",
+            "allowed-tools:\n",
+            "  - vrcforge_run_validation_report\n",
+            "disallowed-tools:\n",
+            "  - vrcforge_execute_shell\n",
+            "  - direct_unity_asset_write\n",
+            "---\n",
+            "Use the read-only validation report.\n",
+        );
+
+        assert_eq!(sanitize_text_for_webview(markdown), markdown);
+        let sanitized = sanitize_webview_response(serde_json::json!({
+            "skillMarkdown": markdown,
+        }));
+        assert_eq!(sanitized["skillMarkdown"], markdown);
+
+        let mixed = [markdown, "notes: ", "sk", "-private-value\n"].concat();
+        assert_eq!(sanitize_text_for_webview(&mixed), "[redacted]");
     }
 
     #[test]
