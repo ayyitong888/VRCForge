@@ -96,6 +96,12 @@ _COMPOSITE_SECRET_ASSIGNMENT_RE = re.compile(
     r")(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\r\n,;}]+)"
 )
 _SAFE_SECRET_METRIC_SUFFIXES = ("count", "counts", "length", "limit", "limits", "usage", "budget", "index")
+_PUBLIC_EVIDENCE_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:[a-z]:[\\/]|\\\\|/(?:Users|home|root|tmp)/|/var/folders/)[^\r\n\"'<>|,;]*"
+)
+_PUBLIC_EVIDENCE_RELATIVE_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?:^|[\\/])(?:\.ssh|AppData|Library[\\/]Application Support)(?:[\\/]|$)"
+)
 
 
 def _utc_now() -> datetime:
@@ -157,6 +163,43 @@ def _scrub_secret_text(value: str) -> str:
     text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
     text = _BEARER_RE.sub("Bearer [REDACTED]", text)
     return _KNOWN_KEY_RE.sub("[REDACTED]", text)
+
+
+def redact_public_evidence(value: Any, *, depth: int = 0) -> Any:
+    """Deterministically scrub secrets and machine-private paths from evidence.
+
+    Callers that require a fail-closed public contract can compare the returned
+    value with the original and reject the document whenever they differ.
+    This helper intentionally has no identity store or filesystem side effect.
+    """
+
+    if depth > 16:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:500]:
+            key_text = str(key)
+            if _is_secret_key(key_text):
+                result[key_text] = "[REDACTED]"
+            else:
+                result[key_text] = redact_public_evidence(item, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [redact_public_evidence(item, depth=depth + 1) for item in list(value)[:500]]
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, str):
+        text = _scrub_secret_text(value)
+        text = re.sub(r"(?i)file://[^\s\"']+", "[REDACTED_PATH]", text)
+        text = _PUBLIC_EVIDENCE_PRIVATE_PATH_RE.sub("[REDACTED_PATH]", text)
+        if _PUBLIC_EVIDENCE_RELATIVE_PRIVATE_PATH_RE.search(text):
+            return "[REDACTED_PATH]"
+        return text
+    if isinstance(value, float) and not math.isfinite(value):
+        return "[REDACTED]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return "[REDACTED]"
 
 
 def _iso(value: datetime) -> str:
@@ -717,4 +760,5 @@ __all__ = [
     "IDENTITY_MAX_RECORDS",
     "IDENTITY_RETENTION",
     "IDENTITY_SCHEMA",
+    "redact_public_evidence",
 ]

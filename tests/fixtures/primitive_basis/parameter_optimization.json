@@ -1,0 +1,11 @@
+{
+  "schema": "vrcforge.primitive_basis_fixture.v1",
+  "scenarioId": "parameter_optimization",
+  "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/parameter_optimization",
+  "baselineManifest": "baseline.json",
+  "expectedBaselineDigest": "",
+  "expectedTreeDigest": "",
+  "requiredPrimitives": [
+    "parameter_bit_pack"
+  ]
+}
