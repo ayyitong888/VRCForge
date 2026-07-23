@@ -59,6 +59,11 @@ namespace VRCForge.Editor
                 var avatarPath = (@params["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var preview = @params["preview"] != null && @params["preview"].ToObject<bool>();
                 var allowDuplicate = @params["allowDuplicate"] != null && @params["allowDuplicate"].ToObject<bool>();
+                var saveSceneToken = @params["saveScene"] ?? @params["save_scene"];
+                var saveScene = saveSceneToken != null
+                    && saveSceneToken.Type != JTokenType.Null
+                    && saveSceneToken.ToObject<bool>();
+                PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
 
                 if (string.IsNullOrWhiteSpace(gameObjectPath))
                 {
@@ -113,7 +118,10 @@ namespace VRCForge.Editor
                             reason = "component_exists",
                             gameObjectPath = targetPath,
                             componentType = componentType.FullName,
-                            existingCount = existing
+                            existingCount = existing,
+                            saveScene,
+                            sceneSaved = false,
+                            sceneDirty = target.scene.IsValid() && target.scene.isDirty
                         });
                 }
 
@@ -183,6 +191,9 @@ namespace VRCForge.Editor
                             avatarPath = avatarRoot != null ? GetTransformPath(avatarRoot) : null,
                             componentType = componentType.FullName,
                             existingCount = existing,
+                            saveScene,
+                            sceneSaved = false,
+                            sceneDirty = target.scene.IsValid() && target.scene.isDirty,
                             references = refDesc,
                             fields = fieldDesc,
                             warnings
@@ -190,20 +201,24 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
+                var targetScene = target.scene;
+                var sceneWasDirty = targetScene.IsValid() && targetScene.isDirty;
                 Undo.IncrementCurrentGroup();
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add {componentType.Name}");
-                var component = Undo.AddComponent(target, componentType);
-                if (component == null)
-                {
-                    return new ErrorResponse($"Failed to add {componentType.Name} to '{target.name}'.");
-                }
-                Undo.RegisterCompleteObjectUndo(component, $"Configure {componentType.Name}");
-
                 var appliedRefs = new List<object>();
                 var appliedFields = new List<object>();
+                var sceneSaved = false;
                 try
                 {
+                    var component = Undo.AddComponent(target, componentType);
+                    if (component == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to add {componentType.Name} to '{target.name}'.");
+                    }
+                    Undo.RegisterCompleteObjectUndo(component, $"Configure {componentType.Name}");
+
                     foreach (var plan in refPlan)
                     {
                         ApplyReference(component, plan);
@@ -215,18 +230,39 @@ namespace VRCForge.Editor
                         SetMemberValue(component, plan.member, plan.convertedValue);
                         appliedFields.Add(new { field = plan.member.Name, set = true, value = plan.token?.ToString() });
                     }
+
+                    EditorUtility.SetDirty(component);
+                    if (targetScene.IsValid())
+                    {
+                        UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(targetScene);
+                    }
+                    if (saveScene)
+                    {
+                        if (!targetScene.IsValid() || !targetScene.isLoaded || string.IsNullOrWhiteSpace(targetScene.path))
+                        {
+                            throw new InvalidOperationException(
+                                "Target scene must already be saved to disk before saveScene=true can be used.");
+                        }
+                        sceneSaved = UnityEditor.SceneManagement.EditorSceneManager.SaveScene(targetScene);
+                        if (!sceneSaved)
+                        {
+                            throw new InvalidOperationException("Unity did not save the target scene.");
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
                     Undo.RevertAllDownToGroup(undoGroup);
+                    if (targetScene.IsValid())
+                    {
+                        if (sceneWasDirty)
+                        {
+                            UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(targetScene);
+                        }
+                    }
                     return new ErrorResponse($"Could not configure {componentType.Name}; the added component was rolled back: {ex.Message}");
                 }
 
-                EditorUtility.SetDirty(component);
-                if (target.scene.IsValid())
-                {
-                    UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(target.scene);
-                }
                 Undo.CollapseUndoOperations(undoGroup);
 
                 return new SuccessResponse(
@@ -240,6 +276,9 @@ namespace VRCForge.Editor
                         avatarPath = avatarRoot != null ? GetTransformPath(avatarRoot) : null,
                         componentType = componentType.FullName,
                         addedComponent = true,
+                        saveScene,
+                        sceneSaved,
+                        sceneDirty = targetScene.IsValid() && targetScene.isDirty,
                         references = appliedRefs,
                         fields = appliedFields,
                         warnings
@@ -248,6 +287,107 @@ namespace VRCForge.Editor
             catch (Exception ex)
             {
                 return new ErrorResponse($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        internal static object HandleInspectCommand(JObject @params)
+        {
+            try
+            {
+                @params = @params ?? new JObject();
+                var gameObjectPath = (@params["gameObjectPath"]?.ToString()
+                    ?? @params["targetPath"]?.ToString()
+                    ?? string.Empty).Trim();
+                var componentTypeInput = (@params["componentType"]?.ToString() ?? string.Empty).Trim();
+                var avatarPath = (@params["avatarPath"]?.ToString() ?? string.Empty).Trim();
+                PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
+
+                if (string.IsNullOrWhiteSpace(gameObjectPath))
+                {
+                    return new ErrorResponse("Missing required parameter: gameObjectPath.");
+                }
+                if (string.IsNullOrWhiteSpace(componentTypeInput))
+                {
+                    return new ErrorResponse("Missing required parameter: componentType.");
+                }
+                if (FindType(MaNamespace + "ModularAvatarMergeArmature") == null)
+                {
+                    return new ErrorResponse("Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
+                }
+
+                var resolvedTypeName = Aliases.TryGetValue(componentTypeInput, out var mapped)
+                    ? mapped
+                    : componentTypeInput;
+                var componentType = FindType(resolvedTypeName) ?? FindType(MaNamespace + componentTypeInput);
+                if (componentType == null || !typeof(Component).IsAssignableFrom(componentType))
+                {
+                    return new ErrorResponse($"Modular Avatar component type not found: '{componentTypeInput}'.");
+                }
+
+                var avatarRoot = ResolveAvatarRoot(avatarPath);
+                var target = ResolveSceneObject(gameObjectPath, avatarRoot);
+                if (target == null)
+                {
+                    return new ErrorResponse($"Target GameObject not found in the loaded scene(s): '{gameObjectPath}'.");
+                }
+                if (avatarRoot == null)
+                {
+                    avatarRoot = FindAvatarRootFor(target.transform);
+                }
+
+                var components = target.GetComponents(componentType);
+                var references = new List<object>();
+                const BindingFlags memberFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var referenceMembers = componentType.GetFields(memberFlags)
+                    .Cast<MemberInfo>()
+                    .Concat(componentType.GetProperties(memberFlags)
+                        .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+                        .Cast<MemberInfo>())
+                    .Where(member => GetMemberType(member)?.Name == "AvatarObjectReference")
+                    .GroupBy(member => member.Name, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .OrderBy(member => member.Name, StringComparer.Ordinal)
+                    .ToList();
+
+                for (var componentIndex = 0; componentIndex < components.Length; componentIndex++)
+                {
+                    var component = components[componentIndex];
+                    foreach (var member in referenceMembers)
+                    {
+                        var referenceType = GetMemberType(member);
+                        var reference = GetMemberValue(component, member);
+                        var referencePath = ReadAvatarObjectReferencePath(reference, referenceType);
+                        var resolved = ResolveAvatarObjectReference(reference, referenceType, component, avatarRoot, referencePath);
+                        references.Add(new
+                        {
+                            componentIndex,
+                            member = member.Name,
+                            referencePath,
+                            resolved = resolved != null,
+                            resolvedPath = resolved != null ? GetTransformPath(resolved.transform) : null
+                        });
+                    }
+                }
+
+                var targetScene = target.scene;
+                return new SuccessResponse(
+                    $"Inspected {components.Length} {componentType.Name} component(s) on '{target.name}'.",
+                    new
+                    {
+                        ok = true,
+                        action = "inspect_modular_avatar_component",
+                        gameObjectPath = GetTransformPath(target.transform),
+                        avatarPath = avatarRoot != null ? GetTransformPath(avatarRoot) : null,
+                        present = components.Length > 0,
+                        count = components.Length,
+                        type = componentType.FullName,
+                        sceneDirty = targetScene.IsValid() && targetScene.isDirty,
+                        references
+                    });
+            }
+            catch (Exception ex)
+            {
+                return new ErrorResponse($"Inspect Modular Avatar component failed: {ex.Message}");
             }
         }
 
@@ -379,6 +519,37 @@ namespace VRCForge.Editor
             }
         }
 
+        private static string ReadAvatarObjectReferencePath(object reference, Type referenceType)
+        {
+            if (reference == null || referenceType == null) { return null; }
+            var pathMember = ResolveMember(referenceType, "referencePath");
+            if (pathMember == null) { return null; }
+            return GetMemberValue(reference, pathMember)?.ToString();
+        }
+
+        private static GameObject ResolveAvatarObjectReference(
+            object reference,
+            Type referenceType,
+            Component container,
+            Transform avatarRoot,
+            string referencePath)
+        {
+            if (reference == null || referenceType == null || container == null) { return null; }
+            var getMethod = referenceType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(method => method.Name == "Get"
+                    && method.GetParameters().Length == 1
+                    && method.GetParameters()[0].ParameterType.IsAssignableFrom(container.GetType())
+                    && typeof(GameObject).IsAssignableFrom(method.ReturnType));
+            if (getMethod != null)
+            {
+                return getMethod.Invoke(reference, new object[] { container }) as GameObject;
+            }
+
+            if (string.IsNullOrEmpty(referencePath) || avatarRoot == null) { return null; }
+            if (referencePath == "$$$AVATAR_ROOT$$$") { return avatarRoot.gameObject; }
+            return avatarRoot.Find(NormalizePath(referencePath))?.gameObject;
+        }
+
         private static object ConvertScalar(JToken token, Type targetType)
         {
             if (token == null)
@@ -437,26 +608,38 @@ namespace VRCForge.Editor
         private static Transform ResolveAvatarRoot(string avatarPath)
         {
             if (string.IsNullOrWhiteSpace(avatarPath)) { return null; }
-            var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor");
-            if (descriptorType == null) { return null; }
             var normalized = NormalizePath(avatarPath);
-            var descriptors = Resources.FindObjectsOfTypeAll(descriptorType)
-                .OfType<Component>()
-                .Where(IsSceneComponent)
-                .ToList();
-            var match = descriptors.FirstOrDefault(d => NormalizePath(GetTransformPath(d.transform)) == normalized)
-                ?? descriptors.FirstOrDefault(d => d.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase));
-            return match != null ? match.transform : null;
+            foreach (var rootTypeName in new[]
+            {
+                "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor",
+                "nadena.dev.ndmf.runtime.components.NDMFAvatarRoot"
+            })
+            {
+                var rootType = FindType(rootTypeName);
+                if (rootType == null) { continue; }
+                var match = Resources.FindObjectsOfTypeAll(rootType)
+                    .OfType<Component>()
+                    .Where(IsSceneComponent)
+                    .FirstOrDefault(component => NormalizePath(GetTransformPath(component.transform)) == normalized);
+                if (match != null) { return match.transform; }
+            }
+            return null;
         }
 
         private static Transform FindAvatarRootFor(Transform t)
         {
-            var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor");
-            if (descriptorType == null) { return null; }
             var current = t;
             while (current != null)
             {
-                if (current.GetComponent(descriptorType) != null) { return current; }
+                foreach (var rootTypeName in new[]
+                {
+                    "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor",
+                    "nadena.dev.ndmf.runtime.components.NDMFAvatarRoot"
+                })
+                {
+                    var rootType = FindType(rootTypeName);
+                    if (rootType != null && current.GetComponent(rootType) != null) { return current; }
+                }
                 current = current.parent;
             }
             return null;
@@ -558,6 +741,20 @@ namespace VRCForge.Editor
             public object convertedValue;
             public string resolvedDisplay;
             public string avatarRelativePath;
+        }
+    }
+
+    [McpForUnityTool(
+        name: "vrc_inspect_modular_avatar_component",
+        Description = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing."
+    )]
+    public static class MAComponentInspector
+    {
+        public const string ToolName = "vrc_inspect_modular_avatar_component";
+
+        public static object HandleCommand(JObject @params)
+        {
+            return MAComponentWriter.HandleInspectCommand(@params);
         }
     }
 }

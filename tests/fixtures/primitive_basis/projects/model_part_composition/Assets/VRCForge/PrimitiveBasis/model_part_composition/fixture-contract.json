@@ -1,0 +1,66 @@
+{
+  "schema": "vrcforge.primitive_basis_model_part_fixture.v1",
+  "scenarioId": "model_part_composition",
+  "primitiveId": "non_destructive_part_composition",
+  "unity": {
+    "version": "2022.3.22f1",
+    "revision": "887be4894c44"
+  },
+  "scene": {
+    "assetPath": "Assets/VRCForge/PrimitiveBasis/model_part_composition/ModelPartComposition.unity",
+    "guid": "285dbe12f5ede174cbcd075983e1410f",
+    "avatarPath": "FixtureAvatar",
+    "baseArmaturePath": "FixtureAvatar/Armature",
+    "partRootPath": "FixtureAvatar/Part",
+    "componentHostPath": "FixtureAvatar/Part/Armature",
+    "mergeTargetPath": "FixtureAvatar/Armature",
+    "rendererPath": "FixtureAvatar/Part/RendererProbe",
+    "baselineComponentCount": 0
+  },
+  "projectFiles": [
+    {
+      "path": "Packages/manifest.json",
+      "sha256": "98b0f74110da34cfa5439cd6a99790f943be64fa378c8fcf9132720c0b2e5991"
+    },
+    {
+      "path": "Packages/packages-lock.json",
+      "sha256": "1d08f76f9854f0a83796cfb83cddbf5b1fa315663a33f5854777711410b80256"
+    },
+    {
+      "path": "ProjectSettings/ProjectVersion.txt",
+      "sha256": "0599d0a5e5f574ce3aaf02f6f98a477bd75b97ddd6a1cf9a9466c603c3d7b6ca"
+    }
+  ],
+  "requiredPackages": [
+    {
+      "id": "com.coplaydev.unity-mcp",
+      "version": "9.6.9-beta.7",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.avatars",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.base",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "nadena.dev.modular-avatar",
+      "version": "1.17.1",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "nadena.dev.ndmf",
+      "version": "1.13.1",
+      "provisioning": "exact_artifact"
+    }
+  ],
+  "runtime": {
+    "bootstrapType": "VRCForge.PrimitiveBasisFixtures.ModelPartCompositionFixtureBootstrap",
+    "runIdEnvironment": "VRCFORGE_PRIMITIVE_BASIS_RUN_ID",
+    "readyMarker": "Library/VRCForge/primitive-basis-model-part-ready.json"
+  }
+}

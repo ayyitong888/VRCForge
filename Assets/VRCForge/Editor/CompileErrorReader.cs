@@ -104,11 +104,12 @@ namespace VRCForge.Editor
         {
             try
             {
+                var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 var parameters = (@params ?? new JObject()).ToObject<Parameters>() ?? new Parameters();
                 var maxErrors = Math.Max(1, Math.Min(parameters.maxErrors ?? DefaultMaxErrors, MaxMaxErrors));
                 var includeConsoleFallback = parameters.includeConsoleFallback ?? true;
 
-                var payload = BuildPayload(maxErrors, includeConsoleFallback);
+                var payload = BuildPayload(maxErrors, includeConsoleFallback, identity);
                 return new SuccessResponse("Compile errors checked.", payload);
             }
             catch (Exception ex)
@@ -117,7 +118,10 @@ namespace VRCForge.Editor
             }
         }
 
-        private static object BuildPayload(int maxErrors, bool includeConsoleFallback)
+        private static object BuildPayload(
+            int maxErrors,
+            bool includeConsoleFallback,
+            PrimitiveBasisLiveGuard.ProcessIdentity identity)
         {
             var pipelineErrors = CompileErrorMonitor.LoadEntries();
             var source = "compilation_pipeline";
@@ -156,7 +160,11 @@ namespace VRCForge.Editor
                 truncated,
                 source,
                 capturedAt = CompileErrorMonitor.CapturedAt,
-                errors = new JArray(errors)
+                errors = new JArray(errors),
+                unityProcessId = identity?.ProcessId,
+                unityProcessStartedAtUtc = identity?.StartedAtUtc,
+                unityExecutableDigest = identity?.ExecutableDigest,
+                projectPathDigest = identity?.ProjectPathDigest
             };
         }
 

@@ -1,0 +1,12 @@
+{
+  "schema": "vrcforge.primitive_basis_fixture.v1",
+  "scenarioId": "component_feature_application",
+  "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/component_feature_application",
+  "baselineManifest": "baseline.json",
+  "expectedBaselineDigest": "",
+  "expectedTreeDigest": "",
+  "requiredPrimitives": [
+    "typed_component_list_write",
+    "feature_component_write"
+  ]
+}

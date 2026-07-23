@@ -39,6 +39,32 @@ namespace MCPForUnity.Editor.Services.Server
                 return false;
             }
 
+            string primitiveServerRoot = Environment.GetEnvironmentVariable(
+                "VRCFORGE_PRIMITIVE_MCP_SERVER_ROOT");
+            bool primitiveBasisRun = !string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("VRCFORGE_PRIMITIVE_BASIS_RUN_ID"));
+            if (primitiveBasisRun)
+            {
+                if (string.IsNullOrWhiteSpace(primitiveServerRoot)
+                    || !File.Exists(Path.Combine(primitiveServerRoot, "pyproject.toml"))
+                    || !File.Exists(Path.Combine(primitiveServerRoot, "uv.lock")))
+                {
+                    error = "The fixed primitive-basis server environment is unavailable.";
+                    return false;
+                }
+                var (primitiveUvxPath, _, _) = AssetPathUtility.GetUvxCommandParts();
+                string primitiveUvPath = BuildUvPathFromUvx(primitiveUvxPath);
+                if (string.IsNullOrWhiteSpace(primitiveUvPath) || !File.Exists(primitiveUvPath))
+                {
+                    error = "The fixed primitive-basis uv runtime is unavailable.";
+                    return false;
+                }
+                fileName = primitiveUvPath;
+                arguments = $"run --offline --frozen --project {QuoteIfNeeded(primitiveServerRoot)} mcp-for-unity --transport http --http-url {httpUrl} --project-scoped-tools";
+                displayCommand = $"{QuoteIfNeeded(primitiveUvPath)} {arguments}";
+                return true;
+            }
+
             var (uvxPath, fromUrl, packageName) = AssetPathUtility.GetUvxCommandParts();
             if (string.IsNullOrEmpty(uvxPath))
             {

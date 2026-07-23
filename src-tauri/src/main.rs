@@ -65,9 +65,19 @@ fn main() {
     }
     #[cfg(windows)]
     configure_webview2_accessibility();
+    let primitive_live_bootstrap =
+        read_primitive_live_bootstrap_from_stdin().unwrap_or_else(|_| {
+            eprintln!("VRCForge primitive live bootstrap was rejected.");
+            std::process::exit(2);
+        });
+    env::remove_var(backend::PRIMITIVE_LIVE_STDIN_ENV);
+    let backend_state = match primitive_live_bootstrap {
+        Some(frame) => BackendState::with_primitive_live_bootstrap(Some(frame)),
+        None => BackendState::new(),
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .manage(BackendState::new())
+        .manage(backend_state)
         .setup(|app| {
             let open_chat_item =
                 MenuItem::with_id(app, "open_chat", "打开对话", true, None::<&str>)?;
@@ -269,15 +279,17 @@ mod tests {
         advanced_settings_update_body, app_session_challenge_signature,
         app_session_challenge_signature_matches, developer_options_challenge_path,
         diagnostics_update_body, extract_challenge_signature, force_child_exit, hmac_sha256_hex,
-        percent_encode_query_component, prepare_runtime_files, provider_config_body,
-        resolve_logs_folder, runtime_session_verification_error, sanitize_backend_event,
-        sanitize_text_for_webview, sanitize_webview_response,
+        percent_encode_query_component, prepare_runtime_files, primitive_live_bootstrap_requested,
+        provider_config_body, resolve_logs_folder, runtime_session_verification_error,
+        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
         send_backend_graceful_shutdown_request_to, stop_managed_backend_child,
         tauri_ipc_bridge_proof, try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
-        webview_error_message, BackendState, DesktopAdvancedSettingsUpdateRequest,
-        DesktopDiagnosticsUpdateRequest, BACKEND_GRACEFUL_SHUTDOWN_METHOD,
-        BACKEND_GRACEFUL_SHUTDOWN_PATH, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        validate_primitive_live_bootstrap, validate_project_folder_to_open, wait_for_child_exit,
+        webview2_args_with_accessibility, webview_error_message, BackendState,
+        DesktopAdvancedSettingsUpdateRequest, DesktopDiagnosticsUpdateRequest,
+        BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH,
+        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS, PRIMITIVE_LIVE_BOOTSTRAP_MAGIC,
+        PRIMITIVE_LIVE_BOOTSTRAP_SIZE,
     };
     use std::{
         env, fs,
@@ -362,6 +374,43 @@ mod tests {
             app_session_challenge_signature("session-token", "nonce-value"),
             app_session_challenge_signature("session-token", "other-nonce"),
         );
+    }
+
+    #[test]
+    fn primitive_live_bootstrap_binds_the_exact_desktop_bytes() {
+        let desktop = [0x44u8; 32];
+        let desktop_hex = desktop
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let mut frame = vec![0u8; PRIMITIVE_LIVE_BOOTSTRAP_SIZE];
+        frame[..PRIMITIVE_LIVE_BOOTSTRAP_MAGIC.len()]
+            .copy_from_slice(PRIMITIVE_LIVE_BOOTSTRAP_MAGIC);
+        let desktop_offset = PRIMITIVE_LIVE_BOOTSTRAP_MAGIC.len() + 3 * 32;
+        frame[desktop_offset..desktop_offset + 32].copy_from_slice(&desktop);
+
+        assert!(validate_primitive_live_bootstrap(&frame, &desktop_hex).is_ok());
+        assert!(validate_primitive_live_bootstrap(&frame, &"45".repeat(32)).is_err());
+        assert!(
+            validate_primitive_live_bootstrap(&frame[..frame.len() - 1], &desktop_hex).is_err()
+        );
+        frame[0] ^= 1;
+        assert!(validate_primitive_live_bootstrap(&frame, &desktop_hex).is_err());
+    }
+
+    #[test]
+    fn primitive_live_stdin_requires_both_private_signals() {
+        assert_eq!(primitive_live_bootstrap_requested(None, false), Ok(false));
+        assert_eq!(
+            primitive_live_bootstrap_requested(Some("1"), false),
+            Ok(false)
+        );
+        assert_eq!(
+            primitive_live_bootstrap_requested(Some("1"), true),
+            Ok(true)
+        );
+        assert!(primitive_live_bootstrap_requested(None, true).is_err());
+        assert!(primitive_live_bootstrap_requested(Some("0"), true).is_err());
     }
 
     #[test]

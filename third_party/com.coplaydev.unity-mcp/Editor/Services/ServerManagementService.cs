@@ -21,6 +21,7 @@ namespace MCPForUnity.Editor.Services
         private readonly IProcessTerminator _processTerminator;
         private readonly IServerCommandBuilder _commandBuilder;
         private readonly ITerminalLauncher _terminalLauncher;
+        private System.Diagnostics.Process _primitiveBasisServerProcess;
 
         /// <summary>
         /// Creates a new ServerManagementService with default dependencies.
@@ -237,7 +238,11 @@ namespace MCPForUnity.Editor.Services
             /// Clean stale Python build artifacts when using a local dev server path
             AssetPathUtility.CleanLocalServerBuildArtifacts();
 
-            if (!TryGetLocalHttpServerCommandParts(out _, out _, out var displayCommand, out var error))
+            if (!TryGetLocalHttpServerCommandParts(
+                out var fileName,
+                out var commandArguments,
+                out var displayCommand,
+                out var error))
             {
                 if (!quiet)
                 {
@@ -286,9 +291,11 @@ namespace MCPForUnity.Editor.Services
             string pidFilePath = portForPid > 0 ? GetLocalHttpServerPidFilePath(portForPid) : null;
 
             string launchCommand = displayCommand;
+            string launchArguments = commandArguments;
             if (!string.IsNullOrEmpty(pidFilePath))
             {
                 launchCommand = $"{displayCommand} --pidfile {QuoteIfNeeded(pidFilePath)} --unity-instance-token {instanceToken}";
+                launchArguments = $"{commandArguments} --pidfile {QuoteIfNeeded(pidFilePath)} --unity-instance-token {instanceToken}";
             }
 
             if (!quiet && !EditorUtility.DisplayDialog(
@@ -316,14 +323,36 @@ namespace MCPForUnity.Editor.Services
                 }
                 catch { }
 
-                // Launch the server in a new terminal window (keeps user-visible logs).
-                var startInfo = CreateTerminalProcessStartInfo(launchCommand);
-                System.Diagnostics.Process.Start(startInfo);
+                bool primitiveBasisRun = !string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("VRCFORGE_PRIMITIVE_BASIS_RUN_ID"));
+                if (primitiveBasisRun)
+                {
+                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = fileName,
+                        Arguments = launchArguments,
+                        WorkingDirectory = _terminalLauncher.GetProjectRootPath(),
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+                    };
+                    _primitiveBasisServerProcess?.Dispose();
+                    _primitiveBasisServerProcess = System.Diagnostics.Process.Start(startInfo)
+                        ?? throw new InvalidOperationException("The fixed local server process did not start.");
+                }
+                else
+                {
+                    // Normal interactive launches keep the existing user-visible terminal.
+                    var startInfo = CreateTerminalProcessStartInfo(launchCommand);
+                    System.Diagnostics.Process.Start(startInfo);
+                }
                 if (!string.IsNullOrEmpty(pidFilePath))
                 {
                     StoreLocalHttpServerHandshake(pidFilePath, instanceToken);
                 }
-                McpLog.Info($"Started local HTTP server in terminal: {launchCommand}");
+                McpLog.Info(primitiveBasisRun
+                    ? "Started the fixed local HTTP server process."
+                    : $"Started local HTTP server in terminal: {launchCommand}");
                 return true;
             }
             catch (Exception ex)
@@ -345,13 +374,16 @@ namespace MCPForUnity.Editor.Services
         /// </summary>
         public bool StopLocalHttpServer()
         {
-            return StopLocalHttpServerInternal(quiet: false);
+            bool stopped = StopLocalHttpServerInternal(quiet: false);
+            return StopPrimitiveBasisServerProcess() && stopped;
         }
 
         public bool StopManagedLocalHttpServer()
         {
+            bool stopped = false;
             if (!TryGetLocalHttpServerHandshake(out var pidFilePath, out _))
             {
+                StopPrimitiveBasisServerProcess();
                 return false;
             }
 
@@ -369,10 +401,42 @@ namespace MCPForUnity.Editor.Services
 
             if (port <= 0)
             {
+                StopPrimitiveBasisServerProcess();
                 return false;
             }
 
-            return StopLocalHttpServerInternal(quiet: true, portOverride: port, allowNonLocalUrl: true);
+            stopped = StopLocalHttpServerInternal(quiet: true, portOverride: port, allowNonLocalUrl: true);
+            return StopPrimitiveBasisServerProcess() && stopped;
+        }
+
+        private bool StopPrimitiveBasisServerProcess()
+        {
+            var process = _primitiveBasisServerProcess;
+            _primitiveBasisServerProcess = null;
+            if (process == null)
+            {
+                return true;
+            }
+            try
+            {
+                if (!process.HasExited && !process.WaitForExit(5000))
+                {
+                    process.Kill();
+                    if (!process.WaitForExit(5000))
+                    {
+                        return false;
+                    }
+                }
+                return process.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                process.Dispose();
+            }
         }
 
         public bool IsLocalHttpServerRunning()

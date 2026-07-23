@@ -1,0 +1,12 @@
+{
+  "schema": "vrcforge.primitive_basis_fixture.v1",
+  "scenarioId": "cross_avatar_accessory_copy",
+  "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/cross_avatar_accessory_copy",
+  "baselineManifest": "baseline.json",
+  "expectedBaselineDigest": "",
+  "expectedTreeDigest": "",
+  "requiredPrimitives": [
+    "duplicate_scene_object",
+    "save_scene_object_as_prefab"
+  ]
+}

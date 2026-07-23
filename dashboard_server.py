@@ -153,6 +153,12 @@ from outfit_import_planner import (
 )
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
+from primitive_basis_live_attestation import load_packaged_live_session_from_stdin
+from primitive_basis_live_runtime import (
+    LiveRuntimeCallbacks,
+    ModelPartCompositionLiveRuntime,
+    PrimitiveBasisLiveRuntimeError,
+)
 from project_memory_index import scan_project_memory
 from runtime_settings_safety import (
     load_runtime_settings_safely,
@@ -332,6 +338,8 @@ APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_INTERNAL_SHUTDOWN_PATH = "/api/app/runtime/shutdown"
+PRIMITIVE_BASIS_LIVE_SESSION = load_packaged_live_session_from_stdin()
+PRIMITIVE_BASIS_LIVE_RUNTIME: ModelPartCompositionLiveRuntime | None = None
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
@@ -1153,6 +1161,12 @@ class AgentApprovalScopeRequest(BaseModel):
 class AgentPermissionRequest(BaseModel):
     execution_mode: str = Field(default="approval")
     acknowledge_roslyn_risk: bool = Field(default=False)
+
+
+class PrimitiveBasisLiveStartRequest(BaseModel):
+    project_path: str = Field(alias="projectPath", min_length=1, max_length=4096)
+
+    model_config = {"populate_by_name": True}
 
 
 class AdvancedSettingsRequest(BaseModel):
@@ -3345,6 +3359,57 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
+
+
+def require_primitive_basis_live_runtime() -> ModelPartCompositionLiveRuntime:
+    if PRIMITIVE_BASIS_LIVE_RUNTIME is None:
+        raise HTTPException(status_code=404, detail="Packaged primitive live verification is not active.")
+    return PRIMITIVE_BASIS_LIVE_RUNTIME
+
+
+@app.post("/api/app/primitive-basis/live/model-part/start")
+async def app_start_primitive_basis_model_part_live(
+    request: PrimitiveBasisLiveStartRequest,
+) -> dict[str, Any]:
+    runtime = require_primitive_basis_live_runtime()
+    try:
+        return await asyncio.to_thread(runtime.start, request.project_path)
+    except PrimitiveBasisLiveRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/app/primitive-basis/live/model-part/status")
+def app_primitive_basis_model_part_live_status() -> dict[str, Any]:
+    return require_primitive_basis_live_runtime().status()
+
+
+@app.post("/api/app/primitive-basis/live/model-part/readback")
+async def app_readback_primitive_basis_model_part_live() -> dict[str, Any]:
+    runtime = require_primitive_basis_live_runtime()
+    try:
+        payload = await asyncio.to_thread(runtime.readback_and_request_restore)
+    except PrimitiveBasisLiveRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    return payload
+
+
+@app.post("/api/app/primitive-basis/live/model-part/prepare-cleanup")
+async def app_prepare_primitive_basis_model_part_cleanup() -> dict[str, Any]:
+    runtime = require_primitive_basis_live_runtime()
+    try:
+        return await asyncio.to_thread(runtime.prepare_cleanup)
+    except PrimitiveBasisLiveRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/app/primitive-basis/live/model-part/finalize")
+async def app_finalize_primitive_basis_model_part_live() -> dict[str, Any]:
+    runtime = require_primitive_basis_live_runtime()
+    try:
+        return await asyncio.to_thread(runtime.finalize_after_cleanup)
+    except PrimitiveBasisLiveRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/app/recoveries")
@@ -8892,6 +8957,16 @@ async def refresh_projects() -> dict[str, Any]:
 
 @app.post("/api/state")
 async def update_state(request: DashboardStateRequest) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if (
+        live_connection is not None
+        and hasattr(live_connection, "state_update_allowed")
+        and not live_connection.state_update_allowed(request)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The fixed live run has frozen the Unity project and transport.",
+        )
     if request.project_path is not None:
         DASHBOARD_STATE.selected_project_path = normalize_path_string(request.project_path)
         if request.unity_instance is None or not request.unity_instance.strip():
@@ -9264,6 +9339,9 @@ def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
 
 @app.post("/api/projects/install")
 async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if live_connection is not None and live_connection.is_frozen():
+        raise HTTPException(status_code=409, detail="Project installation is blocked during the fixed live run.")
     project_path = resolve_target_project(request.project_path)
     await emit_log_async("info", "project", "Installing VRCForge into Unity project.", {"projectPath": project_path})
     try:
@@ -9288,6 +9366,9 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
 
 @app.post("/api/projects/open")
 async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if live_connection is not None and live_connection.is_frozen():
+        raise HTTPException(status_code=409, detail="Opening another project is blocked during the fixed live run.")
     project_path = resolve_target_project(request.project_path)
     editor_path = DASHBOARD_STATE.unity_editor_path
     if not editor_path or not Path(editor_path).exists():
@@ -17890,6 +17971,9 @@ def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
+        return live_connection.prepare_checkpoint(project_root)
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
@@ -17906,6 +17990,9 @@ def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
 
 
 def reload_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
+        return live_connection.reload_checkpoint(project_root)
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
@@ -19756,6 +19843,7 @@ def build_add_modular_avatar_component_request(params: dict[str, Any], preview: 
         ).strip(),
         "componentType": str(params.get("component_type") or params.get("componentType") or "").strip(),
         "preview": preview,
+        "saveScene": normalize_bool(params.get("save_scene", params.get("saveScene")), False),
     }
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
     if avatar_path:
@@ -19796,6 +19884,9 @@ def preview_add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[st
 
 def add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if live_connection is not None and _primitive_live_guard_fields(params):
+        return live_connection.apply_component(params)
     request = build_add_modular_avatar_component_request(params, False)
     invalid = _validate_add_modular_avatar_component_request(request)
     if invalid is not None:
@@ -19813,6 +19904,87 @@ def add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
         {"gameObjectPath": request["gameObjectPath"], "componentType": request["componentType"]},
     )
     return payload
+
+
+def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "gameObjectPath": str(
+            params.get("game_object_path")
+            or params.get("gameObjectPath")
+            or params.get("target_path")
+            or params.get("targetPath")
+            or ""
+        ).strip(),
+        "componentType": str(params.get("component_type") or params.get("componentType") or "").strip(),
+    }
+    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    if avatar_path:
+        request["avatarPath"] = avatar_path
+    return request
+
+
+def inspect_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    request = build_inspect_modular_avatar_component_request(params)
+    invalid = _validate_add_modular_avatar_component_request(request)
+    if invalid is not None:
+        return invalid
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_inspect_modular_avatar_component", request)),
+        "inspect modular avatar component",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def inspect_primitive_basis_fixture_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    expected_run_id_digest = str(
+        params.get("expected_run_id_digest")
+        or params.get("expectedRunIdDigest")
+        or ""
+    ).strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_run_id_digest) is None:
+        return {"ok": False, "error": "expectedRunIdDigest must be a lowercase SHA-256 digest."}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_inspect_primitive_basis_fixture",
+                {"expectedRunIdDigest": expected_run_id_digest},
+            )
+        ),
+        "inspect primitive basis fixture",
+    )
+    payload.setdefault("ok", True)
+    return payload
+
+
+def create_primitive_basis_restore_request_sync(checkpoint_id: str) -> dict[str, Any]:
+    preview = AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+    if preview.get("ok") is not True:
+        raise PrimitiveBasisLiveRuntimeError("The fixed checkpoint is not restorable.")
+    checkpoint = ensure_dict(preview.get("checkpoint"))
+    arguments: dict[str, Any] = {
+        "checkpointId": checkpoint_id,
+        "confirmRestore": True,
+    }
+    if checkpoint.get("projectRoot"):
+        arguments["projectRoot"] = str(checkpoint["projectRoot"])
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": "vrcforge_restore_checkpoint",
+            "arguments": arguments,
+            "reason": "Restore the fixed primitive-basis fixture checkpoint.",
+            "preview": preview,
+            "agent_name": "primitive-basis-live-runner",
+            "never_auto_approve": True,
+            "requires_explicit_approval": True,
+        },
+        include_arguments_digest=True,
+    )
 
 
 def _coerce_int_list(params: dict[str, Any], *keys: str) -> list[int]:
@@ -22921,6 +23093,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: read_avatar_blendshapes_sync(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", scan_avatar_items_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
@@ -23375,6 +23549,284 @@ AGENT_GATEWAY.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
 AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
 
 register_agent_gateway_tools()
+
+
+def create_primitive_basis_live_runtime() -> ModelPartCompositionLiveRuntime | None:
+    if PRIMITIVE_BASIS_LIVE_SESSION is None:
+        return None
+    global PRIMITIVE_BASIS_LIVE_CONNECTION
+    PRIMITIVE_BASIS_LIVE_CONNECTION = PrimitiveBasisLiveUnityConnection()
+    return ModelPartCompositionLiveRuntime(
+        PRIMITIVE_BASIS_LIVE_SESSION,
+        LiveRuntimeCallbacks(
+            bind_connection=PRIMITIVE_BASIS_LIVE_CONNECTION.bind,
+            validate_connection=PRIMITIVE_BASIS_LIVE_CONNECTION.validate,
+            inspect_fixture=PRIMITIVE_BASIS_LIVE_CONNECTION.inspect_fixture,
+            reload_fixture=PRIMITIVE_BASIS_LIVE_CONNECTION.reload_fixture,
+            inspect_component=PRIMITIVE_BASIS_LIVE_CONNECTION.inspect_component,
+            preview_component=PRIMITIVE_BASIS_LIVE_CONNECTION.preview_component,
+            create_apply_request=lambda params: AGENT_GATEWAY.create_apply_request(
+                params,
+                include_arguments_digest=True,
+            ),
+            read_compile_status=PRIMITIVE_BASIS_LIVE_CONNECTION.read_compile_status,
+            create_restore_request=create_primitive_basis_restore_request_sync,
+            preview_checkpoint=lambda checkpoint_id: AGENT_GATEWAY.preview_restore_checkpoint(
+                {"checkpointId": checkpoint_id}
+            ),
+        ),
+    )
+
+
+class PrimitiveBasisLiveUnityConnection:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._settings: Settings | None = None
+        self._project_root = ""
+        self._project_path_digest = ""
+        self._binding_digest = ""
+        self._settings_path = ""
+        self._host = ""
+        self._port = 0
+        self._instance = ""
+
+    def is_frozen(self) -> bool:
+        with self._lock:
+            return self._settings is not None
+
+    def bind(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._settings is not None:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity connection is already frozen.")
+            project_root = normalize_path_string(str(params.get("projectPath") or ""))
+            selected = normalize_path_string(str(DASHBOARD_STATE.selected_project_path or ""))
+            if not project_root or selected != project_root:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity project selection changed.")
+            request = ConnectionRequest(
+                settings_path=str(DASHBOARD_STATE.settings_path),
+                unity_host=DASHBOARD_STATE.unity_host,
+                unity_port=DASHBOARD_STATE.unity_port,
+                unity_instance=DASHBOARD_STATE.unity_instance,
+            )
+            settings = load_dashboard_settings(request)
+            host = str(settings.unity_mcp_host or "").strip().lower()
+            port = int(settings.unity_mcp_port or 0)
+            instance = str(settings.unity_mcp_instance or "").strip()
+            if host not in {"127.0.0.1", "localhost", "::1"} or port != 8080 or not instance:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity transport is invalid.")
+            settings.unity_mcp_timeout_seconds = max(
+                int(settings.unity_mcp_timeout_seconds or 30), 180
+            )
+            project_path_digest = hashlib.sha256(
+                project_root.replace("\\", "/").rstrip("/").lower().encode("utf-8")
+            ).hexdigest()
+            binding_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "projectPathDigest": project_path_digest,
+                        "host": host,
+                        "port": port,
+                        "instance": instance,
+                        "command": list(settings.unity_mcp_command),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            self._settings = settings
+            self._project_root = project_root
+            self._project_path_digest = project_path_digest
+            self._binding_digest = binding_digest
+            self._settings_path = str(DASHBOARD_STATE.settings_path)
+            self._host = host
+            self._port = port
+            self._instance = instance
+            return self._public_binding()
+
+    def validate(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._settings is None:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity connection is not frozen.")
+            expected = str(params.get("connectionBindingDigest") or "")
+            if expected and expected != self._binding_digest:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity connection binding changed.")
+            self._validate_current_locked()
+            return self._public_binding()
+
+    def state_update_allowed(self, request: DashboardStateRequest) -> bool:
+        with self._lock:
+            if self._settings is None:
+                return True
+            project = (
+                normalize_path_string(request.project_path)
+                if request.project_path is not None
+                else self._project_root
+            )
+            host = (
+                str(request.unity_host or "").strip().lower()
+                if request.unity_host is not None
+                else self._host
+            )
+            port = int(request.unity_port) if request.unity_port is not None else self._port
+            instance = (
+                str(request.unity_instance or "").strip()
+                if request.unity_instance is not None
+                else self._instance
+            )
+            return (
+                project == self._project_root
+                and host == self._host
+                and port == self._port
+                and instance == self._instance
+                and str(resolve_local_path(request.settings_path)) == self._settings_path
+            )
+
+    def inspect_fixture(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._invoke_payload(
+            "vrc_inspect_primitive_basis_fixture",
+            {"expectedRunIdDigest": str(params.get("expectedRunIdDigest") or "")},
+            "primitive-basis fixture inspection",
+        )
+
+    def reload_fixture(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._invoke_payload(
+            "vrc_reload_primitive_basis_fixture",
+            dict(params),
+            "primitive-basis fixture reload",
+        )
+
+    def inspect_component(self, params: dict[str, Any]) -> dict[str, Any]:
+        request = build_inspect_modular_avatar_component_request(params)
+        request.update(_primitive_live_guard_fields(params))
+        return self._invoke_payload(
+            "vrc_inspect_modular_avatar_component",
+            request,
+            "primitive-basis component inspection",
+        )
+
+    def preview_component(self, params: dict[str, Any]) -> dict[str, Any]:
+        request = build_add_modular_avatar_component_request(params, True)
+        request.update(_primitive_live_guard_fields(params))
+        return self._invoke_payload(
+            "vrc_add_modular_avatar_component",
+            request,
+            "primitive-basis component preview",
+        )
+
+    def apply_component(self, params: dict[str, Any]) -> dict[str, Any]:
+        request = build_add_modular_avatar_component_request(params, False)
+        request.update(_primitive_live_guard_fields(params))
+        return self._invoke_payload(
+            "vrc_add_modular_avatar_component",
+            request,
+            "primitive-basis component apply",
+        )
+
+    def read_compile_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        arguments = {"maxErrors": int(params.get("maxErrors") or 20)}
+        arguments.update(_primitive_live_guard_fields(params))
+        result = self._invoke_result("vrc_get_compile_errors", arguments)
+        payload = ensure_dict_payload(
+            extract_tool_result_payload(result),
+            "primitive-basis compile status",
+        )
+        return {
+            **payload,
+            "ok": result.exit_code == 0 and payload.get("ok") is not False,
+            "exitCode": result.exit_code,
+        }
+
+    def prepare_checkpoint(self, project_root: Path) -> dict[str, Any]:
+        return self._checkpoint_call("vrc_prepare_checkpoint", project_root)
+
+    def reload_checkpoint(self, project_root: Path) -> dict[str, Any]:
+        return self._checkpoint_call("vrc_reload_after_checkpoint_restore", project_root)
+
+    def _checkpoint_call(self, tool_name: str, project_root: Path) -> dict[str, Any]:
+        if normalize_path_string(str(project_root)) != self._project_root:
+            raise PrimitiveBasisLiveRuntimeError("The fixed checkpoint project changed.")
+        result = self._invoke_result(
+            tool_name,
+            {"projectPath": str(project_root), **self._guard_fields()},
+        )
+        payload = ensure_dict_payload(
+            extract_tool_result_payload(result),
+            "primitive-basis checkpoint lifecycle",
+        )
+        return {
+            **payload,
+            "ok": result.exit_code == 0 and payload.get("ok") is not False,
+            "exitCode": result.exit_code,
+        }
+
+    def _guard_fields(self) -> dict[str, Any]:
+        runtime = PRIMITIVE_BASIS_LIVE_RUNTIME
+        if runtime is None:
+            return {}
+        return _primitive_live_guard_fields(runtime._component_arguments(preview=False))
+
+    def _invoke_payload(
+        self, tool_name: str, arguments: dict[str, Any], label: str
+    ) -> dict[str, Any]:
+        payload = ensure_dict_payload(
+            extract_tool_result_payload(self._invoke_result(tool_name, arguments)),
+            label,
+        )
+        payload.setdefault("ok", True)
+        return payload
+
+    def _invoke_result(self, tool_name: str, arguments: dict[str, Any]) -> McpResult:
+        with self._lock:
+            settings = self._settings
+            if settings is None:
+                raise PrimitiveBasisLiveRuntimeError("The fixed Unity connection is not frozen.")
+            self._validate_current_locked()
+            result = invoke_unity_mcp(settings, tool_name, arguments)
+            self._validate_current_locked()
+            return result
+
+    def _validate_current_locked(self) -> None:
+        current_project = normalize_path_string(str(DASHBOARD_STATE.selected_project_path or ""))
+        current_host = str(DASHBOARD_STATE.unity_host or "").strip().lower()
+        current_port = int(DASHBOARD_STATE.unity_port or 0)
+        current_instance = str(DASHBOARD_STATE.unity_instance or "").strip()
+        if (
+            current_project != self._project_root
+            or current_host != self._host
+            or current_port != self._port
+            or current_instance != self._instance
+            or str(DASHBOARD_STATE.settings_path) != self._settings_path
+        ):
+            raise PrimitiveBasisLiveRuntimeError("The fixed Unity connection changed.")
+
+    def _public_binding(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "schema": "vrcforge.primitive_basis_connection_binding.v1",
+            "frozen": True,
+            "projectPathDigest": self._project_path_digest,
+            "connectionBindingDigest": self._binding_digest,
+        }
+
+
+def _primitive_live_guard_fields(params: dict[str, Any]) -> dict[str, Any]:
+    names = (
+        "expectedRunIdDigest",
+        "expectedProjectPathDigest",
+        "expectedUnityProcessId",
+        "expectedUnityProcessStartedAtUtc",
+        "expectedUnityExecutableDigest",
+    )
+    return {name: params[name] for name in names if name in params}
+
+
+PRIMITIVE_BASIS_LIVE_CONNECTION: PrimitiveBasisLiveUnityConnection | None = None
+PRIMITIVE_BASIS_LIVE_RUNTIME = create_primitive_basis_live_runtime()
+if PRIMITIVE_BASIS_LIVE_RUNTIME is not None:
+    AGENT_GATEWAY.apply_lifecycle_observer_fn = (
+        PRIMITIVE_BASIS_LIVE_RUNTIME.observe_apply_lifecycle
+    )
 app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")
 
 

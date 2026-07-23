@@ -22,6 +22,7 @@ namespace VRCForge.Editor
         {
             try
             {
+                var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 ValidateProject(@params);
                 EnsureEditorReady();
                 AssetDatabase.SaveAssets();
@@ -32,7 +33,16 @@ namespace VRCForge.Editor
                 var scenes = OpenProjectScenePaths();
                 return new SuccessResponse(
                     "Saved open scenes and dirty assets before checkpointing.",
-                    new { ok = true, projectPath = ProjectRoot(), scenes });
+                    new
+                    {
+                        ok = true,
+                        projectPath = ProjectRoot(),
+                        scenes,
+                        unityProcessId = identity?.ProcessId,
+                        unityProcessStartedAtUtc = identity?.StartedAtUtc,
+                        unityExecutableDigest = identity?.ExecutableDigest,
+                        projectPathDigest = identity?.ProjectPathDigest
+                    });
             }
             catch (Exception ex)
             {
@@ -95,6 +105,7 @@ namespace VRCForge.Editor
         {
             try
             {
+                var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
                 var scenes = CheckpointPrepareTool.OpenProjectScenePaths()
@@ -146,7 +157,16 @@ namespace VRCForge.Editor
                 }
                 return new SuccessResponse(
                     "Reloaded restored scenes and refreshed project assets.",
-                    new { ok = true, projectPath = CheckpointPrepareTool.ProjectRoot(), scenes });
+                    new
+                    {
+                        ok = true,
+                        projectPath = CheckpointPrepareTool.ProjectRoot(),
+                        scenes,
+                        unityProcessId = identity?.ProcessId,
+                        unityProcessStartedAtUtc = identity?.StartedAtUtc,
+                        unityExecutableDigest = identity?.ExecutableDigest,
+                        projectPathDigest = identity?.ProjectPathDigest
+                    });
             }
             catch (Exception ex)
             {

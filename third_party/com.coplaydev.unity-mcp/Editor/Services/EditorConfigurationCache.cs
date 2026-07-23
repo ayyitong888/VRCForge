@@ -128,15 +128,22 @@ namespace MCPForUnity.Editor.Services
         /// </summary>
         public void Refresh()
         {
-            _useHttpTransport = EditorPrefs.GetBool(EditorPrefKeys.UseHttpTransport, true);
+            bool primitiveBasisRun = !string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("VRCFORGE_PRIMITIVE_BASIS_RUN_ID"));
+            _useHttpTransport = primitiveBasisRun
+                || EditorPrefs.GetBool(EditorPrefKeys.UseHttpTransport, true);
             _debugLogs = EditorPrefs.GetBool(EditorPrefKeys.DebugLogs, false);
             _devModeForceServerRefresh = EditorPrefs.GetBool(EditorPrefKeys.DevModeForceServerRefresh, false);
             _uvxPathOverride = EditorPrefs.GetString(EditorPrefKeys.UvxPathOverride, string.Empty);
             _gitUrlOverride = EditorPrefs.GetString(EditorPrefKeys.GitUrlOverride, string.Empty);
-            _httpBaseUrl = EditorPrefs.GetString(EditorPrefKeys.HttpBaseUrl, string.Empty);
+            _httpBaseUrl = primitiveBasisRun
+                ? "http://127.0.0.1:8080"
+                : EditorPrefs.GetString(EditorPrefKeys.HttpBaseUrl, string.Empty);
             _httpRemoteBaseUrl = EditorPrefs.GetString(EditorPrefKeys.HttpRemoteBaseUrl, string.Empty);
             _claudeCliPathOverride = EditorPrefs.GetString(EditorPrefKeys.ClaudeCliPathOverride, string.Empty);
-            _httpTransportScope = EditorPrefs.GetString(EditorPrefKeys.HttpTransportScope, string.Empty);
+            _httpTransportScope = primitiveBasisRun
+                ? "local"
+                : EditorPrefs.GetString(EditorPrefKeys.HttpTransportScope, string.Empty);
             _unitySocketPort = EditorPrefs.GetInt(EditorPrefKeys.UnitySocketPort, 0);
         }
 

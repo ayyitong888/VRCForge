@@ -7741,6 +7741,37 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("TryResolveReference", source)
         self.assertIn("Undo.RevertAllDownToGroup", source)
         self.assertIn("preview", source)
+        self.assertIn(
+            "FirstOrDefault(component => NormalizePath(GetTransformPath(component.transform)) == normalized)",
+            source,
+        )
+        # Scene persistence is opt-in. A failed explicit save reverts the Undo
+        # group, while a pre-existing dirty scene stays explicitly dirty.
+        self.assertIn('var saveSceneToken = @params["saveScene"] ?? @params["save_scene"]', source)
+        self.assertIn("EditorSceneManager.SaveScene(targetScene)", source)
+        self.assertIn("EditorSceneManager.MarkSceneDirty(targetScene)", source)
+        self.assertNotIn("EditorSceneManager.MarkSceneClean(targetScene)", source)
+        self.assertNotIn("EditorSceneManager.ClearSceneDirtiness(targetScene)", source)
+        self.assertLess(
+            source.index("var sceneWasDirty = targetScene.IsValid() && targetScene.isDirty"),
+            source.index("Undo.AddComponent(target, componentType)"),
+        )
+        # The paired inspector is read-only and reports exact component and
+        # AvatarObjectReference state for post-apply/readback evidence.
+        self.assertIn('name: "vrc_inspect_modular_avatar_component"', source)
+        self.assertIn("HandleInspectCommand", source)
+        self.assertIn("present = components.Length > 0", source)
+        self.assertIn("count = components.Length", source)
+        self.assertIn("type = componentType.FullName", source)
+        self.assertIn("sceneDirty", source)
+        self.assertIn("referencePath", source)
+        self.assertIn("resolvedPath", source)
+        inspect_body = source[
+            source.index("internal static object HandleInspectCommand"):
+            source.index("// --- reference / field application")
+        ]
+        for write_api in ("Undo.", "SetDirty(", "MarkSceneDirty(", "SaveScene("):
+            self.assertNotIn(write_api, inspect_body)
 
     def test_add_outfit_part_and_ma_registered_in_gateway(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -7760,6 +7791,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_preview_add_outfit_part", write_targets)
         self.assertIn("vrcforge_preview_add_modular_avatar_component", tool_names)
         self.assertNotIn("vrcforge_preview_add_modular_avatar_component", write_targets)
+        self.assertIn("vrcforge_inspect_modular_avatar_component", tool_names)
+        self.assertNotIn("vrcforge_inspect_modular_avatar_component", write_targets)
+        self.assertNotIn(
+            "vrc_inspect_modular_avatar_component",
+            dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST,
+        )
         # The writes are approval-gated write targets, never direct read tools.
         self.assertIn("vrcforge_add_outfit_part", write_targets)
         self.assertNotIn("vrcforge_add_outfit_part", tool_names)
@@ -7858,6 +7895,75 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["references"], {"mergeTarget": "Armature"})
         self.assertEqual(params["fields"], {"prefix": "", "suffix": ""})
         self.assertFalse(params["preview"])
+        self.assertFalse(params["saveScene"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_modular_avatar_component_only_forwards_explicit_scene_save(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "addedComponent": True, "sceneSaved": True}},
+        )
+
+        result = dashboard_server.add_modular_avatar_component_sync({
+            "gameObjectPath": "HeroAvatar/Outfits/Hoodie",
+            "componentType": "MergeArmature",
+            "saveScene": True,
+        })
+
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_add_modular_avatar_component")
+        self.assertTrue(params["saveScene"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_inspect_modular_avatar_component_is_exact_read_forwarding(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "ok": True,
+                    "present": True,
+                    "count": 1,
+                    "type": "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature",
+                    "sceneDirty": True,
+                    "references": [
+                        {
+                            "member": "mergeTarget",
+                            "referencePath": "Armature",
+                            "resolvedPath": "HeroAvatar/Armature",
+                        }
+                    ],
+                }
+            },
+        )
+
+        result = dashboard_server.inspect_modular_avatar_component_sync({
+            "game_object_path": "HeroAvatar/Outfits/Hoodie",
+            "component_type": "MergeArmature",
+            "avatar_path": "HeroAvatar",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["present"])
+        self.assertEqual(result["references"][0]["referencePath"], "Armature")
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_inspect_modular_avatar_component")
+        self.assertEqual(
+            params,
+            {
+                "gameObjectPath": "HeroAvatar/Outfits/Hoodie",
+                "componentType": "MergeArmature",
+                "avatarPath": "HeroAvatar",
+            },
+        )
 
     def test_add_modular_avatar_component_requires_target_and_type(self) -> None:
         missing_type = dashboard_server.add_modular_avatar_component_sync({
@@ -8677,6 +8783,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
         self.assertIn("ForceSynchronousImport", source)
         self.assertIn("AssetDatabase.Refresh", source)
+        self.assertEqual(
+            source.count("PrimitiveBasisLiveGuard.RequireBoundRequest(@params)"),
+            2,
+        )
+
+        compile_source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "CompileErrorReader.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PrimitiveBasisLiveGuard.RequireBoundRequest(@params)", compile_source)
+        for field in (
+            "unityProcessId",
+            "unityProcessStartedAtUtc",
+            "unityExecutableDigest",
+            "projectPathDigest",
+        ):
+            self.assertIn(field, compile_source)
 
     def test_refresh_asset_database_tool_can_resolve_packages(self) -> None:
         source = (

@@ -1628,6 +1628,7 @@ class AgentGateway:
         self._in_flight_apply_writes: dict[str, dict[str, Any]] = {}
         self._background_project_read_leases: set[str] = set()
         self.background_activity_started_fn: Callable[[str], Any] | None = None
+        self.apply_lifecycle_observer_fn: Callable[[str, dict[str, Any]], Any] | None = None
         # Optional LLM planner hook injected by the host server. Receives a prompt
         # string and returns the raw model response text. Any exception falls back
         # to the deterministic local planner.
@@ -1702,6 +1703,27 @@ class AgentGateway:
             # Optional background cancellation must never reject the
             # interactive operation that owns this boundary.
             pass
+
+    def _observe_apply_lifecycle(
+        self,
+        stage: str,
+        approval: dict[str, Any],
+        *,
+        checkpoint: dict[str, Any] | None = None,
+        result: Any = None,
+        arguments_digest: str = "",
+    ) -> None:
+        callback = self.apply_lifecycle_observer_fn
+        if callback is None:
+            return
+        payload = {
+            "approval": dict(approval),
+            "checkpoint": dict(checkpoint) if isinstance(checkpoint, dict) else None,
+            "result": result,
+        }
+        if arguments_digest:
+            payload["argumentsDigest"] = arguments_digest
+        callback(stage, payload)
 
     @property
     def agent_memory_log_path(self) -> Path:
@@ -5534,7 +5556,13 @@ class AgentGateway:
         )
         return result
 
-    def create_apply_request(self, params: dict[str, Any], *, internal_wrapper: bool = False) -> dict[str, Any]:
+    def create_apply_request(
+        self,
+        params: dict[str, Any],
+        *,
+        internal_wrapper: bool = False,
+        include_arguments_digest: bool = False,
+    ) -> dict[str, Any]:
         config = self.ensure_config()
         if not config.allow_write_requests:
             raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
@@ -5647,6 +5675,15 @@ class AgentGateway:
             explicit_approval_reason=explicit_approval_reason,
             goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
         )
+        if include_arguments_digest:
+            approval["argumentsDigest"] = stable_hash(
+                json.dumps(
+                    arguments,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         if full_permission_auto and not never_auto_approve and (
             requires_explicit_approval or auto_policy_reason or risk_escalation_reason
         ):
@@ -5860,6 +5897,7 @@ class AgentGateway:
                         "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
                     }
                 )
+                self._observe_apply_lifecycle("approval_started", approval)
             except Exception as exc:  # noqa: BLE001 - restore a retryable approval on transition I/O failure.
                 approval["status"] = "approved"
                 self._approvals[approval_id] = approval
@@ -5887,6 +5925,14 @@ class AgentGateway:
                 ensure_dict(approval.get("arguments") or {}),
                 user_constraints,
             )
+            handler_arguments_digest = stable_hash(
+                json.dumps(
+                    arguments,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
             classification = ensure_dict(arguments.get("classification_snapshot"))
             requires_checkpoint = not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
@@ -5904,7 +5950,23 @@ class AgentGateway:
                             if checkpoint.get("ok") is not True:
                                 checkpoint["blocking"] = True
                                 raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                            self._observe_apply_lifecycle(
+                                "checkpoint_created", approval, checkpoint=checkpoint
+                            )
+                            self._observe_apply_lifecycle(
+                                "handler_starting",
+                                approval,
+                                checkpoint=checkpoint,
+                                arguments_digest=handler_arguments_digest,
+                            )
                             recovery = self._start_apply_recovery(approval, arguments, checkpoint)
+                        if not checkpoint:
+                            self._observe_apply_lifecycle(
+                                "handler_starting",
+                                approval,
+                                checkpoint=checkpoint,
+                                arguments_digest=handler_arguments_digest,
+                            )
                         result = write_handler.handler(arguments)
             else:
                 if requires_checkpoint:
@@ -5915,7 +5977,23 @@ class AgentGateway:
                             if checkpoint.get("ok") is not True:
                                 checkpoint["blocking"] = True
                                 raise AgentGatewayError(str(checkpoint.get("error") or "Pre-write checkpoint failed."))
+                            self._observe_apply_lifecycle(
+                                "checkpoint_created", approval, checkpoint=checkpoint
+                            )
+                            self._observe_apply_lifecycle(
+                                "handler_starting",
+                                approval,
+                                checkpoint=checkpoint,
+                                arguments_digest=handler_arguments_digest,
+                            )
                             recovery = self._start_apply_recovery(approval, arguments, checkpoint)
+                if not checkpoint:
+                    self._observe_apply_lifecycle(
+                        "handler_starting",
+                        approval,
+                        checkpoint=checkpoint,
+                        arguments_digest=handler_arguments_digest,
+                    )
                 result = write_handler.handler(arguments)
             if isinstance(result, dict) and result.get("ok") is False:
                 no_write_conflict = bool(
@@ -5930,6 +6008,9 @@ class AgentGateway:
                     or f"{target_tool} returned ok=false."
                 )
                 raise AgentGatewayError(str(message))
+            self._observe_apply_lifecycle(
+                "handler_returned", approval, checkpoint=checkpoint, result=result
+            )
             with self._lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
@@ -7037,6 +7118,9 @@ class AgentGateway:
                 "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
                 "error": clean.get("error") or "",
             }
+        if payload.get("ok"):
+            payload["checkpointId"] = str(checkpoint.get("id") or "")
+            payload["restored"] = True
         if payload.get("ok") and not local_state_restore:
             cache_cleanup = self._cleanup_checkpoint_restore_unity_caches(checkpoint)
             payload["unityCacheCleanup"] = cache_cleanup
@@ -11989,6 +12073,8 @@ def create_agent_mcp_app(gateway: AgentGateway):
         "vrcforge_scan_blendshapes",
         "vrcforge_scan_materials",
         "vrcforge_scan_modular_avatar",
+        "vrcforge_inspect_modular_avatar_component",
+        "vrcforge_inspect_primitive_basis_fixture",
         "vrcforge_scan_vrcfury",
         "vrcforge_scan_avatar_items",
         "vrcforge_scan_fx_animator",

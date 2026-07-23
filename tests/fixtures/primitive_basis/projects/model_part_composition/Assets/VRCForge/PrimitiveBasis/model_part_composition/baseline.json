@@ -1,0 +1,46 @@
+{
+  "schema": "vrcforge.primitive_basis_baseline.v1",
+  "scenarioId": "model_part_composition",
+  "files": [
+    {
+      "path": "Editor.meta",
+      "size": 169,
+      "sha256": "8216f68927f70e8c33485ac8bf8b70d1bdaa3c9a58dadeb90f3d598f13ea4af1"
+    },
+    {
+      "path": "Editor/ModelPartCompositionFixtureBootstrap.cs",
+      "size": 6694,
+      "sha256": "3b5f31ca7793d2fb33ea87da5341c8f95d5cea3024c1dacb8a70e10aaab330c3"
+    },
+    {
+      "path": "Editor/ModelPartCompositionFixtureBootstrap.cs.meta",
+      "size": 240,
+      "sha256": "515154b54ac206072df84989feab618b4c856face126979b4c5c8b2beb288722"
+    },
+    {
+      "path": "ModelPartComposition.unity",
+      "size": 11348,
+      "sha256": "59de4a023cd1912acbbe9215c722886cc700879f43d8d4d477145f24b58aa97f"
+    },
+    {
+      "path": "ModelPartComposition.unity.meta",
+      "size": 152,
+      "sha256": "046beb2316cc5cc422e3b9cf46a59379481221b7947ec9487904b55de2a0c63b"
+    },
+    {
+      "path": "baseline.json.meta",
+      "size": 155,
+      "sha256": "189a2c7f9e34e005816591ac29b87e5f06d267bad8d7a907089e452aa7c3b3d6"
+    },
+    {
+      "path": "fixture-contract.json",
+      "size": 2028,
+      "sha256": "68a466d27cdb6718586fa74661d7337404c684c6a1c5a21e0af618c7b790e74d"
+    },
+    {
+      "path": "fixture-contract.json.meta",
+      "size": 155,
+      "sha256": "aaebf8b9e7693389c7ea292db3827af2011a51f5d6ff81160f5aed6129e5f4cd"
+    }
+  ]
+}

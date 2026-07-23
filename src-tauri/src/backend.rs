@@ -12,6 +12,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
+    io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -49,6 +50,12 @@ pub(crate) const BACKEND_GRACEFUL_SHUTDOWN_PATH: &str = "/api/app/runtime/shutdo
 pub(crate) const BACKEND_GRACEFUL_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
 pub(crate) const BACKEND_GRACEFUL_EXIT_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const BACKEND_FORCE_EXIT_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const PRIMITIVE_LIVE_STDIN_ENV: &str = "VRCFORGE_PRIMITIVE_LIVE_STDIN";
+pub(crate) const PRIMITIVE_LIVE_STDIN_ARG: &str = "--primitive-live-stdin";
+pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_MAGIC: &[u8; 16] = b"VRCFPRIMLIVE3\0\0\0";
+pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_DIGEST_COUNT: usize = 9;
+pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_SIZE: usize =
+    PRIMITIVE_LIVE_BOOTSTRAP_MAGIC.len() + (2 + PRIMITIVE_LIVE_BOOTSTRAP_DIGEST_COUNT) * 32;
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -72,10 +79,15 @@ pub(crate) struct BackendState {
     pub(crate) job: Mutex<Option<BackendJob>>,
     pub(crate) event_bridge_started: Mutex<bool>,
     pub(crate) start_in_progress: Mutex<bool>,
+    pub(crate) primitive_live_bootstrap: Mutex<Option<SensitiveBootstrap>>,
 }
 
 impl BackendState {
     pub(crate) fn new() -> Self {
+        Self::with_primitive_live_bootstrap(None)
+    }
+
+    pub(crate) fn with_primitive_live_bootstrap(bootstrap: Option<Vec<u8>>) -> Self {
         Self {
             child: Mutex::new(None),
             app_session_token: Mutex::new(None),
@@ -83,7 +95,28 @@ impl BackendState {
             job: Mutex::new(None),
             event_bridge_started: Mutex::new(false),
             start_in_progress: Mutex::new(false),
+            primitive_live_bootstrap: Mutex::new(bootstrap.map(SensitiveBootstrap::new)),
         }
+    }
+}
+
+pub(crate) struct SensitiveBootstrap {
+    bytes: Vec<u8>,
+}
+
+impl SensitiveBootstrap {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for SensitiveBootstrap {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
     }
 }
 
@@ -588,14 +621,24 @@ pub(crate) fn start_backend_in_background(
 ) -> Result<serde_json::Value, String> {
     let user_data = user_data_dir()?;
     let app_session_token = ensure_app_session_token(&user_data)?;
+    let state = app_handle.state::<BackendState>();
     if backend_port_open() {
+        let live_requested = state
+            .primitive_live_bootstrap
+            .lock()
+            .map_err(|_| "live bootstrap state lock poisoned".to_string())?
+            .is_some();
+        if live_requested {
+            return Err(
+                "Primitive live verification requires an unused managed runtime port.".to_string(),
+            );
+        }
         if !existing_backend_accepts_session(&app_session_token) {
             return Err(
                 "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
             );
         }
         mark_backend_session_verified();
-        let state = app_handle.state::<BackendState>();
         start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token)?;
         return Ok(serde_json::json!({
             "ok": true,
@@ -612,6 +655,12 @@ pub(crate) fn start_backend_in_background(
     let capture_helper = env::current_exe().map_err(|error| {
         format!("unable to resolve the VRCForge capture helper executable: {error}")
     })?;
+    let live_bootstrap = state
+        .primitive_live_bootstrap
+        .lock()
+        .map_err(|_| "live bootstrap state lock poisoned".to_string())?
+        .take();
+    let live_requested = live_bootstrap.is_some();
     command
         .current_dir(&root)
         .env("VRCFORGE_APP_DIR", &root)
@@ -631,15 +680,41 @@ pub(crate) fn start_backend_in_background(
         .arg(BACKEND_HOST)
         .arg("--port")
         .arg(BACKEND_PORT.to_string())
-        .stdin(Stdio::null())
+        .stdin(if live_requested {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if live_requested {
+        command.env(PRIMITIVE_LIVE_STDIN_ENV, "1");
+    } else {
+        command.env_remove(PRIMITIVE_LIVE_STDIN_ENV);
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动本地 runtime: {error}"))?;
+
+    if let Some(bootstrap) = live_bootstrap {
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| "live bootstrap pipe was unavailable".to_string())
+            .and_then(|mut pipe| {
+                pipe.write_all(bootstrap.as_slice())
+                    .and_then(|_| pipe.flush())
+                    .map_err(|_| "live bootstrap pipe write failed".to_string())
+            });
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
 
     #[cfg(windows)]
     let backend_job = match BackendJob::assign(&child) {
@@ -651,7 +726,6 @@ pub(crate) fn start_backend_in_background(
         }
     };
 
-    let state = app_handle.state::<BackendState>();
     {
         // Keep the child lock until all managed-only shutdown state is
         // installed. Shutdown takes this lock first, so it cannot observe a
@@ -693,6 +767,103 @@ pub(crate) fn start_backend_in_background(
         "status": "timeout",
         "logDir": log_dir.display().to_string()
     }))
+}
+
+pub(crate) fn read_primitive_live_bootstrap_from_stdin() -> Result<Option<Vec<u8>>, String> {
+    let mode = env::var(PRIMITIVE_LIVE_STDIN_ENV).ok();
+    let private_mode = env::args_os().any(|value| value == PRIMITIVE_LIVE_STDIN_ARG);
+    let requested = primitive_live_bootstrap_requested(mode.as_deref(), private_mode)?;
+    if mode.is_some() && !requested {
+        env::remove_var(PRIMITIVE_LIVE_STDIN_ENV);
+        return Ok(None);
+    }
+    if !requested {
+        return Ok(None);
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut payload = vec![0u8; PRIMITIVE_LIVE_BOOTSTRAP_SIZE];
+        let result = std::io::stdin()
+            .lock()
+            .read_exact(&mut payload)
+            .map(|_| payload)
+            .map_err(|_| "primitive live bootstrap could not be read".to_string());
+        let _ = sender.send(result);
+    });
+    let payload = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "primitive live bootstrap timed out".to_string())??;
+    let executable = env::current_exe()
+        .map_err(|_| "primitive live desktop executable is unavailable".to_string())?;
+    let digest = sha256_file(&executable)?;
+    validate_primitive_live_bootstrap(&payload, &digest)?;
+    Ok(Some(payload))
+}
+
+pub(crate) fn primitive_live_bootstrap_requested(
+    mode: Option<&str>,
+    private_mode: bool,
+) -> Result<bool, String> {
+    match (mode, private_mode) {
+        (None, false) | (Some(_), false) => Ok(false),
+        (Some("1"), true) => Ok(true),
+        _ => Err("primitive live bootstrap mode is invalid".to_string()),
+    }
+}
+
+pub(crate) fn validate_primitive_live_bootstrap(
+    payload: &[u8],
+    desktop_executable_digest: &str,
+) -> Result<(), String> {
+    if payload.len() != PRIMITIVE_LIVE_BOOTSTRAP_SIZE
+        || !payload.starts_with(PRIMITIVE_LIVE_BOOTSTRAP_MAGIC)
+    {
+        return Err("primitive live bootstrap frame is invalid".to_string());
+    }
+    let actual_desktop = decode_sha256_hex(desktop_executable_digest)
+        .ok_or_else(|| "primitive live desktop digest is invalid".to_string())?;
+    let desktop_offset = PRIMITIVE_LIVE_BOOTSTRAP_MAGIC.len() + 3 * 32;
+    let expected_desktop = &payload[desktop_offset..desktop_offset + 32];
+    if expected_desktop != actual_desktop {
+        return Err("primitive live desktop digest mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+
+    let mut file = fs::File::open(path)
+        .map_err(|_| "primitive live executable could not be opened".to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| "primitive live executable could not be hashed".to_string())?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn decode_sha256_hex(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut output = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).ok()?;
+        output[index] = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(output)
 }
 
 pub(crate) fn backend_command(root: &Path) -> Result<Command, String> {

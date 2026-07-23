@@ -51,6 +51,11 @@ namespace MCPForUnity.Editor.Helpers
         /// </summary>
         public static string GetLocalBaseUrl()
         {
+            if (!string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("VRCFORGE_PRIMITIVE_BASIS_RUN_ID")))
+            {
+                return DefaultLocalBaseUrl;
+            }
             string stored = EditorPrefs.GetString(LocalPrefKey, DefaultLocalBaseUrl);
             return NormalizeBaseUrl(stored, DefaultLocalBaseUrl, remoteScope: false);
         }
@@ -131,6 +136,11 @@ namespace MCPForUnity.Editor.Helpers
         /// </summary>
         public static bool IsRemoteScope()
         {
+            if (!string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("VRCFORGE_PRIMITIVE_BASIS_RUN_ID")))
+            {
+                return false;
+            }
             string scope = EditorConfigurationCache.Instance.HttpTransportScope;
             return string.Equals(scope, "remote", StringComparison.OrdinalIgnoreCase);
         }
