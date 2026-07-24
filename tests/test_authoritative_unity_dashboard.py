@@ -7,6 +7,12 @@ from unittest.mock import patch
 import pytest
 
 import dashboard_server
+from constraint_source_write import (
+    TOOL_NAME as CONSTRAINT_TOOL_NAME,
+    build_wrapper_arguments as build_constraint_wrapper,
+    compute_component_id,
+    compute_sources_digest,
+)
 from scene_object_copy import (
     DUPLICATE_TOOL_NAME,
     PREFAB_TOOL_NAME,
@@ -148,6 +154,60 @@ def _texture_payload(project: Path) -> dict:
     }
 
 
+def _constraint_payload(project: Path) -> dict:
+    scene_guid = "a" * 32
+    component_global_id = "GlobalObjectId_V1-2-123-456-0"
+    component_type = "VRC.SDK3.Dynamics.Constraint.Components.VRCPositionConstraint"
+    target_sources = [
+        {
+            "sourcePath": "Avatar/SourceA",
+            "sourceObjectId": "GlobalObjectId_V1-2-201-1-0",
+            "weight": 0.25,
+            "weightBits": "3e800000",
+        }
+    ]
+    return {
+        "schema": "vrcforge.constraint_source_write.v1",
+        "ok": True,
+        "preview": True,
+        "verified": True,
+        "changed": False,
+        "saved": False,
+        "wouldChange": True,
+        "projectPath": str(project.resolve()),
+        "scenePath": "Assets/Scenes/Fixture.unity",
+        "sceneGuid": scene_guid,
+        "sceneHandle": 7,
+        "sceneFileDigestBefore": "b" * 64,
+        "sceneFileDigestAfter": "b" * 64,
+        "sceneFileIdentity": "c" * 64,
+        "sceneFileLinkCount": 1,
+        "sceneMetaDigestBefore": "d" * 64,
+        "sceneMetaDigestAfter": "d" * 64,
+        "sceneMetaIdentity": "e" * 64,
+        "sceneMetaLinkCount": 1,
+        "sceneDirtyBefore": False,
+        "sceneDirtyAfter": False,
+        "gameObjectPath": "Avatar/ConstraintHost",
+        "constraintKind": "position",
+        "componentType": component_type,
+        "componentIndex": 0,
+        "componentId": compute_component_id(
+            scene_guid=scene_guid,
+            component_global_id=component_global_id,
+            game_object_path="Avatar/ConstraintHost",
+            component_type=component_type,
+            component_index=0,
+        ),
+        "componentGlobalId": component_global_id,
+        "beforeSources": [],
+        "targetSources": target_sources,
+        "beforeSourcesDigest": compute_sources_digest([]),
+        "targetSourcesDigest": compute_sources_digest(target_sources),
+        "sourcesDigestSchema": "vrcforge.constraint_sources_digest.v1",
+    }
+
+
 @pytest.mark.parametrize(
     ("tool_name", "params", "payload", "plan_call", "expected_precondition"),
     [
@@ -263,13 +323,63 @@ def test_texture_plan_and_approval_use_one_authoritative_mapping(tmp_path: Path)
         assert not any(key.startswith("expected") and key != "expectedProjectPath" for key in call.args[2])
 
 
+def test_constraint_plan_and_approval_use_one_authoritative_mapping(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    params = {
+        "projectPath": str(project),
+        "scenePath": "Assets/Scenes/Fixture.unity",
+        "gameObjectPath": "Avatar/ConstraintHost",
+        "constraintKind": "position",
+        "componentIndex": 0,
+        "sources": [{"sourcePath": "Avatar/SourceA", "weight": 0.25}],
+    }
+    result = dashboard_server.McpResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        payload={"data": _constraint_payload(project)},
+    )
+
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=result) as invoke,
+    ):
+        plan = dashboard_server.preview_constraint_sources_sync(deepcopy(params))
+        prepared, approval = dashboard_server.prepare_unity_mcp_write_request(
+            build_constraint_wrapper(deepcopy(params)),
+            {"spoofed": True},
+        )
+
+    assert plan == {"ok": True, "preview": approval}
+    assert prepared["toolName"] == CONSTRAINT_TOOL_NAME
+    assert prepared["projectPath"] == str(project.resolve())
+    assert prepared["arguments"]["expectedSceneFileIdentity"] == "c" * 64
+    assert prepared["arguments"]["expectedSceneMetaIdentity"] == "e" * 64
+    assert prepared["arguments"]["expectedTargetSourcesDigest"] == approval["change"]["afterSourcesDigest"]
+    assert prepared["arguments"]["preview"] is False
+    assert prepared["arguments"]["saveScene"] is True
+    assert "spoofed" not in approval
+    assert [call.args[1] for call in invoke.call_args_list] == [CONSTRAINT_TOOL_NAME, CONSTRAINT_TOOL_NAME]
+    for call in invoke.call_args_list:
+        assert call.args[2]["preview"] is True
+        assert call.args[2]["saveScene"] is False
+        assert not any(key.startswith("expected") and key != "expectedProjectPath" for key in call.args[2])
+
+
 def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
-    for tool_name in (DUPLICATE_TOOL_NAME, PREFAB_TOOL_NAME, TEXTURE_TOOL_NAME):
+    for tool_name in (
+        DUPLICATE_TOOL_NAME,
+        PREFAB_TOOL_NAME,
+        TEXTURE_TOOL_NAME,
+        CONSTRAINT_TOOL_NAME,
+    ):
         assert tool_name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
     for plan_tool in (
         "vrcforge_preview_scene_object_duplicate",
         "vrcforge_preview_scene_object_prefab",
         "vrcforge_preview_texture_import_settings",
+        "vrcforge_preview_constraint_sources",
     ):
         assert plan_tool in dashboard_server.AGENT_GATEWAY._tools

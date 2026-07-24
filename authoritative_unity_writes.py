@@ -11,6 +11,12 @@ from material_shader_assignment import (
     bind_authoritative_preview as bind_material_shader_preview,
     build_preview_arguments as build_material_shader_preview_arguments,
 )
+from constraint_source_write import (
+    TOOL_NAME as CONSTRAINT_SOURCE_TOOL,
+    ConstraintSourceWriteError,
+    bind_authoritative_preview as bind_constraint_source_preview,
+    build_preview_arguments as build_constraint_source_preview_arguments,
+)
 from scene_object_copy import (
     DUPLICATE_TOOL_NAME,
     PREFAB_TOOL_NAME,
@@ -88,6 +94,15 @@ _SPECS = {
         domain_error=TextureImportSettingsError,
         build_preview=build_texture_import_settings_preview_arguments,
         bind_preview=bind_texture_import_settings_preview,
+    ),
+    CONSTRAINT_SOURCE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=CONSTRAINT_SOURCE_TOOL,
+        request_error="Constraint source arguments are required.",
+        bridge_error="Constraint source preview could not be verified against the current project.",
+        receipt_error="Constraint source preview returned an invalid verification receipt.",
+        domain_error=ConstraintSourceWriteError,
+        build_preview=build_constraint_source_preview_arguments,
+        bind_preview=bind_constraint_source_preview,
     ),
 }
 
