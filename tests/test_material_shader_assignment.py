@@ -119,6 +119,7 @@ def test_preview_arguments_remove_caller_preconditions_and_force_read_only_mode(
         "expectedSharedImpactDigest": "3" * 64,
         "preview": False,
         "saveAssets": False,
+        "secretField": "must-not-cross-preview-boundary",
     }
 
     prepared = build_preview_arguments(raw)
@@ -126,6 +127,7 @@ def test_preview_arguments_remove_caller_preconditions_and_force_read_only_mode(
     assert prepared["preview"] is True
     assert prepared["saveAssets"] is True
     assert not any(key.startswith("expected") for key in prepared)
+    assert "secretField" not in prepared
     assert raw["expectedBeforeShader"] == "spoofed"
 
 

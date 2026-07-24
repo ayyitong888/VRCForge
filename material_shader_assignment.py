@@ -48,26 +48,12 @@ def build_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    preview_arguments = deepcopy(arguments)
-    for key in (
-        "expectedBeforeShader",
-        "expectedBeforeShaderAssetPath",
-        "expectedBeforeShaderAssetGuid",
-        "expectedMaterialAssetPath",
-        "expectedMaterialAssetGuid",
-        "expectedMaterialFileDigest",
-        "expectedSharedImpactDigest",
-        "expectedRendererScenePath",
-        "expectedRendererSceneGuid",
-        "expectedRendererSceneHandle",
-        "expectedRendererComponentId",
-        "expectedRendererComponentType",
-        "expectedRendererComponentIndex",
-        "expectedShaderAssetPath",
-        "expectedShaderAssetGuid",
-        "expectedProjectPath",
-    ):
-        preview_arguments.pop(key, None)
+    request = arguments if isinstance(arguments, dict) else {}
+    preview_arguments = {
+        key: deepcopy(request[key])
+        for key in REQUEST_ARGUMENT_KEYS
+        if key in request
+    }
     preview_arguments["preview"] = True
     preview_arguments["saveAssets"] = True
     return preview_arguments

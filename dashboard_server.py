@@ -60,6 +60,10 @@ from agent_gateway import (
     redact_sensitive,
 )
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
+from authoritative_unity_writes import (
+    AuthoritativeUnityWriteError,
+    prepare_authoritative_unity_write,
+)
 from backend_owner_lease import BackendOwnerLease
 from background_goal_delivery import BackgroundGoalDeliveryCoordinator, BackgroundGoalDeliveryError
 from background_goal_runtime import (
@@ -78,11 +82,17 @@ from chat_attachment_vault import (
     is_vault_payload_hash,
 )
 from material_shader_assignment import (
-    MaterialShaderAssignmentError,
     TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
-    bind_authoritative_preview as bind_material_shader_preview,
-    build_preview_arguments as build_material_shader_preview_arguments,
     build_wrapper_arguments as build_material_shader_wrapper_arguments,
+)
+from scene_object_copy import (
+    DUPLICATE_TOOL_NAME as DUPLICATE_SCENE_OBJECT_TOOL,
+    PREFAB_TOOL_NAME as SAVE_SCENE_OBJECT_AS_PREFAB_TOOL,
+    build_wrapper_arguments as build_scene_object_copy_wrapper_arguments,
+)
+from texture_import_settings import (
+    TOOL_NAME as TEXTURE_IMPORT_SETTINGS_TOOL,
+    build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
 )
 from context_compaction import ContextCompactionInputError, compact_context
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
@@ -365,6 +375,9 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_scan_avatar_performance",
     "vrc_export_vrm",
     "vrc_set_material_shader",
+    "vrc_duplicate_scene_object",
+    "vrc_save_scene_object_as_prefab",
+    "vrc_set_texture_import_settings",
 ]
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
@@ -374,6 +387,9 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_apply_parameter_optimization",
         "vrc_rollback_avatar_parameters",
         "vrc_set_material_shader",
+        "vrc_duplicate_scene_object",
+        "vrc_save_scene_object_as_prefab",
+        "vrc_set_texture_import_settings",
         "vrc_toggle_scene_object",
         "vrc_setup_outfit",
         "vrc_add_wardrobe_outfit",
@@ -18031,63 +18047,51 @@ def prepare_unity_mcp_write_request(
     params: dict[str, Any],
     caller_preview: Any,
 ) -> tuple[dict[str, Any], Any]:
-    params = params or {}
-    tool_name = str(params.get("tool_name") or params.get("toolName") or "").strip()
-    if tool_name != MATERIAL_SHADER_ASSIGNMENT_TOOL:
-        return params, caller_preview
-
-    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
-    if not isinstance(arguments, dict):
-        raise AgentGatewayError("Material shader arguments are required.", status_code=400)
-
-    project_text = str(params.get("projectPath") or "").strip()
-    project_path = Path(project_text)
-    if not project_text or not project_path.is_absolute():
-        raise AgentGatewayError("projectPath must be an absolute Unity project path.", status_code=400)
     try:
-        canonical_project_path = project_path.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise AgentGatewayError("projectPath is not an accessible Unity project.", status_code=400) from exc
-    if not canonical_project_path.is_dir() or not (canonical_project_path / "Assets").is_dir():
-        raise AgentGatewayError("projectPath is not an accessible Unity project.", status_code=400)
+        return prepare_authoritative_unity_write(
+            params or {},
+            caller_preview,
+            lambda tool_name, preview_arguments: _invoke_authoritative_unity_preview(
+                params or {},
+                tool_name,
+                preview_arguments,
+            ),
+        )
+    except AuthoritativeUnityWriteError as exc:
+        raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
 
-    canonical_params = copy.deepcopy(params)
-    canonical_params["projectPath"] = str(canonical_project_path)
-    canonical_arguments = copy.deepcopy(arguments)
-    canonical_arguments["expectedProjectPath"] = str(canonical_project_path)
-    canonical_params.pop("params", None)
-    canonical_params["arguments"] = canonical_arguments
+
+def _invoke_authoritative_unity_preview(
+    params: dict[str, Any],
+    tool_name: str,
+    preview_arguments: dict[str, Any],
+) -> Any:
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    preview_arguments = build_material_shader_preview_arguments(arguments)
-    preview_arguments["expectedProjectPath"] = str(canonical_project_path)
-    try:
-        result = invoke_unity_mcp(
-            settings,
-            MATERIAL_SHADER_ASSIGNMENT_TOOL,
-            preview_arguments,
-        )
-    except Exception as exc:  # noqa: BLE001 - raw bridge details must not escape the preview boundary.
-        raise AgentGatewayError(
-            "Material shader preview could not be verified against the current project.",
-            status_code=409,
-        ) from exc
+    result = invoke_unity_mcp(settings, tool_name, preview_arguments)
     if result.exit_code != 0:
-        raise AgentGatewayError(
-            "Material shader preview could not be verified against the current project.",
-            status_code=409,
-        )
-    try:
-        return bind_material_shader_preview(canonical_params, extract_tool_result_payload(result))
-    except MaterialShaderAssignmentError as exc:
-        raise AgentGatewayError(
-            "Material shader preview returned an invalid verification receipt.",
-            status_code=409,
-        ) from exc
+        raise RuntimeError("Authoritative Unity preview failed.")
+    return extract_tool_result_payload(result)
 
 
 def preview_material_shader_assignment_sync(params: dict[str, Any]) -> dict[str, Any]:
     _arguments, preview = prepare_unity_mcp_write_request(
         build_material_shader_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def preview_scene_object_copy_sync(params: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_scene_object_copy_wrapper_arguments(params or {}, tool_name),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def preview_texture_import_settings_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_texture_import_settings_wrapper_arguments(params or {}),
         None,
     )
     return {"ok": True, "preview": preview}
@@ -23237,6 +23241,24 @@ def register_agent_gateway_tools() -> None:
         "Preview one persistent material shader assignment and its shared impact without writing project files.",
         "plan/preview",
         preview_material_shader_assignment_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_scene_object_duplicate",
+        "Preview one create-new scene object duplicate without writing project files.",
+        "plan/preview",
+        lambda params: preview_scene_object_copy_sync(params or {}, DUPLICATE_SCENE_OBJECT_TOOL),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_scene_object_prefab",
+        "Preview saving one scene object as a create-new generated prefab without writing project files.",
+        "plan/preview",
+        lambda params: preview_scene_object_copy_sync(params or {}, SAVE_SCENE_OBJECT_AS_PREFAB_TOOL),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_texture_import_settings",
+        "Preview one bounded texture importer settings change without writing project files.",
+        "plan/preview",
+        preview_texture_import_settings_sync,
     )
     AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
