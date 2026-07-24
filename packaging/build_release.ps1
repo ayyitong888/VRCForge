@@ -622,8 +622,8 @@ try {
 
         $authorityRelativeRoot = "artifacts/primitive-evidence-authority/$headCommit/$evidenceRunId"
         $authorityFiles = @()
+        $authorityFileMetadata = @{}
         $authorityCopiedPaths = @{}
-        $authorityControllerDigest = $null
         foreach ($authorityBinName in $authorityBinNames) {
             $authorityFileName = "$authorityBinName.exe"
             $authorityBuildExe = Join-Path $repoRoot "src-tauri\target\release\$authorityFileName"
@@ -640,14 +640,13 @@ try {
                 -SourcePath $authorityBuildExe `
                 -DestinationPath $authorityDestination
             $authorityCopiedPaths[$authorityBinName] = $authorityCopy.path
-            $authorityFiles += [ordered]@{
+            $authorityFile = [ordered]@{
                 name = $authorityFileName
                 sha256 = $authorityCopy.sha256
                 length = $authorityCopy.length
             }
-            if ($authorityBinName -eq "vrcforge_primitive_evidence_controller") {
-                $authorityControllerDigest = [string]$authorityCopy.sha256
-            }
+            $authorityFiles += $authorityFile
+            $authorityFileMetadata[$authorityBinName] = $authorityFile
         }
 
         $authorityInstallHelperPath = $authorityCopiedPaths["vrcforge_primitive_evidence_install_helper"]
@@ -665,36 +664,172 @@ try {
             $authorityPlan.mutationSupported -ne $false -or
             $authorityPlan.trustedBoundaryReady -ne $false -or
             $authorityPlan.candidatePayloadIncludesAuthority -ne $false -or
-            $authorityPlan.controllerPathPolicy -ne "sha256-parent-create-new-never-reuse" -or
+            [string]::IsNullOrWhiteSpace([string]$authorityPlan.serviceSecuritySddl) -or
+            $authorityPlan.generationPathPolicy -ne "authority-generation-sha256-parent-create-new-never-reuse" -or
             @($authorityPlan.blockers).Count -eq 0
         ) {
             throw "Evidence authority install-helper plan violated the fail-closed source policy."
         }
-        if ([string]::IsNullOrWhiteSpace($authorityControllerDigest)) {
-            throw "Evidence authority controller digest was not captured."
+
+        $authorityGenerationPlaceholder = "{authority-generation-sha256-lower}"
+        $authorityExpectedBinaryBase = Join-Path `
+            ([string]$authorityPlan.layout.binaryAnchor) `
+            "VRCForgeEvidenceAuthority"
+        $authorityExpectedStateBase = Join-Path `
+            ([string]$authorityPlan.layout.stateAnchor) `
+            "VRCForgeEvidenceAuthority"
+        $authorityExpectedBinaryVersionRoot = Join-Path $authorityExpectedBinaryBase "v1"
+        $authorityExpectedStateVersionRoot = Join-Path $authorityExpectedStateBase "v1"
+        if (
+            [string]$authorityPlan.layout.binaryBase -cne $authorityExpectedBinaryBase -or
+            [string]$authorityPlan.layout.stateBase -cne $authorityExpectedStateBase -or
+            [string]$authorityPlan.layout.binaryVersionRoot -cne $authorityExpectedBinaryVersionRoot -or
+            [string]$authorityPlan.layout.stateVersionRoot -cne $authorityExpectedStateVersionRoot
+        ) {
+            throw "Evidence authority plan was not rooted directly below its Known Folder anchors."
         }
-        $authorityControllerFileName = "vrcforge_primitive_evidence_controller.exe"
-        $authorityControllerPattern = Join-Path `
-            ([string]$authorityPlan.layout.binaryRoot) `
-            (Join-Path "{controller-sha256-lower}" $authorityControllerFileName)
-        if ([string]$authorityPlan.layout.controllerExecutablePattern -cne $authorityControllerPattern) {
-            throw "Evidence authority controller path pattern was not content addressed."
+        $authorityGenerationBinaryPattern = Join-Path `
+            ([string]$authorityPlan.layout.binaryVersionRoot) `
+            (Join-Path "generations" $authorityGenerationPlaceholder)
+        $authorityGenerationStatePattern = Join-Path `
+            ([string]$authorityPlan.layout.stateVersionRoot) `
+            (Join-Path "generations" $authorityGenerationPlaceholder)
+        $authorityExpectedPatterns = [ordered]@{
+            generationBinaryRootPattern = $authorityGenerationBinaryPattern
+            generationStateRootPattern = $authorityGenerationStatePattern
+            serviceExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_service.exe"
+            controllerExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_controller.exe"
+            installHelperExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_install_helper.exe"
         }
-        $authorityControllerInstalledPath = Join-Path `
-            ([string]$authorityPlan.layout.binaryRoot) `
-            (Join-Path $authorityControllerDigest $authorityControllerFileName)
+        foreach ($authorityPatternName in $authorityExpectedPatterns.Keys) {
+            if ([string]$authorityPlan.layout.$authorityPatternName -cne [string]$authorityExpectedPatterns[$authorityPatternName]) {
+                throw "Evidence authority plan layout pattern mismatch: $authorityPatternName"
+            }
+        }
+
+        $authorityPreviewLines = @(& $authorityInstallHelperPath `
+            --preview-install `
+            $authorityCopiedPaths["vrcforge_primitive_evidence_service"] `
+            $authorityCopiedPaths["vrcforge_primitive_evidence_controller"] `
+            $authorityCopiedPaths["vrcforge_primitive_evidence_install_helper"])
+        if ($LASTEXITCODE -ne 0) {
+            throw "Evidence authority install-helper preview was rejected."
+        }
+        try {
+            $authorityPreview = ($authorityPreviewLines -join [Environment]::NewLine) | ConvertFrom-Json
+        } catch {
+            throw "Evidence authority install-helper preview was not valid JSON."
+        }
+        if (
+            $authorityPreview.schema -ne "vrcforge.primitive_evidence_authority_maintenance_preview.v1" -or
+            $authorityPreview.operation -ne "install" -or
+            $authorityPreview.automaticExecutionAllowed -ne $false -or
+            $authorityPreview.nativeMutationBackendAvailable -ne $false -or
+            $authorityPreview.executionRequiresVerifiedElevatedMaintenanceCapability -ne $true -or
+            $authorityPreview.trustedBoundaryReady -ne $false -or
+            @($authorityPreview.blockers).Count -eq 0 -or
+            @($authorityPreview.steps).Count -eq 0
+        ) {
+            throw "Evidence authority install-helper preview violated the fail-closed maintenance policy."
+        }
+        foreach ($authorityDigestName in @("generation", "policySha256", "planSha256")) {
+            if ([string]$authorityPreview.$authorityDigestName -cnotmatch '^[0-9a-f]{64}$') {
+                throw "Evidence authority preview digest was not canonical: $authorityDigestName"
+            }
+        }
+
+        $authorityContentBindings = @(
+            @("vrcforge_primitive_evidence_service", "service"),
+            @("vrcforge_primitive_evidence_controller", "controller"),
+            @("vrcforge_primitive_evidence_install_helper", "installHelper")
+        )
+        foreach ($authorityContentBinding in $authorityContentBindings) {
+            $authorityBinName = [string]$authorityContentBinding[0]
+            $authorityContentName = [string]$authorityContentBinding[1]
+            $authorityExpectedFile = $authorityFileMetadata[$authorityBinName]
+            $authorityPreviewFile = $authorityPreview.content.$authorityContentName
+            if (
+                [string]$authorityPreviewFile.sha256 -cne [string]$authorityExpectedFile.sha256 -or
+                [uint64]$authorityPreviewFile.byteLength -ne [uint64]$authorityExpectedFile.length
+            ) {
+                throw "Evidence authority preview content mismatch: $authorityBinName"
+            }
+        }
+
+        $authorityGeneration = [string]$authorityPreview.generation
+        $authorityGenerationBinaryRoot = Join-Path `
+            ([string]$authorityPlan.layout.binaryVersionRoot) `
+            (Join-Path "generations" $authorityGeneration)
+        $authorityGenerationStateRoot = Join-Path `
+            ([string]$authorityPlan.layout.stateVersionRoot) `
+            (Join-Path "generations" $authorityGeneration)
+        $authorityInstalledPaths = [ordered]@{
+            service = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_service.exe"
+            controller = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_controller.exe"
+            installHelper = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_install_helper.exe"
+        }
+        if (
+            [string]$authorityPreview.layout.binaryAnchor -cne [string]$authorityPlan.layout.binaryAnchor -or
+            [string]$authorityPreview.layout.stateAnchor -cne [string]$authorityPlan.layout.stateAnchor -or
+            [string]$authorityPreview.layout.binaryBase -cne [string]$authorityPlan.layout.binaryBase -or
+            [string]$authorityPreview.layout.stateBase -cne [string]$authorityPlan.layout.stateBase -or
+            [string]$authorityPreview.layout.binaryVersionRoot -cne [string]$authorityPlan.layout.binaryVersionRoot -or
+            [string]$authorityPreview.layout.stateVersionRoot -cne [string]$authorityPlan.layout.stateVersionRoot -or
+            [string]$authorityPreview.layout.generationBinaryRoot -cne $authorityGenerationBinaryRoot -or
+            [string]$authorityPreview.layout.generationStateRoot -cne $authorityGenerationStateRoot -or
+            [string]$authorityPreview.layout.serviceExecutable -cne [string]$authorityInstalledPaths.service -or
+            [string]$authorityPreview.layout.controllerExecutable -cne [string]$authorityInstalledPaths.controller -or
+            [string]$authorityPreview.layout.installHelperExecutable -cne [string]$authorityInstalledPaths.installHelper -or
+            [string]$authorityPreview.fixedPolicy.service.binaryCommand -cne ('"' + [string]$authorityInstalledPaths.service + '" --service') -or
+            [string]$authorityPreview.fixedPolicy.service.securitySddl -cne [string]$authorityPlan.serviceSecuritySddl
+        ) {
+            throw "Evidence authority preview generation layout or service command mismatch."
+        }
+        $authorityInstalledFiles = @(
+            [ordered]@{
+                name = "vrcforge_primitive_evidence_service.exe"
+                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_service"].sha256
+                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_service"].length
+                installedPath = [string]$authorityInstalledPaths.service
+            },
+            [ordered]@{
+                name = "vrcforge_primitive_evidence_controller.exe"
+                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_controller"].sha256
+                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_controller"].length
+                installedPath = [string]$authorityInstalledPaths.controller
+            },
+            [ordered]@{
+                name = "vrcforge_primitive_evidence_install_helper.exe"
+                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_install_helper"].sha256
+                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_install_helper"].length
+                installedPath = [string]$authorityInstalledPaths.installHelper
+            }
+        )
         $evidenceAuthority = [ordered]@{
             schema = "vrcforge.primitive_evidence_authority_bundle.v1"
             repositoryRelativeRoot = $authorityRelativeRoot
             files = $authorityFiles
             planSchema = [string]$authorityPlan.schema
+            previewSchema = [string]$authorityPreview.schema
             installationSupported = $false
             trustedBoundaryReady = $false
             candidatePayloadIncluded = $false
-            controller = [ordered]@{
-                sha256 = $authorityControllerDigest
-                installedPath = $authorityControllerInstalledPath
+            layout = [ordered]@{
+                binaryAnchor = [string]$authorityPlan.layout.binaryAnchor
+                stateAnchor = [string]$authorityPlan.layout.stateAnchor
+                binaryBase = [string]$authorityPlan.layout.binaryBase
+                stateBase = [string]$authorityPlan.layout.stateBase
+                binaryVersionRoot = [string]$authorityPlan.layout.binaryVersionRoot
+                stateVersionRoot = [string]$authorityPlan.layout.stateVersionRoot
+            }
+            generation = [ordered]@{
+                sha256 = $authorityGeneration
+                policySha256 = [string]$authorityPreview.policySha256
+                planSha256 = [string]$authorityPreview.planSha256
+                binaryRoot = $authorityGenerationBinaryRoot
+                stateRoot = $authorityGenerationStateRoot
                 installMode = "create-new-never-reuse"
+                files = $authorityInstalledFiles
             }
         }
     }
@@ -876,10 +1011,23 @@ try {
         )
     }
     if ($strictEvidenceBuild) {
+        foreach ($authorityBinName in $authorityBinNames) {
+            $authorityFinalPath = Resolve-SafeRepositoryPath -Path $authorityCopiedPaths[$authorityBinName]
+            $authorityFinalItem = Get-Item -LiteralPath $authorityFinalPath -Force -ErrorAction Stop
+            $authorityExpectedFile = $authorityFileMetadata[$authorityBinName]
+            if (
+                $authorityFinalItem.PSIsContainer -or
+                ($authorityFinalItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [uint64]$authorityFinalItem.Length -ne [uint64]$authorityExpectedFile.length -or
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $authorityFinalPath).Hash.ToLowerInvariant() -cne [string]$authorityExpectedFile.sha256
+            ) {
+                throw "Evidence authority bundle changed after maintenance preview: $authorityBinName"
+            }
+        }
         $manifest.evidenceAttestor = $evidenceAttestor
         $manifest.evidenceAuthority = $evidenceAuthority
     }
-    $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
+    $manifest | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
 
     Write-Host "Release payload built: $payloadRoot"
     Write-Host "Release artifacts: $releaseRoot"

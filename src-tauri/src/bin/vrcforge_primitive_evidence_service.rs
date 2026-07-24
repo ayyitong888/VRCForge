@@ -10,6 +10,12 @@ mod primitive_evidence_authority_ledger;
 #[path = "../primitive_evidence_authority_pipe.rs"]
 mod primitive_evidence_authority_pipe;
 #[allow(dead_code)]
+#[path = "../primitive_evidence_authority_runtime.rs"]
+mod primitive_evidence_authority_runtime;
+#[allow(dead_code)]
+#[path = "../primitive_evidence_authority_supervisor.rs"]
+mod primitive_evidence_authority_supervisor;
+#[allow(dead_code)]
 #[path = "../primitive_evidence_authority_windows.rs"]
 mod primitive_evidence_authority_windows;
 

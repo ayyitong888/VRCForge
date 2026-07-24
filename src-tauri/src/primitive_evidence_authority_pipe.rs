@@ -60,33 +60,114 @@ impl fmt::Display for AuthorityPipeError {
 
 impl std::error::Error for AuthorityPipeError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StableFileIdentity {
+    pub volume_serial_number: u32,
+    pub file_index: u64,
+    pub size: u64,
+    pub creation_time: u64,
+    pub last_write_time: u64,
+    pub link_count: u32,
+}
+
+enum VerifiedControllerLaunchBinding {
+    #[cfg(windows)]
+    Held(windows::VerifiedControllerLaunchObjects),
+    #[cfg(test)]
+    TestOnly,
+    #[cfg(not(any(windows, test)))]
+    Unsupported,
+}
+
+pub struct VerifiedControllerLaunchReceipt {
+    authority_generation_sha256: [u8; 32],
+    controller_path: PathBuf,
+    controller_sha256: [u8; 32],
+    session_id: u32,
+    process_id: u32,
+    process_creation_time: u64,
+    running_image_file_identity: StableFileIdentity,
+    protected_launcher_receipt_sha256: [u8; 32],
+    binding: VerifiedControllerLaunchBinding,
+}
+
+impl fmt::Debug for VerifiedControllerLaunchReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedControllerLaunchReceipt")
+            .field(
+                "authority_generation_sha256",
+                &hex_lower(&self.authority_generation_sha256),
+            )
+            .field("controller_path", &self.controller_path)
+            .field("controller_sha256", &hex_lower(&self.controller_sha256))
+            .field("session_id", &self.session_id)
+            .field("process_id", &self.process_id)
+            .field("process_creation_time", &self.process_creation_time)
+            .field(
+                "running_image_file_identity",
+                &self.running_image_file_identity,
+            )
+            .field(
+                "protected_launcher_receipt_sha256",
+                &hex_lower(&self.protected_launcher_receipt_sha256),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedControllerLaunchReceipt {
+    #[cfg(test)]
+    fn for_test(
+        authority_generation_sha256: [u8; 32],
+        controller_path: PathBuf,
+        controller_sha256: [u8; 32],
+        session_id: u32,
+        process_id: u32,
+        process_creation_time: u64,
+        running_image_file_identity: StableFileIdentity,
+        protected_launcher_receipt_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            authority_generation_sha256,
+            controller_path,
+            controller_sha256,
+            session_id,
+            process_id,
+            process_creation_time,
+            running_image_file_identity,
+            protected_launcher_receipt_sha256,
+            binding: VerifiedControllerLaunchBinding::TestOnly,
+        }
+    }
+
+    #[cfg(windows)]
+    fn held_objects(&self) -> Option<&windows::VerifiedControllerLaunchObjects> {
+        match &self.binding {
+            VerifiedControllerLaunchBinding::Held(value) => Some(value),
+            #[cfg(test)]
+            VerifiedControllerLaunchBinding::TestOnly => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct AuthorityPeerPolicy {
     expected_controller_path: PathBuf,
-    expected_controller_sha256: [u8; 32],
-    expected_session_id: u32,
+    verified_launch: VerifiedControllerLaunchReceipt,
 }
 
 impl AuthorityPeerPolicy {
-    pub fn for_installed_layout(
+    pub fn for_installed_generation(
         layout: &AuthorityLayout,
-        expected_controller_sha256: [u8; 32],
-        expected_session_id: u32,
+        verified_launch: VerifiedControllerLaunchReceipt,
     ) -> Result<Self, AuthorityPipeError> {
         let path = layout
-            .controller_executable_for_digest(&expected_controller_sha256)
+            .controller_executable_for_generation(&verified_launch.authority_generation_sha256)
             .map_err(|_| AuthorityPipeError::new("authority_peer_controller_layout_invalid"))?;
-        Self::new(path, expected_controller_sha256, expected_session_id)
-    }
-
-    fn new(
-        expected_controller_path: PathBuf,
-        expected_controller_sha256: [u8; 32],
-        expected_session_id: u32,
-    ) -> Result<Self, AuthorityPipeError> {
-        if !expected_controller_path.is_absolute()
-            || expected_controller_path.as_os_str().is_empty()
-            || expected_controller_path
+        if !path.is_absolute()
+            || path.as_os_str().is_empty()
+            || path
                 .components()
                 .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
         {
@@ -94,22 +175,51 @@ impl AuthorityPeerPolicy {
                 "authority_peer_controller_path_invalid",
             ));
         }
-        let expected_digest_component = hex_lower(&expected_controller_sha256);
-        if expected_controller_sha256.iter().all(|byte| *byte == 0)
-            || expected_controller_path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|value| value.to_str())
-                != Some(expected_digest_component.as_str())
+        if verified_launch.controller_path != path {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_controller_launch_path_mismatch",
+            ));
+        }
+        if verified_launch
+            .controller_sha256
+            .iter()
+            .all(|byte| *byte == 0)
         {
             return Err(AuthorityPipeError::new(
-                "authority_peer_controller_path_not_content_addressed",
+                "authority_peer_controller_digest_invalid",
+            ));
+        }
+        if verified_launch.process_id == 0 || verified_launch.process_creation_time == 0 {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_process_receipt_invalid",
+            ));
+        }
+        if verified_launch
+            .running_image_file_identity
+            .volume_serial_number
+            == 0
+            || verified_launch.running_image_file_identity.file_index == 0
+            || verified_launch.running_image_file_identity.creation_time == 0
+            || verified_launch.running_image_file_identity.link_count == 0
+            || verified_launch.running_image_file_identity.size == 0
+            || verified_launch.running_image_file_identity.size > MAX_CONTROLLER_BYTES
+        {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_running_image_identity_invalid",
+            ));
+        }
+        if verified_launch
+            .protected_launcher_receipt_sha256
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_launcher_receipt_invalid",
             ));
         }
         Ok(Self {
-            expected_controller_path,
-            expected_controller_sha256,
-            expected_session_id,
+            expected_controller_path: path,
+            verified_launch,
         })
     }
 
@@ -118,11 +228,27 @@ impl AuthorityPeerPolicy {
     }
 
     pub fn expected_controller_sha256(&self) -> &[u8; 32] {
-        &self.expected_controller_sha256
+        &self.verified_launch.controller_sha256
     }
 
     pub fn expected_session_id(&self) -> u32 {
-        self.expected_session_id
+        self.verified_launch.session_id
+    }
+
+    pub fn expected_process_id(&self) -> u32 {
+        self.verified_launch.process_id
+    }
+
+    pub fn expected_process_creation_time(&self) -> u64 {
+        self.verified_launch.process_creation_time
+    }
+
+    pub fn expected_running_image_file_identity(&self) -> StableFileIdentity {
+        self.verified_launch.running_image_file_identity
+    }
+
+    pub fn expected_launcher_receipt_sha256(&self) -> &[u8; 32] {
+        &self.verified_launch.protected_launcher_receipt_sha256
     }
 }
 
@@ -138,8 +264,14 @@ fn hex_lower(value: &[u8]) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityPeerFacts<'a> {
+    pub process_id: u32,
+    pub process_creation_time: u64,
     pub controller_path: &'a Path,
     pub controller_sha256: [u8; 32],
+    pub running_image_file_identity: StableFileIdentity,
+    pub protected_launcher_receipt_sha256: [u8; 32],
+    pub running_process_handle_bound: bool,
+    pub running_image_object_bound: bool,
     pub pipe_session_id: u32,
     pub token_session_id: u32,
     pub elevated: bool,
@@ -152,9 +284,19 @@ pub fn evaluate_peer_policy(
     facts: &AuthorityPeerFacts<'_>,
 ) -> Result<(), AuthorityPipeError> {
     evaluate_peer_pre_hash_policy(policy, facts)?;
-    if facts.controller_sha256 != policy.expected_controller_sha256 {
+    if facts.controller_sha256 != *policy.expected_controller_sha256() {
         return Err(AuthorityPipeError::new(
             "authority_peer_controller_digest_mismatch",
+        ));
+    }
+    if facts.running_image_file_identity != policy.expected_running_image_file_identity() {
+        return Err(AuthorityPipeError::new(
+            "authority_peer_running_image_identity_mismatch",
+        ));
+    }
+    if facts.protected_launcher_receipt_sha256 != *policy.expected_launcher_receipt_sha256() {
+        return Err(AuthorityPipeError::new(
+            "authority_peer_launcher_receipt_mismatch",
         ));
     }
     Ok(())
@@ -174,9 +316,26 @@ fn evaluate_peer_pre_hash_policy(
         return Err(AuthorityPipeError::new("authority_peer_not_administrator"));
     }
     if facts.pipe_session_id != facts.token_session_id
-        || facts.pipe_session_id != policy.expected_session_id
+        || facts.pipe_session_id != policy.expected_session_id()
     {
         return Err(AuthorityPipeError::new("authority_peer_session_mismatch"));
+    }
+    if facts.process_id != policy.expected_process_id()
+        || facts.process_creation_time != policy.expected_process_creation_time()
+    {
+        return Err(AuthorityPipeError::new(
+            "authority_peer_process_receipt_mismatch",
+        ));
+    }
+    if !facts.running_process_handle_bound {
+        return Err(AuthorityPipeError::new(
+            "authority_peer_process_handle_unbound",
+        ));
+    }
+    if !facts.running_image_object_bound {
+        return Err(AuthorityPipeError::new(
+            "authority_peer_running_image_object_unbound",
+        ));
     }
     if facts.controller_path != policy.expected_controller_path {
         return Err(AuthorityPipeError::new(
@@ -192,13 +351,14 @@ mod windows {
     use sha2::{Digest, Sha256};
     use std::{
         fs::File,
-        io::{Read, Seek, SeekFrom},
         mem::{size_of, zeroed},
         os::windows::{
             ffi::OsStrExt,
+            fs::FileExt,
             io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
         },
         ptr,
+        sync::Arc,
     };
     use windows_sys::Win32::{
         Foundation::{
@@ -218,8 +378,7 @@ mod windows {
         Storage::FileSystem::{
             CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
             FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_READ_ATTRIBUTES,
-            FILE_READ_DATA, FILE_SHARE_READ, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+            OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
         },
         System::{
             Pipes::{
@@ -229,24 +388,13 @@ mod windows {
             },
             SystemServices::SECURITY_MANDATORY_HIGH_RID,
             Threading::{
-                GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
-                QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcessToken,
+                QueryFullProcessImageNameW, WaitForSingleObject,
             },
         },
     };
 
-    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-    const TEST_PIPE_SDDL: &str = "D:P(A;;GA;;;WD)";
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct StableFileIdentity {
-        pub volume_serial_number: u32,
-        pub file_index: u64,
-        pub size: u64,
-        pub creation_time: u64,
-        pub last_write_time: u64,
-        pub link_count: u32,
-    }
+    pub(super) const TEST_PIPE_SDDL: &str = "D:P(A;;GA;;;WD)";
 
     impl StableFileIdentity {
         fn from_information(value: &BY_HANDLE_FILE_INFORMATION) -> Self {
@@ -261,6 +409,25 @@ mod windows {
         }
     }
 
+    pub(super) struct VerifiedControllerLaunchObjects {
+        process_handle: Arc<OwnedHandle>,
+        running_image_file: Arc<File>,
+    }
+
+    impl fmt::Debug for VerifiedControllerLaunchObjects {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("VerifiedControllerLaunchObjects")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl VerifiedControllerLaunchObjects {
+        fn process_raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+            self.process_handle.as_raw_handle().cast()
+        }
+    }
+
     pub struct AuthorityPeerIdentity {
         process_id: u32,
         session_id: u32,
@@ -268,8 +435,8 @@ mod windows {
         controller_path: PathBuf,
         controller_sha256: [u8; 32],
         controller_file_identity: StableFileIdentity,
-        process_handle: OwnedHandle,
-        controller_file: File,
+        process_handle: Arc<OwnedHandle>,
+        controller_file: Arc<File>,
     }
 
     impl fmt::Debug for AuthorityPeerIdentity {
@@ -368,10 +535,10 @@ mod windows {
         }
     }
 
-    struct SecurityDescriptor(*mut core::ffi::c_void);
+    pub(super) struct SecurityDescriptor(pub(super) *mut core::ffi::c_void);
 
     impl SecurityDescriptor {
-        fn from_sddl(sddl: &str) -> Result<Self, AuthorityPipeError> {
+        pub(super) fn from_sddl(sddl: &str) -> Result<Self, AuthorityPipeError> {
             let encoded = wide_null(Path::new(sddl).as_os_str());
             let mut descriptor = ptr::null_mut();
             if unsafe {
@@ -468,7 +635,7 @@ mod windows {
         }
     }
 
-    fn create_pipe_with_sddl(
+    pub(super) fn create_pipe_with_sddl(
         pipe_name: &str,
         sddl: &str,
     ) -> Result<AuthorityPipe, AuthorityPipeError> {
@@ -517,37 +684,27 @@ mod windows {
                 "authority_peer_session_unavailable",
             ));
         }
-        let process = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
-                0,
-                process_id,
-            )
-        };
-        if process.is_null() {
-            return Err(AuthorityPipeError::last_win32(
-                "authority_peer_process_open_failed",
+        if process_id != policy.expected_process_id()
+            || pipe_session_id != policy.expected_session_id()
+        {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_launch_receipt_pipe_mismatch",
             ));
         }
-        let process_handle = unsafe { OwnedHandle::from_raw_handle(process as RawHandle) };
+        let launch_objects = policy.verified_launch.held_objects().ok_or_else(|| {
+            AuthorityPipeError::new("authority_peer_running_image_binding_backend_disabled")
+        })?;
+        let process = launch_objects.process_raw();
+        if unsafe { GetProcessId(process) } != process_id {
+            return Err(AuthorityPipeError::new(
+                "authority_peer_held_process_mismatch",
+            ));
+        }
         let process_creation_time = query_process_creation_time(process)?;
         let controller_path = query_process_path(process)?;
-
         let token_snapshot = query_process_token(process)?;
-
-        let pre_hash_facts = AuthorityPeerFacts {
-            controller_path: &controller_path,
-            controller_sha256: policy.expected_controller_sha256,
-            pipe_session_id,
-            token_session_id: token_snapshot.session_id,
-            elevated: token_snapshot.elevated,
-            high_integrity: token_snapshot.high_integrity,
-            administrators_member: token_snapshot.administrators_member,
-        };
-        evaluate_peer_pre_hash_policy(policy, &pre_hash_facts)?;
-
-        let (mut controller_file, controller_sha256, controller_file_identity) =
-            open_and_hash_controller(policy.expected_controller_path())?;
+        let (controller_sha256, controller_file_identity) =
+            hash_held_running_image(&launch_objects.running_image_file)?;
         let controller_path_after_hash = query_process_path(process)?;
         if controller_path_after_hash != controller_path || !process_is_active(process)? {
             return Err(AuthorityPipeError::new(
@@ -555,8 +712,14 @@ mod windows {
             ));
         }
         let facts = AuthorityPeerFacts {
+            process_id,
+            process_creation_time,
             controller_path: &controller_path,
             controller_sha256,
+            running_image_file_identity: controller_file_identity,
+            protected_launcher_receipt_sha256: *policy.expected_launcher_receipt_sha256(),
+            running_process_handle_bound: true,
+            running_image_object_bound: true,
             pipe_session_id,
             token_session_id: token_snapshot.session_id,
             elevated: token_snapshot.elevated,
@@ -564,9 +727,6 @@ mod windows {
             administrators_member: token_snapshot.administrators_member,
         };
         evaluate_peer_policy(policy, &facts)?;
-        controller_file.seek(SeekFrom::Start(0)).map_err(|error| {
-            AuthorityPipeError::from_io("authority_peer_controller_rewind_failed", &error)
-        })?;
         Ok(AuthorityPeerIdentity {
             process_id,
             session_id: pipe_session_id,
@@ -574,8 +734,8 @@ mod windows {
             controller_path,
             controller_sha256,
             controller_file_identity,
-            process_handle,
-            controller_file,
+            process_handle: Arc::clone(&launch_objects.process_handle),
+            controller_file: Arc::clone(&launch_objects.running_image_file),
         })
     }
 
@@ -623,7 +783,7 @@ mod windows {
         )?))
     }
 
-    fn process_is_active(
+    pub(super) fn process_is_active(
         process: windows_sys::Win32::Foundation::HANDLE,
     ) -> Result<bool, AuthorityPipeError> {
         match unsafe { WaitForSingleObject(process, 0) } {
@@ -753,27 +913,9 @@ mod windows {
         Ok(session_id)
     }
 
-    fn open_and_hash_controller(
-        path: &Path,
-    ) -> Result<(File, [u8; 32], StableFileIdentity), AuthorityPipeError> {
-        let encoded = wide_null(path.as_os_str());
-        let handle = unsafe {
-            CreateFileW(
-                encoded.as_ptr(),
-                FILE_READ_DATA | FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ,
-                ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(AuthorityPipeError::last_win32(
-                "authority_peer_controller_open_failed",
-            ));
-        }
-        let mut file = unsafe { File::from_raw_handle(handle as RawHandle) };
+    fn hash_held_running_image(
+        file: &File,
+    ) -> Result<([u8; 32], StableFileIdentity), AuthorityPipeError> {
         let before = query_file_identity(file.as_raw_handle().cast())?;
         if before.size == 0 || before.size > MAX_CONTROLLER_BYTES {
             return Err(AuthorityPipeError::new(
@@ -782,22 +924,31 @@ mod windows {
         }
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
+        let mut offset = 0u64;
         loop {
-            let read = file.read(&mut buffer).map_err(|error| {
+            let read = file.seek_read(&mut buffer, offset).map_err(|error| {
                 AuthorityPipeError::from_io("authority_peer_controller_read_failed", &error)
             })?;
             if read == 0 {
                 break;
             }
             hasher.update(&buffer[..read]);
+            offset = offset
+                .checked_add(read as u64)
+                .ok_or_else(|| AuthorityPipeError::new("authority_peer_controller_size_invalid"))?;
+            if offset > before.size {
+                return Err(AuthorityPipeError::new(
+                    "authority_peer_controller_size_invalid",
+                ));
+            }
         }
         let after = query_file_identity(file.as_raw_handle().cast())?;
-        if before != after {
+        if before != after || offset != before.size {
             return Err(AuthorityPipeError::new(
                 "authority_peer_controller_file_changed",
             ));
         }
-        Ok((file, hasher.finalize().into(), before))
+        Ok((hasher.finalize().into(), before))
     }
 
     fn query_file_identity(
@@ -817,7 +968,7 @@ mod windows {
         Ok(StableFileIdentity::from_information(&value))
     }
 
-    fn current_process_session_id() -> Result<u32, AuthorityPipeError> {
+    pub(super) fn current_process_session_id() -> Result<u32, AuthorityPipeError> {
         let mut token = ptr::null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0
             || token.is_null()
@@ -830,7 +981,7 @@ mod windows {
         query_token_session_id(token.as_raw_handle().cast())
     }
 
-    fn open_test_client(pipe_name: &str) -> Result<OwnedHandle, AuthorityPipeError> {
+    pub(super) fn open_test_client(pipe_name: &str) -> Result<OwnedHandle, AuthorityPipeError> {
         let pipe_name = wide_null(Path::new(pipe_name).as_os_str());
         let handle = unsafe {
             CreateFileW(
@@ -851,7 +1002,7 @@ mod windows {
         Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
     }
 
-    fn unique_test_pipe_name() -> String {
+    pub(super) fn unique_test_pipe_name() -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQUENCE: AtomicU64 = AtomicU64::new(1);
         format!(
@@ -885,212 +1036,15 @@ mod windows {
         drop(first);
         Ok(())
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn policy() -> AuthorityPeerPolicy {
-            let digest = [0x42; 32];
-            let layout = AuthorityLayout::for_test_roots(
-                Path::new(r"C:\Program Files"),
-                Path::new(r"C:\ProgramData"),
-            )
-            .unwrap();
-            AuthorityPeerPolicy::for_installed_layout(&layout, digest, 7).unwrap()
-        }
-
-        fn facts<'a>(path: &'a Path) -> AuthorityPeerFacts<'a> {
-            AuthorityPeerFacts {
-                controller_path: path,
-                controller_sha256: [0x42; 32],
-                pipe_session_id: 7,
-                token_session_id: 7,
-                elevated: true,
-                high_integrity: true,
-                administrators_member: true,
-            }
-        }
-
-        #[test]
-        fn policy_accepts_only_the_exact_high_administrator_controller() {
-            let policy = policy();
-            evaluate_peer_policy(&policy, &facts(policy.expected_controller_path())).unwrap();
-        }
-
-        #[test]
-        fn policy_rejects_every_identity_shortcut() {
-            let policy = policy();
-            let expected_path = policy.expected_controller_path();
-            let cases = [
-                (
-                    AuthorityPeerFacts {
-                        elevated: false,
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_not_elevated",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        high_integrity: false,
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_integrity_too_low",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        administrators_member: false,
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_not_administrator",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        pipe_session_id: 8,
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_session_mismatch",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        token_session_id: 8,
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_session_mismatch",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        controller_path: Path::new(
-                            r"C:\Program Files\VRCForge\EvidenceAuthority\v1\controller-copy.exe",
-                        ),
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_controller_path_mismatch",
-                ),
-                (
-                    AuthorityPeerFacts {
-                        controller_sha256: [0x43; 32],
-                        ..facts(expected_path)
-                    },
-                    "authority_peer_controller_digest_mismatch",
-                ),
-            ];
-            for (observed, expected_code) in cases {
-                assert_eq!(
-                    evaluate_peer_policy(&policy, &observed).unwrap_err().code(),
-                    expected_code
-                );
-            }
-        }
-
-        #[test]
-        fn policy_rejects_relative_or_traversing_controller_paths() {
-            for path in [
-                PathBuf::from("controller.exe"),
-                PathBuf::from(r"C:\Program Files\VRCForge\..\controller.exe"),
-            ] {
-                assert_eq!(
-                    AuthorityPeerPolicy::new(path, [0u8; 32], 1)
-                        .unwrap_err()
-                        .code(),
-                    "authority_peer_controller_path_invalid"
-                );
-            }
-        }
-
-        #[test]
-        fn policy_requires_an_exact_content_addressed_parent() {
-            let digest = [0x42; 32];
-            for (path, candidate_digest) in [
-                (
-                    PathBuf::from(
-                        r"C:\Program Files\VRCForge\EvidenceAuthority\v1\vrcforge_primitive_evidence_controller.exe",
-                    ),
-                    digest,
-                ),
-                (
-                    PathBuf::from(format!(
-                        r"C:\Program Files\VRCForge\EvidenceAuthority\v1\{}\vrcforge_primitive_evidence_controller.exe",
-                        "43".repeat(32)
-                    )),
-                    digest,
-                ),
-                (
-                    PathBuf::from(format!(
-                        r"C:\Program Files\VRCForge\EvidenceAuthority\v1\{}\vrcforge_primitive_evidence_controller.exe",
-                        "00".repeat(32)
-                    )),
-                    [0; 32],
-                ),
-            ] {
-                assert_eq!(
-                    AuthorityPeerPolicy::new(path, candidate_digest, 1)
-                        .unwrap_err()
-                        .code(),
-                    "authority_peer_controller_path_not_content_addressed"
-                );
-            }
-        }
-
-        #[test]
-        fn production_sddl_parses_without_elevation() {
-            let descriptor = SecurityDescriptor::from_sddl(AUTHORITY_PIPE_SDDL).unwrap();
-            assert!(!descriptor.0.is_null());
-        }
-
-        #[test]
-        fn first_instance_flag_prevents_a_second_real_server() {
-            let name = unique_test_pipe_name();
-            let _first = create_pipe_with_sddl(&name, TEST_PIPE_SDDL).unwrap();
-            let error = create_pipe_with_sddl(&name, TEST_PIPE_SDDL).unwrap_err();
-            assert_eq!(error.code(), "authority_pipe_create_failed");
-        }
-
-        #[test]
-        fn current_process_cannot_obtain_identity_through_production_policy() {
-            let name = unique_test_pipe_name();
-            let pipe = create_pipe_with_sddl(&name, TEST_PIPE_SDDL).unwrap();
-            let _client = open_test_client(&name).unwrap();
-            let current_path = std::env::current_exe().unwrap();
-            let mut digest: [u8; 32] = Sha256::digest(std::fs::read(&current_path).unwrap()).into();
-            digest[0] ^= 0xff;
-            let expected_path = current_path
-                .parent()
-                .unwrap()
-                .join(hex_lower(&digest))
-                .join("vrcforge_primitive_evidence_controller.exe");
-            let policy = AuthorityPeerPolicy::new(
-                expected_path,
-                digest,
-                current_process_session_id().unwrap(),
-            )
-            .unwrap();
-            assert!(pipe.accept_peer(&policy).is_err());
-        }
-
-        #[test]
-        fn self_test_is_non_mutating_and_does_not_need_elevation() {
-            run_non_mutating_self_test().unwrap();
-        }
-
-        #[test]
-        fn exited_process_with_still_active_exit_code_is_not_live() {
-            let mut child = std::process::Command::new("cmd.exe")
-                .args(["/C", "exit", "259"])
-                .spawn()
-                .unwrap();
-            let status = child.wait().unwrap();
-            assert_eq!(status.code(), Some(259));
-            assert!(!process_is_active(child.as_raw_handle().cast()).unwrap());
-        }
-    }
 }
+
+#[cfg(all(test, windows))]
+#[path = "primitive_evidence_authority_pipe/tests.rs"]
+mod tests;
 
 #[cfg(windows)]
 #[allow(unused_imports)]
-pub use windows::{
-    run_non_mutating_self_test, AuthorityPeerIdentity, AuthorityPipe, StableFileIdentity,
-};
+pub use windows::{run_non_mutating_self_test, AuthorityPeerIdentity, AuthorityPipe};
 
 #[cfg(not(windows))]
 pub fn run_non_mutating_self_test() -> Result<(), AuthorityPipeError> {
