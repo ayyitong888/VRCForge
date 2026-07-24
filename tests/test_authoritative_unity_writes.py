@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import authoritative_unity_writes as writes
+from component_feature_write import TOOL_NAME as COMPONENT_FEATURE_TOOL
 from constraint_source_write import TOOL_NAME as CONSTRAINT_TOOL
 from material_shader_assignment import TOOL_NAME as MATERIAL_TOOL
 from scene_object_copy import DUPLICATE_TOOL_NAME, PREFAB_TOOL_NAME
@@ -19,6 +20,7 @@ def test_registry_contains_only_the_guarded_write_protocols() -> None:
         PREFAB_TOOL_NAME,
         TEXTURE_TOOL,
         CONSTRAINT_TOOL,
+        COMPONENT_FEATURE_TOOL,
     }
 
 

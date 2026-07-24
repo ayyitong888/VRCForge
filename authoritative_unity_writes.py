@@ -11,6 +11,12 @@ from material_shader_assignment import (
     bind_authoritative_preview as bind_material_shader_preview,
     build_preview_arguments as build_material_shader_preview_arguments,
 )
+from component_feature_write import (
+    TOOL_NAME as COMPONENT_FEATURE_TOOL,
+    ComponentFeatureWriteError,
+    bind_authoritative_preview as bind_component_feature_preview,
+    build_preview_arguments as build_component_feature_preview_arguments,
+)
 from constraint_source_write import (
     TOOL_NAME as CONSTRAINT_SOURCE_TOOL,
     ConstraintSourceWriteError,
@@ -103,6 +109,15 @@ _SPECS = {
         domain_error=ConstraintSourceWriteError,
         build_preview=build_constraint_source_preview_arguments,
         bind_preview=bind_constraint_source_preview,
+    ),
+    COMPONENT_FEATURE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=COMPONENT_FEATURE_TOOL,
+        request_error="Component feature arguments are required.",
+        bridge_error="Component feature preview could not be verified against the current project.",
+        receipt_error="Component feature preview returned an invalid verification receipt.",
+        domain_error=ComponentFeatureWriteError,
+        build_preview=build_component_feature_preview_arguments,
+        bind_preview=bind_component_feature_preview,
     ),
 }
 

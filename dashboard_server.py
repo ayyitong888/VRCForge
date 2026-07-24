@@ -68,6 +68,10 @@ from constraint_source_write import (
     TOOL_NAME as CONSTRAINT_SOURCE_TOOL,
     build_wrapper_arguments as build_constraint_source_wrapper_arguments,
 )
+from component_feature_write import (
+    TOOL_NAME as COMPONENT_FEATURE_TOOL,
+    build_wrapper_arguments as build_component_feature_wrapper_arguments,
+)
 from backend_owner_lease import BackendOwnerLease
 from background_goal_delivery import BackgroundGoalDeliveryCoordinator, BackgroundGoalDeliveryError
 from background_goal_runtime import (
@@ -383,6 +387,7 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_save_scene_object_as_prefab",
     "vrc_set_texture_import_settings",
     "vrc_set_constraint_sources",
+    "vrc_create_component_feature",
 ]
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
@@ -396,6 +401,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_save_scene_object_as_prefab",
         "vrc_set_texture_import_settings",
         "vrc_set_constraint_sources",
+        "vrc_create_component_feature",
         "vrc_toggle_scene_object",
         "vrc_setup_outfit",
         "vrc_add_wardrobe_outfit",
@@ -18111,6 +18117,14 @@ def preview_constraint_sources_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "preview": preview}
 
 
+def preview_component_feature_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_component_feature_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
 ADDON_FRAMEWORKS: dict[str, dict[str, Any]] = {
     "modular_avatar": {
         "label": "Modular Avatar",
@@ -23279,6 +23293,12 @@ def register_agent_gateway_tools() -> None:
         "Preview one exact ordered constraint-source replacement without writing project files.",
         "plan/preview",
         preview_constraint_sources_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_component_feature",
+        "Preview one fixed-schema component feature creation without writing project files.",
+        "plan/preview",
+        preview_component_feature_sync,
     )
     AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)

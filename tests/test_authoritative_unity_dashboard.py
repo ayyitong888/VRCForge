@@ -7,6 +7,16 @@ from unittest.mock import patch
 import pytest
 
 import dashboard_server
+from component_feature_write import (
+    COMPATIBILITY_DIGEST_SCHEMA,
+    EXPECTED_COMPATIBILITY,
+    FEATURE_DIGEST_SCHEMA,
+    TOOL_NAME as COMPONENT_FEATURE_TOOL_NAME,
+    build_wrapper_arguments as build_component_feature_wrapper,
+    compute_compatibility_digest as compute_component_compatibility_digest,
+    compute_feature_digest,
+    compute_preview_digest as compute_component_preview_digest,
+)
 from constraint_source_write import (
     TOOL_NAME as CONSTRAINT_TOOL_NAME,
     build_wrapper_arguments as build_constraint_wrapper,
@@ -208,6 +218,74 @@ def _constraint_payload(project: Path) -> dict:
     }
 
 
+def _component_feature_payload(project: Path) -> dict:
+    before = {"present": False, "featureKind": "toggle"}
+    target = {
+        "present": True,
+        "featureKind": "toggle",
+        "menuPath": "Wardrobe/Hat",
+        "slider": False,
+        "defaultOn": True,
+        "saved": True,
+        "globalParameter": "Wardrobe_Hat",
+        "targets": [
+            {
+                "objectPath": "Avatar/Hat",
+                "objectId": "GlobalObjectId_V1-2-100-0-0",
+            }
+        ],
+    }
+    compatibility = deepcopy(EXPECTED_COMPATIBILITY)
+    compatibility.update(
+        {
+            "apiAssemblyDigest": "6" * 64,
+            "runtimeAssemblyDigest": "7" * 64,
+        }
+    )
+    payload = {
+        "schema": "vrcforge.component_feature_write.v1",
+        "ok": True,
+        "preview": True,
+        "verified": True,
+        "changed": False,
+        "saved": False,
+        "mutationCount": 0,
+        "projectPath": str(project.resolve()),
+        "compatibility": compatibility,
+        "compatibilityDigestSchema": COMPATIBILITY_DIGEST_SCHEMA,
+        "compatibilityDigest": compute_component_compatibility_digest(compatibility),
+        "scene": {
+            "path": "Assets/Scenes/Fixture.unity",
+            "guid": "a" * 32,
+            "handle": -1322,
+            "fileDigestBefore": "b" * 64,
+            "fileDigestAfter": "b" * 64,
+            "fileIdentity": "c" * 64,
+            "metaDigestBefore": "d" * 64,
+            "metaDigestAfter": "d" * 64,
+            "metaIdentity": "e" * 64,
+            "dirtyBefore": False,
+            "dirtyAfter": False,
+        },
+        "host": {
+            "objectPath": "Avatar/FeatureHost",
+            "objectId": "GlobalObjectId_V1-2-300-0-0",
+            "componentType": "VF.Model.VRCFury",
+            "componentIndex": 0,
+            "componentIdentitySeed": "f" * 64,
+            "existingFeatureCount": 0,
+        },
+        "before": before,
+        "target": target,
+        "featureDigestSchema": FEATURE_DIGEST_SCHEMA,
+        "beforeFeatureDigest": compute_feature_digest(before),
+        "targetFeatureDigest": compute_feature_digest(target),
+        "wouldChange": True,
+    }
+    payload["previewDigest"] = compute_component_preview_digest(payload)
+    return payload
+
+
 @pytest.mark.parametrize(
     ("tool_name", "params", "payload", "plan_call", "expected_precondition"),
     [
@@ -367,12 +445,70 @@ def test_constraint_plan_and_approval_use_one_authoritative_mapping(tmp_path: Pa
         assert not any(key.startswith("expected") and key != "expectedProjectPath" for key in call.args[2])
 
 
+def test_component_feature_plan_and_approval_use_one_authoritative_mapping(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    params = {
+        "projectPath": str(project),
+        "scenePath": "Assets/Scenes/Fixture.unity",
+        "gameObjectPath": "Avatar/FeatureHost",
+        "featureKind": "toggle",
+        "menuPath": "Wardrobe/Hat",
+        "targetObjectPaths": ["Avatar/Hat"],
+        "slider": False,
+        "defaultOn": True,
+        "saved": True,
+        "globalParameter": "Wardrobe_Hat",
+    }
+    result = dashboard_server.McpResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        payload={"data": _component_feature_payload(project)},
+    )
+
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=result) as invoke,
+    ):
+        plan = dashboard_server.preview_component_feature_sync(deepcopy(params))
+        prepared, approval = dashboard_server.prepare_unity_mcp_write_request(
+            build_component_feature_wrapper(deepcopy(params)),
+            {"spoofed": True},
+        )
+
+    assert plan == {"ok": True, "preview": approval}
+    assert prepared["toolName"] == COMPONENT_FEATURE_TOOL_NAME
+    assert prepared["projectPath"] == str(project.resolve()).replace("\\", "/")
+    assert prepared["arguments"]["expectedSceneHandle"] == -1322
+    assert prepared["arguments"]["expectedSceneFileIdentity"] == "c" * 64
+    assert prepared["arguments"]["expectedCompatibilityDigest"]
+    assert prepared["arguments"]["expectedPreviewDigest"] == approval["previewDigest"]
+    assert prepared["arguments"]["preview"] is False
+    assert prepared["arguments"]["saveScene"] is True
+    assert "spoofed" not in approval
+    assert [call.args[1] for call in invoke.call_args_list] == [
+        COMPONENT_FEATURE_TOOL_NAME,
+        COMPONENT_FEATURE_TOOL_NAME,
+    ]
+    for call in invoke.call_args_list:
+        assert call.args[2]["preview"] is True
+        assert call.args[2]["saveScene"] is False
+        assert not any(
+            key.startswith("expected") and key != "expectedProjectPath"
+            for key in call.args[2]
+        )
+
+
 def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
     for tool_name in (
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
         TEXTURE_TOOL_NAME,
         CONSTRAINT_TOOL_NAME,
+        COMPONENT_FEATURE_TOOL_NAME,
     ):
         assert tool_name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
@@ -381,5 +517,6 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
         "vrcforge_preview_scene_object_prefab",
         "vrcforge_preview_texture_import_settings",
         "vrcforge_preview_constraint_sources",
+        "vrcforge_preview_component_feature",
     ):
         assert plan_tool in dashboard_server.AGENT_GATEWAY._tools
