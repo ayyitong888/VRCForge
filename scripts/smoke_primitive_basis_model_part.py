@@ -90,6 +90,7 @@ class PreparedRun:
     portable_digest: str
     desktop_digest: str
     backend_digest: str
+    backend_tree_digest: str
     unity_package_digest: str
     packaged_unity_tool_tree_digest: str
     runtime_unity_tool_tree_digest: str
@@ -343,13 +344,7 @@ class PackagedModelPartSmoke:
         if _git("status", "--porcelain"):
             raise PackagedModelPartSmokeError("Strict packaged evidence requires a clean worktree.")
         policy = _mapping(manifest.get("buildPolicy"))
-        if policy != {
-            "mode": "strict",
-            "releaseEligible": True,
-            "allowDirty": False,
-            "allowUnpushed": False,
-            "allowVersionMismatch": False,
-        }:
+        if not _accepted_evidence_build_policy(policy):
             raise PackagedModelPartSmokeError("The release manifest is not strict.")
 
         portable_name = f"VRCForge_Windows_x64_{source_version}.zip"
@@ -373,15 +368,20 @@ class PackagedModelPartSmoke:
         if set(artifacts) != expected_artifacts:
             raise PackagedModelPartSmokeError("The release artifact set is not exact.")
         release_root = manifest_path.parent
-        portable_path = release_root / portable_name
-        unity_package_path = release_root / "VRCForge.unitypackage"
-        portable_digest = _stable_digest(portable_path)
-        unity_package_digest = _stable_digest(unity_package_path)
-        if (
-            portable_digest != artifacts[portable_name]
-            or unity_package_digest != artifacts["VRCForge.unitypackage"]
-        ):
-            raise PackagedModelPartSmokeError("A release artifact digest changed.")
+        release_inputs_root = self.private_root / "release-inputs"
+        release_inputs_root.mkdir(exist_ok=False)
+        portable_path = release_inputs_root / portable_name
+        unity_package_path = release_inputs_root / "VRCForge.unitypackage"
+        portable_digest = _copy_stable_release_input(
+            release_root / portable_name,
+            portable_path,
+            artifacts[portable_name],
+        )
+        unity_package_digest = _copy_stable_release_input(
+            release_root / "VRCForge.unitypackage",
+            unity_package_path,
+            artifacts["VRCForge.unitypackage"],
+        )
 
         package_root = self.private_root / "package"
         _extract_safe_zip(portable_path, package_root)
@@ -392,6 +392,7 @@ class PackagedModelPartSmoke:
         )
         desktop_digest = _stable_digest(desktop)
         backend_digest = _stable_digest(backend)
+        backend_tree_digest = _tree_digest(backend.parent)
         if _stable_digest(internal_unity_package) != unity_package_digest:
             raise PackagedModelPartSmokeError("The portable Unity package copy changed.")
         embedded_version = _stable_read(package_root / "VERSION", 128).decode(
@@ -473,6 +474,7 @@ class PackagedModelPartSmoke:
                 "portableDigest": portable_digest,
                 "desktopDigest": desktop_digest,
                 "backendDigest": backend_digest,
+                "backendTreeDigest": backend_tree_digest,
                 "unityPackageDigest": unity_package_digest,
                 "packagedUnityToolTreeDigest": packaged_unity_tool_tree_digest,
                 "runtimeUnityToolTreeDigest": runtime_unity_tool_tree_digest,
@@ -515,6 +517,7 @@ class PackagedModelPartSmoke:
             portable_digest=portable_digest,
             desktop_digest=desktop_digest,
             backend_digest=backend_digest,
+            backend_tree_digest=backend_tree_digest,
             unity_package_digest=unity_package_digest,
             packaged_unity_tool_tree_digest=packaged_unity_tool_tree_digest,
             runtime_unity_tool_tree_digest=runtime_unity_tool_tree_digest,
@@ -531,6 +534,11 @@ class PackagedModelPartSmoke:
 
     def _launch_desktop(self) -> None:
         prepared = self._required_prepared()
+        if (
+            _tree_digest(prepared.backend_executable.parent)
+            != prepared.backend_tree_digest
+        ):
+            raise PackagedModelPartSmokeError("The packaged backend tree changed.")
         config_root = self.private_root / "config"
         user_data_root = self.private_root / "user-data"
         webview_root = self.private_root / "webview"
@@ -889,6 +897,7 @@ class PackagedModelPartSmoke:
             "portableDigest": prepared.portable_digest,
             "desktopDigest": prepared.desktop_digest,
             "backendDigest": prepared.backend_digest,
+            "backendTreeDigest": prepared.backend_tree_digest,
             "unityPackageDigest": prepared.unity_package_digest,
             "packagedUnityToolTreeDigest": prepared.packaged_unity_tool_tree_digest,
             "runtimeUnityToolTreeDigest": prepared.runtime_unity_tool_tree_digest,
@@ -970,6 +979,133 @@ def _verify_server_root(root: Path) -> None:
     unix_python = root / ".venv" / "bin" / "python"
     if not windows_python.is_file() and not unix_python.is_file():
         raise PackagedModelPartSmokeError("The fixed bridge server environment is absent.")
+
+
+def _accepted_evidence_build_policy(value: Mapping[str, Any]) -> bool:
+    return dict(value) in (
+        {
+            "mode": "strict",
+            "releaseEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        },
+        {
+            "mode": "strict-evidence",
+            "releaseEligible": False,
+            "evidenceEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        },
+    )
+
+
+def _copy_stable_release_input(
+    source: Path,
+    destination: Path,
+    expected_digest: str,
+) -> str:
+    if not _is_sha256(expected_digest):
+        raise PackagedModelPartSmokeError("The release input digest is invalid.")
+    if (
+        not source.is_file()
+        or _is_reparse_point(source)
+        or not _has_single_link(source.lstat())
+    ):
+        raise PackagedModelPartSmokeError("The release input source is invalid.")
+    if not destination.parent.is_dir() or _is_reparse_point(destination.parent):
+        raise PackagedModelPartSmokeError("The release input target is invalid.")
+    if destination.exists() or _is_reparse_point(destination):
+        raise PackagedModelPartSmokeError("The release input target already exists.")
+
+    digest = hashlib.sha256()
+    owned_identity: tuple[int, int] | None = None
+    try:
+        with source.open("rb") as source_stream:
+            source_before = os.fstat(source_stream.fileno())
+            if (
+                not stat.S_ISREG(source_before.st_mode)
+                or not _has_single_link(source_before)
+            ):
+                raise PackagedModelPartSmokeError(
+                    "The release input source is invalid."
+                )
+            with destination.open("xb") as target_stream:
+                target_created = os.fstat(target_stream.fileno())
+                if not _has_single_link(target_created):
+                    raise PackagedModelPartSmokeError(
+                        "The private release input target is invalid."
+                    )
+                owned_identity = (target_created.st_dev, target_created.st_ino)
+                _copy_open_file(source_stream, target_stream, digest)
+                target_stream.flush()
+                os.fsync(target_stream.fileno())
+                target_after = os.fstat(target_stream.fileno())
+            source_after = os.fstat(source_stream.fileno())
+        current_source = source.stat()
+        current_target = destination.stat()
+        if (
+            _file_identity(source_before) != _file_identity(source_after)
+            or _file_identity(source_after) != _file_identity(current_source)
+            or not _has_single_link(source_before)
+            or not _has_single_link(source_after)
+            or not _has_single_link(current_source)
+            or _is_reparse_point(source)
+        ):
+            raise PackagedModelPartSmokeError(
+                "The release input source changed during copying."
+            )
+        if (
+            _file_identity(target_after) != _file_identity(current_target)
+            or not _has_single_link(target_created)
+            or not _has_single_link(target_after)
+            or not _has_single_link(current_target)
+            or _is_reparse_point(destination)
+            or _is_reparse_point(destination.parent)
+        ):
+            raise PackagedModelPartSmokeError(
+                "The private release input changed during copying."
+            )
+        copied_digest = digest.hexdigest()
+        if (
+            copied_digest != expected_digest
+            or _stable_digest(destination) != expected_digest
+        ):
+            raise PackagedModelPartSmokeError("A release artifact digest changed.")
+        final_target = destination.stat()
+        if (
+            _file_identity(current_target) != _file_identity(final_target)
+            or not _has_single_link(final_target)
+            or _is_reparse_point(destination)
+        ):
+            raise PackagedModelPartSmokeError(
+                "The private release input changed after copying."
+            )
+        return copied_digest
+    except Exception:
+        if owned_identity is not None:
+            try:
+                current = destination.lstat()
+                if (
+                    not _is_reparse_point(destination)
+                    and (current.st_dev, current.st_ino) == owned_identity
+                    and _has_single_link(current)
+                ):
+                    destination.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _copy_open_file(source_stream: Any, target_stream: Any, digest: Any) -> None:
+    total_bytes = 0
+    for chunk in iter(lambda: source_stream.read(1024 * 1024), b""):
+        total_bytes += len(chunk)
+        if total_bytes > MAX_TREE_BYTES:
+            raise PackagedModelPartSmokeError("A release input is too large.")
+        target_stream.write(chunk)
+        digest.update(chunk)
 
 
 def _extract_safe_zip(source: Path, destination: Path) -> None:
@@ -1130,6 +1266,10 @@ def _stable_digest(path: Path) -> str:
 
 def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
+def _has_single_link(value: os.stat_result) -> bool:
+    return getattr(value, "st_nlink", 1) == 1
 
 
 def _is_reparse_point(path: Path) -> bool:

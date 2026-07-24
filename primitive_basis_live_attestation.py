@@ -20,6 +20,10 @@ LIVE_EVIDENCE_SCHEMA = "vrcforge.primitive_basis_live_evidence.v3"
 LIVE_RECEIPT_SCHEMA = "vrcforge.primitive_basis_live_receipt.v3"
 LIVE_MATRIX_SCHEMA = "vrcforge.primitive_basis_matrix.v3"
 LIVE_BOOTSTRAP_MAGIC = b"VRCFPRIMLIVE3\x00\x00\x00"
+TRUSTED_LIVE_ATTESTATION_SCHEMA = "vrcforge.primitive_basis_live_attestation.v4"
+TRUSTED_LIVE_EVIDENCE_SCHEMA = "vrcforge.primitive_basis_live_evidence.v4"
+TRUSTED_LIVE_RECEIPT_SCHEMA = "vrcforge.primitive_basis_live_receipt.v4"
+TRUSTED_LIVE_BOOTSTRAP_MAGIC = b"VRCFPRIMLIVE4\x00\x00\x00"
 LIVE_PROOF_ALGORITHM = "hmac-sha256-runner-self-mac-v1"
 LIVE_ORIGIN_TRUST = "untrusted_runner_self_mac"
 LIVE_STDIN_ENV = "VRCFORGE_PRIMITIVE_LIVE_STDIN"
@@ -77,6 +81,7 @@ _COMMON_RECEIPT_FIELDS = {
     "facts",
     "authoritativeEventDigest",
 }
+_TRUSTED_RECEIPT_FIELDS = _COMMON_RECEIPT_FIELDS | {"originTicketDigest"}
 _ATTESTATION_FIELDS = {
     "schema",
     "runId",
@@ -104,6 +109,7 @@ _ATTESTATION_FIELDS = {
     "originVerified",
     "proof",
 }
+_TRUSTED_ATTESTATION_FIELDS = _ATTESTATION_FIELDS | {"originTicketDigest"}
 _FINALIZATION_FIELDS = {"schema", "evidence", "attestation"}
 _EVIDENCE_FIELDS = {"schema", "runId", "rows"}
 _ROW_FIELDS = {"scenarioId", "primitiveId", "fixtureDigest", "receipts"}
@@ -220,12 +226,15 @@ class LiveBootstrap:
     fixture_project_input_digest: str
     fixture_set_descriptor_digest: str
     fixture_descriptor_digest: str
+    origin_ticket_digest: str = ""
 
     def __post_init__(self) -> None:
         if len(self.key) != 32 or len(self.challenge) != 32:
             raise LiveAttestationError("live bootstrap secret length is invalid")
         for field_name in _BOOTSTRAP_DIGEST_FIELDS:
             _require_digest(getattr(self, field_name), field_name)
+        if self.origin_ticket_digest:
+            _require_digest(self.origin_ticket_digest, "origin ticket digest")
 
     @property
     def challenge_digest(self) -> str:
@@ -252,6 +261,67 @@ class VerifiedLiveRun:
     finished_at: str
     finalized_at: str
     receipts: tuple[dict[str, Any], ...]
+    inner_attestation_digest: str = ""
+    origin_signer_key_id: str = ""
+    origin_ticket_digest: str = ""
+    origin_process_graph_digest: str = ""
+    origin_network_binding_digest: str = ""
+    origin_cleanup_digest: str = ""
+
+
+@dataclass(frozen=True)
+class LivePublicBinding:
+    """Public inner-run fields authenticated by a separate origin envelope."""
+
+    run_id: str
+    challenge_digest: str
+    runtime_binding_digest: str
+    desktop_executable_digest: str
+    backend_executable_digest: str
+    runner_digest: str
+    unity_package_digest: str
+    unity_editor_digest: str
+    fixture_project_input_digest: str
+    fixture_set_descriptor_digest: str
+    fixture_descriptor_digest: str
+    origin_ticket_digest: str = ""
+
+    def __post_init__(self) -> None:
+        _require_safe_id(self.run_id, "live run")
+        for field_name in (
+            "challenge_digest",
+            "runtime_binding_digest",
+            "desktop_executable_digest",
+            "backend_executable_digest",
+            "runner_digest",
+            "unity_package_digest",
+            "unity_editor_digest",
+            "fixture_project_input_digest",
+            "fixture_set_descriptor_digest",
+            "fixture_descriptor_digest",
+        ):
+            _require_digest(getattr(self, field_name), field_name)
+        if self.run_id != f"primitive-live-{self.challenge_digest[:32]}":
+            raise LiveAttestationError("live run and challenge binding mismatch")
+        if self.origin_ticket_digest:
+            _require_digest(self.origin_ticket_digest, "origin ticket digest")
+
+    @classmethod
+    def from_bootstrap(cls, bootstrap: LiveBootstrap) -> "LivePublicBinding":
+        return cls(
+            run_id=bootstrap.run_id,
+            challenge_digest=bootstrap.challenge_digest,
+            runtime_binding_digest=bootstrap.runtime_binding_digest,
+            desktop_executable_digest=bootstrap.desktop_executable_digest,
+            backend_executable_digest=bootstrap.backend_executable_digest,
+            runner_digest=bootstrap.runner_digest,
+            unity_package_digest=bootstrap.unity_package_digest,
+            unity_editor_digest=bootstrap.unity_editor_digest,
+            fixture_project_input_digest=bootstrap.fixture_project_input_digest,
+            fixture_set_descriptor_digest=bootstrap.fixture_set_descriptor_digest,
+            fixture_descriptor_digest=bootstrap.fixture_descriptor_digest,
+            origin_ticket_digest=bootstrap.origin_ticket_digest,
+        )
 
 
 class PrimitiveBasisLiveSession:
@@ -333,21 +403,26 @@ class PrimitiveBasisLiveSession:
         safe_facts = _copy_public_mapping(facts, "receipt facts")
         safe_event = _copy_public_mapping(authoritative_event, "authoritative event")
         _validate_facts(phase, safe_facts)
-        event_digest = _digest_json(
-            {
-                "runId": self._bootstrap.run_id,
-                "phase": phase,
-                "sequence": sequence,
-                "event": safe_event,
-            }
-        )
+        event_binding = {
+            "runId": self._bootstrap.run_id,
+            "phase": phase,
+            "sequence": sequence,
+            "event": safe_event,
+        }
+        if self._bootstrap.origin_ticket_digest:
+            event_binding["originTicketDigest"] = self._bootstrap.origin_ticket_digest
+        event_digest = _digest_json(event_binding)
         timestamp = _utc_now(lambda: observed_at or self._now())
         if self._receipts:
             previous = _parse_utc(self._receipts[-1]["observedAt"])
             if previous is not None and timestamp <= previous:
                 timestamp = previous + timedelta(microseconds=1)
         receipt = {
-            "schema": LIVE_RECEIPT_SCHEMA,
+            "schema": (
+                TRUSTED_LIVE_RECEIPT_SCHEMA
+                if self._bootstrap.origin_ticket_digest
+                else LIVE_RECEIPT_SCHEMA
+            ),
             "runId": self._bootstrap.run_id,
             "scenarioId": MODEL_SCENARIO_ID,
             "primitiveId": MODEL_PRIMITIVE_ID,
@@ -362,6 +437,8 @@ class PrimitiveBasisLiveSession:
             "facts": safe_facts,
             "authoritativeEventDigest": event_digest,
         }
+        if self._bootstrap.origin_ticket_digest:
+            receipt["originTicketDigest"] = self._bootstrap.origin_ticket_digest
         self._receipts.append(receipt)
         self._event_digests.append(event_digest)
         return json.loads(json.dumps(receipt))
@@ -393,8 +470,18 @@ class PrimitiveBasisLiveSession:
             }
             for receipt in self._receipts
         ]
+        attestation_schema = (
+            TRUSTED_LIVE_ATTESTATION_SCHEMA
+            if self._bootstrap.origin_ticket_digest
+            else LIVE_ATTESTATION_SCHEMA
+        )
+        evidence_schema = (
+            TRUSTED_LIVE_EVIDENCE_SCHEMA
+            if self._bootstrap.origin_ticket_digest
+            else LIVE_EVIDENCE_SCHEMA
+        )
         attestation = {
-            "schema": LIVE_ATTESTATION_SCHEMA,
+            "schema": attestation_schema,
             "runId": self._bootstrap.run_id,
             "challengeDigest": self._bootstrap.challenge_digest,
             "scenarioId": MODEL_SCENARIO_ID,
@@ -419,6 +506,8 @@ class PrimitiveBasisLiveSession:
             "originTrust": LIVE_ORIGIN_TRUST,
             "originVerified": False,
         }
+        if self._bootstrap.origin_ticket_digest:
+            attestation["originTicketDigest"] = self._bootstrap.origin_ticket_digest
         proof = hmac.new(
             bytes(self._key),
             _canonical_bytes(attestation),
@@ -426,9 +515,9 @@ class PrimitiveBasisLiveSession:
         ).hexdigest()
         attestation["proof"] = proof
         finalization = {
-            "schema": LIVE_ATTESTATION_SCHEMA,
+            "schema": attestation_schema,
             "evidence": {
-                "schema": LIVE_EVIDENCE_SCHEMA,
+                "schema": evidence_schema,
                 "runId": self._bootstrap.run_id,
                 "rows": [
                     {
@@ -457,60 +546,117 @@ def verify_live_finalization(
     project_binding_digest: str,
     verified_at: datetime | None = None,
 ) -> VerifiedLiveRun:
+    return _verify_live_finalization_common(
+        payload,
+        binding=LivePublicBinding.from_bootstrap(bootstrap),
+        proof_key=bootstrap.key,
+        fixture_digest=fixture_digest,
+        project_binding_digest=project_binding_digest,
+        verified_at=verified_at,
+    )
+
+
+def verify_origin_bound_live_finalization(
+    payload: Mapping[str, Any],
+    *,
+    binding: LivePublicBinding,
+    fixture_digest: str,
+    project_binding_digest: str,
+    verified_at: datetime | None = None,
+) -> VerifiedLiveRun:
+    """Validate inner semantics already authenticated by a trusted envelope.
+
+    This function never upgrades origin trust. The caller must first verify a
+    report-independent origin signature over the exact finalization bytes and
+    only then replace the returned false origin state with that derived result.
+    """
+
+    if not binding.origin_ticket_digest:
+        raise LiveAttestationError("trusted live origin ticket binding is missing")
+    return _verify_live_finalization_common(
+        payload,
+        binding=binding,
+        proof_key=None,
+        fixture_digest=fixture_digest,
+        project_binding_digest=project_binding_digest,
+        verified_at=verified_at,
+    )
+
+
+def _verify_live_finalization_common(
+    payload: Mapping[str, Any],
+    *,
+    binding: LivePublicBinding,
+    proof_key: bytes | None,
+    fixture_digest: str,
+    project_binding_digest: str,
+    verified_at: datetime | None,
+) -> VerifiedLiveRun:
     if not isinstance(payload, Mapping):
         raise LiveAttestationError("live finalization must be an object")
     _require_public_safe(payload)
+    trusted = bool(binding.origin_ticket_digest)
+    attestation_schema = (
+        TRUSTED_LIVE_ATTESTATION_SCHEMA if trusted else LIVE_ATTESTATION_SCHEMA
+    )
+    evidence_schema = TRUSTED_LIVE_EVIDENCE_SCHEMA if trusted else LIVE_EVIDENCE_SCHEMA
+    attestation_fields = _TRUSTED_ATTESTATION_FIELDS if trusted else _ATTESTATION_FIELDS
     _require_exact_fields(payload, _FINALIZATION_FIELDS, "live finalization")
-    if payload.get("schema") != LIVE_ATTESTATION_SCHEMA:
+    if payload.get("schema") != attestation_schema:
         raise LiveAttestationError("live finalization schema mismatch")
     evidence = payload.get("evidence")
     attestation = payload.get("attestation")
     if not isinstance(evidence, Mapping) or not isinstance(attestation, Mapping):
         raise LiveAttestationError("live finalization sections are invalid")
     _require_exact_fields(evidence, _EVIDENCE_FIELDS, "live evidence")
-    _require_exact_fields(attestation, _ATTESTATION_FIELDS, "live attestation")
-    if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
+    _require_exact_fields(attestation, attestation_fields, "live attestation")
+    if evidence.get("schema") != evidence_schema:
         raise LiveAttestationError("live evidence schema mismatch")
-    if attestation.get("schema") != LIVE_ATTESTATION_SCHEMA:
+    if attestation.get("schema") != attestation_schema:
         raise LiveAttestationError("live attestation schema mismatch")
 
     expected_fixture = _require_digest(fixture_digest, "fixture digest")
     expected_project = _require_digest(project_binding_digest, "project binding digest")
     expected_values = {
-        "runId": bootstrap.run_id,
-        "challengeDigest": bootstrap.challenge_digest,
+        "runId": binding.run_id,
+        "challengeDigest": binding.challenge_digest,
         "scenarioId": MODEL_SCENARIO_ID,
         "primitiveId": MODEL_PRIMITIVE_ID,
-        "fixtureSetDescriptorDigest": bootstrap.fixture_set_descriptor_digest,
-        "fixtureDescriptorDigest": bootstrap.fixture_descriptor_digest,
+        "fixtureSetDescriptorDigest": binding.fixture_set_descriptor_digest,
+        "fixtureDescriptorDigest": binding.fixture_descriptor_digest,
         "fixtureDigest": expected_fixture,
         "projectBindingDigest": expected_project,
-        "runtimeBindingDigest": bootstrap.runtime_binding_digest,
-        "desktopExecutableDigest": bootstrap.desktop_executable_digest,
-        "backendExecutableDigest": bootstrap.backend_executable_digest,
-        "runnerDigest": bootstrap.runner_digest,
-        "unityPackageDigest": bootstrap.unity_package_digest,
-        "unityEditorDigest": bootstrap.unity_editor_digest,
-        "fixtureProjectInputDigest": bootstrap.fixture_project_input_digest,
+        "runtimeBindingDigest": binding.runtime_binding_digest,
+        "desktopExecutableDigest": binding.desktop_executable_digest,
+        "backendExecutableDigest": binding.backend_executable_digest,
+        "runnerDigest": binding.runner_digest,
+        "unityPackageDigest": binding.unity_package_digest,
+        "unityEditorDigest": binding.unity_editor_digest,
+        "fixtureProjectInputDigest": binding.fixture_project_input_digest,
         "proofAlgorithm": LIVE_PROOF_ALGORITHM,
         "originTrust": LIVE_ORIGIN_TRUST,
         "originVerified": False,
     }
+    if trusted:
+        expected_values["originTicketDigest"] = binding.origin_ticket_digest
     if any(attestation.get(key) != value for key, value in expected_values.items()):
         raise LiveAttestationError("live attestation binding mismatch")
-    if evidence.get("runId") != bootstrap.run_id:
+    if evidence.get("runId") != binding.run_id:
         raise LiveAttestationError("live evidence run mismatch")
 
     proof = _require_digest(attestation.get("proof"), "live proof")
-    unsigned = dict(attestation)
-    unsigned.pop("proof", None)
-    expected_proof = hmac.new(
-        bootstrap.key,
-        _canonical_bytes(unsigned),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(proof, expected_proof):
-        raise LiveAttestationError("live proof mismatch")
+    if proof_key is not None:
+        if len(proof_key) != 32:
+            raise LiveAttestationError("live proof key length is invalid")
+        unsigned = dict(attestation)
+        unsigned.pop("proof", None)
+        expected_proof = hmac.new(
+            proof_key,
+            _canonical_bytes(unsigned),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(proof, expected_proof):
+            raise LiveAttestationError("live proof mismatch")
 
     rows = evidence.get("rows")
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
@@ -530,7 +676,7 @@ def verify_live_finalization(
         _validate_receipt(
             receipt,
             sequence=index,
-            bootstrap=bootstrap,
+            bootstrap=binding,
             fixture_digest=expected_fixture,
             project_binding_digest=expected_project,
         )
@@ -538,7 +684,7 @@ def verify_live_finalization(
     ]
     _validate_receipt_invariants(
         checked_receipts,
-        expected_fixture_project_input_digest=bootstrap.fixture_project_input_digest,
+        expected_fixture_project_input_digest=binding.fixture_project_input_digest,
     )
     ordered_receipts = [
         {
@@ -572,14 +718,14 @@ def verify_live_finalization(
             raise LiveAttestationError("live receipt escaped the signed run window")
 
     return VerifiedLiveRun(
-        run_id=bootstrap.run_id,
+        run_id=binding.run_id,
         scenario_id=MODEL_SCENARIO_ID,
         primitive_id=MODEL_PRIMITIVE_ID,
-        fixture_set_descriptor_digest=bootstrap.fixture_set_descriptor_digest,
-        fixture_descriptor_digest=bootstrap.fixture_descriptor_digest,
+        fixture_set_descriptor_digest=binding.fixture_set_descriptor_digest,
+        fixture_descriptor_digest=binding.fixture_descriptor_digest,
         fixture_digest=expected_fixture,
         project_binding_digest=expected_project,
-        runtime_binding_digest=bootstrap.runtime_binding_digest,
+        runtime_binding_digest=binding.runtime_binding_digest,
         attestation_digest=_digest_json(attestation),
         origin_verified=False,
         started_at=_format_utc(started_at),
@@ -590,6 +736,13 @@ def verify_live_finalization(
 
 
 def build_live_matrix_report(fixtures: Any, verified: VerifiedLiveRun) -> dict[str, Any]:
+    """Build a diagnostic matrix that can never grant trusted-origin FULL.
+
+    ``VerifiedLiveRun`` is intentionally a public value object. A future
+    independent gate must revalidate raw signed evidence and own replay state;
+    caller-supplied fields and driver-produced matrix JSON are never authority.
+    """
+
     if fixtures.descriptor_digest != verified.fixture_set_descriptor_digest:
         raise LiveAttestationError("fixture set descriptor mismatch")
     fixture_by_id = {fixture.scenario_id: fixture for fixture in fixtures.fixtures}
@@ -634,18 +787,16 @@ def build_live_matrix_report(fixtures: Any, verified: VerifiedLiveRun) -> dict[s
                 )
     scenarios: list[dict[str, Any]] = []
     for candidate in fixtures.fixtures:
-        scenario_rows = [row for row in rows if row["scenarioId"] == candidate.scenario_id]
-        status = "full" if all(row["status"] == "full" for row in scenario_rows) else "blocked"
         scenarios.append(
             {
                 "scenarioId": candidate.scenario_id,
-                "status": status,
+                "status": "blocked",
                 "fixtureDigest": candidate.digest,
                 "requiredPrimitives": list(candidate.required_primitives),
             }
         )
-    full_rows = sum(row["status"] == "full" for row in rows)
-    full_scenarios = sum(item["status"] == "full" for item in scenarios)
+    full_rows = 0
+    full_scenarios = 0
     report = {
         "schema": LIVE_MATRIX_SCHEMA,
         "ok": False,
@@ -675,6 +826,12 @@ def build_live_matrix_report(fixtures: Any, verified: VerifiedLiveRun) -> dict[s
         },
         "attestation": {
             "digest": verified.attestation_digest,
+            "innerDigest": verified.inner_attestation_digest,
+            "originSignerKeyId": verified.origin_signer_key_id,
+            "originTicketDigest": verified.origin_ticket_digest,
+            "originProcessGraphDigest": verified.origin_process_graph_digest,
+            "originNetworkBindingDigest": verified.origin_network_binding_digest,
+            "originCleanupDigest": verified.origin_cleanup_digest,
             "startedAt": verified.started_at,
             "finishedAt": verified.finished_at,
             "finalizedAt": verified.finalized_at,
@@ -687,19 +844,33 @@ def build_live_matrix_report(fixtures: Any, verified: VerifiedLiveRun) -> dict[s
 def encode_bootstrap_frame(bootstrap: LiveBootstrap) -> bytes:
     values = [bootstrap.key, bootstrap.challenge]
     values.extend(bytes.fromhex(getattr(bootstrap, field)) for field in _BOOTSTRAP_DIGEST_FIELDS)
+    if bootstrap.origin_ticket_digest:
+        values.append(bytes.fromhex(bootstrap.origin_ticket_digest))
+        return TRUSTED_LIVE_BOOTSTRAP_MAGIC + b"".join(values)
     return LIVE_BOOTSTRAP_MAGIC + b"".join(values)
 
 
 def read_bootstrap_frame(stream: BinaryIO) -> LiveBootstrap:
-    expected_size = len(LIVE_BOOTSTRAP_MAGIC) + (2 + len(_BOOTSTRAP_DIGEST_FIELDS)) * 32
-    payload = stream.read(expected_size + 1)
-    if len(payload) != expected_size or not payload.startswith(LIVE_BOOTSTRAP_MAGIC):
+    legacy_size = len(LIVE_BOOTSTRAP_MAGIC) + (2 + len(_BOOTSTRAP_DIGEST_FIELDS)) * 32
+    trusted_size = legacy_size + 32
+    payload = stream.read(trusted_size + 1)
+    if payload.startswith(LIVE_BOOTSTRAP_MAGIC) and len(payload) == legacy_size:
+        trusted = False
+    elif payload.startswith(TRUSTED_LIVE_BOOTSTRAP_MAGIC) and len(payload) == trusted_size:
+        trusted = True
+    else:
         raise LiveAttestationError("live bootstrap frame is invalid")
     offset = len(LIVE_BOOTSTRAP_MAGIC)
     chunks = [payload[index : index + 32] for index in range(offset, len(payload), 32)]
     key, challenge, *digests = chunks
+    origin_ticket_digest = digests.pop().hex() if trusted else ""
     values = dict(zip(_BOOTSTRAP_DIGEST_FIELDS, (item.hex() for item in digests), strict=True))
-    return LiveBootstrap(key=key, challenge=challenge, **values)
+    return LiveBootstrap(
+        key=key,
+        challenge=challenge,
+        origin_ticket_digest=origin_ticket_digest,
+        **values,
+    )
 
 
 def load_packaged_live_session_from_stdin(
@@ -733,16 +904,21 @@ def _validate_receipt(
     value: Any,
     *,
     sequence: int,
-    bootstrap: LiveBootstrap,
+    bootstrap: LiveBootstrap | LivePublicBinding,
     fixture_digest: str,
     project_binding_digest: str,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise LiveAttestationError("live receipt must be an object")
-    _require_exact_fields(value, _COMMON_RECEIPT_FIELDS, "live receipt")
+    trusted = bool(bootstrap.origin_ticket_digest)
+    _require_exact_fields(
+        value,
+        _TRUSTED_RECEIPT_FIELDS if trusted else _COMMON_RECEIPT_FIELDS,
+        "live receipt",
+    )
     phase = LIVE_PHASES[sequence - 1]
     expected = {
-        "schema": LIVE_RECEIPT_SCHEMA,
+        "schema": TRUSTED_LIVE_RECEIPT_SCHEMA if trusted else LIVE_RECEIPT_SCHEMA,
         "runId": bootstrap.run_id,
         "scenarioId": MODEL_SCENARIO_ID,
         "primitiveId": MODEL_PRIMITIVE_ID,
@@ -754,6 +930,8 @@ def _validate_receipt(
         "projectBindingDigest": project_binding_digest,
         "status": "passed",
     }
+    if trusted:
+        expected["originTicketDigest"] = bootstrap.origin_ticket_digest
     if any(value.get(key) != expected_value for key, expected_value in expected.items()):
         raise LiveAttestationError("live receipt binding mismatch")
     if _parse_utc(value.get("observedAt")) is None:

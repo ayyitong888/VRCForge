@@ -5957,6 +5957,19 @@ class DashboardServerTests(unittest.TestCase):
         taskkill.assert_called_once()
         process.kill.assert_called_once_with()
 
+    def test_windows_process_tree_kill_falls_back_when_taskkill_cannot_start(self) -> None:
+        process = Mock()
+        process.pid = 4242
+        process.poll.side_effect = [None, None]
+        with (
+            patch("agent_gateway.os.name", "nt"),
+            patch("agent_gateway.subprocess.run", side_effect=PermissionError) as taskkill,
+        ):
+            kill_process_tree(process)
+
+        taskkill.assert_called_once()
+        process.kill.assert_called_once_with()
+
     def test_native_shell_argv_accepts_plain_commands_only(self) -> None:
         argv = native_shell_argv("git --no-pager status --short")
         self.assertIsNotNone(argv)
@@ -10675,9 +10688,12 @@ namespace VRCForge.Editor
         self.assertIn("$AllowUnpushed -and $AllowVersionMismatch", build_script)
         self.assertIn("AllowVersionMismatch = $true", local_build_script)
         self.assertNotIn("AllowVersionMismatch", publish_script)
-        self.assertIn('$strictReleaseBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)', build_script)
-        self.assertIn('mode = if ($strictReleaseBuild)', build_script)
-        self.assertIn("releaseEligible = $strictReleaseBuild", build_script)
+        self.assertIn('$strictSourceBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)', build_script)
+        self.assertIn('$strictEvidenceBuild = $strictSourceBuild -and [bool]$StrictEvidence', build_script)
+        self.assertIn('$strictReleaseBuild = $strictSourceBuild -and -not $strictEvidenceBuild', build_script)
+        self.assertIn('mode = if ($strictEvidenceBuild) { "strict-evidence" }', build_script)
+        self.assertIn("releaseEligible = [bool]$strictReleaseBuild", build_script)
+        self.assertIn("$buildPolicy.evidenceEligible = $true", build_script)
         self.assertIn('Package version must match the source VERSION file', build_script)
         self.assertIn('Strict release build requires a pinned 64-hex UvDownloadSha256', build_script)
         self.assertIn('Strict release build requires a successful git fetch of origin', build_script)

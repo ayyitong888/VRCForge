@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -337,6 +338,40 @@ def test_bootstrap_pipe_frame_is_exact_and_rejects_trailing_bytes() -> None:
 
     with pytest.raises(live.LiveAttestationError, match="frame is invalid"):
         live.read_bootstrap_frame(__import__("io").BytesIO(encoded + b"x"))
+
+
+def test_trusted_bootstrap_binds_ticket_digest_through_every_receipt() -> None:
+    ticket_digest = hashlib.sha256(b"origin-ticket").hexdigest()
+    proof = replace(bootstrap(), origin_ticket_digest=ticket_digest)
+    encoded = live.encode_bootstrap_frame(proof)
+    decoded = live.read_bootstrap_frame(__import__("io").BytesIO(encoded))
+    assert decoded == proof
+    assert encoded.startswith(live.TRUSTED_LIVE_BOOTSTRAP_MAGIC)
+
+    clock = TickClock()
+    session = live.PrimitiveBasisLiveSession(proof, now=clock)
+    session.begin(fixture_digest=DIGEST, project_binding_digest=PROJECT_DIGEST)
+    for phase in live.LIVE_PHASES:
+        receipt = session.record(
+            phase,
+            facts(phase),
+            authoritative_event={"phase": phase, "source": "backend"},
+        )
+        assert receipt["schema"] == live.TRUSTED_LIVE_RECEIPT_SCHEMA
+        assert receipt["originTicketDigest"] == ticket_digest
+    payload = session.finalize()
+
+    assert payload["schema"] == live.TRUSTED_LIVE_ATTESTATION_SCHEMA
+    assert payload["evidence"]["schema"] == live.TRUSTED_LIVE_EVIDENCE_SCHEMA
+    assert payload["attestation"]["originTicketDigest"] == ticket_digest
+    verified = live.verify_live_finalization(
+        payload,
+        bootstrap=proof,
+        fixture_digest=DIGEST,
+        project_binding_digest=PROJECT_DIGEST,
+        verified_at=clock.value + timedelta(seconds=1),
+    )
+    assert verified.origin_verified is False
 
 
 def test_packaged_bootstrap_requires_frozen_exact_backend_bytes(tmp_path: Path) -> None:

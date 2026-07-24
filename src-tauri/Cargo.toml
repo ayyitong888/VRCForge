@@ -22,4 +22,4 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 [target.'cfg(windows)'.dependencies]
 rfd = "0.15"
 windows-capture = "2.0.0"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }

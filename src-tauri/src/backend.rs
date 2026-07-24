@@ -53,9 +53,11 @@ pub(crate) const BACKEND_FORCE_EXIT_WAIT: Duration = Duration::from_secs(2);
 pub(crate) const PRIMITIVE_LIVE_STDIN_ENV: &str = "VRCFORGE_PRIMITIVE_LIVE_STDIN";
 pub(crate) const PRIMITIVE_LIVE_STDIN_ARG: &str = "--primitive-live-stdin";
 pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_MAGIC: &[u8; 16] = b"VRCFPRIMLIVE3\0\0\0";
+pub(crate) const TRUSTED_LIVE_BOOTSTRAP_MAGIC: &[u8; 16] = b"VRCFPRIMLIVE4\0\0\0";
 pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_DIGEST_COUNT: usize = 9;
 pub(crate) const PRIMITIVE_LIVE_BOOTSTRAP_SIZE: usize =
     PRIMITIVE_LIVE_BOOTSTRAP_MAGIC.len() + (2 + PRIMITIVE_LIVE_BOOTSTRAP_DIGEST_COUNT) * 32;
+pub(crate) const TRUSTED_LIVE_BOOTSTRAP_SIZE: usize = PRIMITIVE_LIVE_BOOTSTRAP_SIZE + 32;
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -782,10 +784,11 @@ pub(crate) fn read_primitive_live_bootstrap_from_stdin() -> Result<Option<Vec<u8
     }
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut payload = vec![0u8; PRIMITIVE_LIVE_BOOTSTRAP_SIZE];
+        let mut payload = Vec::with_capacity(TRUSTED_LIVE_BOOTSTRAP_SIZE);
         let result = std::io::stdin()
             .lock()
-            .read_exact(&mut payload)
+            .take((TRUSTED_LIVE_BOOTSTRAP_SIZE + 1) as u64)
+            .read_to_end(&mut payload)
             .map(|_| payload)
             .map_err(|_| "primitive live bootstrap could not be read".to_string());
         let _ = sender.send(result);
@@ -815,9 +818,11 @@ pub(crate) fn validate_primitive_live_bootstrap(
     payload: &[u8],
     desktop_executable_digest: &str,
 ) -> Result<(), String> {
-    if payload.len() != PRIMITIVE_LIVE_BOOTSTRAP_SIZE
-        || !payload.starts_with(PRIMITIVE_LIVE_BOOTSTRAP_MAGIC)
-    {
+    let valid_shape = (payload.len() == PRIMITIVE_LIVE_BOOTSTRAP_SIZE
+        && payload.starts_with(PRIMITIVE_LIVE_BOOTSTRAP_MAGIC))
+        || (payload.len() == TRUSTED_LIVE_BOOTSTRAP_SIZE
+            && payload.starts_with(TRUSTED_LIVE_BOOTSTRAP_MAGIC));
+    if !valid_shape {
         return Err("primitive live bootstrap frame is invalid".to_string());
     }
     let actual_desktop = decode_sha256_hex(desktop_executable_digest)

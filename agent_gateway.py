@@ -12726,13 +12726,16 @@ def kill_process_tree(process: subprocess.Popen) -> None:
         return
     if os.name == "nt":
         creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                check=False,
+            )
+        except OSError:
+            pass
         # Some managed Windows hosts reject taskkill even for a child process
         # (for example with "ERROR: Call cancelled").  Do not then wait until
         # the command timeout: TerminateProcess the supervised parent as a

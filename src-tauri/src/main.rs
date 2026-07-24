@@ -289,7 +289,7 @@ mod tests {
         DesktopAdvancedSettingsUpdateRequest, DesktopDiagnosticsUpdateRequest,
         BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH,
         DESKTOP_AGENT_MESSAGE_TIMEOUT_MS, PRIMITIVE_LIVE_BOOTSTRAP_MAGIC,
-        PRIMITIVE_LIVE_BOOTSTRAP_SIZE,
+        PRIMITIVE_LIVE_BOOTSTRAP_SIZE, TRUSTED_LIVE_BOOTSTRAP_MAGIC, TRUSTED_LIVE_BOOTSTRAP_SIZE,
     };
     use std::{
         env, fs,
@@ -396,6 +396,14 @@ mod tests {
         );
         frame[0] ^= 1;
         assert!(validate_primitive_live_bootstrap(&frame, &desktop_hex).is_err());
+
+        let mut trusted_frame = vec![0u8; TRUSTED_LIVE_BOOTSTRAP_SIZE];
+        trusted_frame[..TRUSTED_LIVE_BOOTSTRAP_MAGIC.len()]
+            .copy_from_slice(TRUSTED_LIVE_BOOTSTRAP_MAGIC);
+        trusted_frame[desktop_offset..desktop_offset + 32].copy_from_slice(&desktop);
+        assert!(validate_primitive_live_bootstrap(&trusted_frame, &desktop_hex).is_ok());
+        trusted_frame.pop();
+        assert!(validate_primitive_live_bootstrap(&trusted_frame, &desktop_hex).is_err());
     }
 
     #[test]

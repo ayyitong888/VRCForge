@@ -9,7 +9,8 @@ param(
     [string]$UvDownloadSha256 = "",
     [switch]$AllowDirty,
     [switch]$AllowUnpushed,
-    [switch]$AllowVersionMismatch
+    [switch]$AllowVersionMismatch,
+    [switch]$StrictEvidence
 )
 
 Set-StrictMode -Version Latest
@@ -123,6 +124,177 @@ function Get-StreamSha256 {
     }
 }
 
+function Resolve-SafeRepositoryPath {
+    param(
+        [string]$Path
+    )
+
+    $repositoryPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]"\/")
+    $candidatePath = [System.IO.Path]::GetFullPath($Path)
+    $repositoryPrefix = $repositoryPath + [System.IO.Path]::DirectorySeparatorChar
+    $isRepositoryRoot = [string]::Equals(
+        $candidatePath,
+        $repositoryPath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    if (
+        -not $isRepositoryRoot -and
+        -not $candidatePath.StartsWith(
+            $repositoryPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw "Output path must stay inside the repository: $candidatePath"
+    }
+
+    $currentPath = $candidatePath
+    while ($true) {
+        $currentItem = Get-Item -LiteralPath $currentPath -Force -ErrorAction SilentlyContinue
+        if (
+            $null -ne $currentItem -and
+            ($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            throw "Repository output path cannot traverse a reparse point: $currentPath"
+        }
+        if ([string]::Equals(
+            $currentPath,
+            $repositoryPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            break
+        }
+        $parentPath = [System.IO.Path]::GetDirectoryName($currentPath)
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or $parentPath -eq $currentPath) {
+            throw "Repository output path ancestry is invalid: $candidatePath"
+        }
+        $currentPath = $parentPath
+    }
+    return $candidatePath
+}
+
+function New-SafeRepositoryDirectory {
+    param(
+        [string]$Path
+    )
+
+    $resolvedPath = Resolve-SafeRepositoryPath -Path $Path
+    if (Get-Item -LiteralPath $resolvedPath -Force -ErrorAction SilentlyContinue) {
+        throw "Repository output directory already exists: $resolvedPath"
+    }
+    $parentPath = [System.IO.Path]::GetDirectoryName($resolvedPath)
+    if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) {
+        if (Get-Item -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue) {
+            throw "Repository output parent is not a directory: $parentPath"
+        }
+        $null = New-SafeRepositoryDirectory -Path $parentPath
+    } else {
+        $null = Resolve-SafeRepositoryPath -Path $parentPath
+    }
+    New-Item -ItemType Directory -Path $resolvedPath -ErrorAction Stop | Out-Null
+    $createdItem = Get-Item -LiteralPath $resolvedPath -Force -ErrorAction Stop
+    if (
+        -not $createdItem.PSIsContainer -or
+        ($createdItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw "Repository output directory is not a regular directory: $resolvedPath"
+    }
+    $null = Resolve-SafeRepositoryPath -Path $resolvedPath
+    return $resolvedPath
+}
+
+function Copy-SafeRepositoryFileCreateNew {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+
+    $resolvedSource = Resolve-SafeRepositoryPath -Path $SourcePath
+    $sourceItem = Get-Item -LiteralPath $resolvedSource -Force -ErrorAction Stop
+    if (
+        $sourceItem.PSIsContainer -or
+        ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw "Repository copy source must be a regular file: $resolvedSource"
+    }
+
+    $resolvedDestination = Resolve-SafeRepositoryPath -Path $DestinationPath
+    if (Get-Item -LiteralPath $resolvedDestination -Force -ErrorAction SilentlyContinue) {
+        throw "Repository output file already exists: $resolvedDestination"
+    }
+    $destinationParent = [System.IO.Path]::GetDirectoryName($resolvedDestination)
+    if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+        $null = New-SafeRepositoryDirectory -Path $destinationParent
+    } else {
+        $null = Resolve-SafeRepositoryPath -Path $destinationParent
+    }
+
+    $sourceStream = $null
+    $destinationStream = $null
+    try {
+        $sourceStream = [System.IO.FileStream]::new(
+            $resolvedSource,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $destinationStream = [System.IO.FileStream]::new(
+            $resolvedDestination,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        $sourceStream.CopyTo($destinationStream)
+        $destinationStream.Flush($true)
+        $sourceStream.Position = 0
+        $sourceDigest = Get-StreamSha256 -Stream $sourceStream
+        $destinationStream.Position = 0
+        $destinationDigest = Get-StreamSha256 -Stream $destinationStream
+        $destinationLength = $destinationStream.Length
+        if ($destinationDigest -ne $sourceDigest) {
+            throw "Repository output copy digest mismatch: $resolvedDestination"
+        }
+    } finally {
+        if ($null -ne $destinationStream) {
+            $destinationStream.Dispose()
+        }
+        if ($null -ne $sourceStream) {
+            $sourceStream.Dispose()
+        }
+    }
+
+    $null = Resolve-SafeRepositoryPath -Path $resolvedDestination
+    $destinationItem = Get-Item -LiteralPath $resolvedDestination -Force -ErrorAction Stop
+    if (
+        $destinationItem.PSIsContainer -or
+        ($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $destinationItem.Length -ne $destinationLength
+    ) {
+        throw "Repository output file identity changed after copy: $resolvedDestination"
+    }
+    $verificationStream = $null
+    try {
+        $verificationStream = [System.IO.FileStream]::new(
+            $resolvedDestination,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $verifiedDigest = Get-StreamSha256 -Stream $verificationStream
+        if ($verifiedDigest -ne $destinationDigest) {
+            throw "Repository output file changed after copy: $resolvedDestination"
+        }
+    } finally {
+        if ($null -ne $verificationStream) {
+            $verificationStream.Dispose()
+        }
+    }
+    return [pscustomobject]@{
+        path = $resolvedDestination
+        sha256 = $verifiedDigest
+        length = $destinationLength
+    }
+}
+
 function Build-TauriDesktopApp {
     param(
         [string]$DestinationExe
@@ -151,8 +323,9 @@ function Build-TauriDesktopApp {
     if (-not (Test-Path -LiteralPath $tauriExe)) {
         throw "Tauri build did not produce expected exe: $tauriExe"
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestinationExe) | Out-Null
-    Copy-Item -LiteralPath $tauriExe -Destination $DestinationExe -Force
+    $null = Copy-SafeRepositoryFileCreateNew `
+        -SourcePath $tauriExe `
+        -DestinationPath $DestinationExe
 }
 
 function Install-UvRuntime {
@@ -314,7 +487,12 @@ try {
     Push-Location $repoRoot
     $locationPushed = $true
 
-    $strictReleaseBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)
+    if ($StrictEvidence -and ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)) {
+        throw "Strict evidence builds cannot use local-acceptance relaxation switches."
+    }
+    $strictSourceBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)
+    $strictEvidenceBuild = $strictSourceBuild -and [bool]$StrictEvidence
+    $strictReleaseBuild = $strictSourceBuild -and -not $strictEvidenceBuild
     if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
     }
@@ -323,7 +501,7 @@ try {
         throw "Package version must match the source VERSION file. requested=$Version source=$sourceVersion"
     }
     if ($UvDownloadSha256 -notmatch "^[0-9a-fA-F]{64}$") {
-        if ($strictReleaseBuild) {
+        if ($strictSourceBuild) {
             throw "Strict release build requires a pinned 64-hex UvDownloadSha256."
         }
         Write-Warning "LOCAL acceptance build: uv download SHA-256 is not pinned; artifacts remain non-publishable."
@@ -331,7 +509,7 @@ try {
 
     git fetch origin --tags --prune | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        if ($strictReleaseBuild) {
+        if ($strictSourceBuild) {
             throw "Strict release build requires a successful git fetch of origin."
         }
         Write-Warning "LOCAL acceptance build: git fetch failed; using the cached origin/main ref."
@@ -349,7 +527,7 @@ try {
 
     $headCommit = (git rev-parse HEAD).Trim()
     $originMainCommit = (git rev-parse origin/main).Trim()
-    if ($strictReleaseBuild -and $headCommit -ne $originMainCommit) {
+    if ($strictSourceBuild -and $headCommit -ne $originMainCommit) {
         throw "Strict release build requires HEAD to equal origin/main. HEAD=$headCommit origin/main=$originMainCommit"
     }
 
@@ -374,12 +552,53 @@ try {
     & .\packaging\check_third_party_licenses.ps1
     & .\packaging\check_coplaydev_mcp_license.ps1 -PackagePath $CoplayDevPackagePath
 
-    $payloadRoot = Join-Path $repoRoot "dist\VRCForge_Windows_x64"
-    $releaseRoot = Join-Path $repoRoot "dist\release"
-    Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+    if ($strictEvidenceBuild) {
+        $evidenceRunId = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([Guid]::NewGuid().ToString('N'))"
+        $evidenceBuildRoot = Join-Path $repoRoot "dist\evidence\$headCommit\$evidenceRunId"
+        $evidenceBuildRoot = New-SafeRepositoryDirectory -Path $evidenceBuildRoot
+        $payloadRoot = Join-Path $evidenceBuildRoot "VRCForge_Windows_x64"
+        $releaseRoot = Join-Path $evidenceBuildRoot "release"
+        $payloadRoot = New-SafeRepositoryDirectory -Path $payloadRoot
+        $releaseRoot = New-SafeRepositoryDirectory -Path $releaseRoot
+    } else {
+        $payloadRoot = Join-Path $repoRoot "dist\VRCForge_Windows_x64"
+        $releaseRoot = Join-Path $repoRoot "dist\release"
+        Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+        New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+    }
     Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
-    New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+    $evidenceAttestor = $null
+    if ($strictEvidenceBuild) {
+        Write-Host "Building external evidence attestor..."
+        $cargoExe = Resolve-CargoExe
+        & $cargoExe build `
+            --manifest-path (Join-Path $repoRoot "src-tauri\Cargo.toml") `
+            --release `
+            --bin vrcforge_primitive_attestor
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed for the external evidence attestor."
+        }
+        $attestorBuildExe = Join-Path $repoRoot "src-tauri\target\release\vrcforge_primitive_attestor.exe"
+        if (-not (Test-Path -LiteralPath $attestorBuildExe -PathType Leaf)) {
+            throw "External evidence attestor build did not produce the expected executable."
+        }
+        $attestorItem = Get-Item -LiteralPath $attestorBuildExe -Force
+        if (($attestorItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "External evidence attestor build output must be a regular file."
+        }
+        $evidenceRelativePath = "artifacts/primitive-origin-tools/$headCommit/$evidenceRunId/vrcforge_primitive_attestor.exe"
+        $evidenceAttestorPath = Join-Path $repoRoot ($evidenceRelativePath.Replace("/", "\"))
+        $attestorCopy = Copy-SafeRepositoryFileCreateNew `
+            -SourcePath $attestorBuildExe `
+            -DestinationPath $evidenceAttestorPath
+        $evidenceAttestorDigest = $attestorCopy.sha256
+        $evidenceAttestor = [ordered]@{
+            repositoryRelativePath = $evidenceRelativePath
+            sha256 = $evidenceAttestorDigest
+            trustedBoundaryReady = $false
+        }
+    }
 
     $legacyLauncherBuildRoot = Join-Path $repoRoot "dist\legacy-launcher-build"
     Remove-Item -LiteralPath $legacyLauncherBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -411,7 +630,7 @@ try {
     Copy-Item -LiteralPath .\start_dashboard.cmd -Destination (Join-Path $payloadRoot "start_dashboard.cmd") -Force
     $uvRuntimeProvenance = Install-UvRuntime `
         -DestinationDir (Join-Path $payloadRoot "tools\uv") `
-        -RequireVerifiedDownload $strictReleaseBuild
+        -RequireVerifiedDownload $strictSourceBuild
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "config"),(Join-Path $payloadRoot "logs"),(Join-Path $payloadRoot "artifacts") | Out-Null
 
     $unityPluginRoot = Join-Path $payloadRoot "unity_plugin"
@@ -520,7 +739,7 @@ try {
     if ($finalSourceVersion -ne $Version) {
         throw "Source VERSION changed during packaging. requested=$Version source=$finalSourceVersion"
     }
-    if ($strictReleaseBuild -and (
+    if ($strictSourceBuild -and (
         $finalStatus -or
         $finalHeadCommit -ne $finalOriginMainCommit -or
         $finalHeadCommit -ne $headCommit -or
@@ -529,16 +748,20 @@ try {
         throw "Strict release source state changed during packaging; rebuild from a clean HEAD equal to origin/main."
     }
 
+    $buildPolicy = [ordered]@{
+        mode = if ($strictEvidenceBuild) { "strict-evidence" } elseif ($strictReleaseBuild) { "strict" } else { "local-acceptance" }
+        releaseEligible = [bool]$strictReleaseBuild
+        allowDirty = [bool]$AllowDirty
+        allowUnpushed = [bool]$AllowUnpushed
+        allowVersionMismatch = [bool]$AllowVersionMismatch
+    }
+    if ($strictEvidenceBuild) {
+        $buildPolicy.evidenceEligible = $true
+    }
     $manifest = [ordered]@{
         version = $Version
         commit = $finalHeadCommit
-        buildPolicy = [ordered]@{
-            mode = if ($strictReleaseBuild) { "strict" } else { "local-acceptance" }
-            releaseEligible = $strictReleaseBuild
-            allowDirty = [bool]$AllowDirty
-            allowUnpushed = [bool]$AllowUnpushed
-            allowVersionMismatch = [bool]$AllowVersionMismatch
-        }
+        buildPolicy = $buildPolicy
         uvDownloadUrl = $uvDownloadUrl
         uvDownloadSha256 = $UvDownloadSha256
         uvRuntime = $uvRuntimeProvenance
@@ -552,6 +775,9 @@ try {
             @{ name = [System.IO.Path]::GetFileName($offlineInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $offlineInstaller).Hash.ToLowerInvariant() },
             @{ name = [System.IO.Path]::GetFileName($webInstaller); sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $webInstaller).Hash.ToLowerInvariant() }
         )
+    }
+    if ($strictEvidenceBuild) {
+        $manifest.evidenceAttestor = $evidenceAttestor
     }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
 

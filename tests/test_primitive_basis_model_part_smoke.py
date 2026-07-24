@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import socket
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +32,245 @@ def test_safe_zip_extraction_rejects_parent_escape(tmp_path: Path) -> None:
         smoke._extract_safe_zip(archive, tmp_path / "output")
 
     assert not (tmp_path / "outside.txt").exists()
+
+
+def test_release_input_copy_uses_one_stable_source_handle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "release.zip"
+    source.write_bytes(b"fixed-release-bytes")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+
+    original_copy = smoke._copy_open_file
+
+    def mutate_after_copy(source_stream, target_stream, digest) -> None:
+        original_copy(source_stream, target_stream, digest)
+        source.write_bytes(b"changed-release-bytes")
+
+    monkeypatch.setattr(smoke, "_copy_open_file", mutate_after_copy)
+
+    with pytest.raises(
+        smoke.PackagedModelPartSmokeError, match="changed during copying"
+    ):
+        smoke._copy_stable_release_input(source, destination, expected)
+
+    assert not destination.exists()
+
+
+def test_release_input_copy_materializes_manifest_bound_private_copy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "release.unitypackage"
+    source.write_bytes(b"fixed-package")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+
+    copied_digest = smoke._copy_stable_release_input(source, destination, expected)
+
+    assert copied_digest == expected
+    assert destination.read_bytes() == source.read_bytes()
+
+
+def test_release_input_copy_rejects_existing_or_linked_targets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "release.unitypackage"
+    source.write_bytes(b"fixed-package")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+    destination.write_bytes(b"pre-existing")
+
+    with pytest.raises(smoke.PackagedModelPartSmokeError, match="already exists"):
+        smoke._copy_stable_release_input(source, destination, expected)
+    assert destination.read_bytes() == b"pre-existing"
+
+    destination.unlink()
+    monkeypatch.setattr(
+        smoke,
+        "_is_reparse_point",
+        lambda path: Path(path) == destination_root,
+    )
+    with pytest.raises(smoke.PackagedModelPartSmokeError, match="target is invalid"):
+        smoke._copy_stable_release_input(source, destination, expected)
+    assert not destination.exists()
+
+
+def test_release_input_copy_rejects_linked_source(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "release.zip"
+    source.write_bytes(b"fixed-release")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+    monkeypatch.setattr(
+        smoke,
+        "_is_reparse_point",
+        lambda path: Path(path) == source,
+    )
+
+    with pytest.raises(smoke.PackagedModelPartSmokeError, match="source is invalid"):
+        smoke._copy_stable_release_input(source, destination, expected)
+
+    assert not destination.exists()
+
+
+def test_release_input_copy_rejects_hard_linked_source(tmp_path: Path) -> None:
+    source = tmp_path / "release.zip"
+    source.write_bytes(b"fixed-release")
+    os.link(source, tmp_path / "release-alias.zip")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+
+    with pytest.raises(smoke.PackagedModelPartSmokeError, match="source is invalid"):
+        smoke._copy_stable_release_input(source, destination, expected)
+
+    assert not destination.exists()
+
+
+def test_release_input_copy_rejects_source_that_becomes_linked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "release.zip"
+    source.write_bytes(b"fixed-release")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+    source_checks = 0
+
+    def reparse_after_open(path: Path) -> bool:
+        nonlocal source_checks
+        if Path(path) != source:
+            return False
+        source_checks += 1
+        return source_checks > 1
+
+    monkeypatch.setattr(smoke, "_is_reparse_point", reparse_after_open)
+
+    with pytest.raises(
+        smoke.PackagedModelPartSmokeError, match="changed during copying"
+    ):
+        smoke._copy_stable_release_input(source, destination, expected)
+
+    assert not destination.exists()
+
+
+def test_release_input_copy_rejects_target_that_becomes_hard_linked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "release.zip"
+    source.write_bytes(b"fixed-release")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    destination_root = tmp_path / "private" / "release-inputs"
+    destination_root.mkdir(parents=True)
+    destination = destination_root / source.name
+    alias = tmp_path / "copied-alias.zip"
+    original_copy = smoke._copy_open_file
+
+    def hard_link_after_copy(source_stream, target_stream, digest) -> None:
+        original_copy(source_stream, target_stream, digest)
+        os.link(destination, alias)
+
+    monkeypatch.setattr(smoke, "_copy_open_file", hard_link_after_copy)
+
+    with pytest.raises(
+        smoke.PackagedModelPartSmokeError,
+        match="private release input changed during copying",
+    ):
+        smoke._copy_stable_release_input(source, destination, expected)
+
+    assert destination.exists()
+    assert alias.exists()
+
+
+def test_backend_tree_digest_binds_internal_payload(tmp_path: Path) -> None:
+    backend_root = tmp_path / "backend"
+    internal_root = backend_root / "_internal"
+    internal_root.mkdir(parents=True)
+    (backend_root / "vrcforge_backend.exe").write_bytes(b"launcher")
+    internal = internal_root / "runtime.bin"
+    internal.write_bytes(b"runtime-a")
+
+    first = smoke._tree_digest(backend_root)
+    internal.write_bytes(b"runtime-b")
+    second = smoke._tree_digest(backend_root)
+    source = Path(smoke.__file__).read_text(encoding="utf-8")
+
+    assert second != first
+    assert '"backendTreeDigest": backend_tree_digest' in source
+    assert '"backendTreeDigest": prepared.backend_tree_digest' in source
+
+
+def test_live_runner_accepts_only_exact_strict_or_strict_evidence_policy() -> None:
+    assert smoke._accepted_evidence_build_policy(
+        {
+            "mode": "strict",
+            "releaseEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        }
+    )
+    assert smoke._accepted_evidence_build_policy(
+        {
+            "mode": "strict-evidence",
+            "releaseEligible": False,
+            "evidenceEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        }
+    )
+    for mutation in (
+        {"mode": "local", "releaseEligible": False},
+        {
+            "mode": "strict-evidence",
+            "releaseEligible": True,
+            "evidenceEligible": True,
+            "allowDirty": False,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        },
+        {
+            "mode": "strict-evidence",
+            "releaseEligible": False,
+            "evidenceEligible": True,
+            "allowDirty": True,
+            "allowUnpushed": False,
+            "allowVersionMismatch": False,
+        },
+    ):
+        assert not smoke._accepted_evidence_build_policy(mutation)
+
+
+def test_desktop_launch_rejects_backend_internal_drift(tmp_path: Path) -> None:
+    backend_root = tmp_path / "backend"
+    internal_root = backend_root / "_internal"
+    internal_root.mkdir(parents=True)
+    backend = backend_root / "vrcforge_backend.exe"
+    backend.write_bytes(b"launcher")
+    internal = internal_root / "runtime.bin"
+    internal.write_bytes(b"runtime-a")
+    expected_tree_digest = smoke._tree_digest(backend_root)
+    internal.write_bytes(b"runtime-b")
+
+    runner = object.__new__(smoke.PackagedModelPartSmoke)
+    runner.prepared = SimpleNamespace(
+        backend_executable=backend,
+        backend_tree_digest=expected_tree_digest,
+    )
+
+    with pytest.raises(smoke.PackagedModelPartSmokeError, match="backend tree changed"):
+        runner._launch_desktop()
 
 
 def test_external_package_set_and_versions_are_exact(tmp_path: Path) -> None:
