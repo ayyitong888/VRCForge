@@ -569,6 +569,7 @@ try {
     }
     Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
     $evidenceAttestor = $null
+    $evidenceAuthority = $null
     if ($strictEvidenceBuild) {
         Write-Host "Building external evidence attestor..."
         $cargoExe = Resolve-CargoExe
@@ -597,6 +598,104 @@ try {
             repositoryRelativePath = $evidenceRelativePath
             sha256 = $evidenceAttestorDigest
             trustedBoundaryReady = $false
+        }
+
+        Write-Host "Building the non-installing evidence authority diagnostic bundle..."
+        $authorityBinNames = @(
+            "vrcforge_primitive_evidence_service",
+            "vrcforge_primitive_evidence_controller",
+            "vrcforge_primitive_evidence_install_helper"
+        )
+        $authorityBuildArguments = @(
+            "build",
+            "--manifest-path",
+            (Join-Path $repoRoot "src-tauri\Cargo.toml"),
+            "--release"
+        )
+        foreach ($authorityBinName in $authorityBinNames) {
+            $authorityBuildArguments += @("--bin", $authorityBinName)
+        }
+        & $cargoExe @authorityBuildArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed for the evidence authority diagnostic bundle."
+        }
+
+        $authorityRelativeRoot = "artifacts/primitive-evidence-authority/$headCommit/$evidenceRunId"
+        $authorityFiles = @()
+        $authorityCopiedPaths = @{}
+        $authorityControllerDigest = $null
+        foreach ($authorityBinName in $authorityBinNames) {
+            $authorityFileName = "$authorityBinName.exe"
+            $authorityBuildExe = Join-Path $repoRoot "src-tauri\target\release\$authorityFileName"
+            if (-not (Test-Path -LiteralPath $authorityBuildExe -PathType Leaf)) {
+                throw "Evidence authority build did not produce $authorityFileName."
+            }
+            $authorityBuildItem = Get-Item -LiteralPath $authorityBuildExe -Force
+            if (($authorityBuildItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Evidence authority build output must be a regular file: $authorityFileName"
+            }
+            $authorityRelativePath = "$authorityRelativeRoot/$authorityFileName"
+            $authorityDestination = Join-Path $repoRoot ($authorityRelativePath.Replace("/", "\"))
+            $authorityCopy = Copy-SafeRepositoryFileCreateNew `
+                -SourcePath $authorityBuildExe `
+                -DestinationPath $authorityDestination
+            $authorityCopiedPaths[$authorityBinName] = $authorityCopy.path
+            $authorityFiles += [ordered]@{
+                name = $authorityFileName
+                sha256 = $authorityCopy.sha256
+                length = $authorityCopy.length
+            }
+            if ($authorityBinName -eq "vrcforge_primitive_evidence_controller") {
+                $authorityControllerDigest = [string]$authorityCopy.sha256
+            }
+        }
+
+        $authorityInstallHelperPath = $authorityCopiedPaths["vrcforge_primitive_evidence_install_helper"]
+        $authorityPlanLines = @(& $authorityInstallHelperPath --plan)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Evidence authority install-helper plan was rejected."
+        }
+        try {
+            $authorityPlan = ($authorityPlanLines -join [Environment]::NewLine) | ConvertFrom-Json
+        } catch {
+            throw "Evidence authority install-helper plan was not valid JSON."
+        }
+        if (
+            $authorityPlan.schema -ne "vrcforge.primitive_evidence_authority_policy.v1" -or
+            $authorityPlan.mutationSupported -ne $false -or
+            $authorityPlan.trustedBoundaryReady -ne $false -or
+            $authorityPlan.candidatePayloadIncludesAuthority -ne $false -or
+            $authorityPlan.controllerPathPolicy -ne "sha256-parent-create-new-never-reuse" -or
+            @($authorityPlan.blockers).Count -eq 0
+        ) {
+            throw "Evidence authority install-helper plan violated the fail-closed source policy."
+        }
+        if ([string]::IsNullOrWhiteSpace($authorityControllerDigest)) {
+            throw "Evidence authority controller digest was not captured."
+        }
+        $authorityControllerFileName = "vrcforge_primitive_evidence_controller.exe"
+        $authorityControllerPattern = Join-Path `
+            ([string]$authorityPlan.layout.binaryRoot) `
+            (Join-Path "{controller-sha256-lower}" $authorityControllerFileName)
+        if ([string]$authorityPlan.layout.controllerExecutablePattern -cne $authorityControllerPattern) {
+            throw "Evidence authority controller path pattern was not content addressed."
+        }
+        $authorityControllerInstalledPath = Join-Path `
+            ([string]$authorityPlan.layout.binaryRoot) `
+            (Join-Path $authorityControllerDigest $authorityControllerFileName)
+        $evidenceAuthority = [ordered]@{
+            schema = "vrcforge.primitive_evidence_authority_bundle.v1"
+            repositoryRelativeRoot = $authorityRelativeRoot
+            files = $authorityFiles
+            planSchema = [string]$authorityPlan.schema
+            installationSupported = $false
+            trustedBoundaryReady = $false
+            candidatePayloadIncluded = $false
+            controller = [ordered]@{
+                sha256 = $authorityControllerDigest
+                installedPath = $authorityControllerInstalledPath
+                installMode = "create-new-never-reuse"
+            }
         }
     }
 
@@ -778,6 +877,7 @@ try {
     }
     if ($strictEvidenceBuild) {
         $manifest.evidenceAttestor = $evidenceAttestor
+        $manifest.evidenceAuthority = $evidenceAuthority
     }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
 

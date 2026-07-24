@@ -59,3 +59,42 @@ def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:
     assert "[System.IO.FileMode]::CreateNew" in source
     assert 'dist\\evidence\\$headCommit\\$evidenceRunId' in source
     assert "Copy-Item -LiteralPath $attestorBuildExe" not in source
+
+
+def test_evidence_authority_bundle_is_external_noninstalling_and_fail_closed() -> None:
+    source = _build_script()
+
+    for binary in (
+        "vrcforge_primitive_evidence_service",
+        "vrcforge_primitive_evidence_controller",
+        "vrcforge_primitive_evidence_install_helper",
+    ):
+        assert f'"{binary}"' in source
+        assert f'Join-Path $payloadRoot "tools\\{binary}.exe"' not in source
+
+    assert "artifacts/primitive-evidence-authority/$headCommit/$evidenceRunId" in source
+    assert "Copy-SafeRepositoryFileCreateNew" in source
+    assert 'schema = "vrcforge.primitive_evidence_authority_bundle.v1"' in source
+    assert "installationSupported = $false" in source
+    assert "trustedBoundaryReady = $false" in source
+    assert "candidatePayloadIncluded = $false" in source
+    assert "$manifest.evidenceAuthority = $evidenceAuthority" in source
+    assert 'controllerPathPolicy -ne "sha256-parent-create-new-never-reuse"' in source
+    assert "controllerExecutablePattern" in source
+    assert 'installMode = "create-new-never-reuse"' in source
+    assert "installedPath = $authorityControllerInstalledPath" in source
+    assert '--plan' in source
+    for forbidden in ("--install", "--provision", "--reset", "--delete"):
+        assert forbidden not in source
+
+
+def test_evidence_authority_machine_layout_uses_system_known_folders() -> None:
+    source = (
+        REPO_ROOT / "src-tauri" / "src" / "primitive_evidence_authority_windows.rs"
+    ).read_text(encoding="utf-8")
+
+    assert "SHGetKnownFolderPath" in source
+    assert "FOLDERID_ProgramFiles" in source
+    assert "FOLDERID_ProgramData" in source
+    assert 'env::var_os("ProgramFiles")' not in source
+    assert 'env::var_os("ProgramData")' not in source
