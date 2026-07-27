@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import authoritative_unity_writes as writes
+from atomic_reference_rename import TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL
 from component_feature_write import TOOL_NAME as COMPONENT_FEATURE_TOOL
 from constraint_source_write import TOOL_NAME as CONSTRAINT_TOOL
 from material_shader_assignment import TOOL_NAME as MATERIAL_TOOL
+from parameter_bit_packing import TOOL_NAME as PARAMETER_BIT_PACKING_TOOL
 from scene_object_copy import DUPLICATE_TOOL_NAME, PREFAB_TOOL_NAME
 from texture_import_settings import TOOL_NAME as TEXTURE_TOOL
 
@@ -21,6 +24,8 @@ def test_registry_contains_only_the_guarded_write_protocols() -> None:
         TEXTURE_TOOL,
         CONSTRAINT_TOOL,
         COMPONENT_FEATURE_TOOL,
+        PARAMETER_BIT_PACKING_TOOL,
+        ATOMIC_REFERENCE_RENAME_TOOL,
     }
 
 
@@ -76,6 +81,7 @@ def test_authoritative_mapping_canonicalizes_project_and_replaces_caller_receipt
             domain_error=DomainError,
             build_preview=build_preview,
             bind_preview=bind_preview,
+            include_project_path_in_preview=True,
         ),
     )
     invocations: list[tuple[str, dict]] = []
@@ -121,6 +127,68 @@ def test_authoritative_mapping_canonicalizes_project_and_replaces_caller_receipt
         "preview": False,
     }
     assert preview == {"schema": "approval.v1"}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            PARAMETER_BIT_PACKING_TOOL,
+            {
+                "sourceScenePath": "Assets/Avatar.unity",
+                "sourceAvatarPath": "Avatar",
+                "outputCloneName": "Packed Clone",
+            },
+        ),
+        (
+            ATOMIC_REFERENCE_RENAME_TOOL,
+            {
+                "operationKind": "game_object",
+                "scenePath": "Assets/Avatar.unity",
+                "avatarPath": "Avatar",
+                "targetObjectPath": "Avatar/Hat",
+                "newName": "Hat Renamed",
+            },
+        ),
+    ],
+)
+def test_strict_preview_protocols_do_not_receive_apply_only_project_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    original = writes._SPECS[tool_name]
+    monkeypatch.setitem(
+        writes._SPECS,
+        tool_name,
+        replace(
+            original,
+            bind_preview=lambda request, payload: (request, payload),
+        ),
+    )
+    invocations: list[dict[str, object]] = []
+
+    prepared, preview = writes.prepare_authoritative_unity_write(
+        {
+            "projectPath": str(project),
+            "toolName": tool_name,
+            "arguments": {**arguments, "expectedProjectPath": "D:/spoofed"},
+        },
+        {"spoofed": True},
+        lambda _tool, preview_arguments: (
+            invocations.append(deepcopy(preview_arguments))
+            or {"schema": "live.v1"}
+        ),
+    )
+
+    assert len(invocations) == 1
+    assert not any(key.startswith("expected") for key in invocations[0])
+    assert invocations[0]["preview"] is True
+    assert prepared["arguments"]["expectedProjectPath"] == str(project.resolve())
+    assert preview == {"schema": "live.v1"}
 
 
 def test_transport_failure_returns_only_the_spec_safe_message(

@@ -7,6 +7,9 @@ from unittest.mock import patch
 import pytest
 
 import dashboard_server
+from agent_gateway import AgentGateway
+from atomic_reference_rename import TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL_NAME
+from parameter_bit_packing import TOOL_NAME as PARAMETER_BIT_PACKING_TOOL_NAME
 from component_feature_write import (
     COMPATIBILITY_DIGEST_SCHEMA,
     EXPECTED_COMPATIBILITY,
@@ -509,6 +512,8 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
         TEXTURE_TOOL_NAME,
         CONSTRAINT_TOOL_NAME,
         COMPONENT_FEATURE_TOOL_NAME,
+        PARAMETER_BIT_PACKING_TOOL_NAME,
+        ATOMIC_REFERENCE_RENAME_TOOL_NAME,
     ):
         assert tool_name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
@@ -518,5 +523,219 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
         "vrcforge_preview_texture_import_settings",
         "vrcforge_preview_constraint_sources",
         "vrcforge_preview_component_feature",
+        "vrcforge_preview_parameter_bit_packing",
+        "vrcforge_preview_atomic_reference_rename",
     ):
         assert plan_tool in dashboard_server.AGENT_GATEWAY._tools
+
+    write_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_unity_mcp_write"]
+    assert write_handler.manual_approval_resolver is dashboard_server.unity_mcp_manual_approval_reason
+    assert (
+        write_handler.checkpoint_prepare_handler
+        is dashboard_server.prepare_authoritative_unity_checkpoint_sync
+    )
+    for nested_tool in (PARAMETER_BIT_PACKING_TOOL_NAME, ATOMIC_REFERENCE_RENAME_TOOL_NAME):
+        assert write_handler.manual_approval_resolver({"toolName": nested_tool}, {})
+    assert write_handler.manual_approval_resolver({"toolName": DUPLICATE_TOOL_NAME}, {}) == ""
+
+
+def test_strict_apply_exposes_only_the_canonical_validated_receipt() -> None:
+    transport = dashboard_server.McpResult(
+        exit_code=0,
+        stdout="untrusted transport text",
+        stderr="untrusted transport error",
+        payload={
+            "data": {"schema": "valid.inner.v1"},
+            "spoofed": {"ok": False, "secret": "must-not-cross"},
+        },
+    )
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=transport),
+        patch(
+            "dashboard_server.validate_authoritative_unity_write_result",
+            return_value={"schema": "canonical.inner.v1"},
+        ) as validate,
+    ):
+        result = dashboard_server.unity_mcp_write_sync(
+            {
+                "projectPath": "D:/Project",
+                "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+                "arguments": {},
+            }
+        )
+
+    assert result == {
+        "ok": True,
+        "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+        "result": {
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "payload": {"data": {"schema": "canonical.inner.v1"}},
+        },
+    }
+    assert validate.call_args.args[1] == {"schema": "valid.inner.v1"}
+
+
+def test_strict_apply_transport_failure_does_not_expose_raw_output() -> None:
+    transport = dashboard_server.McpResult(
+        exit_code=7,
+        stdout="secret stdout must not cross",
+        stderr="secret stderr must not cross",
+        payload={"secret": "secret payload must not cross"},
+    )
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=transport),
+        patch("dashboard_server.validate_authoritative_unity_write_result") as validate,
+    ):
+        result = dashboard_server.unity_mcp_write_sync(
+            {
+                "projectPath": "D:/Project",
+                "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+                "arguments": {},
+            }
+        )
+
+    assert result == {
+        "ok": False,
+        "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+        "error": "The authoritative Unity write transport failed.",
+    }
+    validate.assert_not_called()
+
+
+def test_strict_checkpoint_revalidates_canonical_state_without_saving(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    approved = {
+        "projectPath": str(project.resolve()),
+        "toolName": ATOMIC_REFERENCE_RENAME_TOOL_NAME,
+        "arguments": {
+            "operationKind": "parameter",
+            "expectedPlanDigest": "a" * 64,
+        },
+    }
+    apply_arguments = {
+        **deepcopy(approved),
+        "_vrcforge_user_constraints": {
+            "status": "ok",
+            "path": "<configured>",
+            "enabled": True,
+        },
+    }
+    with (
+        patch(
+            "dashboard_server.prepare_unity_mcp_write_request",
+            return_value=(deepcopy(approved), {"schema": "refreshed.v1"}),
+        ) as reprepare,
+        patch("dashboard_server.prepare_unity_checkpoint_sync") as save_prepare,
+    ):
+        result = dashboard_server.prepare_authoritative_unity_checkpoint_sync(
+            project.resolve(),
+            apply_arguments,
+        )
+
+    assert result["ok"] is True
+    assert result["mode"] == "read_only_authoritative_revalidation"
+    assert result["canonicalRevalidated"] is True
+    assert reprepare.call_args.args == (approved, None)
+    save_prepare.assert_not_called()
+
+
+def test_strict_checkpoint_blocks_canonical_drift_before_saving(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    approved = {
+        "projectPath": str(project.resolve()),
+        "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+        "arguments": {"expectedPreviewDigest": "a" * 64},
+    }
+    changed = deepcopy(approved)
+    changed["arguments"]["expectedPreviewDigest"] = "b" * 64
+    with (
+        patch(
+            "dashboard_server.prepare_unity_mcp_write_request",
+            return_value=(changed, {"schema": "refreshed.v1"}),
+        ),
+        patch("dashboard_server.prepare_unity_checkpoint_sync") as save_prepare,
+    ):
+        result = dashboard_server.prepare_authoritative_unity_checkpoint_sync(
+            project.resolve(),
+            deepcopy(approved),
+        )
+
+    assert result == {
+        "ok": False,
+        "error": "The approved Unity state changed before checkpointing.",
+    }
+    save_prepare.assert_not_called()
+
+
+def test_existing_unity_writes_keep_the_saving_checkpoint_prepare(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    expected = {"ok": True, "mode": "save_existing_state"}
+    with patch(
+        "dashboard_server.prepare_unity_checkpoint_sync",
+        return_value=expected,
+    ) as save_prepare:
+        result = dashboard_server.prepare_authoritative_unity_checkpoint_sync(
+            project.resolve(),
+            {
+                "projectPath": str(project.resolve()),
+                "toolName": DUPLICATE_TOOL_NAME,
+                "arguments": {},
+            },
+        )
+
+    assert result == expected
+    save_prepare.assert_called_once_with(project.resolve())
+
+
+@pytest.mark.parametrize("execution_mode", ["auto", "roslyn_full_auto"])
+def test_generic_parameter_request_cannot_bypass_manual_approval(
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    gateway = AgentGateway(
+        tmp_path / "gateway" / "config.json",
+        tmp_path / "gateway" / "audit",
+    )
+    executed: list[dict] = []
+    gateway.register_write_handler(
+        "vrcforge_unity_mcp_write",
+        "Test Unity wrapper.",
+        "high",
+        lambda arguments: executed.append(arguments) or {"ok": True},
+        request_preparer=lambda arguments, preview: (arguments, preview),
+        manual_approval_resolver=dashboard_server.unity_mcp_manual_approval_reason,
+    )
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = execution_mode
+    config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
+    config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"
+    gateway.save_config(config)
+
+    result = gateway.create_apply_request(
+        {
+            "target_tool": "vrcforge_unity_mcp_write",
+            "arguments": {
+                "projectPath": "D:/Project",
+                "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
+                "arguments": {},
+            },
+            "never_auto_approve": False,
+            "requires_explicit_approval": False,
+        }
+    )
+
+    assert result["status"] == "pending"
+    assert result["approval"]["requiresExplicitApproval"] is True
+    assert result["approval"]["autoApprovalBlocked"] is True
+    assert executed == []

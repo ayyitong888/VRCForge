@@ -213,7 +213,7 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "externalName": "optimization.parameter.vrcfury-compressor-plan",
         "gatewayName": "vrcforge_optimization_parameter_vrcfury_compressor_plan",
         "category": "plan/preview",
-        "description": "Plan VRCFury Parameter Compressor usage as an experimental request-only path with behavior-regression gates.",
+        "description": "Plan Parameter Compressor usage for the authoritative request path with behavior-regression gates.",
     },
     {
         "externalName": "optimization.parameter.behavior-regression",
@@ -225,7 +225,7 @@ OPTIMIZATION_TOOL_DEFINITIONS: list[dict[str, str]] = [
         "externalName": "optimization.parameter.path-to-skill",
         "gatewayName": "vrcforge_optimization_parameter_path_to_skill",
         "category": "plan/preview",
-        "description": "Map parameter compression candidates into the future request-only skill path and hard gates.",
+        "description": "Map parameter compression candidates into the authoritative request path and hard gates.",
     },
     {
         "externalName": "optimization.vrcfury.compatibility-report",
@@ -447,19 +447,6 @@ OPTIMIZER_DEPENDENCIES: list[dict[str, Any]] = [
 ]
 
 
-FUTURE_WRITE_REQUEST_TOOLS = [
-    {"externalName": "optimization.lac.apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
-    {"externalName": "optimization.aao.trace-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
-    {"externalName": "optimization.ttt.atlas-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
-    {"externalName": "optimization.ma2bt.convert-apply-request", "versionStage": "0.8.0-beta", "directApplyExposed": False},
-    {"externalName": "optimization.meshia.simplify-apply-request", "versionStage": "0.8.1-beta", "directApplyExposed": False},
-    {"externalName": "optimization.vrcfury.parameter-compressor-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
-    {"externalName": "optimization.vrcfury.direct-tree-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
-    {"externalName": "optimization.aao.hidden-body-cut-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
-    {"externalName": "optimization.aao.physbone-cleanup-apply-request", "versionStage": "0.9.x-rc", "directApplyExposed": False},
-]
-
-
 OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
     {
         "externalName": "optimization.lac.apply-request",
@@ -543,15 +530,15 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
         "gatewayName": "vrcforge_optimization_vrcfury_parameter_compressor_apply_request",
         "optimizerId": "vrcfury",
         "planTool": "optimization.vrcfury.compatibility-report",
-        "targetTool": "vrcforge_configure_optimizer_component",
+        "targetTool": "vrcforge_unity_mcp_write",
         "mode": "vrcfury_parameter_compressor",
         "componentType": "",
         "riskLevel": "high",
-        "versionStage": "0.9.x-rc",
-        "writeSupported": False,
+        "versionStage": "1.4.0",
+        "writeSupported": True,
         "stableCallable": True,
         "supportedProfiles": [],
-        "description": "Stable request surface for VRCFury Parameter Compressor. It returns a blocked preview until a public, validated VRCFury writer path exists.",
+        "description": "Request one source-preserving parameter-packed clone through the authoritative Unity preview, approval, checkpoint, apply, verification, and restore lane. No direct apply is exposed.",
     },
     {
         "externalName": "optimization.vrcfury.direct-tree-apply-request",
@@ -601,6 +588,14 @@ OPTIMIZATION_APPLY_REQUEST_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 
+FUTURE_WRITE_REQUEST_TOOLS = [
+    {
+        "externalName": item["externalName"],
+        "versionStage": item["versionStage"],
+        "directApplyExposed": False,
+    }
+    for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS
+]
 STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS = [
     item for item in OPTIMIZATION_APPLY_REQUEST_DEFINITIONS if item.get("stableCallable")
 ]
@@ -1446,16 +1441,16 @@ def build_vrcfury_parameter_compressor_plan(dependency_doctor: dict[str, Any], v
     return {
         "planOnly": True,
         "dependency": dep,
-        "experimentalOnly": True,
+        "experimentalOnly": False,
         "applyRequestTool": "optimization.vrcfury.parameter-compressor-apply-request",
-        "applyBlocked": True,
-        "blockedReason": "VRCFury Parameter Compressor writes stay experimental until behavior-regression and rollback proof exist.",
+        "applyBlocked": dep.get("status") != "installed" or not bool(candidates),
+        "blockedReason": None if dep.get("status") == "installed" and candidates else "Install the pinned dependency and identify safe boolean toggle candidates before requesting the authoritative build.",
         "hardGate": _optimization_hard_gate(
             [
                 _optimization_gate_row("vrcfury.installed", "VRCFury package detected", dep.get("status") == "installed", "Install or repair VRCFury before any compressor request."),
                 _optimization_gate_row("parameter.safe_candidates", "Safe compression candidates identified", bool(candidates), "Run inventory, menu-map, animator-usage, and compressibility planning first."),
-                _optimization_gate_row("behavior_regression.proof", "Menu/FX behavior regression proof", False, "Capture before/after behavior evidence for every touched parameter before enabling writes."),
-                _optimization_gate_row("rollback.proof", "Rollback proof", False, "A public apply proof must include approval, checkpoint, validation delta, rollback, and post-restore validation."),
+                _optimization_gate_row("authoritative.preview", "Authoritative zero-write preview required", True, "The request must produce a fresh source/capability/root-bound preview."),
+                _optimization_gate_row("rollback.proof", "Checkpoint and restore proof required", True, "The write lane must create a checkpoint and retain verified restore capability."),
             ]
         ),
         "candidateCount": len(candidates),
@@ -1572,16 +1567,16 @@ def build_parameter_path_to_skill_plan(dependency_doctor: dict[str, Any], valida
             {"step": "animator-usage", "tool": "optimization.parameter.animator-usage", "status": "available"},
             {"step": "compressibility", "tool": "optimization.parameter.compressibility-plan", "status": "available"},
             {"step": "behavior-regression", "tool": "optimization.parameter.behavior-regression", "status": "required_before_write"},
-            {"step": "future-request", "tool": "optimization.vrcfury.parameter-compressor-apply-request", "status": "blocked_preview"},
+            {"step": "authoritative-request", "tool": "optimization.vrcfury.parameter-compressor-apply-request", "status": "available"},
         ],
         "hardGates": {
             "behaviorRegressionCaseCount": regression.get("summary", {}).get("testCaseCount"),
             "blockedParameterCount": regression.get("summary", {}).get("dangerParameterCount"),
             "failures": hard_gate_failures,
         },
-        "applyBlocked": True,
-        "blockedReason": "Parameter compression remains request-only/blocked until behavior-regression proof and rollback proof are public.",
-        "notes": ["This path converts planner evidence into future skill gates; it does not call VRCFury or rewrite parameters."],
+        "applyBlocked": dep.get("status") != "installed" or not bool(candidates),
+        "blockedReason": None if dep.get("status") == "installed" and candidates else "The dependency and safe-candidate gates must pass before the authoritative request can be prepared.",
+        "notes": ["This planner stays read-only. The dedicated request tool obtains a fresh authoritative Unity preview and never exposes direct apply."],
     }
 
 
@@ -1893,7 +1888,7 @@ def build_vrcfury_compatibility_report(dependency_doctor: dict[str, Any], valida
         "componentsDetected": [],
         "possibleConflicts": warnings,
         "directTreeHints": _dedupe_labels(direct_tree_hints)[:40],
-        "applyPolicy": "VRCFury Parameter Compressor and Direct Tree have stable request surfaces, but VRCForge blocks writes until a public, validated VRCFury writer path exists.",
+        "applyPolicy": "Parameter Compressor requests use the authoritative preview, approval, checkpoint, verification, and restore lane. Direct Tree writes remain blocked until their fixed writer is validated.",
     }
 
 

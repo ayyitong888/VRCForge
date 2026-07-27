@@ -6,6 +6,8 @@ import shutil
 import threading
 from pathlib import Path
 
+import pytest
+
 from agent_gateway import AgentGateway, AgentGatewayConfig
 
 
@@ -211,6 +213,92 @@ def test_never_auto_approve_survives_full_permission_mode(tmp_path: Path) -> Non
     assert result["status"] == "pending"
     assert result["approval"]["requiresExplicitApproval"] is True
     assert executed == []
+
+
+@pytest.mark.parametrize("execution_mode", ["auto", "roslyn_full_auto"])
+def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    gateway = _gateway(tmp_path)
+    executed: list[dict] = []
+    gateway.register_write_handler(
+        "vrcforge_test_canonical_manual_only",
+        "Canonical manual-only test write.",
+        "low",
+        lambda params: executed.append(params) or {"ok": True},
+        request_preparer=lambda arguments, _preview: (
+            {**arguments, "canonical": True},
+            {"schema": "approval.v1"},
+        ),
+        manual_approval_resolver=lambda arguments, _preview: (
+            "The canonical operation always requires manual approval."
+            if arguments.get("canonical") is True
+            else ""
+        ),
+    )
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.execution_mode = execution_mode
+    config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
+    config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"
+    config.allow_write_requests = True
+    gateway.save_config(config)
+
+    result = gateway.create_apply_request(
+        {
+            "target_tool": "vrcforge_test_canonical_manual_only",
+            "arguments": {"caller": "cannot-disable-policy"},
+            "requires_explicit_approval": False,
+            "never_auto_approve": False,
+            "explicit_approval_reason": "caller supplied text",
+        }
+    )
+
+    assert result["status"] == "pending"
+    assert result["approval"]["requiresExplicitApproval"] is True
+    assert result["approval"]["autoApprovalBlocked"] is True
+    assert result["approval"]["explicitApprovalReason"] == (
+        "The canonical operation always requires manual approval."
+    )
+    assert executed == []
+
+
+def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(
+    tmp_path: Path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for root in ("Assets", "Packages", "ProjectSettings"):
+        (project / root).mkdir(parents=True, exist_ok=True)
+    dedicated_calls: list[tuple[Path, dict]] = []
+    global_calls: list[Path] = []
+    gateway.register_write_handler(
+        "vrcforge_test_dedicated_checkpoint",
+        "Dedicated checkpoint test write.",
+        "high",
+        lambda _params: {"ok": True},
+        checkpoint_prepare_handler=lambda root, arguments: (
+            dedicated_calls.append((root, arguments))
+            or {"ok": False, "error": "Dedicated state changed."}
+        ),
+    )
+    gateway.checkpoint_prepare_handler = (
+        lambda root: global_calls.append(root) or {"ok": True}
+    )
+    arguments = {"projectPath": str(project), "selector": "Avatar"}
+
+    checkpoint = gateway._create_pre_write_checkpoint(
+        {"id": "approval-dedicated", "targetTool": "vrcforge_test_dedicated_checkpoint"},
+        arguments,
+    )
+
+    assert checkpoint is not None
+    assert checkpoint["ok"] is False
+    assert checkpoint["blocking"] is True
+    assert checkpoint["status"] == "failed"
+    assert dedicated_calls == [(project.resolve(), arguments)]
+    assert global_calls == []
 
 
 def test_project_chat_checkpoint_covers_exact_store_and_restores_it(tmp_path: Path) -> None:

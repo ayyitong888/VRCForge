@@ -62,7 +62,9 @@ from agent_gateway import (
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from authoritative_unity_writes import (
     AuthoritativeUnityWriteError,
+    authoritative_unity_write_has_strict_result,
     prepare_authoritative_unity_write,
+    validate_authoritative_unity_write_result,
 )
 from constraint_source_write import (
     TOOL_NAME as CONSTRAINT_SOURCE_TOOL,
@@ -92,6 +94,14 @@ from chat_attachment_vault import (
 from material_shader_assignment import (
     TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
     build_wrapper_arguments as build_material_shader_wrapper_arguments,
+)
+from atomic_reference_rename import (
+    TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
+    build_wrapper_arguments as build_atomic_reference_rename_wrapper_arguments,
+)
+from parameter_bit_packing import (
+    TOOL_NAME as PARAMETER_BIT_PACKING_TOOL,
+    build_wrapper_arguments as build_parameter_bit_packing_wrapper_arguments,
 )
 from scene_object_copy import (
     DUPLICATE_TOOL_NAME as DUPLICATE_SCENE_OBJECT_TOOL,
@@ -388,6 +398,8 @@ REQUIRED_VRCFORGE_UNITY_TOOLS = [
     "vrc_set_texture_import_settings",
     "vrc_set_constraint_sources",
     "vrc_create_component_feature",
+    PARAMETER_BIT_PACKING_TOOL,
+    ATOMIC_REFERENCE_RENAME_TOOL,
 ]
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
     {
@@ -402,6 +414,8 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_set_texture_import_settings",
         "vrc_set_constraint_sources",
         "vrc_create_component_feature",
+        PARAMETER_BIT_PACKING_TOOL,
+        ATOMIC_REFERENCE_RENAME_TOOL,
         "vrc_toggle_scene_object",
         "vrc_setup_outfit",
         "vrc_add_wardrobe_outfit",
@@ -18050,8 +18064,34 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else params.get("params")
     if not isinstance(arguments, dict):
         arguments = {}
+    strict_result = authoritative_unity_write_has_strict_result(params)
     settings = load_dashboard_settings(build_agent_connection_request(params))
     result = invoke_unity_mcp(settings, tool_name, arguments)
+    if strict_result and result.exit_code != 0:
+        return {
+            "ok": False,
+            "toolName": tool_name,
+            "error": "The authoritative Unity write transport failed.",
+        }
+    if result.exit_code == 0:
+        try:
+            validated_payload = validate_authoritative_unity_write_result(
+                params,
+                extract_tool_result_payload(result),
+            )
+        except AuthoritativeUnityWriteError as exc:
+            return {"ok": False, "toolName": tool_name, "error": str(exc)}
+        if strict_result:
+            return {
+                "ok": True,
+                "toolName": tool_name,
+                "result": {
+                    "exitCode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "payload": {"data": validated_payload},
+                },
+            }
     return {"ok": result.exit_code == 0, "toolName": tool_name, "result": serialize_result(result)}
 
 
@@ -18071,6 +18111,51 @@ def prepare_unity_mcp_write_request(
         )
     except AuthoritativeUnityWriteError as exc:
         raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
+
+def unity_mcp_manual_approval_reason(arguments: dict[str, Any], _preview: Any) -> str:
+    nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
+    if nested_tool in {PARAMETER_BIT_PACKING_TOOL, ATOMIC_REFERENCE_RENAME_TOOL}:
+        return "This operation requires explicit user approval in every permission mode."
+    return ""
+
+
+def prepare_authoritative_unity_checkpoint_sync(
+    project_root: Path,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
+    if nested_tool not in {PARAMETER_BIT_PACKING_TOOL, ATOMIC_REFERENCE_RENAME_TOOL}:
+        return prepare_unity_checkpoint_sync(project_root)
+    approved_write_arguments = copy.deepcopy(arguments)
+    approved_write_arguments.pop("_vrcforge_user_constraints", None)
+    try:
+        refreshed_arguments, _refreshed_preview = prepare_unity_mcp_write_request(
+            approved_write_arguments,
+            None,
+        )
+    except AgentGatewayError:
+        return {
+            "ok": False,
+            "error": "The approved Unity state could not be revalidated before checkpointing.",
+        }
+    if refreshed_arguments != approved_write_arguments:
+        return {
+            "ok": False,
+            "error": "The approved Unity state changed before checkpointing.",
+        }
+    if Path(str(refreshed_arguments.get("projectPath") or "")).resolve() != project_root.resolve():
+        return {
+            "ok": False,
+            "error": "The approved Unity project changed before checkpointing.",
+        }
+    return {
+        "ok": True,
+        "projectPath": str(project_root),
+        "toolName": nested_tool,
+        "mode": "read_only_authoritative_revalidation",
+        "canonicalRevalidated": True,
+    }
 
 
 def _invoke_authoritative_unity_preview(
@@ -18120,6 +18205,22 @@ def preview_constraint_sources_sync(params: dict[str, Any]) -> dict[str, Any]:
 def preview_component_feature_sync(params: dict[str, Any]) -> dict[str, Any]:
     _arguments, preview = prepare_unity_mcp_write_request(
         build_component_feature_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def preview_parameter_bit_packing_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_parameter_bit_packing_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def preview_atomic_reference_rename_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_atomic_reference_rename_wrapper_arguments(params or {}),
         None,
     )
     return {"ok": True, "preview": preview}
@@ -18192,7 +18293,13 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
     project_value = str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip()
     project_path = Path(project_value) if project_value else None
     package_info = detect_addon_package(project_path, list(spec["packageIds"]))
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    avatar_path = str(
+        params.get("source_avatar_path")
+        or params.get("sourceAvatarPath")
+        or params.get("avatar_path")
+        or params.get("avatarPath")
+        or ""
+    ).strip()
 
     unity_state: dict[str, Any] = {"scanned": False}
     matches: list[dict[str, Any]] = []
@@ -18263,7 +18370,13 @@ def run_unity_artifact_scan_sync(
     label: str,
 ) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    avatar_path = str(
+        params.get("source_avatar_path")
+        or params.get("sourceAvatarPath")
+        or params.get("avatar_path")
+        or params.get("avatarPath")
+        or ""
+    ).strip()
     output_path = build_dashboard_artifact_path(prefix, avatar_path, "json")
     # Never let a previous scan for the same avatar path masquerade as the
     # current Unity response when the tool fails to refresh its output file.
@@ -21681,7 +21794,7 @@ def _find_optimizer_dependency(dependency_doctor: dict[str, Any], optimizer_id: 
 def _optimization_preview_blocked_write_reason(definition: dict[str, Any]) -> str:
     mode = str(definition.get("mode") or "")
     if mode == "vrcfury_parameter_compressor":
-        return "VRCFury Parameter Compressor is experimental: writes stay blocked until behavior-regression proof, rollback proof, and a public validated writer path exist."
+        return "The Parameter Compressor request is unavailable because this build did not register its validated writer path."
     if mode == "vrcfury_direct_tree":
         return "VRCFury Direct Tree is experimental: VRCForge exposes the request name but blocks writes until controller behavior and rollback proof exist."
     if mode == "aao_hidden_body_cut":
@@ -21746,7 +21859,13 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     tool = normalize_optimization_apply_request_name(str(params.get("tool") or params.get("externalName") or params.get("gatewayName") or ""))
     definition = OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL[tool]
     project_value = resolve_addon_project_path(params)
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
+    avatar_path = str(
+        params.get("source_avatar_path")
+        or params.get("sourceAvatarPath")
+        or params.get("avatar_path")
+        or params.get("avatarPath")
+        or ""
+    ).strip()
     profile = _normalize_optimizer_profile_id(
         params.get("profile") or params.get("targetProfile") or params.get("target_profile") or "pc_conservative"
     )
@@ -21793,7 +21912,55 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
     if supported_profiles and profile not in supported_profiles:
         blocked_reasons.append(f"Profile '{profile}' is not enabled for stable delegated apply yet.")
     mode = str(definition.get("mode") or "")
-    if mode == "ttt_atlas":
+    authoritative_preview: dict[str, Any] | None = None
+    apply_arguments: dict[str, Any] = {"projectPath": project_value}
+    if mode == "vrcfury_parameter_compressor":
+        source_scene_path = str(
+            options.get("sourceScenePath")
+            or options.get("source_scene_path")
+            or params.get("sourceScenePath")
+            or params.get("source_scene_path")
+            or ""
+        ).strip()
+        output_clone_name = str(
+            options.get("outputCloneName")
+            or options.get("output_clone_name")
+            or params.get("outputCloneName")
+            or params.get("output_clone_name")
+            or ""
+        ).strip()
+        if not source_scene_path:
+            blocked_reasons.append("sourceScenePath is required for the authoritative parameter build preview.")
+        if not avatar_path:
+            blocked_reasons.append("sourceAvatarPath (or avatarPath) is required for the authoritative parameter build preview.")
+        if not output_clone_name:
+            blocked_reasons.append("outputCloneName is required for the authoritative parameter build preview.")
+        target_path = avatar_path
+        if project_value and source_scene_path and avatar_path and output_clone_name:
+            try:
+                apply_arguments = build_parameter_bit_packing_wrapper_arguments(
+                    {
+                        "projectPath": project_value,
+                        "sourceScenePath": source_scene_path,
+                        "sourceAvatarPath": avatar_path,
+                        "outputCloneName": output_clone_name,
+                    }
+                )
+            except ValueError as exc:
+                blocked_reasons.append(str(exc))
+        if not blocked_reasons:
+            try:
+                authoritative_preview = preview_parameter_bit_packing_sync(
+                    {
+                        "projectPath": project_value,
+                        "sourceScenePath": source_scene_path,
+                        "sourceAvatarPath": avatar_path,
+                        "outputCloneName": output_clone_name,
+                    }
+                ).get("preview")
+            except (AgentGatewayError, AuthoritativeUnityWriteError, ValueError) as exc:
+                blocked_reasons.append(str(exc))
+    elif mode == "ttt_atlas":
         material_paths = _confirmed_ttt_material_paths(params, options)
         if not material_paths:
             blocked_reasons.append("TexTransTool atlas setup requires user-confirmed material asset paths in options.atlasTargetMaterials.")
@@ -21810,17 +21977,18 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
         if ratio_error:
             blocked_reasons.append(ratio_error)
         options = {**options, "rendererPath": renderer_path, "relativeVertexCount": ratio}
-    apply_arguments = {
-        "projectPath": project_value,
-        "avatarPath": avatar_path,
-        "targetPath": target_path,
-        "optimizerId": definition["optimizerId"],
-        "mode": definition["mode"],
-        "componentType": definition.get("componentType") or "",
-        "profile": profile,
-        "options": options,
-        "sourceApplyRequestTool": definition["externalName"],
-    }
+    if mode != "vrcfury_parameter_compressor":
+        apply_arguments = {
+            "projectPath": project_value,
+            "avatarPath": avatar_path,
+            "targetPath": target_path,
+            "optimizerId": definition["optimizerId"],
+            "mode": definition["mode"],
+            "componentType": definition.get("componentType") or "",
+            "profile": profile,
+            "options": options,
+            "sourceApplyRequestTool": definition["externalName"],
+        }
     return {
         "ok": True,
         "schema": "vrcforge.optimization.apply_request.v1",
@@ -21848,6 +22016,7 @@ def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dic
         "blockedReasons": blocked_reasons,
         "dependency": dependency,
         "dependencyInstallPlan": install_plan,
+        "authoritativePreview": authoritative_preview,
         "plan": build_optimization_tool_result(str(definition["planTool"]), params, {}),
         "applyArguments": apply_arguments,
         "policy": {
@@ -21902,6 +22071,7 @@ def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "e
             "preview": preview,
             "agent_name": agent_name,
             "requires_explicit_approval": True,
+            "never_auto_approve": str(ensure_dict(preview.get("applyArguments")).get("toolName") or "") == PARAMETER_BIT_PACKING_TOOL,
             "explicit_approval_reason": "Optimizer apply requests require explicit user approval even when global auto mode is enabled.",
         },
         internal_wrapper=True,
@@ -23300,6 +23470,18 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_component_feature_sync,
     )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_parameter_bit_packing",
+        "Preview one source-preserving parameter bit-packing build on a temporary avatar clone without writing project files.",
+        "plan/preview",
+        preview_parameter_bit_packing_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_atomic_reference_rename",
+        "Preview one complete object or parameter reference migration without writing project files.",
+        "plan/preview",
+        preview_atomic_reference_rename_sync,
+    )
     AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
     AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", set_skill_package_enabled_sync)
@@ -23577,6 +23759,8 @@ def register_agent_gateway_tools() -> None:
         "high",
         unity_mcp_write_sync,
         request_preparer=prepare_unity_mcp_write_request,
+        manual_approval_resolver=unity_mcp_manual_approval_reason,
+        checkpoint_prepare_handler=prepare_authoritative_unity_checkpoint_sync,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_export_vrm",

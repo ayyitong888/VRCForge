@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import dashboard_server
-from agent_gateway import AgentGatewayConfig
+from agent_gateway import AgentGateway, AgentGatewayConfig
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
@@ -199,6 +199,12 @@ def test_optimization_report_schema_is_stable_and_plan_only(tmp_path: Path) -> N
     }
     assert all(tool["directApplyExposed"] is False for tool in payload["tools"])
     assert all(item["externalName"].endswith("apply-request") for item in payload["futureWriteRequestTools"])
+    by_name = {item["externalName"]: item for item in payload["futureWriteRequestTools"]}
+    assert by_name["optimization.vrcfury.parameter-compressor-apply-request"] == {
+        "externalName": "optimization.vrcfury.parameter-compressor-apply-request",
+        "versionStage": "1.4.0",
+        "directApplyExposed": False,
+    }
 
 
 def test_plan_tools_do_not_write(tmp_path: Path) -> None:
@@ -249,6 +255,11 @@ def test_parameter_hard_gate_surfaces_are_read_only_and_conservative(tmp_path: P
     usage = build_optimization_tool_result("optimization.parameter.animator-usage", {"projectPath": str(project)}, validation)["result"]
     compressibility = build_optimization_tool_result("optimization.parameter.compressibility-plan", {"projectPath": str(project)}, validation)
     vrcfury_plan = build_optimization_tool_result("optimization.parameter.vrcfury-compressor-plan", {"projectPath": str(project)}, validation)
+    compatibility = build_optimization_tool_result(
+        "optimization.vrcfury.compatibility-report",
+        {"projectPath": str(project)},
+        validation,
+    )["result"]
 
     assert inventory["summary"]["syncedBits"] == 280
     assert inventory["summary"]["totalCustomParameters"] == 6
@@ -260,8 +271,10 @@ def test_parameter_hard_gate_surfaces_are_read_only_and_conservative(tmp_path: P
     assert "PuppetAxis" in {item["name"] for item in categories["danger_puppet"]}
     assert "OutfitToggleHat" in {item["name"] for item in categories["safe_to_pack"]}
     assert "Wardrobe" in {item["name"] for item in categories["safe_to_int_exclusive"]}
-    assert vrcfury_plan["result"]["experimentalOnly"] is True
+    assert vrcfury_plan["result"]["experimentalOnly"] is False
     assert vrcfury_plan["result"]["applyBlocked"] is True
+    assert "Parameter Compressor requests use the authoritative" in compatibility["applyPolicy"]
+    assert "Direct Tree writes remain blocked" in compatibility["applyPolicy"]
 
 
 def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> None:
@@ -731,7 +744,7 @@ def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dep
         {
             "tool": "optimization.lac.apply-request",
             "projectPath": str(project),
-            "avatarPath": "Avatar",
+            "sourceAvatarPath": "Avatar",
             "targetProfile": "pc_conservative",
         }
     )
@@ -896,27 +909,219 @@ def test_configure_optimizer_component_fails_when_dirty_scene_save_fails(monkeyp
     assert any(step["id"] == "save_dirty_scene_assets" and step["status"] == "failed" for step in result["steps"])
 
 
-def test_vrcfury_apply_requests_are_stable_blocked_surfaces(tmp_path: Path) -> None:
+def test_vrcfury_parameter_request_uses_authoritative_clone_writer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+
+    observed: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "preview_parameter_bit_packing_sync",
+        lambda params: observed.append(params) or {"ok": True, "preview": {"schema": "vrcforge.parameter_bit_packing_approval.v1"}},
+    )
 
     payload = dashboard_server.build_optimization_apply_request_preview_sync(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": str(project),
-            "avatarPath": "Avatar",
+            "sourceAvatarPath": "Avatar",
+            "sourceScenePath": "Assets/Avatar.unity",
+            "outputCloneName": "Packed Clone",
             "targetProfile": "pc_conservative",
         }
     )
 
     assert payload["stableCallable"] is True
-    assert payload["writeSupported"] is False
-    assert payload["readyToRequest"] is False
-    assert any("public validated writer path" in reason for reason in payload["blockedReasons"])
-    assert payload["hardGate"]["status"] == "blocked"
-    assert "experimental.writer_proof" in payload["hardGate"]["blockingIds"]
+    assert payload["writeSupported"] is True
+    assert payload["readyToRequest"] is True
+    assert payload["targetTool"] == "vrcforge_unity_mcp_write"
+    assert payload["hardGate"]["status"] == "pass"
+    assert "experimental.writer_proof" not in payload["hardGate"]["blockingIds"]
+    assert payload["applyArguments"] == {
+        "projectPath": str(project.resolve()),
+        "toolName": "vrc_build_parameter_bit_packed_clone",
+        "arguments": {
+            "sourceScenePath": "Assets/Avatar.unity",
+            "sourceAvatarPath": "Avatar",
+            "outputCloneName": "Packed Clone",
+        },
+    }
+    assert observed == [
+        {
+            "projectPath": str(project.resolve()),
+            "sourceScenePath": "Assets/Avatar.unity",
+            "sourceAvatarPath": "Avatar",
+            "outputCloneName": "Packed Clone",
+        }
+    ]
+    assert payload["authoritativePreview"]["schema"] == "vrcforge.parameter_bit_packing_approval.v1"
     assert payload["rollbackRequirements"]["postRestoreValidationRequired"] is True
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["sourceScenePath", "sourceAvatarPath", "outputCloneName"],
+)
+def test_parameter_request_with_missing_selector_returns_a_blocked_preview(
+    tmp_path: Path,
+    monkeypatch,
+    missing_field: str,
+) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+    preview_calls: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "preview_parameter_bit_packing_sync",
+        lambda params: preview_calls.append(params) or {"ok": True, "preview": {}},
+    )
+    params = {
+        "tool": "optimization.vrcfury.parameter-compressor-apply-request",
+        "projectPath": str(project),
+        "sourceScenePath": "Assets/Avatar.unity",
+        "sourceAvatarPath": "Avatar",
+        "outputCloneName": "Packed Clone",
+        "targetProfile": "pc_conservative",
+    }
+    params.pop(missing_field)
+
+    payload = dashboard_server.build_optimization_apply_request_preview_sync(params)
+
+    assert payload["readyToRequest"] is False
+    assert payload["hardGate"]["status"] == "blocked"
+    assert payload["blockedReasons"]
+    assert preview_calls == []
+
+
+def test_parameter_authoritative_preview_error_is_returned_as_a_blocker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+
+    def fail_preview(_params: dict) -> dict:
+        raise dashboard_server.AgentGatewayError("Authoritative preview is unavailable.")
+
+    monkeypatch.setattr(dashboard_server, "preview_parameter_bit_packing_sync", fail_preview)
+
+    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+        {
+            "tool": "optimization.vrcfury.parameter-compressor-apply-request",
+            "projectPath": str(project),
+            "sourceScenePath": "Assets/Avatar.unity",
+            "sourceAvatarPath": "Avatar",
+            "outputCloneName": "Packed Clone",
+            "targetProfile": "pc_conservative",
+        }
+    )
+
+    assert payload["readyToRequest"] is False
+    assert payload["hardGate"]["status"] == "blocked"
+    assert payload["blockedReasons"] == ["Authoritative preview is unavailable."]
+
+
+def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    install_package(project, "com.vrcfury.vrcfury", "1.1334.0")
+    project_path = str(project.resolve())
+    gateway = AgentGateway(tmp_path / "gateway" / "config.json", tmp_path / "gateway" / "audit")
+    prepared: list[tuple[dict, dict]] = []
+    executed: list[dict] = []
+    checkpoint_roots: list[Path] = []
+
+    def prepare(arguments: dict, caller_preview: object) -> tuple[dict, dict]:
+        assert isinstance(caller_preview, dict)
+        prepared.append((copy.deepcopy(arguments), copy.deepcopy(caller_preview)))
+        canonical = copy.deepcopy(arguments)
+        canonical["arguments"].update(
+            {
+                "preview": False,
+                "runBuildCallbacks": True,
+                "saveScene": False,
+                "expectedPreviewDigest": "a" * 64,
+            }
+        )
+        return canonical, {
+            "schema": "vrcforge.parameter_bit_packing_approval.v1",
+            "previewDigest": "a" * 64,
+        }
+
+    gateway.register_write_handler(
+        "vrcforge_unity_mcp_write",
+        "Test authoritative Unity write lane.",
+        "high",
+        lambda arguments: executed.append(copy.deepcopy(arguments)) or {"ok": True},
+        request_preparer=prepare,
+    )
+    gateway.checkpoint_prepare_handler = (
+        lambda root: checkpoint_roots.append(root) or {"ok": True}
+    )
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = True
+    config.execution_mode = "auto"
+    gateway.save_config(config)
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    initial_previews: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_server,
+        "preview_parameter_bit_packing_sync",
+        lambda params: initial_previews.append(copy.deepcopy(params))
+        or {
+            "ok": True,
+            "preview": {
+                "schema": "vrcforge.parameter_bit_packing_approval.v1",
+                "previewDigest": "0" * 64,
+            },
+        },
+    )
+
+    requested = dashboard_server.request_optimization_apply_sync(
+        {
+            "tool": "optimization.vrcfury.parameter-compressor-apply-request",
+            "projectPath": project_path,
+            "sourceScenePath": "Assets/Avatar.unity",
+            "sourceAvatarPath": "Avatar",
+            "outputCloneName": "Packed Clone",
+            "targetProfile": "pc_conservative",
+        },
+        agent_name="optimizer-entry-contract",
+    )
+
+    assert requested["ok"] is True
+    assert requested["status"] == "pending"
+    assert requested.get("autoApproved") is not True
+    approval = requested["approval"]
+    assert approval["requiresExplicitApproval"] is True
+    assert approval["autoApprovalBlocked"] is True
+    assert approval["preview"]["previewDigest"] == "a" * 64
+    stored_approval = gateway._approvals[approval["id"]]
+    assert stored_approval["arguments"]["arguments"]["expectedPreviewDigest"] == "a" * 64
+    assert len(initial_previews) == 1
+    assert len(prepared) == 1
+    raw_arguments, caller_preview = prepared[0]
+    assert "expectedPreviewDigest" not in raw_arguments["arguments"]
+    assert caller_preview["authoritativePreview"]["previewDigest"] == "0" * 64
+
+    approval_id = approval["id"]
+    assert gateway.approve(approval_id)["ok"] is True
+    applied = gateway.apply_approved({"approval_id": approval_id})
+
+    assert applied["ok"] is True
+    assert checkpoint_roots == [project.resolve()]
+    assert len(executed) == 1
+    assert executed[0]["arguments"]["expectedPreviewDigest"] == "a" * 64
 
 
 def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp_path: Path) -> None:

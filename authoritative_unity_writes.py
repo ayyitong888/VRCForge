@@ -11,6 +11,20 @@ from material_shader_assignment import (
     bind_authoritative_preview as bind_material_shader_preview,
     build_preview_arguments as build_material_shader_preview_arguments,
 )
+from atomic_reference_rename import (
+    TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
+    AtomicReferenceRenameError,
+    bind_authoritative_preview as bind_atomic_reference_rename_preview,
+    build_preview_arguments as build_atomic_reference_rename_preview_arguments,
+    validate_authoritative_apply_result as validate_atomic_reference_rename_apply_result,
+)
+from parameter_bit_packing import (
+    TOOL_NAME as PARAMETER_BIT_PACKING_TOOL,
+    ParameterBitPackingError,
+    bind_authoritative_preview as bind_parameter_bit_packing_preview,
+    build_preview_arguments as build_parameter_bit_packing_preview_arguments,
+    validate_apply_result as validate_parameter_bit_packing_apply_result,
+)
 from component_feature_write import (
     TOOL_NAME as COMPONENT_FEATURE_TOOL,
     ComponentFeatureWriteError,
@@ -41,6 +55,7 @@ from texture_import_settings import (
 PreviewInvoker = Callable[[str, dict[str, Any]], Any]
 PreviewBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 PreviewBinder = Callable[[dict[str, Any], Any], tuple[dict[str, Any], dict[str, Any]]]
+ApplyValidator = Callable[[dict[str, Any], Any], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -52,6 +67,9 @@ class AuthoritativeUnityWriteSpec:
     domain_error: type[ValueError]
     build_preview: PreviewBuilder
     bind_preview: PreviewBinder
+    include_project_path_in_preview: bool = False
+    validate_apply: ApplyValidator | None = None
+    result_error: str = ""
 
 
 class AuthoritativeUnityWriteError(ValueError):
@@ -73,6 +91,7 @@ _SPECS = {
         domain_error=MaterialShaderAssignmentError,
         build_preview=build_material_shader_preview_arguments,
         bind_preview=bind_material_shader_preview,
+        include_project_path_in_preview=True,
     ),
     DUPLICATE_TOOL_NAME: AuthoritativeUnityWriteSpec(
         tool_name=DUPLICATE_TOOL_NAME,
@@ -82,6 +101,7 @@ _SPECS = {
         domain_error=SceneObjectCopyError,
         build_preview=_scene_preview_builder(DUPLICATE_TOOL_NAME),
         bind_preview=bind_scene_object_copy_preview,
+        include_project_path_in_preview=True,
     ),
     PREFAB_TOOL_NAME: AuthoritativeUnityWriteSpec(
         tool_name=PREFAB_TOOL_NAME,
@@ -91,6 +111,7 @@ _SPECS = {
         domain_error=SceneObjectCopyError,
         build_preview=_scene_preview_builder(PREFAB_TOOL_NAME),
         bind_preview=bind_scene_object_copy_preview,
+        include_project_path_in_preview=True,
     ),
     TEXTURE_IMPORT_SETTINGS_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=TEXTURE_IMPORT_SETTINGS_TOOL,
@@ -100,6 +121,7 @@ _SPECS = {
         domain_error=TextureImportSettingsError,
         build_preview=build_texture_import_settings_preview_arguments,
         bind_preview=bind_texture_import_settings_preview,
+        include_project_path_in_preview=True,
     ),
     CONSTRAINT_SOURCE_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=CONSTRAINT_SOURCE_TOOL,
@@ -109,6 +131,7 @@ _SPECS = {
         domain_error=ConstraintSourceWriteError,
         build_preview=build_constraint_source_preview_arguments,
         bind_preview=bind_constraint_source_preview,
+        include_project_path_in_preview=True,
     ),
     COMPONENT_FEATURE_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=COMPONENT_FEATURE_TOOL,
@@ -118,6 +141,29 @@ _SPECS = {
         domain_error=ComponentFeatureWriteError,
         build_preview=build_component_feature_preview_arguments,
         bind_preview=bind_component_feature_preview,
+        include_project_path_in_preview=True,
+    ),
+    PARAMETER_BIT_PACKING_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=PARAMETER_BIT_PACKING_TOOL,
+        request_error="Parameter bit-packing arguments are required.",
+        bridge_error="Parameter bit-packing preview could not be verified against the current project.",
+        receipt_error="Parameter bit-packing preview returned an invalid verification receipt.",
+        domain_error=ParameterBitPackingError,
+        build_preview=build_parameter_bit_packing_preview_arguments,
+        bind_preview=bind_parameter_bit_packing_preview,
+        validate_apply=validate_parameter_bit_packing_apply_result,
+        result_error="Parameter bit-packing apply returned an invalid verification receipt.",
+    ),
+    ATOMIC_REFERENCE_RENAME_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=ATOMIC_REFERENCE_RENAME_TOOL,
+        request_error="Atomic reference rename arguments are required.",
+        bridge_error="Atomic reference rename preview could not be verified against the current project.",
+        receipt_error="Atomic reference rename preview returned an invalid verification receipt.",
+        domain_error=AtomicReferenceRenameError,
+        build_preview=build_atomic_reference_rename_preview_arguments,
+        bind_preview=bind_atomic_reference_rename_preview,
+        validate_apply=validate_atomic_reference_rename_apply_result,
+        result_error="Atomic reference rename apply returned an invalid verification receipt.",
     ),
 }
 
@@ -149,7 +195,8 @@ def prepare_authoritative_unity_write(
     canonical_request["arguments"] = canonical_arguments
 
     preview_arguments = spec.build_preview(arguments)
-    preview_arguments["expectedProjectPath"] = str(canonical_project_path)
+    if spec.include_project_path_in_preview:
+        preview_arguments["expectedProjectPath"] = str(canonical_project_path)
     try:
         payload = invoke_preview(spec.tool_name, preview_arguments)
     except Exception as exc:  # noqa: BLE001 - transport details must not cross this boundary.
@@ -161,6 +208,41 @@ def prepare_authoritative_unity_write(
         raise AuthoritativeUnityWriteError(spec.receipt_error, status_code=409) from exc
     except Exception as exc:  # noqa: BLE001 - receipt parser details must not cross this boundary.
         raise AuthoritativeUnityWriteError(spec.receipt_error, status_code=409) from exc
+
+
+def validate_authoritative_unity_write_result(
+    params: dict[str, Any],
+    payload: Any,
+) -> Any:
+    request = params or {}
+    tool_name = str(request.get("tool_name") or request.get("toolName") or "").strip()
+    spec = _SPECS.get(tool_name)
+    if spec is None or spec.validate_apply is None:
+        return payload
+
+    arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else request.get("params")
+    if not isinstance(arguments, dict):
+        raise AuthoritativeUnityWriteError(spec.request_error, status_code=400)
+
+    try:
+        return spec.validate_apply(deepcopy(arguments), payload)
+    except spec.domain_error as exc:
+        raise AuthoritativeUnityWriteError(
+            spec.result_error or spec.receipt_error,
+            status_code=409,
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - result parser details must not cross this boundary.
+        raise AuthoritativeUnityWriteError(
+            spec.result_error or spec.receipt_error,
+            status_code=409,
+        ) from exc
+
+
+def authoritative_unity_write_has_strict_result(params: dict[str, Any]) -> bool:
+    request = params or {}
+    tool_name = str(request.get("tool_name") or request.get("toolName") or "").strip()
+    spec = _SPECS.get(tool_name)
+    return spec is not None and spec.validate_apply is not None
 
 
 def _canonical_unity_project(value: Any) -> Path:

@@ -43,6 +43,8 @@ from background_goal_runtime import (
 
 ToolHandler = Callable[[dict[str, Any]], Any]
 RiskLevelResolver = Callable[[dict[str, Any]], str]
+ManualApprovalResolver = Callable[[dict[str, Any], Any], str]
+CheckpointPrepareHandler = Callable[[Path, dict[str, Any]], dict[str, Any]]
 WriteRequestPreparer = Callable[
     [dict[str, Any], Any],
     tuple[dict[str, Any], Any],
@@ -217,6 +219,8 @@ class AgentWriteHandler:
     advanced: bool = False
     risk_level_resolver: RiskLevelResolver | None = None
     request_preparer: WriteRequestPreparer | None = None
+    manual_approval_resolver: ManualApprovalResolver | None = None
+    checkpoint_prepare_handler: CheckpointPrepareHandler | None = None
 
 
 @dataclass
@@ -1786,6 +1790,8 @@ class AgentGateway:
         advanced: bool = False,
         risk_level_resolver: RiskLevelResolver | None = None,
         request_preparer: WriteRequestPreparer | None = None,
+        manual_approval_resolver: ManualApprovalResolver | None = None,
+        checkpoint_prepare_handler: CheckpointPrepareHandler | None = None,
     ) -> None:
         self._write_handlers[name] = AgentWriteHandler(
             name=name,
@@ -1795,6 +1801,8 @@ class AgentGateway:
             advanced=advanced,
             risk_level_resolver=risk_level_resolver,
             request_preparer=request_preparer,
+            manual_approval_resolver=manual_approval_resolver,
+            checkpoint_prepare_handler=checkpoint_prepare_handler,
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -5604,6 +5612,17 @@ class AgentGateway:
                 )
             arguments = prepared_arguments
             preview = prepared_preview
+        mandatory_manual_approval_reason = ""
+        if write_handler.manual_approval_resolver is not None:
+            try:
+                mandatory_manual_approval_reason = str(
+                    write_handler.manual_approval_resolver(dict(arguments), preview) or ""
+                ).strip()
+            except Exception as exc:  # noqa: BLE001 - policy failures must block the request.
+                raise AgentGatewayError(
+                    f"Could not determine the manual approval policy for {target_tool}.",
+                    status_code=500,
+                ) from exc
         base_risk_level = normalize_risk_level(write_handler.risk_level)
         effective_risk_level = base_risk_level
         risk_escalation_reason = ""
@@ -5638,6 +5657,7 @@ class AgentGateway:
         never_auto_approve = bool(
             params.get("never_auto_approve")
             or params.get("neverAutoApprove")
+            or mandatory_manual_approval_reason
         )
         execution_mode = normalize_execution_mode(config.execution_mode)
         full_permission_auto = execution_mode == "roslyn_full_auto"
@@ -5651,7 +5671,8 @@ class AgentGateway:
             and not full_permission_auto
         )
         explicit_approval_reason = str(
-            params.get("explicit_approval_reason")
+            mandatory_manual_approval_reason
+            or params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
             or risk_escalation_reason
             or auto_policy_reason
@@ -7208,7 +7229,38 @@ class AgentGateway:
             record["expectedSourceDigest"] = str(arguments.get("expectedDigest") or "").strip().lower()
             return self._create_project_chat_checkpoint(project_root, record)
 
-        if self.checkpoint_prepare_handler is not None:
+        write_handler = self._write_handlers.get(target_tool)
+        dedicated_checkpoint_prepare = (
+            write_handler.checkpoint_prepare_handler
+            if write_handler is not None
+            else None
+        )
+        if dedicated_checkpoint_prepare is not None:
+            try:
+                prepare_result = ensure_dict(
+                    dedicated_checkpoint_prepare(project_root, dict(arguments))
+                )
+            except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
+                prepare_result = {
+                    "ok": False,
+                    "error": "The dedicated checkpoint preflight failed.",
+                }
+            record["unityPrepare"] = prepare_result
+            if not prepare_result.get("ok"):
+                record.update(
+                    {
+                        "ok": False,
+                        "blocking": True,
+                        "status": "failed",
+                        "error": str(
+                            prepare_result.get("error")
+                            or "The dedicated checkpoint preflight rejected the write."
+                        ),
+                    }
+                )
+                self._append_checkpoint(record)
+                return record
+        elif self.checkpoint_prepare_handler is not None:
             try:
                 prepare_result = ensure_dict(self.checkpoint_prepare_handler(project_root))
             except Exception as exc:  # noqa: BLE001
